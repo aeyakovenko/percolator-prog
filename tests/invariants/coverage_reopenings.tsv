@@ -122,6 +122,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # the peer's junior funding claim stays unconverted. Direct admission equals public
 # settlement. First-ever flat admission, shared owners, policy changes and general
 # histories remain outside this bounded increment; no production fix or promotion.
+# Row 413 cross-asset credit composition (2026-09-12):
+# cu/inv_027_unfunded_credit_admission.rs,
+# v16_program_unfunded_cross_asset_credit_cannot_precede_admission_liabilities.
+# Sixteen public histories separate two original funding peers from the admission
+# counterparty. Gross debt and maintenance precede initially unsupported positive
+# funding; backing alone cannot bypass a different unsettled cohort. The unchanged
+# increase eventually reserves one exact credit atom, with 48 complete rollbacks
+# and 64 senior SPL payouts. Both constrained roles, leg orders and all four routes;
+# no new bug or production change. Flat uncollected-fee admission remains OPEN.
 413	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-first-risk	all-accrued-liabilities-precede-every-risk-increasing-admission	OPEN
 # Row 414 bounded response conformance (2026-09-12): cu/inv_012_reused_asset_return_binding.rs,
 # v16_program_reused_asset_requires_current_generation_and_fresh_matcher_output.

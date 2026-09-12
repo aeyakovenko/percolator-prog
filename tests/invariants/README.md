@@ -2894,6 +2894,98 @@ cargo fmt --all -- --check
 git diff --check
 ```
 
+## INV-027 cross-asset funding credit before admission (row 413, 2026-09-12)
+
+Owner: [cu/inv_027_unfunded_credit_admission.rs](cu/inv_027_unfunded_credit_admission.rs),
+mounted under `inv_027_protected_principal_seniority::joint_admission_liabilities::unfunded_credit_admission`.
+Selector: `v16_program_unfunded_cross_asset_credit_cannot_precede_admission_liabilities`.
+
+Sixteen public LiteSVM histories cross four trade transports, the constrained
+trader as taker or unsigned CPI maker, and both old-leg insertion orders. Two
+different original counterparties hold the other sides of the trader's 10.1-unit
+long on asset 0 and short on asset 1. A fourth funded owner supplies the new
+asset-2 admission. System/SPL/ATA/wrapper instructions create all economic state.
+
+Empty-keeper cranks advance slots 2 through 4 with authenticated targets of 99,
+unchanged effective prices of 100 and a one-bps movement cap. Neither old trader
+nor either original peer is touched. Independent signed-floor funding arithmetic
+and position rounding produce a 21-atom payable on asset 1 and a 20-atom
+receivable on asset 0. Maintenance is independently `3 * 7 = 21`; adverse
+long-leg target lag is 11. The constrained deposit of 265 therefore leaves 223
+senior atoms, exactly covering old-leg IM 202, lag 11 and first asset-2 IM 10.
+
+The retained history distinguishes three admission conditions:
+
+1. An extra position quantum on the first asset-2 admission rejects with
+   `EngineInvalidConfig`. The exact boundary succeeds after both gross funding
+   debt and maintenance, preserving 223 capital and a separate, unsupported
+   20-atom claim. Omitting either liability or using claim face as equity would
+   admit the rejected quantity. The generously funded, never-exposed admission
+   peer retains its documented deferred maintenance until its next live increase.
+2. A retained 0.1-unit increase needs one additional IM atom and also rejects.
+   Public settlement of the original asset-0 debtor supplies 21 backing atoms,
+   invalidates the trader's certificate, and makes independently recomputed equity
+   243 without touching the trader's account. The same increase still rejects
+   with `EngineLockActive` while the original asset-1 peer remains unsettled.
+3. Settling that last peer clears both funding cohorts without changing the
+   trader's bytes or the clock. The unchanged increase succeeds with exactly one
+   counterparty-backed lien atom. Twenty unreserved backing atoms still cover the
+   20-atom claim bound, satisfying the wrapper's full-rate-after-lien rule.
+   The trader's current certificate matches the independent oracle; the new lien
+   invalidates the other admission certificate while preserving its exact health
+   values. Neither claim nor backing is counted twice.
+
+All 48 rejections compare complete tracked and transaction Accounts, including
+matcher context and the exact runtime signature fee. Stock, reservation and
+source-credit censuses, exact positions/OI, fee cursors, owner-local capital/PnL,
+SPL custody and unrelated frames accompany the history. Same-slot close and all
+64 principal payouts preserve the independent entitlements
+`[223, 9979, 9958, 9979]`. Both 20-atom junior claims remain unconverted and owned
+by their original earners. Final capital is zero; 126 custody atoms remain as
+84 maintenance atoms plus the two 21-atom realized funding losses. Peak measured
+transaction CU is 558,367 under a 600,000 ceiling.
+
+This adds bounded INV-024/027/044/053/060/081 evidence. The adjacent funding
+selector has one old leg and admits the original counterparty, which settles the
+credit source in the same trade. The INV-044 cross-domain order control has no
+elapsed maintenance or admission boundary. Neither isolates a still-unsupported
+claim from the new admission peer, then composes credit restoration, an unsettled
+cohort, retained retry, exact lien creation and all owners' senior exits.
+
+**Row 413 remains OPEN.** No new public-interface LoF/DoS or production fix was
+found. This does not close first-ever admission at an uncollected-fee margin
+boundary, arbitrary histories, underfunded original debtors, changing premiums,
+fee-policy changes, backing expiry, terminal disposition or maximum shapes.
+No generic INV-010/062 or whole-invariant closure is claimed. Reward-only and
+flat-reopen route permutations were screened out as duplicate coverage. A
+full-claim-spending positive-control probe was discarded because it violates the
+existing full-rate-after-lien rule; no marginal probe was retained. Initial
+oracle assumptions about the ample-headroom peer's deferred fees and certificate
+freshness after lien creation were corrected to the documented contracts.
+
+Validation worktree: `/tmp/percolator-row413-risk-admission-20260912`, branch
+`codex/row413-risk-admission-coverage-20260912`, based on
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`76c9e7e834116ab5967c730403e58a0506c5a1c6`. The coordinator was not edited.
+Default-feature wrapper and authenticated matcher SBF were rebuilt in this
+worktree, locked/offline with platform-tools v1.52, against engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+Program SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row413-risk-admission-20260912/target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::joint_admission_liabilities::unfunded_credit_admission::v16_program_unfunded_cross_asset_credit_cannot_precede_admission_liabilities -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_027_protected_principal_seniority::joint_admission_liabilities::funding_admission::v16_program_funding_and_maintenance_precede_new_asset_after_route_rollback inv_027_protected_principal_seniority::joint_admission_liabilities::v16_program_joint_accrued_liabilities_precede_risk_admission inv_027_protected_principal_seniority::joint_admission_liabilities::standalone_first_admission::v16_program_standalone_first_admission_preserves_deferred_fee_owner_entitlement inv_044_no_phantom_value_from_indices_certificates_or_labels::v16_program_cross_domain_settlement_is_crank_and_leg_slot_order_independent
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-027 funding and maintenance before new-asset risk (row 413, 2026-09-12)
 
 Owner: [cu/inv_027_funding_admission.rs](cu/inv_027_funding_admission.rs), mounted

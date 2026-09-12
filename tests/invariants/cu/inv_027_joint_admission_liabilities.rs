@@ -8,6 +8,8 @@
 //! fee disposition; admission at the uncollected-fee margin boundary remains open.
 //! The funding sibling adds nonzero rounded funding debt and price-cap carry,
 //! opposite-route rollback/retry, and senior principal exit ahead of a junior claim.
+//! The unfunded-credit sibling separates two old funding counterparties from the
+//! admission peer, enforcing gross debits before claim support and lien admission.
 //! All economic state is constructed through System/SPL/ATA/wrapper instructions.
 
 use super::*;
@@ -29,6 +31,9 @@ mod first_risk_preexisting_lag;
 
 #[path = "inv_027_funding_admission.rs"]
 mod funding_admission;
+
+#[path = "inv_027_unfunded_credit_admission.rs"]
+mod unfunded_credit_admission;
 
 #[path = "inv_027_flat_reopen_routes.rs"]
 mod flat_reopen_routes;
