@@ -1,5 +1,70 @@
 # Invariant-owned test coverage
 
+## INV-012 prior-epoch keeper revocation (row 412, 2026-09-12)
+
+Owner: [cu/inv_012_prior_epoch_cleanup_revocation.rs](cu/inv_012_prior_epoch_cleanup_revocation.rs),
+mounted under `inv_012_capability_and_delegate_scope::joint_incarnation_binding`.
+Four public System/SPL/wrapper histories cross both CPI consumers with both signs.
+A configured matcher opens two positions; a signed sibling-asset exit successfully
+simulates before the peer's owner-only reduction resets the other asset's LP side.
+The reset leaves the LP Account and grant byte-identical, with a prior-epoch leg.
+
+Permissionless cleanup then detaches that leg, advances the LP portfolio episode
+once, disables the grant and clears expiry, preserving its sequence, tuple and
+fee cap. It neither calls the matcher nor changes the live sibling leg or peer
+Account. A cleanup-plus-current-episode consumer rejects Unauthorized after the
+cleanup succeeds internally, restoring the complete economic Account frame and
+charging only the exact network fee. Committed cleanup independently rejects the
+original retained bytes, a request with only the peer episode refreshed, and a
+request with both episodes refreshed. All reject before matcher CPI. Explicit
+owner reauthorization permits the same sibling exit, side-reset finalization,
+and both owners' complete principal withdrawals.
+
+This adds the automatic prior-epoch detachment writer excluded by the existing
+Recovery-forfeit coverage. The INV-028 reset-exit selector covers claim storage
+and payout, without retained sibling capability or rollback of revocation.
+Standalone disable/re-enable, owner reduction/conversion, Recovery forfeit and
+liquidation probes were rejected as duplicates during design review; none were
+added and removed. **Row 412 remains OPEN.** This sampled INV-004/005/010/012/024/081
+increment does not close arbitrary writer histories, policy changes, retained
+grant delivery, incarnation replacement, fees/funding/claims or maximum shape.
+No public-interface LoF/DoS was found, and no production fix, engine dependency
+change or invariant-status promotion is claimed.
+
+The new selector passes four live previews, sixteen exact rejected transactions,
+four committed cleanups, eight matcher fills and eight complete withdrawals.
+Measured maxima: cleanup **220,997 CU**, rejected cleanup bundle **325,855 CU**,
+matcher fill/preview **461,832 CU**, owner reduction/grant **243,446 CU**, withdrawal
+**138,767 CU**. Existing CU ceilings are unchanged.
+
+Isolated worktree `/tmp/percolator-row412-20260912`, branch
+`codex/row412-retained-capability-20260912`, requested origin base
+`5bbe2d722cd89b3a8a288be29dd9ac89a3605846`. Private host/deploy outputs were copied
+from `/dev/shm/percolator-row424-sync-20260912-target`; production/Cargo/matcher
+inputs match `82f44d1146a45f1f0cf07a76fb171a280d5c21e2`. Cached default-feature
+wrapper SHA-256 is `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256 is `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Host tests compile in this worktree. No SBF rebuild or broad-suite run is claimed.
+Focused validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row412-cleanup-20260912-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::prior_epoch_cleanup_revocation::v16_program_prior_epoch_cleanup_revokes_retained_sibling_capability -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::mixed_batch_revocation::v16_program_clear_cross_zero_batch_roundtrip_cannot_revive_retained_capability \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::revocation_atomicity::v16_program_retained_capability_tracks_committed_revocation_after_bundle_rollback \
+  inv_012_capability_and_delegate_scope::cure_revocation::v16_program_funded_close_cancellation_requires_fresh_matcher_capability \
+  inv_028_source_domain_realizability_cap::historical_latent_capacity::latent_reset_exit::v16_program_latent_source_survives_owner_reduction_and_prior_epoch_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-070 native denomination after a terminal prefix (row 424, 2026-09-12)
 
 Owner: [cu/inv_070_terminal_native_reclassification.rs](cu/inv_070_terminal_native_reclassification.rs),

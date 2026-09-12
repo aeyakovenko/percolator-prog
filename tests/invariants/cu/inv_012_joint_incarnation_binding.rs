@@ -22,6 +22,9 @@ mod revocation_atomicity;
 #[path = "inv_012_mixed_batch_revocation.rs"]
 mod mixed_batch_revocation;
 
+#[path = "inv_012_prior_epoch_cleanup_revocation.rs"]
+mod prior_epoch_cleanup_revocation;
+
 #[path = "inv_012_generation_bundle_rollback.rs"]
 mod generation_bundle_rollback;
 
