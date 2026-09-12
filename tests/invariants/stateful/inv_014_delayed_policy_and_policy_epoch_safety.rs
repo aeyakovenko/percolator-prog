@@ -52,6 +52,9 @@ mod retained_permitted_policy_history;
 #[path = "inv_014_retained_taker_aggregate_cap.rs"]
 mod retained_taker_aggregate_cap;
 
+#[path = "inv_014_retained_mark_fee_cap.rs"]
+mod retained_mark_fee_cap;
+
 #[test]
 fn v16_program_retained_batch_route_switch_preserves_fee_caps_and_funded_provider() {
     use crate::support::{

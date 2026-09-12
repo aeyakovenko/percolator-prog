@@ -12,6 +12,23 @@ liquidated quantity and insurance domains while preserving exact owner entitleme
 This adds bounded evidence for labels 422/426; pending-observation omission and
 general selection histories remain open. Labels 413/422/423/425/426 remain OPEN.
 
+The [retained computed mark-fee cap audit](retained_mark_fee_cap_audit_20260912.md)
+adds `v16_program_retained_batch_atom_cap_includes_computed_mark_fees` under
+`stateful/inv_014_retained_mark_fee_cap.rs`, mounted as
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_mark_fee_cap`.
+Eight public LiteSVM worlds cross direction, leg order and a permitted base-policy
+detour after signing. An authorized quote change creates a nonzero EWMA movement
+fee: the retained exact-minus-one atom cap rejects after the matcher, while the
+independently retained exact cap admits both complete legs. Input-priced checks
+reconcile each owner's capital, quantities, marks, insurance, base-fee domain
+budgets, custody and full rollback frames. This adds INV-011/014/024/036/045/080
+evidence beyond the constant-price aggregate-cap test. It ends at the paid mark
+target with open positions; later catchup and payouts are outside this increment.
+Single-CPI fee-bps enforcement and asymmetric dynamic LP consent remain gaps;
+computed-fee partial fills, passive OI, underfunded collection and arbitrary
+histories are outside this increment.
+Holdout labels 411/432 remain OPEN.
+
 The [2026-09-12 standalone first-admission audit](standalone_first_admission_audit_20260912.md)
 covers aged, never-exposed owners opening through a single wrapper instruction,
 without a fee/refresh prefix. Single/batch trades in both directions preserve
