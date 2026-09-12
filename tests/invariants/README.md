@@ -10,6 +10,14 @@ debit and SPL endpoint, including rollback of a policy/fill prefix. Above-consen
 execution and successful insurance/backing debit replay remain untested by this increment;
 holdout labels 411/415/428/432 remain OPEN.
 
+The [2026-09-12 mixed-provider liquidation audit](mixed_provider_liquidation_audit_20260912.md)
+adds eight fresh public LiteSVM histories comparing full observations with omission
+of the selected asset after complete two-asset refresh. Pyth/Switchboard and
+Pyth/Chainlink histories preserve exact owner, keeper and insurance attribution,
+including 40 exact rollbacks and eight keeper SPL payouts. Rows 422/426 gain
+partial coverage; 413/423/425 gain no new evidence. All five remain OPEN, including
+omissions before complete refresh, uncommitted reports and general asset selection.
+
 The [retained fee/insurance stock audit](retained_value_gap_20260912.md) adds 32 public
 LiteSVM worlds combining retained fee-bearing trades, insurance payouts, policy relaxation,
 fee/top-up replenishment and exact transaction rollback. Per-owner SPL outcomes agree across
