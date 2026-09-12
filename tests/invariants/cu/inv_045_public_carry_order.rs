@@ -20,6 +20,9 @@ mod fractional_position_residue;
 #[path = "inv_045_funding_carry_entitlement.rs"]
 mod funding_carry_entitlement;
 
+#[path = "inv_045_generated_fractional_routes.rs"]
+mod generated_fractional_routes;
+
 const ANCHORS: [u64; 2] = [100, 125];
 const CAP_BPS: u64 = 24;
 const PRINCIPAL: [u64; 4] = [100_003, 200_009, 300_017, 400_037];
@@ -73,6 +76,14 @@ impl World {
     }
 
     fn with_funding(history: History, max_abs_funding_e9_per_slot: u64) -> Self {
+        Self::with_funding_and_accrual_limit(history, max_abs_funding_e9_per_slot, 1)
+    }
+
+    fn with_funding_and_accrual_limit(
+        history: History,
+        max_abs_funding_e9_per_slot: u64,
+        max_accrual_dt_slots: u64,
+    ) -> Self {
         let mut env = inv018_public_spl_market_with_params(
             6,
             V16CuMarketParams {
@@ -80,6 +91,8 @@ impl World {
                 initial_price: ANCHORS[0],
                 max_price_move_bps_per_slot: CAP_BPS,
                 max_abs_funding_e9_per_slot,
+                max_accrual_dt_slots,
+                min_funding_lifetime_slots: max_accrual_dt_slots,
                 ..V16CuMarketParams::default()
             },
         );

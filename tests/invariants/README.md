@@ -1,5 +1,98 @@
 # Invariant-owned test coverage
 
+## INV-045 generated fractional K/F routes (row 425, 2026-09-12)
+
+Owner: [cu/inv_045_generated_fractional_routes.rs](cu/inv_045_generated_fractional_routes.rs),
+mounted under `inv_045_no_free_mark_movement::public_carry_order::generated_fractional_routes`.
+Exact selector:
+`v16_program_generated_fractional_kf_routes_preserve_carry_owner_value_and_residue`.
+
+Four deterministic XorShift seeds (`425`, `425010`, `425038`, `425052`) generate
+six-event histories with 2--4-slot intervals, unequal 1/8--3/8-lot reductions,
+and optional owner settlement before each fill. Both opposite AuthMark directions
+run as an equivalent pair: grouped market accrual plus whole bilateral batches,
+and one-slot market accrual plus half-sized fills alternating all four public
+single/batch CPI/bilateral routes. The latter reverses asset and owner order and
+inserts account cranks between fill halves. Sixteen public LiteSVM worlds start
+with two portfolios holding fractional legs, two holding integral legs, four
+unequal deposits, and a fixed 1,000,066-atom SPL supply. System/SPL/ATA/wrapper
+instructions construct economic state; no program-owned account bytes are patched.
+
+The local ledger derives price carry from the fixed input anchor and elapsed time,
+funding from the bounded premium and one-slot signed floor, and owner value from
+signed input quantities. It keeps independent account checkpoints, separate K/F
+floor residues, exact rational entitlement and four gross funding counters per
+owner. Every accrual, grant renewal and fill checks committed and latent owner
+value, decoded K/F snapshots, matched OI, carry/mark/funding provenance, capital/PnL
+totals, mint supply and custody. Trades and renewals preserve complete oracle
+profiles; absent portfolios remain complete-Account equal. No deployed arithmetic
+helper or decoded index supplies an expected value.
+
+This adds repeated price movements with simultaneous fractional K and F settlement
+to the earlier one-move/zero-funding fractional test and integral funding-reversal
+test. The paired routes preserve the same fractional-owner settlement frontiers;
+only the integral market-crank owner changes cadence. Thus the comparison does
+not assume arbitrary account-settlement fragmentation is economically identical.
+Fifty-four settlement steps distinguish separate K/F floors from flooring their
+sum. The independent owner ledger and each owner's K/F residue and gross funding
+counters agree between routes, as do all four final SPL payouts.
+
+Each event also executes a valid economic prefix followed by an invalid suffix:
+96 full Account rollbacks, including matcher context, absence and metadata, with
+only the exact payer signature fee deducted. Prefix-success logs establish that
+the economic instruction ran. Non-progress crank/close rejections retain the
+existing helpers' exact writable-economic-Account rollback checks. Signed closes
+and later resolved settlement pay 64 exact owner entitlements and leave only the
+independently computed 10--14 residue atoms. No recoverable backing lien, fresh
+backing, provider earnings or insurance remains. The shared payout helper now
+asserts the actual authenticated resolution slot; the shared public constructor
+accepts an accrual limit and matching minimum funding lifetime (both four here).
+
+**Row 425 remains OPEN.** This is a bounded generator/oracle, not coverage of all
+economic routes: fixed AuthMark targets, rate cap 10,000, unit ADL, zero fees,
+solvent reductions and two assets deliberately exclude target replacement,
+pending funding checkpoints, trade-driven mark discovery, nonzero fees/ADL,
+other oracle/quote modes, bankruptcy/Recovery and arbitrary settlement cadence.
+No production change or implementation violation is established. Initial probe
+iterations corrected fixture parameters (one-slot accrual and an inadmissible
+funding cap); those were harness setup failures, not implementation findings.
+
+Branch `codex/row425-fractional-carry-routes-20260912`, worktree
+`/tmp/percolator-row425-fractional-routes-20260912`, initially based on `fd425093`
+and fetched/rebased onto `5e4d80eb` including row424 before final validation.
+Existing row notes and dispositions are preserved. Default-feature wrapper and
+authenticated matcher SBF were built locked/offline with platform-tools v1.52
+in private paths. SHA-256: wrapper
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Measured successful/rejected prefix peaks after rebase: 469,587/469,799 CU
+(limit 1,400,000).
+Only the new behavioral selector and the two requested metadata selectors are run.
+Exact verification commands (from the worktree root unless noted):
+
+```bash
+export CARGO_TARGET_DIR=/tmp/row425-fractional-routes-target
+export TMPDIR=/tmp/row425-fractional-routes-tmp
+export PERCOLATOR_FUZZ_SBF=/tmp/row425-fractional-routes-target/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/row425-fractional-routes-target/deploy -- --locked
+# Matcher build command, run from tests/fixtures/auth_matcher:
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/percolator-row425-fractional-routes-20260912/tests/fixtures/auth_matcher/target/deploy -- --locked
+# Return to the worktree root for all remaining commands.
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::generated_fractional_routes::v16_program_generated_fractional_kf_routes_preserve_carry_owner_value_and_residue -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /tmp/row425-fractional-routes-target
+cargo clean --target-dir /tmp/percolator-row425-fractional-routes-20260912/tests/fixtures/auth_matcher/target
+cargo clean --target-dir /tmp/row425-fractional-routes-tmp
+```
+
 ## INV-039 insured pending debt through resolution (row 419, 2026-09-12)
 
 Owner: [cu/inv_039_pending_loss_insured_resolution.rs](cu/inv_039_pending_loss_insured_resolution.rs),

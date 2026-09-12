@@ -543,6 +543,22 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Market accrual is explicit; inline market accrual, pending funding checkpoints,
 # fractional lots/fees/ADL and arbitrary histories remain outside this finite family.
 # Current behavior conforms in this selector; no production or status promotion. See README.
+# Row 425 generated fractional K/F route conformance (2026-09-12):
+# cu/inv_045_generated_fractional_routes.rs; exact selector
+# inv_045_no_free_mark_movement::public_carry_order::generated_fractional_routes::v16_program_generated_fractional_kf_routes_preserve_carry_owner_value_and_residue.
+# Sixteen public histories pair grouped/one-slot accrual, whole/half-sized fills,
+# all four trade routes, reversed asset/owner order and between-fill account cranks.
+# Input-derived K/F checkpoints, separate owner floor residues and gross funding
+# counters reconcile every prefix and 64 exact SPL payouts; 96 successful economic
+# prefixes roll back as full Accounts apart from exact signature fees. Final 10--14
+# custody atoms equal the independent residue, with no remaining backing/insurance
+# claim; 54 steps distinguish separate K/F floors from flooring their sum.
+# Net-new repeated price moves plus simultaneous fractional K/F; paired histories
+# keep fractional-owner settlement frontiers equal. Fixed AuthMark targets, rate
+# cap 10000, unit ADL, zero fees, solvent two-asset reductions only. Target/checkpoint
+# replacement, trade-driven discovery, fees/ADL, other modes and arbitrary cadence
+# remain open. No production change or status promotion. Exact commands and limits:
+# README.md#inv-045-generated-fractional-kf-routes-row-425-2026-09-12.
 425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	OPEN
 # Row 426 partial conformance (2026-09-12): cu/inv_020_interrupted_refresh_fees.rs,
 # v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements.

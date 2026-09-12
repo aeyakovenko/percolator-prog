@@ -126,8 +126,9 @@ pub(super) fn pay_resolved_with_residue(
     settlement_rounding_residue: u128,
     mut before_close: impl FnMut(&mut World, usize, &Instruction),
 ) -> [u64; 4] {
+    let resolved_slot = world.env.svm.get_sysvar::<Clock>().slot;
     world.trace.push(format!(
-        "ResolveMarket at slot 5; CloseResolved at slot {payout_slot}"
+        "ResolveMarket at slot {resolved_slot}; CloseResolved at slot {payout_slot}"
     ));
     let env = &mut world.env;
     let cu = env
@@ -147,7 +148,7 @@ pub(super) fn pay_resolved_with_residue(
     let check = |world: &World| {
         let group = world.env.market_state().1;
         assert_eq!(group.mode, MarketModeV16::Resolved);
-        assert_eq!(group.resolved_slot, 5);
+        assert_eq!(group.resolved_slot, resolved_slot);
         assert_eq!(
             [0, 1].map(|asset| group.assets[asset].effective_price),
             endpoint.price
