@@ -128,6 +128,10 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # expiry boundary and transaction grouping. This covers the asset-local withdrawal consumer;
 # scanner rediscovery/invalidation, retirement/Recovery and generic closure remain OPEN. See README.
 424	LoF	PRIVILEGED	INV-070	INV-024,INV-025,INV-033,INV-041,INV-063,INV-069,INV-070,INV-071,INV-086,INV-088	persisted-cursor+x-time-reclassification+x-earlier-slot	any-environmental-transition-that-changes-actionability-invalidates-scanned-prefixes	OPEN
+# Row 425 bounded precrank coverage (2026-09-12): README.md#inv-045-precrank-carry-and-entitlement-row-425-2026-09-12.
+# Thirty-two public histories reduce positions before a market crank while carry is nonzero,
+# then prove later crank attribution and owner exits remain input-derived. No generic
+# closure or invariant-status promotion; row stays OPEN.
 425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	OPEN
 # Row 426 partial conformance (2026-09-12): cu/inv_020_interrupted_refresh_fees.rs,
 # v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements.

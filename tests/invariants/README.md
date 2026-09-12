@@ -6287,6 +6287,104 @@ selectors passed **2/2**, public-evidence selectors passed **4/4**, and formatti
 and diff checks passed in the source worktree. The omitted CU source-composition
 guard is the known current-engine-pin assertion, not a runtime regression.
 
+## INV-045 precrank carry and entitlement (row 425, 2026-09-12)
+
+[`cu/inv_045_precrank_carry.rs`](cu/inv_045_precrank_carry.rs) adds one selector
+under the existing `public_carry_order` owner. It reuses that owner's public SPL
+setup, input ledger, raw-account entitlement/stock/OI oracle, passive-account
+frames, and crank progress/rollback checks. The only helper change prints both
+the actual Clock slot and the committed market frontier in reduction traces.
+**Coverage only; no implementation mismatch. Row 425 remains OPEN.**
+
+The 32 deterministic histories cross two mark directions, early reductions on
+even or odd slots, one or two lots reduced before the observer crank, single
+versus two-asset batch no-CPI routes, and both asset/owner orders. At every slot
+the active pair reduces two lots per asset in total. When one lot precedes the crank,
+the other follows it. Each history submits at least two precrank reductions
+while both assets have nonzero carry. All positions stay live and integral.
+
+Unlike the earlier selector, a signed reduction can precede the first market
+crank at the new Clock. In this zero-funding AuthMark setup, trades preserve
+the old frontier and both complete oracle profiles; the public crank advances
+canonical accrual afterward. The ledger attributes each price atom to the lots
+still held when that crank occurs. The 125-atom asset first moves at slot 4,
+and the 100-atom asset at slot 5. Reducing early on even versus odd slots gives
+the active owner independently derived final PnL
+`direction * (-6 + early_lots)` versus `direction * (-6 - early_lots)`.
+The opposing active owner receives the exact negative, and passive owners retain
+`[-4, +4] * direction`. These timing schedules must differ economically from
+the older crank-first `-6 * direction` result. Routes and asset orders within
+each timing schedule must agree. Every final carry is `[2000, 5000]` and final
+positions are `[[3, 7], [-3, -7], [7, 11], [-7, -11]]` lots.
+
+This is bounded additional evidence for INV-024/038/041/045/052/071/085/086/088.
+It supplies no new retained-intent/replay evidence for related INV-010, no generic
+generator, and no full-width arithmetic or whole-transition proof. Trades that
+themselves advance due accrual, CPI/delegation, nonzero fees/funding, fractional
+position lots, target changes, catchup horizons, terminal/resource histories,
+and maximum shapes remain outside this increment. No existing selector was
+copied. No runtime probes were discarded. The initial design assumption that
+these zero-funding trades would advance the market was discarded after reading
+the public source, before execution; no failing oracle was weakened.
+
+The requested main checkout was at `39f08dba` and contained neither this invariant
+suite nor its history. The isolated branch therefore uses the clean local public
+coverage baseline `d8c1334d0d16c5a35f61463488397b5f45ddd53a`, which already contains
+the row-425 selector above. Branch: `codex/astra-fractional-carry-row425-20260912`;
+worktree: `/home/anatoly/worktrees/astra-fractional-carry-row425-20260912`.
+The main checkout was not edited. No GitHub PR/issue/branch or sealed holdout was
+accessed. System/SPL/ATA/wrapper instructions construct every economic account;
+only inherited program loading and payer/admin SOL bootstrap, Clock warps, and
+blockhash expiration use the harness. No program-owned account bytes are injected.
+
+Validation uses a fresh offline default-feature SBF build in this worktree with
+platform-tools v1.52 and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+SBF SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Each host command uses `env CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`; artifacts live in the
+worktree's own `target/`, with no shared target writes.
+
+```sh
+cargo build-sbf --offline --tools-version v1.52 --jobs 2 -- --locked
+sha256sum target/deploy/percolator_prog.so
+cargo test --locked --offline --test v16_cu --no-run
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::precrank_carry::v16_program_row425_precrank_reductions_preserve_carry_and_owner_entitlement -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::v16_program_row425_public_carry_entitlement_is_partition_and_order_equivalent -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --exit-code d8c1334d -- src Cargo.toml Cargo.lock tests/invariants/invariant_status.tsv tests/invariants/special_method_coverage.tsv
+```
+
+The new exact selector passes **1/1, 32 histories**, in **20.24s**, with peak
+measured transition CU **376,794** (setup excluded) under the enforced
+1,400,000-CU ceiling. The existing control passes **1/1, 48 histories**, in
+**31.44s**, with peak transition CU **376,801**. Both filter out 1,082 other
+tests. The charter/index selector passes **1/1**, 122 filtered; formatting,
+diff, and unchanged production/status/method-file checks pass.
+
+The extra machine-status selector **fails, exit 101**, at
+`public_sbf/inv_079_public_reachability_evidence.rs:1890`: INV-058 has an empty
+counterexample projection where the gate expects `{427}`. The same exact
+selector fails identically on clean baseline `d8c1334d`. Its source and the
+status table are unchanged; the reopening table's only edit is a comment
+linking this evidence. This inherited row-427 metadata failure is retained,
+not reclassified as a row-425 production finding. The baseline check used a
+temporary detached checkout and the same private target:
+
+```sh
+git worktree add --detach /home/anatoly/worktrees/astra-fractional-carry-row425-20260912/target/baseline d8c1334d0d16c5a35f61463488397b5f45ddd53a
+# From target/baseline:
+env CARGO_TARGET_DIR=/home/anatoly/worktrees/astra-fractional-carry-row425-20260912/target CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+# From the coverage worktree, after the baseline command completed:
+git worktree remove /home/anatoly/worktrees/astra-fractional-carry-row425-20260912/target/baseline
+```
+
+The existing 346 dead-code warnings in the regression harness and
+`solana-client v1.18.26` future-incompatibility warning remain. No broad suite
+or Kani proof run is claimed.
+
 ## INV-045 public carry and account-settlement order (row 425, 2026-09-09)
 
 [`cu/inv_045_public_carry_order.rs`](cu/inv_045_public_carry_order.rs), mounted by

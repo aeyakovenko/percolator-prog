@@ -6,6 +6,9 @@
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 
+#[path = "inv_045_precrank_carry.rs"]
+mod precrank_carry;
+
 const ANCHORS: [u64; 2] = [100, 125];
 const CAP_BPS: u64 = 24;
 const PRINCIPAL: [u64; 4] = [100_003, 200_009, 300_017, 400_037];
@@ -365,7 +368,8 @@ impl World {
             let passive_before =
                 [2, 3].map(|actor| self.env.svm.get_account(&self.portfolios[actor]));
             self.trace.push(format!(
-                "slot={slot}: {}(actors=0/1, legs={legs:?})",
+                "Clock.slot={}; frontier={slot}: {}(actors=0/1, legs={legs:?})",
+                self.env.svm.get_sysvar::<Clock>().slot,
                 if history.batch {
                     "BatchTradeNoCpi"
                 } else {
