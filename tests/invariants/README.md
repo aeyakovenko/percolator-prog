@@ -1,5 +1,93 @@
 # Invariant-owned test coverage
 
+## INV-008 partial reserve payouts and replenished earnings (row 415, 2026-09-12)
+
+Owner: [stateful/inv_008_retained_backing_earnings.rs](stateful/inv_008_retained_backing_earnings.rs),
+mounted as `inv_008_intent_uniqueness_and_bounded_replay::retained_backing_earnings`.
+Selector: `v16_program_partial_reserve_payouts_preserve_replenished_earnings_across_orders`.
+
+Twelve LiteSVM histories cross asset 0/1 with all six orders of a 137-atom
+principal replenishment, a new fee-accruing bilateral trade, and a retained
+738-atom earnings payout. The standard `V16Svm` fixture supplies initially empty
+program accounts and fixed SPL endowments; public initialization, deposits,
+authority assignment, backing policy/top-up, authenticated marks, cranks and
+trades construct the economic state. No account images create or repair the
+tested stock, lien, earnings or retained-request condition.
+
+The provider owns 100,000 principal atoms and earns 875 atoms on an input-derived
+2,623-atom lien. Separately signed 137-atom principal and earnings withdrawals
+pay the same provider token account before replenishment. Their transactions and
+the independent 738-atom earnings request are signed before either initial payout.
+At a fixed authenticated price of 105, the later 10-contract trade increases the
+lien by 1,400 atoms and charges exactly `ceil(1400 * 3333 / 10000) = 467` new fees.
+The original 738-atom request pays only its signed amount whether it lands before
+or after this accrual. New signatures then pay 137 principal and all 467 later
+earnings through the two distinct reserve handlers.
+
+The independent history books check each trader's capital/PnL, exact principal
+and earned-fee stocks, the complete provider ledger (including lazy fee
+observation), live backing encumbrance, all SPL balances, fixed mint supply,
+unaffected domains and authority/control epochs after every suffix attempt.
+The common stock and encumbrance censuses also run at every boundary. Final
+provider receipts are exactly `274 principal + 1342 earnings = 1616` atoms;
+99,863 deposited principal atoms remain attributed to the provider. The test
+does not confuse the equal initial amounts or their shared destination with a
+single interchangeable reserve allowance.
+
+Each permuted operation first succeeds as a transaction prefix before an
+earnings-overdraw suffix rejects at the exact instruction index. All compiled
+and tracked complete Accounts roll back, including 24 successful SPL prefixes
+and twelve fee-accruing trade prefixes; the payer loses only the exact signature
+fee. The unchanged standalone payload then succeeds. After both replenishments,
+old paid transactions return `AlreadyProcessed` without account or fee changes.
+Two public cranks refresh order-dependent health-certificate risk epochs, after
+which every tracked non-payer Account is byte-identical across all six orders.
+No account bytes are normalized for either rollback or endpoint comparison.
+
+This adds bounded INV-008/010/024/031 composition evidence: partial reserve-stock
+payouts followed by **new utilization earnings and principal replenishment** with
+one shared provider ledger/destination. The existing insurance/operator-ABA
+replenishment test, principal/earnings expiry-stock test, and row-428 insurer
+succession coverage do not own this product. Partial payouts here are separate
+fully executed signed amounts, not persistent partial authorization. Identical
+signed retries test LiteSVM's validator cache only; signature-distinct withdrawal
+payloads have no tested withdrawal-specific stock sequence. No new INV-011
+aggregate-budget or INV-064 insurance-policy guarantee is claimed. **Row 415
+remains OPEN**, with no generic oracle, production fix or invariant-status change.
+Other trade transports, arbitrary histories, authority succession, expiry,
+Recovery/Resolved payouts and complete provider/user exits remain outside this
+selector.
+
+Validation uses isolated worktree `/tmp/percolator-astra-inv008-row415-20260912`
+at base `8dd059afdc9bd0f26d0070fd8e69254f9c1a6c70` and private target
+`/dev/shm/astra-inv008-row415-20260912-target`. The reused default-feature wrapper
+SBF is a private copy with SHA-256
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Production/manifests/pins are unchanged from the README's documented artifact
+base `6ab7856fbe1e2f89ed11c1103fb5282fab404dee`; no SBF rebuild is claimed.
+The new selector passes 12 histories, 108 successful suffix transactions,
+36 exact rollbacks and 108 cache rejections; peak measured cost is **691,407 CU**
+under its 1,000,000-CU assertion and the 1,400,000-CU transaction limit.
+
+Discarded development assumptions: a 20-contract accrual exceeded the fixture's
+available post-fee credit and rejected before the intended suffix, so the retained
+history uses the admitted 10-contract increment. The provisional 600,000-CU test
+ceiling was too small for the successful trade prefix plus deliberate rejection.
+An immediate raw endpoint comparison observed different cached risk epochs;
+public recertification now makes the exact comparison valid. None was a proven
+production defect. No duplicate standalone insurance/expiry probe was added.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-inv008-row415-20260912-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_008_intent_uniqueness_and_bounded_replay::retained_backing_earnings::v16_program_partial_reserve_payouts_preserve_replenished_earnings_across_orders -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture --test-threads=1 inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_paid_retained_insurance_stays_bound_after_replenishment_and_operator_aba inv_063_backing_expiry_normalization::retained_reserve_stock::v16_program_retained_principal_expiry_preserves_encumbered_backing_and_earned_fee_stock
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-067 repeated receipt stock releases (row 417, 2026-09-12)
 
 Owner: [cu/inv_067_receipt_repeated_stock.rs](cu/inv_067_receipt_repeated_stock.rs),

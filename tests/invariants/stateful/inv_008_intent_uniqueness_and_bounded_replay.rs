@@ -27,6 +27,9 @@ use super::*;
 #[path = "inv_008_retained_reserve_replenishment.rs"]
 mod retained_reserve_replenishment;
 
+#[path = "inv_008_retained_backing_earnings.rs"]
+mod retained_backing_earnings;
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,

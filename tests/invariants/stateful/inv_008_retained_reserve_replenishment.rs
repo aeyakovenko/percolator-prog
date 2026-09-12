@@ -79,7 +79,7 @@ fn top_up(env: &V16Svm, domain: u16, amount: u128) -> Instruction {
     }
 }
 
-fn sign(env: &V16Svm, instructions: &[Instruction], nonce: u32) -> Transaction {
+pub(super) fn sign(env: &V16Svm, instructions: &[Instruction], nonce: u32) -> Transaction {
     let mut message = vec![
         ComputeBudgetInstruction::request_heap_frame(256 * 1024),
         ComputeBudgetInstruction::set_compute_unit_limit(TX_CU_LIMIT as u32 - nonce),
@@ -106,7 +106,7 @@ fn sign(env: &V16Svm, instructions: &[Instruction], nonce: u32) -> Transaction {
     tx
 }
 
-fn frame(env: &V16Svm, tx: &Transaction) -> Vec<(Pubkey, Option<Account>)> {
+pub(super) fn frame(env: &V16Svm, tx: &Transaction) -> Vec<(Pubkey, Option<Account>)> {
     let keys: BTreeSet<_> = env
         .all_economic_account_lamports()
         .into_iter()

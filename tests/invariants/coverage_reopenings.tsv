@@ -91,6 +91,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # histories remain outside this bounded increment; no production fix or promotion.
 413	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-first-risk	all-accrued-liabilities-precede-every-risk-increasing-admission	OPEN
 414	LoF	PRIVILEGED	INV-012	INV-002,INV-007,INV-012,INV-019,INV-089	capability+x-asset-reuse+x-generation	capabilities-bind-every-replaceable-economic-object-incarnation	OPEN
+# 415 bounded conformance (2026-09-12): stateful/inv_008_retained_backing_earnings.rs,
+# v16_program_partial_reserve_payouts_preserve_replenished_earnings_across_orders.
+# Twelve public-handler histories permute principal replenishment, new utilization
+# fees and a retained earnings payout after partial principal/earnings payments to
+# one provider destination. Separate input-derived books, 36 exact rollbacks and
+# public recertification give identical endpoints. Identical-transaction retries
+# exercise only validator caching, not a withdrawal-specific stock sequence.
+# No generic oracle, insurance-policy guarantee, production fix or status promotion;
+# row 415 remains OPEN. See README for the distinct product and remaining limits.
 415	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-011,INV-024,INV-031,INV-064	retained-withdrawal+x-stock-replenishment+x-retry	a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution	OPEN
 # 416/429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_coalescence.rs,
 # v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements.
