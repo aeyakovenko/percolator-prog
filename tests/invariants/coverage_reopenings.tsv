@@ -335,6 +335,16 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # frozen atoms/vault, active liabilities, recredit/expiry, missing wallets, native/
 # funded secondary quote, optional ledgers, maximum shape and absent market authority.
 # README records exact selectors, artifact provenance, setup corrections and gaps.
+# Row 421 bounded conformance (2026-09-12): cu/inv_073_missing_insurance_wallet_recredit.rs,
+# v16_program_recredited_insurance_reaches_terminal_exit_without_wallets_or_signatures.
+# Four public asset-0/1 histories close insurance custody and drain both insurance
+# wallets before loss settlement. After 100 atoms are consumed and backing expires,
+# keeper-only ATA creation plus implicit recredit returns exactly 100/101 atoms in
+# two unsigned payments; both wallet Accounts stay absent. Premature-close bundles
+# roll back custody creation, recredit and real payment in four exact Account checks.
+# Signed final close burns 207 unallocated atoms with exact rent. Distinct from
+# existing-wallet row410 recredit, row421 frozen custody and row420/433 repair.
+# No production violation or status promotion; generic progress remains OPEN.
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN
 # 423 partial conformance (2026-09-10): cu/inv_028_single_slot_admission.rs::v16_program_batch_admission_cannot_share_last_future_domain_slot.

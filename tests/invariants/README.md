@@ -694,6 +694,96 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-073 missing insurance wallets through loss and recredit (row 421, 2026-09-12)
+
+Owner: [cu/inv_073_missing_insurance_wallet_recredit.rs](cu/inv_073_missing_insurance_wallet_recredit.rs),
+mounted under `inv_073_no_permanent_user_lock::absent_insurer_spent_retirement`.
+Selector: `missing_insurance_wallet_recredit::v16_program_recredited_insurance_reaches_terminal_exit_without_wallets_or_signatures`.
+
+Four public LiteSVM histories cross asset 0/1 with a 0/1-atom insurance remainder.
+The existing loss/expiry fixture funds 100/101 insurance atoms and 307 unused
+backing atoms. Before trading, public SPL close and System transfers remove the
+beneficiary's token account and drain both beneficiary/operator wallets to zero;
+all reserve keys are dropped. The configured identities persist unchanged.
+Permissionless stale resolution and three user exits pay exactly `[1200, 0, 137]`,
+consuming 100 insurance atoms. Signed empty-portfolio deletion and backing expiry
+leave a 100-atom recredit entitlement plus the original 0/1-atom remainder.
+
+The new continuation starts before recredit is booked. An unrelated keeper pays
+ATA creation rent and submits `WithdrawInsuranceAsset` with no reserve or admin
+signature. This first payment implicitly recredits insurance and pays 37 atoms;
+a second unsigned payment pays the remaining 63/64. The input-derived outstanding
+entitlement strictly decreases `100/101 -> 63/64 -> 0`, including insurance that
+has not yet been recredited. Both absent wallet Account images remain unchanged;
+the repaired SPL account belongs to the original beneficiary. Exact market state,
+domain budgets/spend, role profiles/control sequences, token custody, payer fees,
+stock and encumbrance censuses bind each successful prefix. One administrator-signed
+slab close burns the separately unallocated 207 atoms and returns exact rent.
+
+In each world, a bundled ATA creation, implicit recredit, real partial payment and
+premature slab close rejects only after the creation/payment prefix succeeds.
+Every tracked and compiled Account rolls back, except transaction fees, including
+the missing destination and historical insurance spend. Retrying with keeper-only
+signatures succeeds without creating either wallet account.
+
+This adds **wallet-account absence across an insurance loss/recredit history**.
+Row420 custody replacement preserves a funded provider wallet and never spends
+insurance; row433 destination repair and Recovery cleanup retain beneficiary
+wallets. Row421 frozen-custody coverage retains both wallets and unspent insurance.
+INV-024's raw-surplus/recredit control already pays restored claims unsigned into
+existing custody; the old INV-073 recredit control stops at the protected claim.
+Those cases are controls, not new standalone coverage claims.
+
+**Row 421 remains OPEN**, with partial green conformance and no production change.
+This finite classic-SPL fixture does not prove arbitrary histories, native/secondary
+rails, missing market authority, or access to paid custody when the beneficiary's
+private key is permanently lost. It proves economic disposition to that identity's
+custody. Administrative deletion, expiry normalization and final retirement still
+use the market authority or portfolio owner. No property violation was observed.
+
+Validation starts from `037a055e` in worktree `/tmp/percolator-row421-20260912`,
+branch `codex/row421-insurance-terminal-progress-20260912`. The default-feature SBF
+and private host-cache copies came from `/dev/shm/astra-terminal-public-disposition-target`.
+SBF SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Production sources and Cargo files match the recorded artifact baseline
+`82f44d1146a45f1f0cf07a76fb171a280d5c21e2`; no SBF rebuild is claimed. Shared-memory
+exhaustion required the two requested `/dev/shm` paths to point to private storage
+under this worktree's ignored `target/`. A test-helper compilation error was fixed
+before the first execution; no failing economic case was removed.
+
+The final new selector passes **1/1** (four histories, 2.20 seconds), with eight
+keeper-only payments, four custody creations, four exact rollback bundles and four
+final closes. Peak CU is **170,252** for the new continuation and **222,909** across
+its measured settlement/cleanup transactions, below the unchanged **300,000** bound.
+The eight adjacent exact controls pass **8/8** in 45.69 seconds. Existing Solana
+future-compatibility warnings remain; no full-suite or Kani run is claimed.
+
+Exact validation commands (test output logs are under this worktree's `target/`):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row421-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row421-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row421-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::missing_insurance_wallet_recredit::v16_program_recredited_insurance_reaches_terminal_exit_without_wallets_or_signatures -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_reserve_roles_preserve_recredited_insurance_after_backing_expiry \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_depleted_reserves_preserve_exhaustion_and_retirement_across_retries \
+  inv_073_no_permanent_user_lock::frozen_insurance_remainder::v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement \
+  inv_073_no_permanent_user_lock::v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings \
+  inv_073_no_permanent_user_lock::v16_program_recovery_reserve_repair_crosses_last_portfolio_cleanup_without_beneficiary_signatures \
+  inv_073_no_permanent_user_lock::v16_program_terminal_public_reserve_disposition_preserves_value_across_orders \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_surplus::v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-073 frozen paid insurance and unsigned remainder (row 421, 2026-09-12)
 
 Owner: [cu/inv_073_frozen_insurance_remainder.rs](cu/inv_073_frozen_insurance_remainder.rs),

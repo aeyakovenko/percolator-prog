@@ -6,10 +6,15 @@
 //! The restored beneficiary claim must remain protected, so this is not signer-free retirement.
 //! The withdrawn-provider family crosses payout/deletion order with exhaustion and retirement
 //! rollback. Provider principal leaves while Live; no reserve holder signs the terminal suffix.
+//! The missing-wallet child removes both insurance wallets and custody before loss settlement,
+//! then completes keeper-funded custody repair, implicit recredit/payment and signed retirement.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
+
+#[path = "inv_073_missing_insurance_wallet_recredit.rs"]
+mod missing_insurance_wallet_recredit;
 
 #[test]
 fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion() {
@@ -44,6 +49,7 @@ fn v16_program_absent_depleted_reserves_preserve_exhaustion_and_retirement_acros
 enum ProviderHistory {
     Empty,
     Fresh,
+    FreshMissingWallets,
     Withdrawn,
 }
 
@@ -57,7 +63,8 @@ fn absent_reserve_progress(
     const PAYOUTS: [u64; 3] = [CAPITAL[0] + GAIN, 0, CAPITAL[2]];
     const CALL_BOUND: usize = 8;
     const EXPIRY: u64 = 44;
-    let with_backing = provider_history == ProviderHistory::Fresh;
+    let missing_wallets = provider_history == ProviderHistory::FreshMissingWallets;
+    let with_backing = provider_history == ProviderHistory::Fresh || missing_wallets;
     let provider_principal = if provider_history == ProviderHistory::Empty {
         0u64
     } else {
@@ -277,6 +284,42 @@ fn absent_reserve_progress(
                 }
             }
             let absent = [beneficiary.pubkey(), operator.pubkey(), provider.pubkey()];
+            if missing_wallets {
+                let before = env.market_state();
+                let vault = env.svm.get_account(&env.vault);
+                send_raw_tx(
+                    &mut env.svm,
+                    &env.payer,
+                    spl_token::instruction::close_account(
+                        &spl_token::ID,
+                        &reserve_token,
+                        &beneficiary.pubkey(),
+                        &beneficiary.pubkey(),
+                        &[],
+                    )
+                    .unwrap(),
+                    &[&beneficiary],
+                )
+                .unwrap();
+                for signer in [&beneficiary, &operator] {
+                    let balance = env.svm.get_account(&signer.pubkey()).unwrap().lamports;
+                    send_raw_tx(
+                        &mut env.svm,
+                        &env.payer,
+                        system_instruction::transfer(&signer.pubkey(), &admin.pubkey(), balance),
+                        &[signer],
+                    )
+                    .unwrap();
+                }
+                for key in [absent[0], absent[1], reserve_token] {
+                    assert!(env
+                        .svm
+                        .get_account(&key)
+                        .is_none_or(|account| account.lamports == 0 && account.data.is_empty()));
+                }
+                assert_eq!(env.market_state(), before);
+                assert_eq!(env.svm.get_account(&env.vault), vault);
+            }
             drop(beneficiary);
             drop(operator);
             drop(provider);
@@ -453,7 +496,11 @@ fn absent_reserve_progress(
                     supply
                 );
                 assert_eq!(env.token_amount(admin_token), 0);
-                assert_eq!(env.token_amount(reserve_token), 0);
+                if missing_wallets {
+                    assert_eq!(env.svm.get_account(&reserve_token), reserve_frame);
+                } else {
+                    assert_eq!(env.token_amount(reserve_token), 0);
+                }
                 if let Some(token) = provider_token {
                     assert_eq!(env.token_amount(token), withdrawn);
                 }
@@ -777,6 +824,21 @@ fn absent_reserve_progress(
                     normalized.source_credit[2 * asset + 1].provider_receivable_num,
                     u128::from(CAPITAL[1]) * BOUND_SCALE
                 );
+                if missing_wallets {
+                    peak = peak.max(missing_insurance_wallet_recredit::finish(
+                        &mut env,
+                        &admin,
+                        asset,
+                        absent,
+                        reserve_token,
+                        remainder + recovered,
+                        &close,
+                        &tracked,
+                    ));
+                    assert_eq!(tokens.map(|key| env.token_amount(key)), PAYOUTS);
+                    println!("INV-073 absent insurance wallets asset={asset}, remainder={remainder}: user_calls={calls:?}/{CALL_BOUND}, recredited={recovered}, paid={}, burned={}, peak={peak} CU", remainder + recovered, backing - recovered);
+                    continue;
+                }
                 peak = peak.max(land(
                     &mut env,
                     &[close.clone(), close.clone()],
