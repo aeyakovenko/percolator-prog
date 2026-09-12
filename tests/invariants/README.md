@@ -8,6 +8,16 @@ receipt identity, replay idempotence and terminal custody/rent disposition. This
 adds bounded INV-066/067/068/070/080/081 evidence for nonzero claim/receipt state;
 the zero-bound cleanup/static edge remains unresolved and invariant verdicts are unchanged.
 
+The [shutdown operator-departure audit](shutdown_operator_departure_audit_20260912.md)
+adds one INV-024 selector with four public LiteSVM histories. Funded operator
+succession before/after shutdown and cold-admin burn preserve both operators'
+paid amounts, the unchanged insurance beneficiary, base-asset maintenance fees,
+and separate backing principal. Both operator keypairs leave before resolution;
+24 exact rollbacks and authorized beneficiary/provider payouts compose through
+rent-exact slab retirement. This adds bounded INV-005/024/025/027/036/070/080/081
+evidence. Mature shutdown fallback, provider earnings and absent-beneficiary
+reserve disposal remain untested; labels 410/416/429/433 remain OPEN.
+
 The [terminal alternate-custody audit](terminal_custody_alternate_20260912.md) adds
 eight public LiteSVM histories under INV-082. Absent backing and insurance holders
 receive their portfolio principal through keeper-created SPL accounts while their

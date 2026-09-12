@@ -29,6 +29,9 @@ mod terminal_insurance_lifecycle;
 #[path = "inv_024_terminal_earnings_succession.rs"]
 mod terminal_earnings_succession;
 
+#[path = "inv_024_shutdown_operator_departure.rs"]
+mod shutdown_operator_departure;
+
 #[path = "inv_024_pnl_reward_receipt_history.rs"]
 mod pnl_reward_receipt_history;
 
