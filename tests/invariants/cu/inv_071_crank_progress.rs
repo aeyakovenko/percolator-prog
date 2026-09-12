@@ -27,6 +27,9 @@ mod terminal_reserve_backfill;
 #[path = "inv_071_terminal_prefix_insurance.rs"]
 mod terminal_prefix_insurance;
 
+#[path = "inv_071_terminal_prefix_recredit.rs"]
+mod terminal_prefix_recredit;
+
 #[path = "inv_071_recovery_obligation_finalization.rs"]
 mod recovery_obligation_finalization;
 

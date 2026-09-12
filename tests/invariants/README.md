@@ -66,6 +66,65 @@ arbitrary claim faces, repeated stock reclassifications, Recovery/insurance
 composition and generic history coverage remain outside its scope. No implemented
 probe was discarded and no public-route production bug was found in this pass.
 
+## INV-071 earlier-asset insurance after later expiry (row 424, 2026-09-12)
+
+Owner: [cu/inv_071_terminal_prefix_recredit.rs](cu/inv_071_terminal_prefix_recredit.rs),
+selector
+`inv_071_crank_progress::terminal_prefix_recredit::v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement`.
+
+Sixteen public LiteSVM histories cross long/short insurance spend, later backing
+of 61/307 atoms, exact/late expiry, and split/bundled normalization and payment.
+System, SPL, ATA and wrapper instructions create all economic state. AuthMark
+publication and authenticated Clock drive ten lots from 100 to 120/80. The
+1,000/100/137 capital inputs yield exact user payouts of 1,200/0/137 and 100 atoms
+of spent insurance before public portfolio deletion. Mint authority is revoked.
+
+`CloseSlab` then persists cursor 1 with no residual available to the earlier
+asset. Expiring backing on asset 1 leaves the earlier slot's complete bytes
+unchanged while making its insurance actionable. The oracle independently
+recomputes residual and paired-domain overlap from decoded stocks, compares
+fresh-backing and remaining-insurance sums with cached header totals, and requires
+restoration of `min(100 receivable, 100 spent, 61 or 307 residual)` atoms.
+`WithdrawInsuranceAsset` pays that earlier entitlement in two parts despite
+cursor 1; all 32 payments omit the beneficiary signature. No paid budget revives
+on the second payment. The immutable withdrawal instruction rejects before
+normalization, including after Clock reaches expiry, and succeeds after the
+public normalization step.
+
+The 56 exact rejections compare every compiled/tracked complete Account, with
+only the actual payer signature fee subtracted. Successful expiry, earlier-asset
+recredit and SPL-payment prefixes roll back when unpaid insurance blocks the
+close suffix. Each history completes three successful slab calls including final
+closure, burns exactly 0/207 atoms, and reconciles vault rent, market excess rent,
+tombstone rent and fixed mint supply. Peak measured transaction cost is 218,544 CU
+under the 400,000-CU limit.
+
+This adds the cross-asset transition absent from
+`terminal_prefix_insurance::v16_program_scanned_insurance_withdrawals_preserve_peer_entitlements_across_late_expiry`
+(unspent insurance, unchanged residual) and the INV-073 absent-reserve recredit
+selector (backing and restored insurance on the same asset). It is bounded
+INV-024/063/069/070/071/086/088 evidence for the asset-local withdrawal consumer.
+**Row 424 remains OPEN.** The scanner's own rediscovery/invalidation, arbitrary
+earlier assets, retirement/reuse, Recovery, pending claims and maximum capacity
+remain outside this family. No production fix or vulnerable-pin red/green result
+is claimed; invariant verdicts are unchanged. No marginal/duplicate probe was
+retained, and the existing reuse/time-only selectors were not duplicated.
+
+Validation reuses the documented fixed SBF artifact from the public-reserve
+change, SHA-256 `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`,
+with engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. No SBF rebuild is needed
+for these host-only coverage additions. Exact selectors and controls:
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-row424-env-worker-20260912/target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_071_crank_progress::terminal_prefix_recredit::v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_071_crank_progress::terminal_prefix_insurance::v16_program_scanned_insurance_withdrawals_preserve_peer_entitlements_across_late_expiry inv_071_crank_progress::terminal_cursor_time::v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_prefix_reuse::v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_reserve_roles_preserve_recredited_insurance_after_backing_expiry
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-073 public terminal reserve disposition (2026-09-12)
 
 The [public reserve disposition audit](terminal_public_reserves_audit_20260912.md)
