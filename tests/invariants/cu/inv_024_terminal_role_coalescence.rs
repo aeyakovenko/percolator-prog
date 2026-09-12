@@ -6,6 +6,9 @@
 
 use super::*;
 
+#[path = "inv_024_terminal_role_exchange.rs"]
+mod terminal_role_exchange;
+
 const FEES: usize = 0;
 const INSURER: usize = 1;
 const PRINCIPAL: usize = 2;
@@ -179,7 +182,7 @@ fn payout(
 
 fn land(
     world: &mut TerminalEarningsWorld,
-    ledgers: &[Pubkey; 2],
+    ledgers: &[Pubkey],
     ixs: &[Instruction],
     rejection: Option<(u8, PercolatorError, usize)>,
 ) -> u64 {

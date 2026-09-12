@@ -256,6 +256,16 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # independent entitlements, including shared recipients/providers. See README. Authority
 # epoch composition only; no generic stock-epoch oracle or standalone consumption proof.
 428	LoF	REAL	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	OPEN
+# Row 429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_exchange.rs,
+# v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders.
+# Twelve public resolved histories exchange funded backing/insurance holders across
+# all six role-local prefix/transfer interleavings and both final payout orders.
+# Outstanding principal, 17/858 provider fees and 11/20 insurance atoms retain exact
+# holder/role attribution; four ledgers, 48 complete-Account rollbacks with unchanged
+# prefix retries, and 12 rent-exact slab closures compose. See README's funded terminal
+# role exchange entry for selectors/CU. Pre-wind-down transfers, new fee accrual,
+# expiry/recredit, other assets/rails and arbitrary histories remain outside this
+# witness; no generic generator/oracle, production fix or row/status promotion.
 429	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-025,INV-027,INV-036,INV-070,INV-081	shutdown-reserve+x-beneficiary+x-attribution	terminal-reserve-value-remains-bound-to-the-beneficiary-and-role-that-earned-it	OPEN
 # 432 public red/green coverage (2026-09-12): cu/inv_014_delayed_policy_and_policy_epoch_safety.rs::v16_retained_single_cpi_taker_fee_cap_rejects_policy_increase.
 # Parent source accepted a retained TradeCpi after trade_fee_base_bps rose above the taker's signed fee_bps;

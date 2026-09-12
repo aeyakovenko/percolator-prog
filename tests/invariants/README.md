@@ -172,6 +172,107 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-024 funded terminal role exchange (row 429, 2026-09-12)
+
+Owner: [cu/inv_024_terminal_role_exchange.rs](cu/inv_024_terminal_role_exchange.rs),
+mounted beneath the existing terminal-role conformance module to reuse its public
+earned-fee fixture, reserve instructions, stock oracle and complete-Account frames.
+Exact selector:
+`inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::terminal_role_exchange::v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders`.
+
+Twelve independently constructed LiteSVM worlds exchange the backing provider A
+and insurance beneficiary B: backing `A -> B`, insurance `B -> A`. B remains the
+market/asset admin, while the separate live insurance operator C receives zero.
+The fixture publicly funds 100,000 backing and 31 insurance atoms, earns 875 actual
+utilization-fee atoms, resolves, pays users 56,627/1,995,000 atoms and deletes both
+portfolios. System/SPL/ATA/wrapper instructions construct all economic state;
+program installation, signer SOL, authenticated Clock and fresh blockhashes are
+the harness controls. Account copies are assertion frames, never installed as
+economic state. A receives 101 principal atoms before the exchange; the remaining
+99,899 principal atoms stay funded through both role transfers.
+
+The test compares all six linear extensions of the two role-local sequences
+`incumbent prefix payout -> consensual transfer + successor one-atom payout`,
+crossed with both final role payout orders. Prefixes are 17 provider-fee atoms
+and 11 insurance atoms. Each transfer needs the incumbent and successor; isolated
+reserve payouts use only the independent payer's signature. All worlds finish:
+
+| Recipient | Backing Principal | Provider Fees | Insurance | Total |
+| --- | ---: | ---: | ---: | ---: |
+| A, former provider / final insurer | 101 | 17 | 20 | 138 |
+| B, former insurer / final provider | 99,899 | 858 | 11 | 100,768 |
+| C, unchanged live operator | 0 | 0 | 0 | 0 |
+
+Every measured economic prefix checks input-maintained entitlements, exact SPL
+Account images, fixed supply, booked/raw custody, principal reservations, role
+profiles, authority epochs and unrelated source domains. Four separate post-hoc
+ledgers preserve each holder's role-specific withdrawals: fee counters 17/858,
+insurance counters 11/20, with no new deposits, earnings, profit or loss attributed
+by succession. Fee ledgers retain the input-derived 5,000-atom consumed-backing
+history. Each old holder's ledger remains unchanged when its successor is paid.
+
+For each transfer, a rejected bundle completes the transfer and a real successor
+SPL payout/lazy ledger initialization before rejecting the former holder's payout.
+After both transfers, two further rejected bundles pay one role before rejecting
+the other role's former-holder ledger. All 48 rejections check exact instruction
+errors and successful wrapper/SPL prefixes, then restore every tracked/compiled
+Account except actual signature fees. The identical instruction prefixes succeed
+on fresh transaction retries. This is rollback/retry coverage, not retained signed
+transaction or stock-replenishment evidence. The 120 committed reserve payments,
+24 committed handoffs and 12 slab closures conserve exact token and rent value.
+
+Distinct scope: both funded roles exchange holders while backing principal stays
+unpaid, and every valid cross-role payout/handoff ordering converges. Discarded
+duplicate ideas were fixed-holder payout permutations, single-role merge/split,
+provider round trips, destination repair, backing expiry, retained replenishment,
+pending-debt closure, cursor recredit and fractional-carry histories. Existing
+coverage owns those relations; rows 413/415/433 and 419/424/425 gain no new claim.
+No executed history was discarded. Development corrected a test-only expectation
+that post-hoc fee ledgers omit the fixture's historical consumed backing.
+
+**Row 429 remains OPEN.** This finite resolved asset-0/fixed-SPL witness does not
+cover transfers before full wind-down, other assets/quote rails, fresh fee accrual
+between transfers, expiry/recredit, outstanding user claims, arbitrary role
+histories or a generic generator/oracle. Production, dependency pins and invariant
+verdicts are unchanged; no correctness fix was needed.
+
+Validation uses worktree `/tmp/percolator-row429-terminal-attribution-20260912`,
+based on the requested local origin ref at
+`93860021819ad50997b3a1f15f7db7de4f9a73e3`. The private target is
+`/tmp/percolator-row429-target-20260912`; its cache was copied from the documented
+public-reserve target. Default-feature SBF was rebuilt locally, locked/offline,
+with platform-tools v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Reported CU excludes fixture construction. The final exact selector passes **1/1**
+(12 worlds, 7.32 s), with maxima **229,381 CU** for single calls, **452,472 CU** for
+successful bundles, **421,714 CU** for rejected bundles and **26,742 CU** for slab
+closure, all below the 600,000-CU per-transaction bound. Randomly generated keys
+can vary PDA derivation cost. The four adjacent exact controls pass **4/4** (6.93 s):
+coalesced roles peak at 339,532 CU, insurer merge/split at 226,385 CU and earned-fee
+succession at 423,137 CU; operator departure does not print an aggregate maximum.
+The charter/index passes **1/1**. Repository formatting, unstaged/staged whitespace
+and HEAD commit whitespace checks pass. Existing unused-support and Solana-client
+future-compatibility warnings remain. No full-suite or generic invariant proof is
+claimed.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row429-target-20260912
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+terminal_module=inv_024_attributed_quote_value_conservation::terminal_earnings_succession
+cargo test --locked --offline --test v16_cu "${terminal_module}::terminal_role_coalescence::terminal_role_exchange::v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders" -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  "${terminal_module}::terminal_role_coalescence::v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements" \
+  "${terminal_module}::terminal_role_partition::v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution" \
+  "${terminal_module}::v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance" \
+  inv_024_attributed_quote_value_conservation::shutdown_operator_departure::v16_program_shutdown_operator_departure_preserves_terminal_beneficiary_and_backing
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-067 repeated receipt stock releases (row 417, 2026-09-12)
 
 Owner: [cu/inv_067_receipt_repeated_stock.rs](cu/inv_067_receipt_repeated_stock.rs),
