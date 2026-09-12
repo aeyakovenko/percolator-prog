@@ -11,6 +11,17 @@ INV-024/063/070/071/080/081/086/088 evidence. The tested mutations preserve resi
 general cursor invalidation, earlier-slot insurance recredit, pending loss and
 receipt histories remain separate. Invariant verdicts and holdout labels are unchanged.
 
+The [funded fresh-report handoff audit](funded_fresh_handoff_audit_20260912.md)
+adds one INV-045 selector with two public LiteSVM histories. Separate and combined
+report publication preserve exact 100/1-atom funding transfers, owner capital/PnL,
+a 1,995-atom keeper reward and its complete SPL payout. Twelve rejected
+transactions restore complete Accounts, including funding and rewarded-liquidation
+prefixes. Backing-provider earnings remain zero and Pyth provider Accounts remain
+unchanged. The original sixteen zero-funding handoff worlds retain their selector.
+This adds bounded row-422 evidence; provider changes, arbitrary liquidation sizing
+and complete exposed-owner exits remain outside the increment, and all invariant
+and holdout dispositions are unchanged.
+
 The [terminal reserve-backfill audit](terminal_reserve_backfill_audit_20260912.md)
 adds one INV-071 selector with four public LiteSVM histories. Live-valid backing
 and domain-insurance top-ups cannot introduce obligations behind a cached terminal
