@@ -164,3 +164,8 @@
 424	LoF	PRIVILEGED	INV-070	missing	[PRIVILEGED LoF] Restart terminal scan after backing expiry
 425	LoF	BLOCKER	INV-045	missing	[BLOCKER LoF] Preserve oracle cap carry across interleaved trades
 426	LoF	BLOCKER	INV-020	missing	[BLOCKER LoF] Require current Hybrid evidence before health refresh
+428	LoF	REAL	INV-008	missing	[REAL LoF] Consume insurance withdrawal epoch on retained debit
+429	LoF	PRIVILEGED	INV-024	missing	[PRIVILEGED LoF] Preserve shutdown reserve beneficiaries
+432	LoF	PRIVILEGED	INV-014	missing	Enforce retained single-CPI taker fee terms
+433	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Permit unsigned terminal reserve payouts
+434	LoF	BLOCKER	INV-027	missing	Settle flat-account fees before risk admission
