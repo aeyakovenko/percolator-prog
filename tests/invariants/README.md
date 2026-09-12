@@ -94,6 +94,109 @@ cargo clean --target-dir "$CARGO_TARGET_DIR"
 cargo clean --target-dir "$TMPDIR"
 ```
 
+## INV-005 cold-admin ABA and funded handoff scope (row 416, 2026-09-12)
+
+Owner: [cu/inv_005_cold_admin_handoff_scope.rs](cu/inv_005_cold_admin_handoff_scope.rs),
+mounted under `inv_005_authority_incarnation_binding::cold_admin_handoff_scope`.
+Exact selector:
+`v16_program_cold_admin_aba_and_burn_preserve_funded_handoff_scope_and_value`.
+
+The finite public LiteSVM product crosses three funded roles (insurance authority,
+insurance operator, backing operator), either asset as the rotated scope, and
+Active/DrainOnly for that asset. The sibling remains Active. Both assets hold
+distinct long/short principal: backing `[101, 103, 107, 109]` and insurance
+`[17, 19, 23, 29]`. An independent user's flat portfolio retains 211 atoms.
+All market, portfolio, mint and token state is constructed through public
+System/SPL/ATA/wrapper instructions; only ordinary fixture airdrops and SBF loading
+use the harness. Mint authority is revoked at a fixed 719-atom supply.
+
+Before management, each world signs an incumbent-approved two-asset role handoff
+and prevalidates it in LiteSVM without committing any account changes. A cold-admin
+A-to-B-to-A rotation changes only the subject's admin and shared authority epoch.
+Neither funded incumbent moves. The original subject handoff then rejects
+`EngineStale`, alone and after a successful sibling funded handoff. A separate
+bundle executes that same sibling handoff before a current-epoch, correctly signed
+cold-admin replacement of the subject's funded role rejects `EngineLockActive`.
+Both failed bundles must roll back the sibling's profile and epoch writes.
+
+The subject then renounces its cold-admin role. Its previous cold key loses
+management authority even with a fresh epoch. The sibling's original signed
+handoff remains executable with unchanged signatures, blockhash, metas and bytes.
+The subject's unchanged funded incumbent can transfer after renunciation with
+only the retained handoff's epoch renewed. Each successful management step checks
+the complete decoded economy, both complete role profiles and control-sequence
+records, and fixed-supply wallet/stock accounting. No role change moves tokens.
+
+Payout controls distinguish policy authority from token authority: an insurance
+authority successor cannot withdraw the independent operator's insurance; an old
+backing/insurance operator cannot withdraw after transferring its role. Current
+payout holders then receive exactly all 420 backing and 88 insurance atoms through
+six public withdrawals per world. Untransferred roles still pay their incumbents;
+only an explicit incumbent-approved transfer changes a recipient. Every payout
+checks domain stocks, SPL destinations, supply, profiles and epochs. User capital
+and its full portfolio Account remain intact, leaving exactly 211 vault atoms.
+
+Each rejection checks its exact instruction index/error and complete compiled
+plus tracked Accounts, including unrelated wallets and the user portfolio, with
+only calculated payer signature fees excluded. Logs must prove the successful
+wrapper prefix and absence of SPL invocation on rejected management/payout routes.
+Successful transactions enforce the unchanged Account frame outside the named
+market/vault/recipient writes. The CU ceiling is 600,000 per transaction.
+
+This adds **retained incumbent role-management consent across cold-admin ABA and
+renunciation**, with an unchanged signed sibling-scope control. Existing funded
+withdrawal ABA rotates the funded holder itself; retained empty-insurance
+management checks stock arrival and same-asset role ordering; earned/consumed
+backing coverage does not retain this pair of incumbent management messages.
+No withdrawal replenishment, spent-custody repair, or terminal close family is
+added for rows 415/433. **Row 416 remains OPEN.** This finite matrix does not
+provide an arbitrary-history generator, funded-oracle replacement protection,
+market-authority coalescence, asset reincarnation, nonzero positions or claims,
+earned/impaired backing, expiry/oracle provenance variation (INV-020), telemetry
+ledger succession, native/dual quote, or terminal-lifecycle certification.
+
+Initial base: `25d40f11`; fetched and rebased before final validation onto
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`5cc857dcf41a24b9bf910e8910c2061cdeb16bc3`, preserving row415 and row433 notes.
+Production and Cargo inputs are identical across the rebase. Worktree:
+`/home/anatoly/percolator-prog-row416-cold-admin-containment-20260912`; branch:
+`codex/row416-cold-admin-containment-20260912`. The default-feature wrapper SBF
+was built locked/offline from this worktree in a private target with platform-tools
+v1.52 and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+
+Final rebased result: **1/1 passed**, 12 worlds, 12 prevalidated pairs, 60 exact
+rejections, 24 committed funded handoffs and 72 reserve payouts in 5.30 seconds.
+Peak CU `[management, rejection, payout]` was `[2,177, 19,945, 42,549]`.
+The pre-rebase run also passed (peak `[2,177, 27,439, 54,543]`).
+The initial host compile found a moved `Option` in the new transaction helper;
+borrowing the expected error fixed compilation. The first runtime execution
+passed every economic assertion. No implementation violation or production fix
+was found. Validation is limited to this exact selector and the two metadata
+selectors below, with no full-suite or adjacent row415/433 run.
+
+Exact build, focused validation and cleanup commands (run in this worktree):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row416-cold-admin-containment-20260912-target
+export TMPDIR=/dev/shm/row416-cold-admin-containment-20260912-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::cold_admin_handoff_scope::v16_program_cold_admin_aba_and_burn_preserve_funded_handoff_scope_and_value -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD # post-commit
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+cargo clean --target-dir "$TMPDIR"
+```
+
 ## INV-027 first batch fee boundary (row 413, 2026-09-12)
 
 Owner: [cu/inv_027_first_batch_fee_boundary.rs](cu/inv_027_first_batch_fee_boundary.rs),

@@ -221,6 +221,33 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # overdraw reject; 28 complete-Account rollbacks include role and SPL payout prefixes.
 # Exact separate entitlements survive shared custody. See terminal_role_coalescence_audit_20260912.md.
 # No generic generator/oracle or status promotion; both rows remain OPEN.
+# 416 cold-admin epoch/scope increment (2026-09-12): cu/inv_005_cold_admin_handoff_scope.rs.
+# Exact selector: inv_005_authority_incarnation_binding::cold_admin_handoff_scope::v16_program_cold_admin_aba_and_burn_preserve_funded_handoff_scope_and_value
+# Twelve public worlds cross insurance authority/operator and backing operator with
+# rotated asset 0/1 and Active/DrainOnly. Prevalidated incumbent handoffs become stale
+# only in the cold-admin ABA scope; successful sibling handoff prefixes roll back
+# on stale-epoch and current-signer funded-role rejection. Cold-admin burn preserves
+# incumbents; original signed sibling consent and epoch-renewed subject consent work.
+# Independent 719-atom supply, four-domain stock and recipient accounting preserve
+# 211 user atoms through explicit role transfers and all six reserve payouts/world.
+# Insurance policy succession does not acquire the independent hot payout role.
+# Complete Accounts restore except exactly charged signature fees; no program-byte edits.
+# Final selector PASS after rebase onto 5cc857dc: 12 prevalidated pairs, 60 exact
+# rejections, 24 committed funded handoffs and 72 payouts; peak CU [2177,19945,42549].
+# No runtime property violation or production fix found.
+# Net new: retained funded management across cold-admin ABA/burn, not funded-holder
+# withdrawal ABA, empty-role stock arrival, row415 replenishment or row433 custody repair.
+# Finite conformance only: arbitrary histories, funded-oracle replacement, market-role
+# coalescence, reincarnation, positions/claims, earned/impaired stock, clock/oracle
+# variation, telemetry succession, native/dual quote and terminal lifecycles remain open.
+# Commands (private environment and SBF provenance in README's cold-admin ABA section):
+# cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::cold_admin_handoff_scope::v16_program_cold_admin_aba_and_burn_preserve_funded_handoff_scope_and_value -- --exact --nocapture --test-threads=1
+# cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+# cargo fmt --all -- --check; git diff --check; git diff --cached --check
+# git show --format= --check HEAD (post-commit)
+# cargo clean --target-dir /dev/shm/row416-cold-admin-containment-20260912-target
+# cargo clean --target-dir /dev/shm/row416-cold-admin-containment-20260912-tmp
+# Row 416 remains OPEN; invariant verdicts and production code are unchanged.
 416	LoF	PRIVILEGED	INV-005	INV-005,INV-020,INV-024,INV-027,INV-055	cold-admin+x-funded-role+x-authority-containment	correctly-signed-role-management-cannot-seize-an-incumbent-funded-role	OPEN
 # 417 partial conformance (2026-09-10): cu/inv_067_receipt_source_realization.rs::v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry.
 # Partial source realization plus an older receipt payout rolls back; retained claims survive

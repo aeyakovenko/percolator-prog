@@ -63,6 +63,9 @@ mod cold_admin_earned_reserve;
 #[path = "inv_005_consumed_backing_containment.rs"]
 mod consumed_backing_containment;
 
+#[path = "inv_005_cold_admin_handoff_scope.rs"]
+mod cold_admin_handoff_scope;
+
 fn inv005_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
         .find(marker)
