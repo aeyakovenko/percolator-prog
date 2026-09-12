@@ -69,6 +69,13 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # close and SPL payout prefixes roll back exactly; unchanged valid bundles realize all
 # four entitlements. See retained_redirect_entitlement_audit_20260912.md. No vulnerable-pin
 # experiment, production fix or row/status promotion; both rows remain OPEN.
+# 411 bounded conformance (2026-09-12): cu/inv_014_retained_partial_fee_routes.rs,
+# v16_retained_partial_fill_fee_rate_matches_exact_routes_after_funded_rejection.
+# Twenty public worlds compare partial CPI with four exact transports at the same
+# executed quantity. Above-consent smaller fills reject with exact SPL-deposit rollback;
+# fresh consent converges on identical owner capital, insurance budgets and custody.
+# Dynamic/backing fees, underfunded collection, multi-leg batches and terminal settlement
+# remain outside this increment; no production fix or row/status promotion.
 411	LoF	PRIVILEGED	INV-014	INV-005,INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-081	retained-intent+x-policy-update+x-route	retained-trade-fee-consent-bounds-every-fee-bearing-route	OPEN
 412	LoF	BLOCKER	INV-012	INV-004,INV-005,INV-010,INV-012,INV-024,INV-081	capability+x-automatic-revocation+x-episode	retained-capability-cannot-cross-any-authority-revoking-state-transition	OPEN
 # Row 413 partial conformance (2026-09-12): cu/inv_027_reward_mapping_admission.rs,

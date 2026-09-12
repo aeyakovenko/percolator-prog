@@ -418,6 +418,56 @@ cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-thread
 cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
 ```
 
+## INV-014 retained partial fee route equivalence (row 411, 2026-09-12)
+
+Owner: [cu/inv_014_retained_partial_fee_routes.rs](cu/inv_014_retained_partial_fee_routes.rs),
+mounted by INV-014 as `retained_partial_fee_routes`.
+Exact `v16_cu` selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_partial_fee_routes::v16_retained_partial_fill_fee_rate_matches_exact_routes_after_funded_rejection`.
+
+Twenty public LiteSVM worlds compare partial CPI with all four exact transports
+at the same executed quantity. A post-signature capacity reduction cannot permit
+an above-consent fee rate merely because the smaller debit fits below the signed
+full-request ceiling. Each route rejects its own signed fee bound, restoring a
+real SPL deposit prefix and every complete Account except the exact payer fee;
+batch CPI uses its aggregate atom cap and also rolls back matcher execution.
+Fresh fee consent produces identical input-priced owner capital, insurance
+budgets and SPL custody. This adds partial-quantity consent and cross-route
+economics beyond row 432's single-CPI full-fill base-policy detours.
+
+The new distinction is above-consent partial execution despite its lower absolute
+fee. Discarded duplicates: row 432 policy detours, existing permitted partial and
+redirect histories, aggregate/batch fee caps, backing caps and expiry histories.
+**Row 411 remains OPEN**: dynamic/backing/funding/maintenance fees composed with
+partial fills, underfunded collection, multiple assets or batch legs, maximum
+shapes, authority or matcher succession, withdrawals and terminal settlement
+remain outside this test. No production, dependency or invariant-status change is
+claimed.
+
+The worker originally validated this in isolated worktree
+`/tmp/percolator-row411-20260912`, based on coordinator commit
+`09cb7b880440dbf1c8bd7c06e7c2ec330b19d91a`, with private target
+`/tmp/percolator-row411-20260912/target`. The coordinator integration reran the
+same focused selectors on the current invariant branch using the shared
+`/dev/shm/percolator-watch-test-target` build. The new selector passes **1/1**
+(20 worlds, 20 initial simulations, 20 funded rollbacks and 20 fresh
+successes). CU maxima: success/simulation **192,577**, rejection **179,964**,
+policy **2,699**, matcher control **902**. Two adjacent INV-014 controls pass
+**2/2**; charter/index and authoritative-status selectors pass **2/2**.
+Formatting and Git whitespace checks pass. No full-suite run is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row411-20260912/target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_partial_fee_routes::v16_retained_partial_fill_fee_rate_matches_exact_routes_after_funded_rejection -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_014_delayed_policy_and_policy_epoch_safety::v16_retained_fee_terms_bound_partial_and_exact_fill_routes_after_policy_change inv_014_delayed_policy_and_policy_epoch_safety::v16_program_trade_requires_signed_base_fee_consent
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-014 retained single-CPI fee policy detours (row 432, 2026-09-12)
 
 Owner: [cu/inv_014_retained_single_cpi_policy_history.rs](cu/inv_014_retained_single_cpi_policy_history.rs).

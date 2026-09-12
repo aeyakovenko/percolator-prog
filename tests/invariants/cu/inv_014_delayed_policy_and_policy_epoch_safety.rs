@@ -39,6 +39,9 @@ mod retained_redirect_entitlement;
 #[path = "inv_014_retained_single_cpi_policy_history.rs"]
 mod retained_single_cpi_policy_history;
 
+#[path = "inv_014_retained_partial_fee_routes.rs"]
+mod retained_partial_fee_routes;
+
 #[test]
 fn v16_retained_fee_terms_bound_partial_and_exact_fill_routes_after_policy_change() {
     use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
