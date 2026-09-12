@@ -91,6 +91,14 @@ fn terminal_earnings_world_with_user_signers(
     terminal_exit: bool,
     freeze_authority: Option<Pubkey>,
 ) -> (TerminalEarningsWorld, [Keypair; 2]) {
+    terminal_earnings_world_with_fee_share(terminal_exit, freeze_authority, 0)
+}
+
+fn terminal_earnings_world_with_fee_share(
+    terminal_exit: bool,
+    freeze_authority: Option<Pubkey>,
+    insurance_share_bps: u16,
+) -> (TerminalEarningsWorld, [Keypair; 2]) {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_freeze_authority;
 
     let mut env = inv018_public_spl_market_with_freeze_authority(
@@ -128,7 +136,7 @@ fn terminal_earnings_world_with_user_signers(
     env.svm.warp_to_slot(1);
     env.configure_permissionless_resolve_with_cu(100, 5);
     env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
-    env.update_backing_fee_policy_with_cu(1, RATE, 0);
+    env.update_backing_fee_policy_with_cu(1, RATE, insurance_share_bps);
 
     let wallets = [
         users[0].pubkey(),
@@ -225,7 +233,7 @@ fn terminal_earnings_world_with_user_signers(
                 authority_epoch: env.control_sequences(0).authority_epoch,
                 intent_id: 0,
                 backing_fee_bps: RATE,
-                insurance_share_bps: 0,
+                insurance_share_bps,
                 amount: BACKING.into(),
                 expiry_slot: 100,
             },
@@ -292,7 +300,7 @@ fn terminal_earnings_world_with_user_signers(
     assert_eq!(EARNINGS, 875);
     assert_eq!(
         env.market_state().1.backing_provider_earnings_total,
-        EARNINGS.into()
+        u128::from(EARNINGS - EARNINGS * u64::from(insurance_share_bps) / 10_000)
     );
     assert_eq!(
         env.portfolio_state(portfolios[0]).capital.get(),

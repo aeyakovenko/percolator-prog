@@ -2488,6 +2488,117 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-024 earned insurance share through succession (row 429, 2026-09-12)
+
+Owner: [cu/inv_024_terminal_fee_share_succession.rs](cu/inv_024_terminal_fee_share_succession.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::terminal_fee_share_succession`.
+Selector: `v16_program_terminal_fee_share_succession_preserves_operator_paid_history`.
+Primary INV-024; bounded INV-025/027/036/070/081 attribution evidence. Base:
+`b5006413139cabb5ab1ea572f7d615430652e836`. Branch:
+`codex/row429-terminal-reserve-attribution-20260912`; isolated worktree:
+`/tmp/percolator-row429-20260912`. The parent worktree is not edited.
+
+This single public LiteSVM history parameterizes the existing live earned-fee
+fixture's insurance share before public funding; existing callers keep a zero
+share. The 2,500-bps share splits the initial 875-atom utilization charge into
+657 provider earnings and 218 short-domain insurance atoms, alongside 31 deposited
+long-domain insurance atoms. The provider, insurance operator and initial insurance
+beneficiary/administrator are distinct. A signed operator payout of 7 initializes
+an insurance ledger under the initial beneficiary, while a signed provider sync
+records the preexisting 657 earnings. A two-lot owner-signed fill at 105 increases
+the required lien from 2,623 to 3,603 atoms. The independent charge oracle is
+`ceil(980 * 3,333 / 10,000) = 327`, split into
+`floor(327 * 2,500 / 10,000) = 81` short-domain insurance atoms and 246 provider
+fee atoms. The user's capital pays the full 327; neither ledger observes the
+trade yet.
+
+The initial beneficiary consents to transfer funded insurance to the unchanged
+provider while both users still have positions. The entire engine economics and
+both portfolios are framed across the handoff; only the expected authority epoch
+and beneficiary change. The unchanged operator receives a further 13 atoms using
+a new ledger bound to the successor beneficiary. Its opening insurance balance
+includes the inherited fee share, with zero newly observed profit or deposits.
+The old ledger remains byte-identical at its 7 withdrawn / 242 last-observed prefix.
+Both operator payouts consume deposited long-domain insurance; 11 deposited atoms
+and all 299 earned short-domain atoms remain owed to the successor role.
+
+Asset shutdown at slot 2, market resolution and delayed unsigned owner payouts
+compose before signed portfolio deletion. Terminal keeper-only payouts then pay
+903 provider fees and 11 insurance atoms to the same token account through
+different typed ledgers. A former-beneficiary insurance-ledger suffix rejects
+`Unauthorized` at instruction index 4 after two successful wrapper/SPL payouts.
+All tracked and compiled Accounts roll back except actual signature fees. The
+identical two-instruction prefix commits on retry, including the provider ledger's
+first observation of 246 new earnings and 5,000 consumed-backing atoms. The final
+299-atom insurance payout is exactly the two charges' earned share. Its successor
+ledger records 323 total withdrawals: 13 live atoms paid to the operator and 310
+terminal atoms paid to the beneficiary, without conflating those recipients.
+
+At economic checkpoints an input-maintained book checks both insurance domains,
+provider earnings, beneficiary/operator/provider identities, policy, authority
+epoch, user fee debit, fixed mint supply and SPL custody. The independent stock
+census and market shape validation compose with full Account rollback checks.
+Final recipients hold 56,300 / 1,995,000 user atoms, 101,213 provider/beneficiary
+atoms (100,000 principal + 903 provider fees + 310 insurance), 20 operator atoms,
+and zero administrator atoms. All 2,152,533 minted atoms are accounted for.
+Portfolio rent enters the slab; final public `CloseSlab` frames recipient tokens,
+all three ledgers and the mint, refunds exact slab/vault rent and leaves the
+canonical rent-funded tombstone with no vault residue.
+
+Nonduplication: the existing live-successor exchange earns only provider fees
+with zero insurance share; resolved role exchanges start with fixed reserve
+stocks. Shutdown operator departure uses deposited insurance and maintenance,
+with zero provider earnings. This probe adds **source charges split across
+two reserve roles, unobserved earned insurance inherited by a live beneficiary
+successor, and the same operator's ledger attribution across that handoff**.
+Further fixed-stock payout orders, destination repair and a standalone operator
+departure probe were discarded as duplicate candidates.
+
+**Row 429 remains OPEN.** This is one asset-0/classic-SPL history, not an exhaustive
+beneficiary oracle. Arbitrary share rates, both source orientations, arbitrary
+accrual or role ABA histories, insurance spending/recredit, principal expiry,
+pending losses, maintenance/funding combinations, other assets/quote rails and
+mature asset-local shutdown fallback remain gaps. It does not establish unsigned live reserve
+management or arbitrary Recovery progress. Economic state is constructed only
+through public System/SPL/ATA/wrapper routes; existing harness controls install
+programs, fund native signer balances and advance Clock/blockhash. No economic
+Account image is mutated or restored. Production, dependencies and
+`invariant_status.tsv` are unchanged.
+
+Validation uses a fresh locked/offline default-feature SBF build from this worktree,
+platform-tools v1.52, engine pin `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+SBF SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The private target is on `/tmp` because `/dev/shm` was nearly full; no shared build
+cache was modified. The new selector passes **1/1**, peak **451,028 CU** under the
+existing **600,000-CU** ceiling, excluding fixture construction. Its first development
+run failed during setup: attempting to increase the insurance share after backing
+was funded correctly returned `EngineLockActive`. The fixture now sets and binds
+that share before funding. This was a test setup correction; no property violation
+or production fix was found. The two adjacent exact selectors pass **2/2**,
+including the zero-share live fixture control (441,987 CU peak) and four shutdown
+operator-departure worlds. Repository formatting, unstaged/staged whitespace and
+post-commit whitespace checks pass. The private build target is cleaned with the
+command below. Only the existing Solana-client future-compatibility warning remains.
+No unfiltered suite or machine-status promotion is claimed. Exact commands:
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row429-target
+export TMPDIR=/dev/shm/percolator-row429-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+terminal_module=inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence
+cargo test --locked --offline --test v16_cu "${terminal_module}::terminal_fee_share_succession::v16_program_terminal_fee_share_succession_preserves_operator_paid_history" -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  "${terminal_module}::live_earnings_terminal_exchange::v16_program_live_successor_accrual_survives_terminal_role_exchange" \
+  inv_024_attributed_quote_value_conservation::shutdown_operator_departure::v16_program_shutdown_operator_departure_preserves_terminal_beneficiary_and_backing
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+```
+
 ## INV-024 live successor accrual through terminal exchange (row 429, 2026-09-12)
 
 Owner: [cu/inv_024_live_earnings_terminal_exchange.rs](cu/inv_024_live_earnings_terminal_exchange.rs).

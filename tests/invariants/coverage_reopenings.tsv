@@ -532,6 +532,24 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # New selector peak 441987 CU; see README for provenance, controls and discarded
 # duplicates. One bounded live/terminal history; expiry/recredit, other assets/rails
 # and arbitrary accrual/role histories remain unclaimed. Row remains OPEN; no bug fix.
+# Row 429 earned-insurance increment (2026-09-12):
+# cu/inv_024_terminal_fee_share_succession.rs,
+# v16_program_terminal_fee_share_succession_preserves_operator_paid_history.
+# With 218 already-earned insurance atoms, a later live source charge splits 327
+# atoms into 246 provider fees and 81 insurance. Fixture policy precedes funding.
+# Funded beneficiary succession inherits unobserved earned insurance while the
+# unchanged operator pays 7/13 deposited atoms against different beneficiary ledgers.
+# Shutdown/resolve owner exit, separate typed terminal ledgers at shared custody,
+# two-payout rollback/identical-prefix retry, exact 299-atom earned-share payout and
+# rent-exact slab closure compose. Existing live exchange has zero insurance share;
+# shutdown operator departure has zero provider earnings. Exact commands/provenance
+# are in README's earned insurance share entry. Arbitrary rates/role histories,
+# expiry/recredit, pending losses, other assets/rails and mature shutdown fallback
+# remain outside this witness. New selector 1/1, adjacent controls 2/2 pass;
+# peak 451028 CU <= 600000. Initial policy-after-funding setup correctly rejected;
+# fee-share fixture now configures before funding. No property violation observed.
+# Command: cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::terminal_fee_share_succession::v16_program_terminal_fee_share_succession_preserves_operator_paid_history -- --exact --nocapture
+# No production or machine-status promotion; row OPEN.
 429	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-025,INV-027,INV-036,INV-070,INV-081	shutdown-reserve+x-beneficiary+x-attribution	terminal-reserve-value-remains-bound-to-the-beneficiary-and-role-that-earned-it	OPEN
 # 432 public red/green coverage (2026-09-12): cu/inv_014_delayed_policy_and_policy_epoch_safety.rs::v16_retained_single_cpi_taker_fee_cap_rejects_policy_increase.
 # Parent source accepted a retained TradeCpi after trade_fee_base_bps rose above the taker's signed fee_bps;
