@@ -817,6 +817,89 @@ rollbacks. CU maxima: selected setup fee-trade/principal transactions **437,784*
 rejections **329,432**, successful management/payout transactions **327,621**.
 No production, dependency, invariant-status or full-suite claim is made.
 
+## INV-070 native PnL, late sync and atomic terminal retry (row 418, 2026-09-12)
+
+Owner: [cu/inv_070_native_pnl_sync_retry.rs](cu/inv_070_native_pnl_sync_retry.rs),
+mounted by INV-070 as `native_pnl_sync_retry`. Selector:
+`v16_program_native_pnl_terminal_sync_and_close_retry_preserves_unsynced_donation`.
+Exact base: `2f0d1b42c858318433aa559fe8d07bf1ba3bdbee`
+(`origin/codex/astra-open-holdout-ledger-20260912`), isolated worktree
+`/tmp/percolator-astra-row418-20260912`.
+
+One public LiteSVM history deposits 1,000/1,300 native quote atoms, trades one
+lot at 100, observes the authenticated mark at 110 and resolves. After the owner
+window, the keeper pays the solvent losing leg 1,290 atoms without either owner
+signing. The winning leg remains open with an input-derived 1,010-atom entitlement.
+A committed System transfer then donates 37 lamports to the canonical native
+vault. Complete market/portfolio bytes remain unchanged; the vault still reports
+1,010 token atoms but holds rent plus 1,047 lamports. Stock and encumbrance censuses,
+market/portfolio shape checks and exact native Account comparisons distinguish
+the pending entitlement from the unsynced donation.
+
+The final transaction runs `SyncNative`, the winner's permissionless
+`CloseResolved`, both administrator-signed `ClosePortfolio` calls and `CloseSlab`.
+An appended administrator-authorized 38-atom transfer from the 37-atom sweep
+destination fails with the exact SPL insufficient-funds error. Logs require all
+four wrapper calls and all four successful SPL calls (sync, payout, sweep and
+vault close) to precede that failure. Every compiled or additionally tracked
+Account rolls back exactly, including native backing lamports, unsynced token
+bytes, both portfolios, the paid loser, the pending winner, slab data and rents;
+only the two-signature payer fee is charged. The separately committed donation
+survives, while its wrapping is undone.
+
+Retrying the unchanged instruction prefix succeeds. The winner receives exactly
+1,010 native atoms, the earlier loser keeps 1,290, and the administrator's token
+destination receives only 37. Both portfolios and the canonical vault close;
+the slab retains exactly canonical tombstone rent. Full Account expectations
+reconcile the administrator's portfolio/vault/slab rent refund, both transaction
+fees, unchanged native mint and owner wallets, and aggregate tracked lamports.
+Native mint supply is not used as a proxy for wrapped SOL. The shared fixture
+supplies LiteSVM's missing native-mint genesis account; economic transitions use
+System/ATA/SPL/wrapper instructions, without program-owned byte injection.
+
+Overlap review discarded additional empty/native-capacity closes, classic-SPL
+surplus after a cached scan, cooperative frozen-destination retries, prefunded
+ATA repair and secondary sync/disposal suffix variants. Those are already covered
+by `terminal_quote_variants`, INV-070's external-surplus/native-principal selectors,
+`prefunded_quote_custody`, `secondary_quote_completion` and `frozen_destination_exit`.
+No temporary duplicate test was retained. The new relation is rollback and retry
+of late native wrapping while a nonzero winning PnL entitlement is still pending,
+through final payout and slab closure in the same transaction.
+
+**Row 418 remains OPEN.** This is bounded INV-018/021/025/069/070/073/077/078/081
+coverage with INV-080 rollback evidence. Native-primary booked-residue retirement,
+insurance/backing expiry, bankrupt or partial receipts, unavailable administrators,
+maximum-capacity scans and arbitrary histories remain outside this witness.
+No production defect was observed and no invariant status, production source,
+engine pin or manifest changed.
+
+The selector passes **1/1**. Observed CU maxima across the focused runs for
+`[reported setup, losing payout, donation, failed suffix, valid retry]` are
+`[120122, 142285, 450, 296866, 292541]`, bounded by 500,000. Shared ATA creation
+does not report CU; generated account addresses can vary the measured costs.
+Both final transactions fit 1,232 bytes and require only payer/admin signatures.
+The three exact adjacent selectors below and the charter/index selector pass.
+Formatting and unstaged/staged/HEAD whitespace checks pass. Validation reuses a
+private copy of the local row411 default-feature SBF; its checkout's `src`,
+`Cargo.toml` and `Cargo.lock` match this base byte-for-byte. Program SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Engine: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. No fresh SBF build or full-suite
+validation is claimed.
+
+```sh
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::native_pnl_sync_retry::v16_program_native_pnl_terminal_sync_and_close_retry_preserves_unsynced_donation -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_native_quote_terminal_surplus_sync_has_exact_token_and_lamport_disposition \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::frozen_destination_exit::v16_program_frozen_destinations_preserve_pnl_exit_without_freeze_authority \
+  inv_077_bounded_work_and_maximum_shape_compute::secondary_quote_completion::v16_program_secondary_quote_repair_after_expiry_has_atomic_bounded_disposition
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-070 frozen payout destinations with absent freeze authority (row 418, 2026-09-12)
 
 Owner: [cu/inv_070_frozen_destination_exit.rs](cu/inv_070_frozen_destination_exit.rs),

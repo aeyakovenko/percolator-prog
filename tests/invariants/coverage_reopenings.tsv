@@ -206,6 +206,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # disposition follow. Twenty complete Account rollbacks include custody creation,
 # a prior user payout and final close. Unfrozen canonical custody, solvent losing-first
 # order and administrator cleanup only; see README. Native residue/general row stay OPEN.
+# Row 418 bounded conformance (2026-09-12): cu/inv_070_native_pnl_sync_retry.rs,
+# v16_program_native_pnl_terminal_sync_and_close_retry_preserves_unsynced_donation.
+# Native PnL leaves a 1010-atom winner pending after the 1290-atom loser is paid;
+# a committed 37-lamport vault donation stays unbooked. A failed SPL suffix restores
+# sync, winning payout, both portfolio closes and slab close exactly, preserving
+# that donation as unsynced custody. The same prefix retries with exact 1010/1290/37
+# entitlement/surplus, native backing and rent disposition. Peak 296866 CU; see README
+# for base, selectors and overlap review. Native booked residue/general row stay OPEN.
 418	DoS	BLOCKER	INV-070	INV-018,INV-021,INV-025,INV-069,INV-070,INV-073,INV-077,INV-078,INV-081	token-variant+x-terminal-stock+x-close	all-supported-quote-token-variants-have-a-bounded-terminal-disposition	OPEN
 # Row 419 bounded public conformance (2026-09-12): cu/inv_039_pending_loss_funded_resolution.rs,
 # v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders.
