@@ -15,6 +15,9 @@ mod concurrent_latent_capacity;
 #[path = "inv_028_retained_domain_episodes.rs"]
 mod retained_domain_episodes;
 
+#[path = "inv_028_hybrid_capacity_carry.rs"]
+mod hybrid_capacity_carry;
+
 const ASSETS: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
 const DOMAINS: usize = percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS;
 const CAPITAL: u128 = 1_000_000;

@@ -3,6 +3,12 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+The [2026-09-12 oracle/source composition audit](oracle_source_composition_audit_20260912.md)
+records the INV-028 Hybrid capacity/carry increment: retained historical claims, fractional
+carry, current health certificates and exact owner payouts compose across eight public
+LiteSVM histories. Rows 423/425/426 gain partial coverage; 422 remains outside this increment.
+All four rows remain OPEN.
+
 The [2026-09-12 terminal/liveness gap audit](terminal_liveness_gap_audit_20260912.md)
 records the INV-082 shared-destination recovery increment: sixteen public LiteSVM worlds
 cover pre-funded custody, payout ordering, transaction partitions, exact rollback and

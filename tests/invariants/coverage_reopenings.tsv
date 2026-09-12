@@ -13,6 +13,13 @@
 # Paid Hybrid mark: unequal stale reports, lagged/caught-up liquidation and catchup order;
 # exact effective-price fees, owner claims, zero keeper/domain reward and principal SPL exit.
 # Fresh-report handoff of trade-origin provenance remains open; no row/status promotion.
+# Rows 423/425/426 partial conformance (2026-09-12): cu/inv_028_hybrid_capacity_carry.rs,
+# v16_program_historical_capacity_preserves_hybrid_carry_health_and_owner_entitlement.
+# Eight public histories retain 26 old claims while the last live Hybrid leg needs both
+# remaining domains; fractional carry, partitioned reductions, current health and full
+# owner payouts compose with 16 exact late rollbacks. Positive current-evidence coverage
+# only: omitted/stale evidence and liquidation rewards remain outside this increment.
+# See oracle_source_composition_audit_20260912.md; all four oracle/source rows stay OPEN.
 pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	required_generic_property	status
 # Row 410 partial conformance (2026-09-10): cu/inv_024_terminal_earnings_succession.rs,
 # v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance.
