@@ -224,6 +224,20 @@ incomplete successful discovery cannot pay or certify the account. This adds
 bounded row-426 evidence beyond the existing zero-maintenance staged test.
 **Row 426 remains OPEN**; no production defect or invariant-status promotion is claimed.
 
+## INV-039 Funded Pending Debt At Resolution (2026-09-12)
+
+The [funded pending-resolution audit](pending_loss_funded_resolution_audit_20260912.md)
+adds one selector under `inv_039_pending_loss_obligation_durability::resolved_histories::funded_resolution`.
+Sixteen public LiteSVM histories cross mirrored premium funding, debtor order,
+claimant order and delayed settlement. Input-derived price and funding debts remain
+attributed after both pending holders detach and the first debtor is paid and
+deleted. Exact retries preserve all Accounts, including a successful debtor SPL
+payout prefix; frozen funding indices and all five owner entitlements agree through
+80 payouts and 80 portfolio deletions. There are 96 exact rollbacks, with peak
+terminal transaction compute of 180,307 CU. This extends the zero-funding resolved
+cohort coverage; it does not close the generic obligation-history product.
+**Row 419 remains OPEN**, and every invariant verdict is unchanged.
+
 ## INV-045 unilateral reduction with pending price carry (2026-09-12)
 
 Owner: [cu/inv_045_rebalance_cap_carry.rs](cu/inv_045_rebalance_cap_carry.rs),
