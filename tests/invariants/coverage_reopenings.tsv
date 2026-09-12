@@ -291,6 +291,13 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Existing active-leg same-sign increases at 27 occupied plus one latent domain, then all 28 occupied;
 # later settlement preserves history, partial/final reductions and conversion pay both owners exactly.
 # Sixteen public route/sign/settlement-order worlds; no generic generator/oracle or status promotion.
+# 423 partial conformance (2026-09-12): cu/inv_028_terminal_latent_capacity.rs::
+# v16_program_full_latent_settlement_survives_terminal_owner_window_expiry.
+# Fourteen active-leg increases retain 14 historical and 14 latent domains across
+# resolution and a peer's signed partial exit. Exact/late owner-window expiry permits
+# CloseResolved/automatic crank to grow 14 -> 28 claims, then pay both owners exactly
+# in 55 bounded terminal calls (peak 1,219,283 CU; packet <= 529 bytes). Four public
+# worlds; see INV-028 README section. General reservation/lifecycle closure stays OPEN.
 423	DoS	BLOCKER	INV-028	INV-028,INV-031,INV-057,INV-073,INV-077,INV-078,INV-082,INV-089	historical-capacity+x-latent-domain+x-position-admission	risk-admission-reserves-every-future-settlement-resource-needed-for-exit	OPEN
 # 424 partial public coverage (2026-09-10): cu/inv_070_terminal_prefix_reuse.rs::v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback covers admin/permissionless reuse behind cursor 2, live success controls, exact terminal rejection/expiry-prefix rollback, and bounded close. General actionability invalidation remains OPEN; see README's retired-slot reuse entry.
 # 424 partial public coverage (2026-09-12): cu/inv_071_terminal_prefix_recredit.rs::v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement.

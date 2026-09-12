@@ -2975,6 +2975,101 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-028 maximum latent settlement through terminal expiry (row 423, 2026-09-12)
+
+[`cu/inv_028_terminal_latent_capacity.rs`](cu/inv_028_terminal_latent_capacity.rs)
+adds one public LiteSVM selector beneath the existing concurrent-latent fixture:
+`inv_028_source_domain_realizability_cap::historical_latent_capacity::concurrent_latent_capacity::terminal_latent_capacity::v16_program_full_latent_settlement_survives_terminal_owner_window_expiry`.
+Exact base: `3abff5d2bc6d521d26768c386b847f2b014058e2`, the locally recorded
+`origin/codex/astra-open-holdout-ledger-20260912`. Worktree:
+`/tmp/percolator-astra-row423-lifecycle-20260912`; branch:
+`codex/astra-row423-lifecycle-20260912`. The coordinator checkouts are untouched.
+
+The distinct obligation is **source-table growth during maximum-active-shape terminal
+exit**, after the admitted owner stops participating. Fourteen mixed-sign positions
+earn 27 atoms on fourteen domains. Every existing leg then increases by one unit
+while occupied plus future domains already exhaust the 28-domain budget. Reversal
+and another favorable mark create 41 more atoms of deferred entitlement. Only the
+peer receives global-accrual cranks: the claimant retains fourteen source records
+and fourteen active legs, byte-for-byte unchanged, across public resolution.
+
+At owner-window expiry minus one, the peer signs one `CloseResolved`, settles its
+losses and detaches one leg. The claimant remains untouched with all fourteen new
+domains still latent. At exact expiry or one slot late, either direct `CloseResolved`
+or observation-free `PermissionlessCrank` grows the claimant's table **14 -> 28** on
+its first terminal call while detaching one leg. The two terminal transports finish
+with only the transaction payer signing. Both owners receive exactly
+**1,000,068 / 999,932 atoms**, then separately authorize portfolio deletion.
+
+The four worlds cross the two terminal transports and exact/late owner-window expiry.
+All use System/SPL/ATA/matcher/wrapper construction, with Clock, blockhash and signer
+SOL as harness controls. No program-owned state is edited out of band. Input-derived
+claim amounts, stock and encumbrance censuses, source-credit caps, unchanged peer and
+mint Accounts, and exact SPL/engine custody are checked through the suffix. Each call
+detaches one leg, retires one source, or completes payout. The final leg detach also
+retires one source, so each world requires exactly **55 terminal calls**: 28 leg
+detachments and 27 remaining source retirements. Intermediate leg exits cannot pay
+early; cumulative payouts cannot exceed either owner's entitlement. Final claims,
+backing, OI, capital, insurance, custody and materialized portfolios all clear.
+
+This adds bounded INV-028/057/073/077/078 evidence. The existing concurrent-cohort test
+settles all sources before bilateral exit; the existing latent-resolution test has
+two active legs; INV-077's maximum terminal tests begin with all 28 claims already
+materialized. The earlier owner-window test checks two partial detaches without
+deferred source growth or complete cohort payout. Same-shape admission permutations,
+single-leg reset variants and sibling-generation changes were excluded after reading
+their existing owners. **No runtime duplicate probes were added or discarded.**
+
+**Row 423 remains OPEN.** This is four passing finite histories, with no production
+bug found or generic admission/liveness proof. It does not cover backing expiry,
+liens, insolvency/Recovery, arbitrary partial-reset histories, missing configured
+oracle/resolve authorities, fees/funding/fractional positions, detached history on
+additional assets, market-byte/feed maxima, or generation reuse. No new INV-031
+reservation-reuse proof, INV-082 state-indexed theorem or INV-089 generation result
+is claimed. Admission uses bilateral trades; only terminal transports are compared.
+Production, engine pins, manifests, shared support and invariant statuses are unchanged.
+
+The new selector passes **4 worlds / 56 risk increases / 524 counted history calls**,
+including **220 terminal calls**. Peak CU for trade / crank / mark / resolution /
+terminal settlement and payout / deletion is
+**747,684 / 803,859 / 6,120 / 3,255 / 1,219,283 / 26,556**.
+The terminal peak leaves **155,717 CU** under the enforced 1,375,000 transaction
+budget; serialized terminal packets are at most **529 / 1,232 bytes**. These maxima
+exclude bootstrap, policy and matcher configuration; historical trade/readiness
+and final mark/accrual calls are included in their named lanes. This is the maximum
+14-active-leg/28-source union on a 14-asset market, not maximum market account size.
+
+The wrapper SBF was rebuilt offline with platform-tools v1.52 from this worktree;
+SHA-256 `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The authenticated matcher is a private copy of the existing unchanged artifact,
+SHA-256 `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Engine remains `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Private host dependencies
+were copied from an existing cache, and the test binaries compile from this worktree.
+
+All **three affected selectors pass**: the new four-world history, the existing
+sixteen-world concurrent cohort control (peak 1,040,847 CU), and the existing
+four-world latent-resolution control (peak terminal 689,987 CU). The charter/index
+selector passes **1/1**; formatting and working/staged/committed whitespace checks
+pass. Existing shared-support dead-code warnings and the `solana-client v1.18.26`
+future-compatibility warning remain. There were no failed runtime probes.
+
+Focused validation commands (no broad suite or engine proof runs):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row423-lifecycle-20260912-host
+export PERCOLATOR_FUZZ_SBF=/dev/shm/astra-row423-lifecycle-20260912-sbf/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_028_source_domain_realizability_cap::historical_latent_capacity::concurrent_latent_capacity::terminal_latent_capacity::v16_program_full_latent_settlement_survives_terminal_owner_window_expiry \
+  inv_028_source_domain_realizability_cap::historical_latent_capacity::concurrent_latent_capacity::v16_program_concurrent_latent_cohorts_preserve_full_shape_settlement_and_exit \
+  inv_028_source_domain_realizability_cap::historical_latent_capacity::v16_program_latent_capacity_at_resolution_preserves_attribution_and_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-028 existing active-leg admission and owner exit (row 423, 2026-09-12)
 
 [`cu/inv_028_active_leg_admission.rs`](cu/inv_028_active_leg_admission.rs) adds

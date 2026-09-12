@@ -7,6 +7,9 @@
 
 use super::*;
 
+#[path = "inv_028_terminal_latent_capacity.rs"]
+mod terminal_latent_capacity;
+
 fn readiness_rank(h: &History) -> u64 {
     let group = h.env.market_state().1;
     let pending_slots: u64 = h
