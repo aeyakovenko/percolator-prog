@@ -4,7 +4,8 @@
 //! matrix compares direct admission with public settlement while both are pending.
 //! A separate close/age/reopen history covers an explicit public fee/refresh
 //! prefix on previously exposed flat accounts, including rollback and exact IM.
-//! Standalone flat admission without that prefix remains outside this evidence.
+//! The standalone sibling covers sufficiently funded first admission and deferred
+//! fee disposition; admission at the uncollected-fee margin boundary remains open.
 //! All economic state is constructed through System/SPL/ATA/wrapper instructions.
 
 use super::*;
@@ -14,6 +15,9 @@ use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 
 #[path = "inv_027_reward_recipient_first_risk.rs"]
 mod reward_recipient_first_risk;
+
+#[path = "inv_027_standalone_first_admission.rs"]
+mod standalone_first_admission;
 
 const PRICE: u64 = 100;
 const START: u64 = 1;

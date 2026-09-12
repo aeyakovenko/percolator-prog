@@ -3,6 +3,13 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+The [2026-09-12 standalone first-admission audit](standalone_first_admission_audit_20260912.md)
+covers aged, never-exposed owners opening through a single wrapper instruction,
+without a fee/refresh prefix. Single/batch trades in both directions preserve
+deferred maintenance through exact rollback, reduction and owner SPL payout.
+This is a sufficiently funded conformance slice only: admission at the
+uncollected-fee margin boundary remains untested. Rows 413/422/423/425/426 remain OPEN.
+
 The [retained permitted-policy history audit](retained_permitted_policy_history_20260912.md)
 adds 32 public LiteSVM histories for two independently retained CPI fills delivered at
 different permitted fees. Direct and nonmonotone histories preserve each owner's exact
