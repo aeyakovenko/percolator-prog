@@ -1428,6 +1428,84 @@ cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-thread
 cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
 ```
 
+## INV-014 retained trade and Live recipient succession (row 411, 2026-09-12)
+
+Owner: [cu/inv_014_retained_recipient_succession.rs](cu/inv_014_retained_recipient_succession.rs),
+mounted under INV-014's `retained_redirect_entitlement::retained_recipient_succession`.
+Exact `v16_cu` selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_redirect_entitlement::retained_recipient_succession::v16_retained_trade_and_payout_consent_diverge_across_live_recipient_succession`.
+
+Four public LiteSVM histories cross direct/redirect insurance-operator succession
+with `A -> B` or `A -> B -> A`. An opening bilateral trade earns real fees; A and
+the other recipient receive unequal partial SPL payments before a complete CPI
+increase and trade/payout alternatives are signed and successfully simulated.
+After the funded role transfers, base fees rise from 19 to the signed 37-bps
+bound and the redirect policy changes from 3,333 to 6,667 bps. B receives three
+atoms of unpaid legacy earnings. A's retained payout then rejects after the CPI
+trade succeeds; returning A's key still cannot revive its old payout epoch.
+Each failure restores every complete Account, including matcher context and all
+five SPL destinations, except the exact payer network fee.
+
+The unchanged, originally signed trade-only transaction subsequently succeeds.
+A fresh bilateral close switches transport, and current recipient consent
+withdraws exactly the unpaid tail. A's and B's prior SPL payments stay in their
+original custody accounts. Input-priced fees are 48, 48 and 95 atoms per owner;
+the 382-atom total is attributed 220/162 between the redirect/source assets.
+Every owner and recipient payout, domain budget, capital, mint supply, vault,
+stock census and reservation census reconciles through an empty SPL vault.
+
+The net-new dimension is funded Live recipient succession between retained trade
+signing and execution, including the different lifetimes of owner trade consent
+and recipient payout consent after an atomic failure. The parent redirect test
+keeps both recipients fixed; terminal succession tests do not execute these Live
+retained fee-bearing trades. Discarded duplicate candidates, before adding tests:
+standalone authority-ABA denial, base/backing fee-cap sweeps, split/shared-taker
+fee-budget bundles, grant expiry and additional route-order products. No marginal
+probe is retained. INV-005/010/011/024/036/047/081 gain only this bounded composition;
+generic epoch admission and fee-cap enforcement are existing evidence.
+
+**Row 411 remains OPEN.** Backing-provider earnings, optional payout ledgers,
+underfunded fee collection, partial matcher fills, multi-leg/multi-asset trades,
+dynamic mark/funding/maintenance fees, arbitrary authority histories and terminal
+settlement remain outside this increment. No production bug or fix, vulnerable-pin
+experiment, whole-invariant proof, engine/manifests change or status promotion is
+claimed.
+
+Worktree: `/tmp/percolator-astra-row411-consent-20260912`, branch
+`codex/astra-row411-consent-succession-20260912`. Exact base from
+`origin/codex/astra-open-holdout-ledger-20260912`:
+`0ea8eb26a12cd19a2fb6bcb47ce33ea25ccc98d7`.
+The private `target` copies `/dev/shm/percolator-row427-f6c2-target`; production,
+manifests and fixture sources match its documented `6ab7856f` base. Cached
+default-feature wrapper SBF SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Private fixture copies from the coordinator checkout have authenticated matcher
+SHA-256 `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`
+and hostile matcher SHA-256
+`e0c20fad34a7822cc6ce42a3c77ff08a8591977102f0c497a339d66a9dd6240a`.
+Host tests compile in this worktree; no SBF rebuild or full-suite run is claimed.
+
+The new selector passes four worlds, ten initial simulations and six exact
+trade/matcher-prefix rollbacks. The final focused run passes **3/3** selectors.
+Peak CU: success/simulation **214,061**, rejection **200,826**, policy **2,929**,
+handoff **2,287**. Adjacent controls peak at **230,566** CU (fixed-recipient
+entitlements) and **299,215** CU (redirect-policy bundles). Setup and the standing
+matcher-grant writer are excluded from these phase maxima. Development corrected
+one host API assumption: LiteSVM simulation returns transaction metadata directly.
+
+Focused validation commands (private worktree only):
+
+```sh
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_redirect_entitlement::retained_recipient_succession::v16_retained_trade_and_payout_consent_diverge_across_live_recipient_succession -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_014_delayed_policy_and_policy_epoch_safety::retained_redirect_entitlement::v16_retained_fee_routes_preserve_recipient_entitlement_after_paid_redirect_history inv_036_fee_destination_and_policy_version_integrity::v16_program_retained_redirect_bundle_preserves_fee_rounding_and_policy_order
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-014 retained partial fee route equivalence (row 411, 2026-09-12)
 
 Owner: [cu/inv_014_retained_partial_fee_routes.rs](cu/inv_014_retained_partial_fee_routes.rs),

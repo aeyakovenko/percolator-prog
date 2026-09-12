@@ -9,6 +9,9 @@ use crate::support::fuzz_model::{
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 use std::collections::BTreeSet;
 
+#[path = "inv_014_retained_recipient_succession.rs"]
+mod retained_recipient_succession;
+
 const PRICE: u64 = 100;
 const OLD_BPS: u64 = 19;
 const CAP_BPS: u64 = 37;

@@ -85,6 +85,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # fresh consent converges on identical owner capital, insurance budgets and custody.
 # Dynamic/backing fees, underfunded collection, multi-leg batches and terminal settlement
 # remain outside this increment; no production fix or row/status promotion.
+# 411 bounded conformance (2026-09-12): cu/inv_014_retained_recipient_succession.rs,
+# v16_retained_trade_and_payout_consent_diverge_across_live_recipient_succession.
+# Four Live histories transfer the direct/redirect fee recipient after partial SPL
+# payouts and retained signing, with/without ABA. Permitted base/redirect repricing,
+# six exact trade/matcher-prefix rollbacks, byte-identical CPI retry, bilateral close
+# and all five owner/recipient SPL balances reconcile 382 fee atoms as 220/162 by asset.
+# Generic payout-epoch tests and fixed-recipient route products are not new evidence;
+# this adds their retained-trade/value composition. Bounded scope only; row stays OPEN.
 411	LoF	PRIVILEGED	INV-014	INV-005,INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-081	retained-intent+x-policy-update+x-route	retained-trade-fee-consent-bounds-every-fee-bearing-route	OPEN
 412	LoF	BLOCKER	INV-012	INV-004,INV-005,INV-010,INV-012,INV-024,INV-081	capability+x-automatic-revocation+x-episode	retained-capability-cannot-cross-any-authority-revoking-state-transition	OPEN
 # Row 413 partial conformance (2026-09-12): cu/inv_027_reward_mapping_admission.rs,
