@@ -172,6 +172,17 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Asset 0/1 one-atom surviving-budget controls preserve the claim and reject close atomically.
 # Row 420's absent-provider expiry axis is already covered; no new provider coverage is claimed.
 # Surviving insurance claims, provider principal/earnings and generic absent-signer progress remain OPEN.
+# Rows 420/421 bounded conformance (2026-09-12): cu/inv_073_absent_insurer_spent_retirement.rs,
+# v16_program_absent_depleted_reserves_preserve_exhaustion_and_retirement_across_retries.
+# Forty-eight public histories combine fully withdrawn provider principal, absent provider/
+# beneficiary/operator, exact/one-atom-surviving insurance, asset 0/1, both post-debtor
+# payout orders and all six deletion orders. Successful spending/payment and final-deletion/
+# retirement prefixes roll back; fresh-blockhash retries prove exact payouts, zero vault
+# residue, exact rent and tombstone stability. Old bucket expiry is exact/late, paired with
+# payout order. Twenty-four retirements; surviving one-atom claims remain protected.
+# Provider economic-loss consumption, earnings, surviving-reserve public payouts, debtor-last
+# ordering and generic generator/oracle remain outside this increment. No row/status promotion
+# or production changes; README records exact selectors, CU maxima and an adjacent CU-limit flake.
 # Rows 420/421 partial conformance (2026-09-12): cu/inv_073_absent_insurer_spent_retirement.rs,
 # v16_program_absent_reserve_roles_preserve_recredited_insurance_after_backing_expiry.
 # Four public worlds compose absent provider/beneficiary/operator roles, exact user payouts,

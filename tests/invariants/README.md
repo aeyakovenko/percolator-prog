@@ -359,6 +359,123 @@ cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-thread
 cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
   inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
   inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+```
+
+## INV-073 depleted reserves through retirement retries (rows 420/421, 2026-09-12)
+
+Owner: [cu/inv_073_absent_insurer_spent_retirement.rs](cu/inv_073_absent_insurer_spent_retirement.rs).
+Exact selector:
+`inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_depleted_reserves_preserve_exhaustion_and_retirement_across_retries`.
+
+The existing public fixture now has an optional withdrawn-provider history. A
+distinct provider funds 307 backing atoms and withdraws all 307 while Live, before
+trading or disappearing. Its bucket has zero fresh principal, lien, consumed
+backing and earnings. The current insurance beneficiary separately funds 100 or
+101 atoms. Provider, beneficiary and operator keys are then dropped; their profiles,
+wallets and token destinations remain fixed throughout the terminal continuation.
+System/SPL/ATA/wrapper instructions construct every economic account and balance;
+only signer SOL, authenticated Clock, program installation and fresh blockhashes
+come from the harness. Account snapshots are read-only assertions.
+
+Forty-eight histories cross asset 0/1, exact/one-atom-surviving insurance, both
+winner/idle payout orders and all six portfolio-deletion orders. Debtor settlement
+is first throughout. Input capitals `[1000, 100, 137]` and a ten-unit position
+moving from 100 to 120 yield a 200-atom loss: 100 capital plus exactly 100 insurance.
+Unsigned terminal payouts are exactly `[1200, 0, 137]`; the winner's finalized
+100-atom receipt and zero source-claim bound are checked separately. The provider
+keeps its already withdrawn 307 atoms. Mint authority is revoked at a fixed supply
+of 1,644 or 1,645 atoms, and custody reconciles every payment prefix.
+
+Each economic call first succeeds inside a transaction whose premature slab-close
+suffix rejects. The entire Account frame, insurance spend, receipt/payment state
+and rent roll back, excluding only exact network fees. The unchanged payout then
+commits with payer-only signing and strictly lowers the existing progress rank.
+All three users finish in one call each, below the eight-call bound. Owner-window
+denial, terminal payout retries and materialized-portfolio closure protection stay
+covered. The final deletion occurs at the old bucket's exact expiry for winner-first
+payouts, and one slot late for idle-first payouts; timing is paired with payout order,
+not an independent Cartesian axis.
+
+After two committed deletions, the exhausted case batches the final signed deletion,
+successful slab close and the same close again. The second close rejects the typed
+tombstone with `InvalidAccountLen`, restoring the last portfolio, complete market,
+vault and all rent transfers. Separate fresh-blockhash retries then delete and
+retire successfully. A further retained-close retry preserves the tombstone and
+closed vault. The one-atom control instead rolls back final deletion when slab close
+returns `EngineLockActive`, then permits deletion alone and continues to protect
+the exact remaining insurance claim. This adds **192 successful-prefix rollback
+transactions, 144 committed portfolio deletions and 24 full retirements**. Each
+exhausted market has zero SPL/internal vault, insurance and unreceipted claim
+residue before closure; mint supply never changes and the admin receives only
+exact excess market/vault rent. All measured transactions verify signatures,
+absent reserve signers, complete unrelated Account frames, packet size and a
+300,000-CU ceiling.
+
+The new boundary is a previously funded but fully withdrawn provider bucket combined
+with actually consumed insurance, reordered mechanical deletions and rollback of
+the last deletion plus completed retirement. The older never-funded-provider and
+fresh-backing-recredit callers retain their original scenarios. This is bounded
+INV-010/018/021/027/064/067/069/070/073/078/080/082 conformance. **Rows 420/421 remain
+OPEN**, with no invariant-status promotion or production change. Retirement still
+requires portfolio-owner deletion signatures and a market-authority signature.
+Provider principal consumed by economic losses, nonzero provider earnings,
+surviving-reserve public payouts, debtor-last settlement, arbitrary portfolios,
+Recovery/ADL, alternate quote rails, maximum shapes and a generic generator/oracle
+remain outside this increment.
+
+Discarded duplicates: standalone provider expiry and insurance exhaustion/recredit
+already have the adjacent selectors below. Beneficiary attribution and unsigned
+reserve-payment permutations belong to active rows 429/433; retained CPI fee terms
+belong to 432. First-risk liabilities, reserve replenishment, pending-debt ordering
+and fractional carry belong to 413/415/419/425. No such family was added. No runtime
+history was discarded from the new selector and no production inconsistency was
+observed.
+
+Validation uses worktree `/tmp/percolator-astra-terminal-420-421`, branch
+`codex/astra-terminal-reserve-420-421-20260912`, based on the requested
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`2843fbf5933c09d0769f83c710527bea2d25a4a5`. Host dependencies and the documented
+default-feature SBF are privately copied from `/tmp/astra-terminal-identity-target`
+to `/dev/shm/astra-terminal-420-421-target`. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`, matching
+[the public-reserve audit](terminal_public_reserves_audit_20260912.md).
+Production and pins match local production commit
+`82f44d1146a45f1f0cf07a76fb171a280d5c21e2`; engine pin remains
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. No SBF rebuild, full suite or Kani run is
+claimed. Neither protected checkout was edited; no GitHub PR/issue/branch or
+withheld comparison data was inspected.
+
+The new exact selector passes **1/1**, all 48 histories in 27.06 seconds. Adjacent
+validation initially passed four controls but the unchanged spent-insurance control
+exhausted its existing **325,000-CU** budget in an SPL transfer simulation. One exact
+diagnostic rerun passed all eight of that control's worlds in 4.73 seconds. The
+intermittent CU ceiling remains a validation limitation; no control budget was
+raised. Observed successful-run transaction maxima:
+
+| Selector Family | Maximum CU |
+| --- | ---: |
+| New depleted-reserve ordering/retry selector | 226,929 |
+| Existing exact insurance exhaustion | 221,402 |
+| Existing insurance recredit after backing expiry | 222,909 |
+| Existing absent-provider staggered expiry retirement | 89,857 |
+| Existing spent-insurance payout control (diagnostic rerun) | 321,089 |
+| Existing normal slab-close rent control | 21,849 |
+
+Exact commands (all five adjacent selectors have a passing run; the initial combined
+run is not claimed to have passed):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-terminal-420-421-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_depleted_reserves_preserve_exhaustion_and_retirement_across_retries -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_reserve_roles_preserve_recredited_insurance_after_backing_expiry \
+  inv_073_no_permanent_user_lock::absent_provider_expiry_retirement::v16_program_absent_provider_staggered_expiry_reaches_funded_terminal_retirement \
+  inv_073_no_permanent_user_lock::spent_insurance_terminal_exit::v16_program_spent_insurance_preserves_bounded_keeper_terminal_payouts \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_close_slab_refunds_exact_vault_and_market_excess_rent_after_normal_exit
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::spent_insurance_terminal_exit::v16_program_spent_insurance_preserves_bounded_keeper_terminal_payouts -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
 cargo fmt --all -- --check
 git diff --check
 git diff --cached --check

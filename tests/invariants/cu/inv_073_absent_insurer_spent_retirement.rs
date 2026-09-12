@@ -4,6 +4,8 @@
 //! The mixed-reserve selector adds unused backing on the insurance-funded side. All three
 //! reserve roles disappear after funding; expiry releases backing and restores spent insurance.
 //! The restored beneficiary claim must remain protected, so this is not signer-free retirement.
+//! The withdrawn-provider family crosses payout/deletion order with exhaustion and retirement
+//! rollback. Provider principal leaves while Live; no reserve holder signs the terminal suffix.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -11,27 +13,63 @@ use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::
 
 #[test]
 fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion() {
-    absent_reserve_progress(false);
+    absent_reserve_progress(ProviderHistory::Empty, None);
 }
 
 #[test]
 fn v16_program_absent_reserve_roles_preserve_recredited_insurance_after_backing_expiry() {
-    absent_reserve_progress(true);
+    absent_reserve_progress(ProviderHistory::Fresh, None);
 }
 
-fn absent_reserve_progress(with_backing: bool) {
+#[test]
+fn v16_program_absent_depleted_reserves_preserve_exhaustion_and_retirement_across_retries() {
+    for payout_order in [[0, 2], [2, 0]] {
+        for delete_order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            absent_reserve_progress(
+                ProviderHistory::Withdrawn,
+                Some((payout_order, delete_order)),
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderHistory {
+    Empty,
+    Fresh,
+    Withdrawn,
+}
+
+fn absent_reserve_progress(
+    provider_history: ProviderHistory,
+    retry_orders: Option<([usize; 2], [usize; 3])>,
+) {
     const CAPITAL: [u64; 3] = [1_000, 100, 137];
     const GAIN: u64 = 10 * (120 - 100);
     const DEFICIT: u64 = GAIN - CAPITAL[1];
     const PAYOUTS: [u64; 3] = [CAPITAL[0] + GAIN, 0, CAPITAL[2]];
     const CALL_BOUND: usize = 8;
     const EXPIRY: u64 = 44;
-    let backing = if with_backing { 307u64 } else { 0 };
+    let with_backing = provider_history == ProviderHistory::Fresh;
+    let provider_principal = if provider_history == ProviderHistory::Empty {
+        0u64
+    } else {
+        307
+    };
+    let backing = if with_backing { provider_principal } else { 0 };
+    let withdrawn = provider_principal - backing;
 
     for asset in [0usize, 1] {
         for remainder in [0u64, 1] {
             let insurance = DEFICIT + remainder;
-            let supply = CAPITAL.iter().sum::<u64>() + insurance + backing;
+            let supply = CAPITAL.iter().sum::<u64>() + insurance + provider_principal;
             let backing_asset = asset;
             let backing_domain = 2 * backing_asset;
             let mut env = inv018_public_spl_market_with_params(
@@ -62,7 +100,7 @@ fn absent_reserve_progress(with_backing: bool) {
                 )
                 .unwrap();
             }
-            if with_backing {
+            if provider_principal != 0 {
                 env.svm.airdrop(&provider.pubkey(), 1_000_000_000).unwrap();
                 env.try_update_per_asset_authority_with_cu(
                     &admin,
@@ -109,14 +147,14 @@ fn absent_reserve_progress(with_backing: bool) {
                 create_ata_for_test(&mut env.svm, &env.payer, beneficiary.pubkey(), env.mint);
             let admin_token =
                 create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
-            let provider_token = with_backing.then(|| {
+            let provider_token = (provider_principal != 0).then(|| {
                 create_ata_for_test(&mut env.svm, &env.payer, provider.pubkey(), env.mint)
             });
             for (token, amount) in tokens
                 .into_iter()
                 .zip(CAPITAL)
                 .chain([(reserve_token, insurance)])
-                .chain(provider_token.map(|token| (token, backing)))
+                .chain(provider_token.map(|token| (token, provider_principal)))
             {
                 send_raw_tx(
                     &mut env.svm,
@@ -191,7 +229,7 @@ fn absent_reserve_progress(with_backing: bool) {
                         intent_id: 0,
                         backing_fee_bps: 0,
                         insurance_share_bps: 0,
-                        amount: backing.into(),
+                        amount: provider_principal.into(),
                         expiry_slot: EXPIRY,
                     },
                     vec![
@@ -204,6 +242,39 @@ fn absent_reserve_progress(with_backing: bool) {
                     &[&provider],
                 )
                 .unwrap();
+                if withdrawn != 0 {
+                    assert_eq!(env.token_amount(token), 0);
+                    assert_eq!(
+                        env.market_state().1.source_backing_buckets[backing_domain]
+                            .fresh_unliened_backing_num,
+                        u128::from(provider_principal) * BOUND_SCALE
+                    );
+                    env.send(
+                        ProgInstruction::WithdrawBackingBucket {
+                            domain: backing_domain as u16,
+                            market_id: env.asset_market_id(backing_asset as u16),
+                            authority_epoch: env.control_sequences(backing_asset).authority_epoch,
+                            amount: withdrawn.into(),
+                        },
+                        vec![
+                            AccountMeta::new(provider.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(token, false),
+                            AccountMeta::new(env.vault, false),
+                            AccountMeta::new_readonly(env.vault_authority, false),
+                            AccountMeta::new_readonly(spl_token::ID, false),
+                        ],
+                        &[&provider],
+                    )
+                    .unwrap();
+                    assert_eq!(env.token_amount(token), withdrawn);
+                    assert_eq!(env.token_amount(env.vault), supply - withdrawn);
+                    let bucket = env.market_state().1.source_backing_buckets[backing_domain];
+                    assert_eq!(bucket.fresh_unliened_backing_num, 0);
+                    assert_eq!(bucket.valid_liened_backing_num, 0);
+                    assert_eq!(bucket.consumed_liened_backing_num, 0);
+                    assert_eq!(bucket.utilization_fee_earnings, 0);
+                }
             }
             let absent = [beneficiary.pubkey(), operator.pubkey(), provider.pubkey()];
             drop(beneficiary);
@@ -261,7 +332,7 @@ fn absent_reserve_progress(with_backing: bool) {
             let sequences = [0, 1].map(|index| env.control_sequences(index));
             assert_eq!(profiles[asset].insurance_authority, absent[0].to_bytes());
             assert_eq!(profiles[asset].insurance_operator, absent[1].to_bytes());
-            if with_backing {
+            if provider_principal != 0 {
                 assert_eq!(
                     profiles[backing_asset].backing_bucket_authority,
                     absent[2].to_bytes()
@@ -378,13 +449,13 @@ fn absent_reserve_progress(with_backing: bool) {
                 let paid = tokens.map(|key| env.token_amount(key));
                 assert_eq!(group.vault, u128::from(env.token_amount(env.vault)));
                 assert_eq!(
-                    env.token_amount(env.vault) + paid.iter().sum::<u64>(),
+                    env.token_amount(env.vault) + paid.iter().sum::<u64>() + withdrawn,
                     supply
                 );
                 assert_eq!(env.token_amount(admin_token), 0);
                 assert_eq!(env.token_amount(reserve_token), 0);
                 if let Some(token) = provider_token {
-                    assert_eq!(env.token_amount(token), 0);
+                    assert_eq!(env.token_amount(token), withdrawn);
                 }
                 assert!(paid
                     .into_iter()
@@ -472,11 +543,24 @@ fn absent_reserve_progress(with_backing: bool) {
             };
             let mut calls = [0; 3];
             // The insolvent debtor consumes insurance before the exact source/receipt payout.
-            for actor in [1, 0, 2] {
+            let payout_order = retry_orders.map_or([0, 2], |orders| orders.0);
+            for actor in [1, payout_order[0], payout_order[1]] {
                 while !resolved_portfolio_is_terminal(&env, portfolios[actor]) {
                     assert!(calls[actor] < CALL_BOUND);
                     let before = rank(&env, actor);
                     let changed = [env.market, env.vault, portfolios[actor], tokens[actor]];
+                    if retry_orders.is_some() {
+                        // A successful loss settlement or SPL payout cannot survive a denied close.
+                        peak = peak.max(land(
+                            &mut env,
+                            &[payouts[actor].clone(), close.clone()],
+                            &[&admin],
+                            &[],
+                            Some((3, PercolatorError::EngineLockActive)),
+                        ));
+                        assert_eq!(rank(&env, actor), before);
+                        custody(&env);
+                    }
                     peak = peak.max(land(
                         &mut env,
                         &[payouts[actor].clone()],
@@ -573,7 +657,8 @@ fn absent_reserve_progress(with_backing: bool) {
                 &[],
                 Some((2, PercolatorError::EngineLockActive)),
             ));
-            for actor in 0..3 {
+            let delete_order = retry_orders.map_or([0, 1, 2], |orders| orders.1);
+            for (deleted, actor) in delete_order.into_iter().enumerate() {
                 let market_rent = env.svm.get_account(&env.market).unwrap().lamports;
                 let portfolio_rent = env.svm.get_account(&portfolios[actor]).unwrap().lamports;
                 let delete = wrap(
@@ -585,10 +670,35 @@ fn absent_reserve_progress(with_backing: bool) {
                     ],
                 );
                 let changed = [env.market, portfolios[actor]];
+                if retry_orders.is_some() && deleted == 2 {
+                    // The dead provider bucket crosses its old expiry with no stock to recredit.
+                    env.svm.warp_to_slot(if payout_order[0] == 0 {
+                        EXPIRY
+                    } else {
+                        EXPIRY + 1
+                    });
+                    let suffix = if remainder == 0 {
+                        vec![delete.clone(), close.clone(), close.clone()]
+                    } else {
+                        vec![delete.clone(), close.clone()]
+                    };
+                    peak = peak.max(land(
+                        &mut env,
+                        &suffix,
+                        &[&owners[actor], &admin],
+                        &[],
+                        Some(if remainder == 0 {
+                            (4, PercolatorError::InvalidAccountLen)
+                        } else {
+                            (3, PercolatorError::EngineLockActive)
+                        }),
+                    ));
+                    custody(&env);
+                }
                 peak = peak.max(land(&mut env, &[delete], &[&owners[actor]], &changed, None));
                 assert_eq!(
                     env.market_state().1.materialized_portfolio_count,
-                    (2 - actor) as u64
+                    (2 - deleted) as u64
                 );
                 assert_eq!(
                     env.svm.get_account(&env.market).unwrap().lamports,
@@ -733,6 +843,12 @@ fn absent_reserve_progress(with_backing: bool) {
                 custody(&env);
                 assert_eq!(env.market_state().1, terminal);
             } else {
+                assert_eq!(terminal.vault, 0);
+                assert_eq!(env.token_amount(env.vault), 0);
+                assert_eq!(terminal.insurance, 0);
+                assert_eq!(terminal.backing_provider_earnings_total, 0);
+                assert_eq!(terminal.source_claim_bound_total_num, 0);
+                assert_eq!(terminal.materialized_portfolio_count, 0);
                 let market_rent = env.svm.get_account(&env.market).unwrap().lamports;
                 let vault_rent = env.svm.get_account(&env.vault).unwrap().lamports;
                 let rent = env
@@ -741,7 +857,7 @@ fn absent_reserve_progress(with_backing: bool) {
                 let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();
                 expected_admin.lamports += market_rent + vault_rent - rent;
                 let changed = [env.market, env.vault, admin.pubkey()];
-                peak = peak.max(land(&mut env, &[close], &[&admin], &changed, None));
+                peak = peak.max(land(&mut env, &[close.clone()], &[&admin], &changed, None));
                 let tombstone = env.svm.get_account(&env.market).unwrap();
                 assert_closed_market_tombstone(&tombstone);
                 assert_eq!(tombstone.lamports, rent);
@@ -751,11 +867,20 @@ fn absent_reserve_progress(with_backing: bool) {
                     .get_account(&env.vault)
                     .is_none_or(|account| account.lamports == 0
                         && account.data.iter().all(|byte| *byte == 0)));
+                if retry_orders.is_some() {
+                    peak = peak.max(land(
+                        &mut env,
+                        &[close],
+                        &[&admin],
+                        &[],
+                        Some((2, PercolatorError::InvalidAccountLen)),
+                    ));
+                }
             }
             assert_eq!(tokens.map(|key| env.token_amount(key)), PAYOUTS);
             assert_eq!(env.token_amount(admin_token), 0);
             assert_eq!(env.svm.get_account(&env.mint), Some(mint_frame));
-            println!("INV-073 absent insurer asset={asset}, remainder={remainder}: calls={calls:?}/{CALL_BOUND}, paid={PAYOUTS:?}, peak={peak} CU, closed={}", remainder == 0);
+            println!("INV-073 absent insurer asset={asset}, remainder={remainder}, withdrawn={withdrawn}, orders={retry_orders:?}: calls={calls:?}/{CALL_BOUND}, paid={PAYOUTS:?}, peak={peak} CU, closed={}", remainder == 0);
         }
     }
 }
