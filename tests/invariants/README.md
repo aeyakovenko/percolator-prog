@@ -1,5 +1,99 @@
 # Invariant-owned test coverage
 
+## INV-039 insured pending debt through resolution (row 419, 2026-09-12)
+
+Owner: [cu/inv_039_pending_loss_insured_resolution.rs](cu/inv_039_pending_loss_insured_resolution.rs),
+mounted under `inv_039_pending_loss_obligation_durability::close_reopen::two_domain_resolution::insured_resolution`.
+Exact selector: `v16_program_insured_pending_domains_preserve_exact_debt_through_resolution_orders`.
+
+The bounded input product crosses two insurance allocations, mirrored sides, either
+first debtor, first booking in Live or Resolved, and both claimant/deletion orders:
+32 public LiteSVM histories. Two matched reductions create 20,000- and 30,000-atom
+bankruptcy residuals and distinct zero-basis obligations. A bystander's public
+withdrawal, SPL transfer and two `TopUpInsuranceDomain` calls fund the original
+claimant domains after the residuals exist. Its 20,001-atom initial deposit and all
+other economic state are constructed with System, SPL, ATA and wrapper instructions;
+the test never writes program-owned account bytes. Supply stays fixed at 950,001.
+The shared fixture accepts explicit deposit inputs and checks the complete portfolio
+census after each opening, accrual and matched reduction.
+
+An independent book derives the partition and owner entitlement from deposits,
+price movements, positions and insurance inputs. For each domain it checks the full
+close ledger, including zero support/drift/explicit-loss credits, and requires
+`insurance_spent + b_loss_booked + residual_remaining == original residual`.
+Funding cannot touch either debtor or holder. Booking spends exactly that domain's
+insurance and records only the remaining B loss; the holder retains its old weight
+until its own debit is applied. Releasing the first domain preserves the other
+domain's unbooked debt, holder bytes, insurance allocation and pending census.
+
+| Insurance Inputs | B Losses | Exact Payouts: Holder 0, Holder 2, Donor |
+| --- | --- | --- |
+| 7,500 / 6,000 | 12,500 / 24,000 | 387,500 / 556,000 / 6,501 |
+| 12,000 / 6,000 | 8,000 / 24,000 | 392,000 / 556,000 / 2,001 |
+
+Both debtors receive zero. At every checked prefix, capital, PnL, remaining receipt
+face and wallet value reconcile to the original owner's entitlement, with no payout
+before debt booking and the required holder settlement. The full census checks
+matched OI, retained loss weights, pending/stored counts, ADL factors, capital/PnL
+aggregates, custody and mint supply. Premature `ClosePortfolio` and explicit
+`ClaimResolvedPayoutTopup` calls reject; valid live booking, resolved booking/debit
+and payment prefixes followed by an invalid suffix roll back completely. Rejections
+compare complete fixture/compiled Accounts, including metadata, absence and lamports,
+with exactly the signature fee charged to the separate payer. Prefix-success logs
+and fresh blockhashes prevent an early failure or duplicate cache hit from passing.
+The fixed continuation reconciles all five owners, rejects repeated terminal closes,
+empties vault/capital/PnL and OI/pending-weight aggregates, and deletes every portfolio with
+exact count decrement and unchanged foreign Accounts.
+
+This adds insured residual/B composition across resolution; existing two-domain
+bankruptcy coverage has zero insurance, while INV-039 terminal-fee coverage does
+not spend its insurance budgets. It adds no row417 receipt-history or retained-intent
+generator. Row415/416/417/433 evidence and dispositions are preserved.
+
+**Row 419 remains OPEN.** These are finite integral histories, not a general
+pending-obligation generator/oracle or a status-changing proof. The selected source
+credit ratios are exactly representable (24/25 or 15/16, and 125/128). Initial
+small-budget samples exposed a one-atom terminal accounting difference outside the
+simple exact-rate oracle; no implementation violation was established from it.
+Fractional source conversion/terminal rounding, arbitrary insurance amounts,
+overfunding, backing, ADL, fees/funding, close drift/expiry, restarts, maximum shape
+and arbitrary histories remain open. No production code, engine pin or invariant
+status was changed; INV-066/067/076/086 are not newly discharged.
+
+Worktree: `/home/anatoly/percolator-prog-row419-conformance-20260912`; branch:
+`codex/row419-pending-obligation-resolution-20260912`. Before final validation it
+was fetched and rebased onto `origin/codex/astra-open-holdout-ledger-20260912` at
+`350df938`, including the new row417 notes. The parent worktree was not edited.
+The private host cache was copied from an existing target; the default-feature
+wrapper SBF was rebuilt locked/offline with platform-tools v1.52 and the unchanged
+engine pin. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+
+The new selector passes: 32 histories, 624 complete rollback checks, 160 exact
+owner payout checks (96 nonzero destinations) and 160 portfolio deletions; peak
+observed CU 329,085. Both requested metadata selectors and formatting pass.
+Required Git whitespace checks and private-target cleanup commands are included below.
+Only this new behavioral selector and the two requested metadata selectors are run.
+Exact verification commands from this worktree:
+
+```bash
+export CARGO_TARGET_DIR=/tmp/row419-pending-resolution-20260912-target
+export TMPDIR=/tmp/row419-pending-resolution-20260912-tmp
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::close_reopen::two_domain_resolution::insured_resolution::v16_program_insured_pending_domains_preserve_exact_debt_through_resolution_orders -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+cargo clean --target-dir "$TMPDIR"
+```
+
 ## INV-067 generated overdue source histories (row 417, 2026-09-12)
 
 Owner: [cu/inv_067_receipt_overdue_history.rs](cu/inv_067_receipt_overdue_history.rs),

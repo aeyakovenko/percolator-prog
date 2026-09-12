@@ -11,6 +11,9 @@
 use super::*;
 use close_preemption::{reject, terminal_instruction};
 
+#[path = "inv_039_pending_loss_insured_resolution.rs"]
+mod insured_resolution;
+
 const GAINS: [u128; 2] = [5 * 40_000, 2 * 5 * 28_000];
 const RESIDUALS: [u128; 2] = [
     GAINS[0] - ATTRIBUTION_DEPOSITS[1],
@@ -25,7 +28,11 @@ const PAYOUTS: [u128; 5] = [
 ];
 
 fn setup(reverse: bool, peak: &mut u64) -> AttributionWorld {
-    let mut world = AttributionWorld::new_with_params(
+    setup_with_deposits(reverse, peak, ATTRIBUTION_DEPOSITS)
+}
+
+fn setup_with_deposits(reverse: bool, peak: &mut u64, deposits: [u128; 5]) -> AttributionWorld {
+    let mut world = AttributionWorld::new_with_deposits(
         reverse,
         V16CuMarketParams {
             max_portfolio_assets: 3,
@@ -36,7 +43,11 @@ fn setup(reverse: bool, peak: &mut u64) -> AttributionWorld {
             max_bankrupt_close_lifetime_slots: 1_000,
             ..V16CuMarketParams::default()
         },
+        deposits,
     );
+    let mut basis = [0; 4];
+    let mut pending = [false; 4];
+    world.check(basis, pending);
     for pair in 0..2 {
         let holder = &world.actors[2 * pair];
         let debtor = &world.actors[2 * pair + 1];
@@ -52,6 +63,9 @@ fn setup(reverse: bool, peak: &mut u64) -> AttributionWorld {
         );
         assert_cu_within("INV-039 two-domain opening", cu, TRADE_CU_LIMIT);
         *peak = (*peak).max(cu);
+        basis[2 * pair] = world.quantities[2 * pair];
+        basis[2 * pair + 1] = world.quantities[2 * pair + 1];
+        world.check(basis, pending);
     }
     let sign = if reverse { -1i64 } else { 1 };
     for slot in 1..=5 {
@@ -72,6 +86,7 @@ fn setup(reverse: bool, peak: &mut u64) -> AttributionWorld {
         );
         assert_cu_within("INV-039 two-domain accrual", cu, CRANK_CU_LIMIT);
         *peak = (*peak).max(cu);
+        world.check(basis, pending);
     }
     for pair in 0..2 {
         let holder = &world.actors[2 * pair];
@@ -97,6 +112,10 @@ fn setup(reverse: bool, peak: &mut u64) -> AttributionWorld {
         );
         assert_cu_within("INV-039 two-domain bankruptcy", cu, TRADE_CU_LIMIT);
         *peak = (*peak).max(cu);
+        basis[2 * pair] = 0;
+        basis[2 * pair + 1] = 0;
+        pending[2 * pair] = true;
+        world.check(basis, pending);
         for (key, account) in before {
             if !allowed.contains(&key) {
                 assert_eq!(world.env.svm.get_account(&key), account);

@@ -355,6 +355,19 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # four premature-claim rollbacks and 40 terminal deletions; no cured-close duplicate.
 # See pending_loss_two_domain_resolution_audit_20260912.md for controls, limits and
 # the engine waiting-retry observation. No LoF/DoS established; row remains OPEN.
+# Row 419 insured residual conformance (2026-09-12):
+# cu/inv_039_pending_loss_insured_resolution.rs; exact v16_cu selector:
+# inv_039_pending_loss_obligation_durability::close_reopen::two_domain_resolution::insured_resolution::v16_program_insured_pending_domains_preserve_exact_debt_through_resolution_orders
+# 32 public histories cross insurance allocation, mirrored sides, first debtor,
+# Live/Resolved booking and claimant order. Fixed-supply public funding, independent
+# exact insurance/B partitions and owner entitlements, pending-weight/matched-book
+# census, 624 complete rollback checks and 160 exact payouts/terminal deletions.
+# New coverage spends insurance against two existing bankrupt pending cohorts;
+# it does not duplicate row417's receipt-history generator or rows415/416/433.
+# OPEN: fractional source conversion/rounding, arbitrary/overfunded insurance,
+# backing, ADL, fees/funding, drift/expiry, restart, maximum shape and arbitrary
+# histories. README's insured-pending-debt section records exact commands and limits.
+# No production change, proven implementation violation or status promotion.
 419	LoF	BLOCKER	INV-039	INV-024,INV-037,INV-039,INV-041,INV-048,INV-066,INV-067,INV-073,INV-076,INV-081,INV-086	pending-obligation+x-resolution+x-close-order	obligation-attribution-persists-until-the-opposing-economic-debt-settles	OPEN
 # Rows 420/421 partial conformance (2026-09-10): cu/inv_073_absent_insurer_spent_retirement.rs,
 # v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion.
