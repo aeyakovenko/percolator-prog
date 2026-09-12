@@ -10,6 +10,18 @@ INV-063/069/070/071/073/080/086/088 evidence. Successful cursor-invalidating mut
 claims, insurance recredit and maximum-capacity scans remain outside this increment;
 invariant verdicts and holdout labels are unchanged.
 
+The [complete-observation entitlement audit](complete_observation_entitlement_audit_20260912.md)
+adds one INV-045 selector with eight public LiteSVM histories. Two fresh Pyth-backed
+Hybrid assets retain unequal fractional price caps across observation order,
+observation grouping and elapsed-time partitions. Complete local refresh includes
+both accepted-price PnL and raw-target lag penalties before the same asset-0
+liquidation charges 2,095 atoms and pays 698 atoms to the keeper. Late duplicate
+observations restore complete Accounts; bounded quiescent retries cannot repeat
+fees. Owner and keeper SPL payouts are exactly 523,905 and 1,699 atoms. This adds
+bounded INV-020/024/038/041/045/052/056/061/071/081/086/088 evidence. Funding,
+provider changes, arbitrary liquidation sizing and full peer-claim realization
+remain outside this increment; invariant verdicts are unchanged.
+
 The [terminal destination-authority variant audit](terminal_destination_variant_audit_20260912.md)
 adds one INV-077 selector with six public LiteSVM histories. A fixed-supply mint
 and an admin-owned non-ATA sweep account cross existing delegation, separate close

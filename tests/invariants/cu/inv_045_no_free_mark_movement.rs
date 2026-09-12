@@ -41,6 +41,9 @@
 
 use super::*;
 
+#[path = "inv_045_complete_observation_entitlement.rs"]
+mod complete_observation_entitlement;
+
 #[path = "inv_045_accepted_price_reward.rs"]
 mod accepted_price_reward;
 
