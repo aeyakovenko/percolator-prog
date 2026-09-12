@@ -6,8 +6,316 @@
 //! and assert aggregate custody, capital, insurance, backing, PnL, and fee
 //! conservation across realistic trade, crank, liquidation, funding, and
 //! withdrawal sequences.
+//! The maintenance-policy sibling adds live owner entitlements across a policy
+//! interleaving whose two histories have identical aggregate custody and fees.
 
 use super::*;
+
+#[path = "inv_024_maintenance_policy_entitlement.rs"]
+mod maintenance_policy_entitlement;
+
+#[path = "inv_024_recycled_reward_terminal_history.rs"]
+mod recycled_reward_terminal_history;
+
+#[path = "inv_024_terminal_role_handoff.rs"]
+mod terminal_role_handoff;
+
+#[path = "inv_024_terminal_quote_rails.rs"]
+mod terminal_quote_rails;
+
+#[path = "inv_024_terminal_insurance_lifecycle.rs"]
+mod terminal_insurance_lifecycle;
+
+#[path = "inv_024_terminal_earnings_succession.rs"]
+mod terminal_earnings_succession;
+
+#[path = "inv_024_pnl_reward_receipt_history.rs"]
+mod pnl_reward_receipt_history;
+
+#[test]
+fn v16_program_mixed_rail_withdrawal_retry_preserves_each_owners_claim() {
+    use super::inv_018_quote_mint_vault_token_program_and_authority_integrity::{
+        inv018_create_public_spl_mint, inv018_public_spl_market,
+    };
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const DEPOSITS: [u64; 3] = [101, 307, 503];
+    const SECONDARY_RESERVE: u64 = 1_200;
+    let total_deposits: u64 = DEPOSITS.iter().sum();
+    let mut env = inv018_public_spl_market(6);
+    let secondary = inv018_create_public_spl_mint(&mut env.svm, &env.payer, env.admin.pubkey(), 6);
+    env.update_base_unit_mints_with_cu(env.mint, secondary);
+    let mints = [env.mint, secondary];
+    let vaults = [
+        env.vault,
+        create_ata_for_test(&mut env.svm, &env.payer, env.vault_authority, secondary),
+    ];
+    let owners = [Keypair::new(), Keypair::new(), Keypair::new()];
+    let portfolios = std::array::from_fn::<_, 3, _>(|actor| {
+        env.svm
+            .airdrop(&owners[actor].pubkey(), 1_000_000_000)
+            .unwrap();
+        let portfolio = Keypair::new();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &portfolio,
+            env.portfolio_account_len,
+            env.program_id,
+        );
+        env.send(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owners[actor].pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio.pubkey(), false),
+            ],
+            &[&owners[actor]],
+        )
+        .unwrap();
+        env.portfolios.push(portfolio.pubkey());
+        portfolio.pubkey()
+    });
+    let tokens: [[Pubkey; 2]; 3] = std::array::from_fn(|actor| {
+        mints
+            .map(|mint| create_ata_for_test(&mut env.svm, &env.payer, owners[actor].pubkey(), mint))
+    });
+    for actor in 0..3 {
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &mints[0],
+                &tokens[actor][0],
+                &env.admin.pubkey(),
+                &[],
+                DEPOSITS[actor],
+            )
+            .unwrap(),
+            &[&env.admin],
+        )
+        .unwrap();
+        env.send(
+            env.deposit_ix(portfolios[actor], DEPOSITS[actor].into()),
+            vec![
+                AccountMeta::new(owners[actor].pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolios[actor], false),
+                AccountMeta::new(tokens[actor][0], false),
+                AccountMeta::new(vaults[0], false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owners[actor]],
+        )
+        .unwrap();
+    }
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &secondary,
+            &vaults[1],
+            &env.admin.pubkey(),
+            &[],
+            SECONDARY_RESERVE,
+        )
+        .unwrap(),
+        &[&env.admin],
+    )
+    .unwrap();
+    for mint in mints {
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::set_authority(
+                &spl_token::ID,
+                &mint,
+                None,
+                spl_token::instruction::AuthorityType::MintTokens,
+                &env.admin.pubkey(),
+                &[],
+            )
+            .unwrap(),
+            &[&env.admin],
+        )
+        .unwrap();
+    }
+
+    let withdrawal = |env: &V16CuEnv, actor: usize, rail: usize, amount: u64| Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(owners[actor].pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolios[actor], false),
+            AccountMeta::new(tokens[actor][rail], false),
+            AccountMeta::new(vaults[rail], false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: env.withdraw_ix(portfolios[actor], amount.into()).encode(),
+    };
+    // Rail choice spends one shared claim, not an independent claim per mint.
+    let check = |env: &V16CuEnv, paid: [[u64; 2]; 3], withdrawals: [u64; 3]| {
+        let mut total_paid = [0; 2];
+        for actor in 0..3 {
+            let owner_paid: u64 = paid[actor].iter().sum();
+            assert!(owner_paid <= DEPOSITS[actor]);
+            let portfolio = env.portfolio_state(portfolios[actor]);
+            assert_eq!(
+                portfolio.capital.get(),
+                u128::from(DEPOSITS[actor] - owner_paid)
+            );
+            assert_eq!(portfolio.pnl.get(), 0);
+            assert_eq!(
+                env.portfolio_matcher_sequence(portfolios[actor]),
+                1 + withdrawals[actor]
+            );
+            for rail in 0..2 {
+                let token =
+                    TokenAccount::unpack(&env.svm.get_account(&tokens[actor][rail]).unwrap().data)
+                        .unwrap();
+                assert_eq!(token.owner, owners[actor].pubkey());
+                assert_eq!(token.mint, mints[rail]);
+                assert_eq!(token.amount, paid[actor][rail]);
+                total_paid[rail] += paid[actor][rail];
+            }
+        }
+        for rail in 0..2 {
+            let supply = [total_deposits, SECONDARY_RESERVE][rail];
+            let mint = Mint::unpack(&env.svm.get_account(&mints[rail]).unwrap().data).unwrap();
+            assert_eq!(mint.supply, supply);
+            assert_eq!(mint.mint_authority, COption::None);
+            assert_eq!(env.token_amount(vaults[rail]), supply - total_paid[rail]);
+        }
+        let remaining = total_deposits - total_paid.iter().sum::<u64>();
+        let (_, group) = env.market_state();
+        assert_eq!(
+            (group.c_tot, group.vault, group.insurance),
+            (remaining.into(), remaining.into(), 0)
+        );
+        // Primary stock discharged through the secondary reserve is surplus, not owner credit.
+        assert_eq!(
+            u128::from(env.token_amount(vaults[0])),
+            group.vault + u128::from(total_paid[1])
+        );
+    };
+    let mut frame_keys = vec![
+        env.market,
+        env.admin.pubkey(),
+        env.vault_authority,
+        env.program_id,
+        spl_token::ID,
+    ];
+    frame_keys.extend(mints);
+    frame_keys.extend(vaults);
+    frame_keys.extend(portfolios);
+    frame_keys.extend(owners.iter().map(Signer::pubkey));
+    frame_keys.extend(tokens.into_iter().flatten());
+    let frame = |env: &V16CuEnv| {
+        frame_keys
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>()
+    };
+    let unrelated_before = env.svm.get_account(&portfolios[2]);
+    let mut paid = [[0; 2]; 3];
+    let mut withdrawals = [0; 3];
+    check(&env, paid, withdrawals);
+    for (actor, rail, amount) in [(0, 1, 37), (1, 0, 109)] {
+        let ix = withdrawal(&env, actor, rail, amount);
+        send_raw_tx(&mut env.svm, &env.payer, ix, &[&owners[actor]]).unwrap();
+        paid[actor][rail] += amount;
+        withdrawals[actor] += 1;
+        check(&env, paid, withdrawals);
+        assert_eq!(env.svm.get_account(&portfolios[2]), unrelated_before);
+    }
+
+    // Unlike the single-owner exhausted-rail case, another owner's valid payout
+    // must roll back when a later instruction overdraws or misattributes a claim.
+    let prefix = withdrawal(&env, 1, 1, 29);
+    let retry = withdrawal(&env, 0, 0, 64);
+    let overclaim = withdrawal(&env, 0, 0, 65);
+    let mut wrong_destination = retry.clone();
+    wrong_destination.accounts[3].pubkey = tokens[2][0];
+    assert!(env.token_amount(vaults[0]) > 65);
+    assert!(env.market_state().1.c_tot > 65 + 29);
+    for (suffix, expected_error) in [
+        (overclaim, PercolatorError::EngineLockActive),
+        (wrong_destination, PercolatorError::InvalidTokenAccount),
+    ] {
+        let before = frame(&env);
+        let mut payer_before = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), prefix.clone(), suffix],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &owners[0], &owners[1]],
+            env.svm.latest_blockhash(),
+        );
+        let fee = FeeStructure::default().lamports_per_signature
+            * u64::from(tx.message.header.num_required_signatures);
+        let rejected = env
+            .svm
+            .send_transaction(tx)
+            .expect_err("owner-local withdrawal must reject");
+        assert_eq!(
+            rejected.err,
+            TransactionError::InstructionError(3, InstructionError::Custom(expected_error as u32))
+        );
+        for program in [env.program_id, spl_token::ID] {
+            assert!(
+                rejected
+                    .meta
+                    .logs
+                    .contains(&format!("Program {program} success")),
+                "the earlier payout must execute before the rejection"
+            );
+        }
+        assert_eq!(
+            frame(&env),
+            before,
+            "rollback restores bytes, metadata and lamports of every non-payer account"
+        );
+        payer_before.lamports -= fee;
+        assert_eq!(
+            env.svm.get_account(&env.payer.pubkey()).unwrap(),
+            payer_before
+        );
+        check(&env, paid, withdrawals);
+    }
+    let cu = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), prefix, retry],
+        &[&owners[0], &owners[1]],
+    )
+    .expect("unchanged prefix and owner-correct suffix retain their unconsumed sequences");
+    assert_cu_within("mixed-rail withdrawal retry", cu, 300_000);
+    paid[1][1] += 29;
+    paid[0][0] += 64;
+    withdrawals[0] += 1;
+    withdrawals[1] += 1;
+    check(&env, paid, withdrawals);
+    assert_eq!(env.svm.get_account(&portfolios[2]), unrelated_before);
+
+    for (actor, rail, amount) in [(1, 0, 169), (2, 1, 503)] {
+        let before = portfolios.map(|key| env.svm.get_account(&key));
+        let ix = withdrawal(&env, actor, rail, amount);
+        send_raw_tx(&mut env.svm, &env.payer, ix, &[&owners[actor]]).unwrap();
+        paid[actor][rail] += amount;
+        withdrawals[actor] += 1;
+        check(&env, paid, withdrawals);
+        for other in 0..3 {
+            if other != actor {
+                assert_eq!(env.svm.get_account(&portfolios[other]), before[other]);
+            }
+        }
+    }
+    assert_eq!(paid.map(|rails| rails.iter().sum::<u64>()), DEPOSITS);
+}
 
 #[test]
 fn v16_program_entitlement_effect_roster_is_source_complete() {

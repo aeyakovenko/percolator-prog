@@ -47,6 +47,11 @@
 //! close ledger or not. CPI worlds also prove that a taker-side mutation revokes stale LP authority
 //! and that fresh owner consent restores the route without changing economics.
 //!
+//! A ninth matrix removes the fully reduced owner's portfolio before the opposite reset leg is
+//! cleaned, across both sides and Active/Recovery. Early and deferred owner-signed deletion must
+//! preserve the same principal payouts and permissionless cleanup, framing a still-exposed foreign
+//! pair after every transaction. This is bounded lifecycle composition, not universal liveness.
+//!
 //! Guarantee boundary: these are the same-asset risk-reduction and two-asset/two-account close
 //! cells. Risk increase while a domain loss barrier is active is intentionally outside the
 //! guarantee; broader side/domain/lifecycle combinations remain open.
@@ -61,6 +66,7 @@ use crate::support::fuzz_model::{
 use crate::support::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, TX_CU_LIMIT};
 use percolator::{AssetLifecycleV16, SideModeV16, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
+use solana_sdk::signature::Signer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LifecycleExitOrder {
@@ -565,6 +571,353 @@ fn run_lifecycle_locality_world(
         reset_generation_after_restart: group.assets[0].market_id,
         unrelated_generation: group.assets[1].market_id,
     })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingResetLocalityFrame {
+    assets: Vec<percolator::AssetStateV16>,
+    profiles: [percolator_prog::state::AssetOracleProfileV16; 2],
+    accounts: ScopedRollbackSnapshot,
+}
+
+fn pending_reset_locality_frame(env: &V16Svm) -> PendingResetLocalityFrame {
+    let mut accounts = scoped_rollback_snapshot(env);
+    // Shared counters and the two exiting accounts may change; the other asset/account scopes may not.
+    accounts.market.clear();
+    accounts.portfolios.drain(..2);
+    accounts.tokens.retain(|(key, _)| {
+        ![
+            env.vault,
+            env.actors[0].destination_token,
+            env.actors[1].destination_token,
+        ]
+        .contains(key)
+    });
+    accounts.economic_lamports.retain(|(key, _)| {
+        ![env.market, env.actors[0].portfolio, env.actors[1].portfolio].contains(key)
+    });
+    PendingResetLocalityFrame {
+        assets: env.primary_market_state().1.assets[1..].to_vec(),
+        profiles: [env.primary_profile(1), env.primary_profile(2)],
+        accounts,
+    }
+}
+
+struct PendingResetExitLedger {
+    config: MarketConfig,
+    paid: [bool; 2],
+    closed: [bool; 2],
+    token_supply: u128,
+    locality: PendingResetLocalityFrame,
+    steps: usize,
+}
+
+impl PendingResetExitLedger {
+    fn check(&self, env: &V16Svm) {
+        assert_eq!(pending_reset_locality_frame(env), self.locality);
+        assert_eq!(env.token_supply_observed(), self.token_supply);
+        let group = env.primary_market_state().1;
+        let paid: u128 = (0..2)
+            .filter(|actor| self.paid[*actor])
+            .map(|actor| self.config.actor_deposits[actor])
+            .sum();
+        let remaining = self.config.actor_deposits.iter().sum::<u128>() - paid;
+        assert_eq!(group.c_tot, remaining);
+        assert_eq!(group.vault, remaining);
+        assert_eq!(u128::from(env.token_amount(env.vault)), remaining);
+        assert_eq!(group.insurance, 0);
+        assert_eq!(
+            group.materialized_portfolio_count,
+            (env.actors.len() - self.closed.iter().filter(|closed| **closed).count()) as u64
+        );
+        for (actor, fixture) in env.actors.iter().enumerate() {
+            let payout = if actor < 2 && self.paid[actor] {
+                self.config.actor_deposits[actor]
+            } else {
+                0
+            };
+            assert_eq!(
+                u128::from(env.token_amount(fixture.destination_token)),
+                payout
+            );
+            assert_eq!(
+                u128::from(env.token_amount(fixture.source_token)),
+                u128::from(self.config.actor_token_balances[actor])
+                    - self.config.actor_deposits[actor]
+            );
+            if actor < 2 && self.closed[actor] {
+                assert!(env.primary_portfolio_data(actor).is_empty());
+                assert_eq!(env.account_lamports(fixture.portfolio), 0);
+            } else {
+                let portfolio = env.primary_portfolio(actor);
+                assert_eq!(
+                    portfolio.capital.get(),
+                    self.config.actor_deposits[actor] - payout
+                );
+                assert_eq!(portfolio.pnl.get(), 0);
+            }
+        }
+        assert_public_stock_census("INV-074 pending-reset owner exit", env).unwrap();
+        assert_public_encumbrance_census("INV-074 pending-reset owner exit", env).unwrap();
+    }
+
+    fn step(
+        &mut self,
+        env: &mut V16Svm,
+        action: impl FnOnce(&mut V16Svm) -> Result<crate::support::v16_svm::TxSuccess, String>,
+    ) {
+        action(env).expect("INV-074 bounded pending-reset exit step");
+        self.steps += 1;
+        self.check(env);
+    }
+
+    fn close(&mut self, env: &mut V16Svm, actor: usize) {
+        let rent = env.account_lamports(env.actors[actor].portfolio);
+        let slab_lamports = env.account_lamports(env.market);
+        assert!(rent > 0);
+        self.closed[actor] = true;
+        self.step(env, |env| env.close_primary_portfolio(actor));
+        assert_eq!(env.account_lamports(env.market), slab_lamports + rent);
+    }
+}
+
+#[test]
+fn v16_program_owner_deletion_before_reset_cleanup_preserves_local_exit() {
+    let config = MarketConfig {
+        actor_deposits: [
+            100_000_003,
+            100_000_019,
+            100_000_031,
+            100_000_057,
+            2_000_000_000,
+        ],
+        ..MarketConfig::default()
+    };
+    let mut worlds = 0;
+    let mut checked_steps = 0;
+    let mut cleanup_calls = 0;
+    let mut max_compute_units = 0;
+    for reducer_long in [false, true] {
+        for recovery in [false, true] {
+            let mut expected = None;
+            for (close_early, complete_hints) in [false, true]
+                .into_iter()
+                .flat_map(|early| [false, true].map(|hints| (early, hints)))
+            {
+                let case = format!("long={reducer_long}/recovery={recovery}/early={close_early}/hints={complete_hints}");
+                let mut env = V16Svm::new([0x74; 32], config);
+                env.configure_permissionless_resolve(1_000, 100).unwrap();
+                let size = if reducer_long {
+                    POS_SCALE as i128
+                } else {
+                    -(POS_SCALE as i128)
+                };
+                env.trade_no_cpi(0, 1, 0, size, INITIAL_PRICE, 0).unwrap();
+                env.trade_no_cpi(2, 3, 1, POS_SCALE as i128, INITIAL_PRICE, 0)
+                    .unwrap();
+                assert_eq!(active_leg_count_for_asset(&env, 2, 1), 1);
+                assert_eq!(active_leg_count_for_asset(&env, 3, 1), 1);
+                let mut ledger = PendingResetExitLedger {
+                    config,
+                    paid: [false; 2],
+                    closed: [false; 2],
+                    token_supply: env.token_supply_observed(),
+                    locality: pending_reset_locality_frame(&env),
+                    steps: 0,
+                };
+                ledger.check(&env);
+                env.begin_public_trace();
+                ledger.step(&mut env, |env| env.rebalance_reduce(0, 0, POS_SCALE));
+                if recovery {
+                    ledger.step(&mut env, |env| env.shutdown_asset(0, env.current_slot()));
+                }
+                let pending = env.primary_market_state().1.assets[0];
+                assert_eq!(
+                    pending.lifecycle,
+                    if recovery {
+                        AssetLifecycleV16::Recovery
+                    } else {
+                        AssetLifecycleV16::Active
+                    }
+                );
+                let (mode, stored) = if reducer_long {
+                    (pending.mode_short, pending.stored_pos_count_short)
+                } else {
+                    (pending.mode_long, pending.stored_pos_count_long)
+                };
+                assert_eq!((mode, stored), (SideModeV16::ResetPending, 1), "{case}");
+                assert_eq!(active_leg_count_for_asset(&env, 0, 0), 0);
+                assert_eq!(active_leg_count_for_asset(&env, 1, 0), 1);
+                let counterparty_before = env.primary_portfolio_data(1);
+                let reset_profile = env.primary_profile(0);
+                let assert_pending_frame = |env: &V16Svm| {
+                    assert_eq!(env.primary_market_state().1.assets[0], pending, "{case}");
+                    assert_eq!(env.primary_profile(0), reset_profile, "{case}");
+                    assert_eq!(env.primary_portfolio_data(1), counterparty_before, "{case}");
+                };
+
+                // Deletion is not a payout: the still-funded owner's attempt must roll back.
+                let before = scoped_rollback_snapshot(&env);
+                env.close_primary_portfolio(0)
+                    .expect_err("funded portfolio cannot be deleted");
+                assert_eq!(scoped_rollback_snapshot(&env), before, "{case}");
+                ledger.steps += 1;
+                ledger.check(&env);
+                ledger.paid[0] = true;
+                ledger.step(&mut env, |env| {
+                    env.withdraw_primary(0, config.actor_deposits[0])
+                });
+                assert_pending_frame(&env);
+                if close_early {
+                    ledger.close(&mut env, 0);
+                    assert_pending_frame(&env);
+                }
+
+                // Cleanup never supplies the deleted owner's portfolio or requires its signer.
+                let hints = if complete_hints {
+                    vec![CrankObservationHint {
+                        asset_index: 0,
+                        oracle_accounts: reset_profile.oracle_leg_count,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                let mut calls = 0;
+                for _ in 0..8 {
+                    let before = active_leg_count_for_asset(&env, 1, 0);
+                    if before == 0 {
+                        break;
+                    }
+                    ledger.step(&mut env, |env| {
+                        env.crank(1, env.current_slot(), hints.clone())
+                    });
+                    assert_eq!(env.primary_profile(0), reset_profile, "{case}");
+                    assert!(
+                        active_leg_count_for_asset(&env, 1, 0) < before,
+                        "{case}: reset rank"
+                    );
+                    calls += 1;
+                }
+                assert!(calls > 0, "{case}: nonvacuous reset cleanup");
+                assert_eq!(active_leg_count_for_asset(&env, 1, 0), 0, "{case}");
+                ledger.step(&mut env, |env| {
+                    env.finalize_reset_side(0, u8::from(reducer_long))
+                });
+                assert_eq!(env.primary_profile(0), reset_profile, "{case}");
+                let finalized = env.primary_market_state().1.assets[0];
+                let assert_finalized_frame = |env: &V16Svm| {
+                    assert_eq!(env.primary_market_state().1.assets[0], finalized, "{case}");
+                    assert_eq!(env.primary_profile(0), reset_profile, "{case}");
+                };
+                assert_eq!(finalized.mode_long, SideModeV16::Normal);
+                assert_eq!(finalized.mode_short, SideModeV16::Normal);
+                assert_eq!((finalized.oi_eff_long_q, finalized.oi_eff_short_q), (0, 0));
+                assert_eq!(
+                    (
+                        finalized.stored_pos_count_long,
+                        finalized.stored_pos_count_short
+                    ),
+                    (0, 0)
+                );
+                assert_eq!(
+                    (
+                        finalized.stale_account_count_long,
+                        finalized.stale_account_count_short
+                    ),
+                    (0, 0)
+                );
+                assert_eq!(
+                    (
+                        finalized.pending_obligation_count_long,
+                        finalized.pending_obligation_count_short
+                    ),
+                    (0, 0)
+                );
+                if !close_early {
+                    ledger.close(&mut env, 0);
+                    assert_finalized_frame(&env);
+                }
+                ledger.paid[1] = true;
+                ledger.step(&mut env, |env| {
+                    env.withdraw_primary(1, config.actor_deposits[1])
+                });
+                assert_finalized_frame(&env);
+                ledger.close(&mut env, 1);
+                assert_finalized_frame(&env);
+
+                let trace = env.finish_public_trace();
+                trace
+                    .validate_public_execution()
+                    .expect("public lifecycle suffix");
+                assert_eq!(trace.steps.len(), ledger.steps, "{case}");
+                assert_eq!(trace.steps.iter().filter(|step| !step.succeeded).count(), 1);
+                for step in &trace.steps {
+                    let instruction =
+                        percolator_prog::ix::Instruction::decode(&step.instruction_data).unwrap();
+                    if matches!(
+                        instruction,
+                        percolator_prog::ix::Instruction::PermissionlessCrank { .. }
+                            | percolator_prog::ix::Instruction::FinalizeResetSide { .. }
+                    ) {
+                        assert_eq!(step.transaction_signers, vec![step.fee_payer], "{case}");
+                        assert!(
+                            env.actors
+                                .iter()
+                                .all(|actor| actor.signer.pubkey() != step.fee_payer),
+                            "{case}"
+                        );
+                        assert!(
+                            !step
+                                .accounts
+                                .iter()
+                                .any(|meta| meta.key == env.actors[0].portfolio),
+                            "{case}"
+                        );
+                    }
+                    if matches!(
+                        instruction,
+                        percolator_prog::ix::Instruction::ClosePortfolio { .. }
+                    ) {
+                        let owner = &step.accounts[0];
+                        assert!(
+                            owner.is_signer && step.transaction_signers.contains(&owner.key),
+                            "{case}"
+                        );
+                        assert!(
+                            [0, 1]
+                                .iter()
+                                .any(|actor| env.actors[*actor].signer.pubkey() == owner.key),
+                            "{case}"
+                        );
+                        assert_ne!(owner.key, step.fee_payer, "{case}");
+                    }
+                    max_compute_units = max_compute_units.max(step.compute_units.unwrap_or(0));
+                }
+                let group = env.primary_market_state().1;
+                let outcome = (
+                    group.assets[0],
+                    group.vault,
+                    group.c_tot,
+                    group.materialized_portfolio_count,
+                    env.account_lamports(env.market),
+                );
+                if let Some(expected) = expected.as_ref() {
+                    assert_eq!(
+                        &outcome, expected,
+                        "{case}: early/deferred deletion outcomes"
+                    );
+                } else {
+                    expected = Some(outcome);
+                }
+                worlds += 1;
+                checked_steps += ledger.steps;
+                cleanup_calls += calls;
+            }
+        }
+    }
+    assert_eq!(worlds, 16);
+    assert!(max_compute_units < TX_CU_LIMIT);
+    eprintln!("INV-074 pending-reset deletion: worlds={worlds}, checked_steps={checked_steps}, cleanup_calls={cleanup_calls}, max_cu={max_compute_units}");
 }
 
 #[test]

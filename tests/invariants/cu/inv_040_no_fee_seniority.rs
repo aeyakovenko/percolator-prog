@@ -384,6 +384,140 @@ fn v16_attack_maintenance_fee_spam_cannot_overdrain() {
     );
 }
 
+#[test]
+fn v16_program_clipped_maintenance_refill_retries_cannot_recharge_or_redirect() {
+    const PRINCIPAL: u128 = 7;
+    const REFILL: u128 = 17;
+    const PEER_PRINCIPAL: u128 = 41;
+    const FEE_PER_SLOT: u128 = 10;
+    const SHARE_BPS: u16 = 3_333;
+    const SLOT: u64 = 3;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        maintenance_fee_per_slot: FEE_PER_SLOT,
+        ..V16CuMarketParams::default()
+    });
+    let owner = Keypair::new();
+    let payer = env.create_portfolio(&owner);
+    let source = env.deposit(&owner, payer, PRINCIPAL);
+    let refill_source = env.token_account(owner.pubkey(), REFILL as u64);
+    env.update_maintenance_fee_policy_with_cu(SHARE_BPS);
+    env.svm.warp_to_slot(SLOT);
+    // The separate recipient has no elapsed fee debt of its own at the exit boundary.
+    let peer_owner = Keypair::new();
+    let peer = env.create_portfolio(&peer_owner);
+    let peer_source = env.deposit(&peer_owner, peer, PEER_PRINCIPAL);
+
+    let nominal = FEE_PER_SLOT * u128::from(SLOT);
+    let charged = nominal.min(PRINCIPAL);
+    let reward = charged * u128::from(SHARE_BPS) / 10_000;
+    let retained = charged - reward;
+    assert!(nominal > charged && reward > 0);
+    assert_eq!(env.portfolio_state(payer).last_fee_slot.get(), 0);
+    let mint_before = env.svm.get_account(&env.mint).unwrap();
+    let custody = |env: &V16CuEnv| {
+        [env.vault, env.mint, source, refill_source, peer_source]
+            .map(|key| env.svm.get_account(&key).unwrap())
+    };
+    let custody_before = custody(&env);
+    let peer_before = env.svm.get_account(&peer).unwrap();
+    let assert_economics = |env: &V16CuEnv, payer_capital, peer_capital, vault| {
+        let group = env.market_state().1;
+        assert_eq!(env.portfolio_state(payer).capital.get(), payer_capital);
+        assert_eq!(env.portfolio_state(peer).capital.get(), peer_capital);
+        assert_eq!(env.portfolio_state(payer).last_fee_slot.get(), SLOT);
+        assert_eq!(group.c_tot, payer_capital + peer_capital);
+        assert_eq!(group.insurance, retained);
+        assert_eq!(group.vault, vault);
+        assert_eq!(group.vault, group.c_tot + group.insurance);
+        assert_eq!(group.vault, u128::from(env.token_amount(env.vault)));
+        assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_before);
+        assert_domain_budget_remaining_total_consistent(&group, "clipped maintenance refill");
+    };
+
+    let cu = env.sync_maintenance_fee_with_cu(payer, Some(payer), SLOT);
+    assert_cu_within("clipped self-rewarded maintenance", cu, CUSTODY_CU_LIMIT);
+    assert_economics(&env, reward, PEER_PRINCIPAL, PRINCIPAL + PEER_PRINCIPAL);
+    assert_eq!(custody(&env), custody_before);
+    assert_eq!(env.svm.get_account(&peer).unwrap(), peer_before);
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 2);
+
+    let cu = env
+        .send(
+            env.deposit_ix(payer, REFILL),
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(payer, false),
+                AccountMeta::new(refill_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .expect("refill the same live portfolio through SPL");
+    assert_cu_within("clipped maintenance principal refill", cu, CUSTODY_CU_LIMIT);
+    let funded_vault = PRINCIPAL + REFILL + PEER_PRINCIPAL;
+    assert_economics(&env, reward + REFILL, PEER_PRINCIPAL, funded_vault);
+    assert_eq!(env.token_amount(refill_source), 0);
+
+    // Switching the reward tail must not turn the forgiven remainder into a new debit or reward.
+    let frame = |env: &V16CuEnv| {
+        [
+            env.market,
+            payer,
+            peer,
+            env.vault,
+            env.mint,
+            source,
+            refill_source,
+            peer_source,
+            owner.pubkey(),
+            peer_owner.pubkey(),
+        ]
+        .map(|key| env.svm.get_account(&key).unwrap())
+    };
+    let before_retries = frame(&env);
+    for recipient in [Some(peer), None, Some(payer), Some(peer)] {
+        env.svm.expire_blockhash();
+        let cu = env.sync_maintenance_fee_with_cu(payer, recipient, SLOT);
+        assert_cu_within(
+            "clipped maintenance recipient-switch retry",
+            cu,
+            CUSTODY_CU_LIMIT,
+        );
+        assert_eq!(frame(&env), before_retries, "recipient={recipient:?}");
+    }
+
+    let payout = reward + REFILL;
+    let (destination, cu) = env.withdraw_with_cu(&owner, payer, payout);
+    assert_cu_within("refilled principal withdrawal", cu, CUSTODY_CU_LIMIT);
+    assert_eq!(u128::from(env.token_amount(destination)), payout);
+    assert_economics(&env, 0, PEER_PRINCIPAL, funded_vault - payout);
+    let (peer_destination, cu) = env.withdraw_with_cu(&peer_owner, peer, PEER_PRINCIPAL);
+    assert_cu_within("unrelated principal withdrawal", cu, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        u128::from(env.token_amount(peer_destination)),
+        PEER_PRINCIPAL
+    );
+    assert_economics(&env, 0, 0, retained);
+    assert_eq!(payout + PEER_PRINCIPAL + retained, funded_vault);
+    for (signer, portfolio) in [(&owner, payer), (&peer_owner, peer)] {
+        let cu = env.close_portfolio_with_cu(signer, portfolio);
+        assert_cu_within(
+            "clipped maintenance empty portfolio close",
+            cu,
+            CUSTODY_CU_LIMIT,
+        );
+    }
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.materialized_portfolio_count, 0);
+    assert_eq!(terminal.c_tot, 0);
+    assert_eq!(terminal.insurance, retained);
+    assert_eq!(terminal.vault, retained);
+    assert_eq!(u128::from(env.token_amount(env.vault)), retained);
+}
+
 #[derive(Clone, Copy)]
 struct Inv040FeeIngress {
     owner: &'static str,
@@ -395,7 +529,7 @@ struct Inv040FeeIngress {
 
 #[test]
 fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed() {
-    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const ENGINE_PIN: &str = "394fd0bf2cb7d73df425eb3754dc3be1a0c44336";
     const ROWS: &[Inv040FeeIngress] = &[
         Inv040FeeIngress {
             owner: "collect_maintenance_fee_to_slot_before_value_debit_view",

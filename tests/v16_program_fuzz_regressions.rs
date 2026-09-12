@@ -110,6 +110,9 @@ mod inv_067_terminal_payout_completeness_and_exact_once_settlement;
 #[path = "invariants/public_sbf/inv_079_public_reachability_evidence.rs"]
 mod inv_079_public_reachability_evidence;
 
+#[path = "invariants/public_sbf/inv_080_error_propagation_and_exact_rollback.rs"]
+mod inv_080_error_propagation_and_exact_rollback;
+
 #[path = "invariants/public_sbf/inv_081_success_state_validity_over_complete_public_routes.rs"]
 mod inv_081_success_state_validity_over_complete_public_routes;
 

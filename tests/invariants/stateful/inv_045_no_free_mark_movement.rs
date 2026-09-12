@@ -68,6 +68,11 @@
 //! directions, the first funding boundary remains immutable, each move is independently funded,
 //! catch-up activates both marks in order, route economics are identical, and both owners convert
 //! and withdraw all remaining value.
+//! `v16_program_zero_fee_ceiling_keeps_ordinary_trade_routes_live_without_mark_movement`
+//! opens and closes ordinary positions with a zero trading-fee ceiling in both trade-driven modes,
+//! on all four routes and in both quote directions. Elapsed discovery capacity is nonzero, but
+//! unsupported movement must leave the mark and engine target unchanged without blocking the
+//! round trip. Normalized owner values, insurance, capital, and custody agree across routes.
 //! These tests exercise the deployed public wrapper with real SBF/LiteSVM account construction and
 //! assert economic state, token, rollback, liveness, or compute outcomes appropriate to the
 //! invariant.
@@ -79,6 +84,12 @@ use super::*;
 use crate::support::v16_svm::{MarketConfig, PublicTerminalClassification, TxSuccess, V16Svm};
 use percolator::POS_SCALE;
 use percolator_prog::ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint};
+
+#[path = "inv_045_retained_mark_exit.rs"]
+mod retained_mark_exit;
+
+#[path = "inv_045_paid_mark_source_lien.rs"]
+mod paid_mark_source_lien;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AcceptedMarkMode {
@@ -927,6 +938,136 @@ fn run_invalid_accepted_mark_boundary(
         ));
     }
     Ok(max_cu)
+}
+
+#[test]
+fn v16_program_zero_fee_ceiling_keeps_ordinary_trade_routes_live_without_mark_movement() {
+    const ANCHOR: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const ELAPSED_SLOTS: u64 = 3;
+
+    let mut world_count = 0usize;
+    let mut max_cu = 0u64;
+    for mode in [
+        AcceptedMarkMode::EwmaMark,
+        AcceptedMarkMode::HybridAfterHours,
+    ] {
+        for rises in [false, true] {
+            let target = if rises { 1_002_500 } else { 997_500 };
+            let open_q = if rises {
+                POS_SCALE as i128
+            } else {
+                -(POS_SCALE as i128)
+            };
+            let mut expected_outcome = None;
+            for route in DiscoveryTradeRoute::ALL {
+                let context = format!("{mode:?}/{route:?}/rises={rises}/zero-fee-ceiling");
+                let mut env = V16Svm::new(
+                    [0x4c; 32],
+                    MarketConfig {
+                        initial_price: ANCHOR,
+                        max_trading_fee_bps: 0,
+                        max_price_move_bps_per_slot: CAP_BPS,
+                        ..MarketConfig::default()
+                    },
+                );
+                let oracle = configure_accepted_mark_mode(&mut env, mode, ANCHOR)
+                    .unwrap_or_else(|error| panic!("{context}: configure mode: {error}"));
+                prepare_accepted_mark_landing_dt(&mut env, mode, 0, oracle)
+                    .unwrap_or_else(|error| panic!("{context}: prepare regime: {error}"));
+                let crank =
+                    crank_accepted_mark_target(&mut env, mode, ELAPSED_SLOTS, oracle, &context)
+                        .unwrap_or_else(|error| panic!("{context}: current engine state: {error}"));
+                max_cu = max_cu.max(crank.compute_units);
+
+                let before_profile = env.primary_profile(0);
+                let before_group = env.primary_market_state().1;
+                let before_pair_value = accepted_mark_pair_value_and_insurance(&env);
+                let before_tokens = env.all_token_account_data();
+                let before_foreign = env.market_data(true);
+                assert_eq!(before_group.assets[0].oi_eff_long_q, 0, "{context}");
+                assert_eq!(before_group.assets[0].oi_eff_short_q, 0, "{context}");
+                assert!(
+                    env.current_slot() > before_profile.mark_ewma_last_slot,
+                    "{context}: elapsed discovery capacity must be nonzero"
+                );
+                assert_ne!(
+                    accepted_mark_reference_clamp(ANCHOR, target, CAP_BPS, ELAPSED_SLOTS),
+                    ANCHOR,
+                    "{context}: the quote must permit movement when funded"
+                );
+
+                for (phase, size_q, quote, expected_oi) in [
+                    ("open", open_q, target, POS_SCALE),
+                    ("close", -open_q, ANCHOR, 0),
+                ] {
+                    configure_accepted_mark_target_quote(&mut env, route, ANCHOR, quote)
+                        .unwrap_or_else(|error| panic!("{context}/{phase}: quote: {error}"));
+                    let trade = submit_accepted_mark_trade(&mut env, route, size_q, quote)
+                        .unwrap_or_else(|error| panic!("{context}/{phase}: trade: {error}"));
+                    max_cu = max_cu.max(trade.compute_units);
+                    let profile = env.primary_profile(0);
+                    let group = env.primary_market_state().1;
+                    assert_eq!(
+                        profile.mark_ewma_e6, before_profile.mark_ewma_e6,
+                        "{context}/{phase}"
+                    );
+                    assert_eq!(group.assets[0].effective_price, ANCHOR, "{context}/{phase}");
+                    assert_eq!(
+                        group.assets[0].raw_oracle_target_price, ANCHOR,
+                        "{context}/{phase}"
+                    );
+                    assert_eq!(
+                        group.assets[0].oi_eff_long_q, expected_oi,
+                        "{context}/{phase}"
+                    );
+                    assert_eq!(
+                        group.assets[0].oi_eff_short_q, expected_oi,
+                        "{context}/{phase}"
+                    );
+                    assert_eq!(
+                        group.insurance, before_group.insurance,
+                        "{context}/{phase}: no fees"
+                    );
+                    assert_eq!(
+                        accepted_mark_pair_value_and_insurance(&env),
+                        before_pair_value,
+                        "{context}/{phase}"
+                    );
+                    assert_eq!(
+                        env.all_token_account_data(),
+                        before_tokens,
+                        "{context}/{phase}"
+                    );
+                    assert_eq!(env.market_data(true), before_foreign, "{context}/{phase}");
+                    crate::support::fuzz_model::assert_public_stock_census(&context, &env)
+                        .unwrap_or_else(|error| panic!("{context}/{phase}: stock: {error}"));
+                    crate::support::fuzz_model::assert_public_encumbrance_census(&context, &env)
+                        .unwrap_or_else(|error| panic!("{context}/{phase}: encumbrance: {error}"));
+                }
+
+                let group = env.primary_market_state().1;
+                let outcome = AcceptedMarkEconomicOutcome {
+                    actor_values: accepted_mark_actor_values(&env),
+                    mark: env.primary_profile(0).mark_ewma_e6,
+                    raw_target: group.assets[0].raw_oracle_target_price,
+                    effective_price: group.assets[0].effective_price,
+                    insurance: group.insurance,
+                    capital_total: group.c_tot,
+                    vault: group.vault,
+                    token_supply: env.token_supply_observed(),
+                };
+                if let Some(expected) = &expected_outcome {
+                    assert_eq!(&outcome, expected, "{context}: route economics");
+                } else {
+                    expected_outcome = Some(outcome);
+                }
+                world_count += 1;
+            }
+        }
+    }
+    assert_eq!(world_count, 16, "two modes x two directions x four routes");
+    assert!(max_cu < crate::support::v16_svm::TX_CU_LIMIT);
 }
 
 #[test]

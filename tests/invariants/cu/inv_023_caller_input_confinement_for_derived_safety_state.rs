@@ -17,6 +17,320 @@
 
 use super::*;
 
+use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::{
+    inv018_public_spl_market, inv018_public_spl_market_with_params,
+};
+use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
+
+fn inv023_boundary_send(
+    env: &mut V16CuEnv,
+    instruction: Instruction,
+    expected: Option<InstructionError>,
+    label: &str,
+) -> u64 {
+    env.svm.expire_blockhash();
+    let tx = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), instruction],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &env.admin],
+        env.svm.latest_blockhash(),
+    );
+    tx.verify().unwrap();
+    assert!(bincode::serialize(&tx).unwrap().len() <= 1232);
+    let mut keys = tx.message.account_keys.clone();
+    keys.extend([env.mint, env.vault, solana_sdk::sysvar::clock::ID]);
+    keys.sort_unstable();
+    keys.dedup();
+    let before: Vec<_> = keys.iter().map(|key| env.svm.get_account(key)).collect();
+    let fee = FeeStructure::default().lamports_per_signature
+        * u64::from(tx.message.header.num_required_signatures);
+    let result = env.svm.send_transaction(tx);
+    let rejected = expected.is_some();
+    let cu = match (result, expected) {
+        (Ok(meta), None) => meta.compute_units_consumed,
+        (Err(failure), Some(error)) => {
+            assert_eq!(
+                failure.err,
+                TransactionError::InstructionError(2, error),
+                "{label}"
+            );
+            failure.meta.compute_units_consumed
+        }
+        (actual, expected) => panic!("{label}: expected {expected:?}, got {actual:?}"),
+    };
+    assert_cu_within(label, cu, CRANK_CU_LIMIT);
+    for (key, mut account) in keys.into_iter().zip(before) {
+        if key == env.payer.pubkey() {
+            account.as_mut().unwrap().lamports -= fee;
+        } else if !rejected && (key == env.market || env.portfolios.contains(&key)) {
+            continue;
+        }
+        assert_eq!(env.svm.get_account(&key), account, "{label}: {key}");
+    }
+    cu
+}
+
+#[test]
+fn v16_program_boundary_product_ewma_fields_cannot_select_authenticated_time() {
+    let mut worlds = 0;
+    let mut peak = 0;
+    for price in [
+        percolator::MAX_ORACLE_PRICE - 1,
+        percolator::MAX_ORACLE_PRICE,
+    ] {
+        for halflife in [0, 1, u64::MAX - 1, u64::MAX] {
+            for min_fee in [0, 1, u64::MAX - 1, u64::MAX] {
+                let mut env = inv018_public_spl_market(0);
+                set_test_clock(&mut env, 7, 100);
+                for (now_slot, sequence) in [
+                    (0, 1),
+                    (1, 2),
+                    (u64::MAX - 1, u64::MAX - 1),
+                    (u64::MAX, u64::MAX),
+                ] {
+                    let ix = Instruction {
+                        program_id: env.program_id,
+                        accounts: vec![
+                            AccountMeta::new(env.admin.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                        ],
+                        data: ProgInstruction::ConfigureEwmaMark {
+                            market_id: env.asset_market_id(0),
+                            authority_epoch: env.control_sequences(0).authority_epoch,
+                            observation_sequence: sequence,
+                            asset_index: 0,
+                            now_slot,
+                            initial_mark_e6: price,
+                            mark_ewma_halflife_slots: halflife,
+                            mark_min_fee: min_fee,
+                        }
+                        .encode(),
+                    };
+                    peak = peak.max(inv023_boundary_send(&mut env, ix,
+                        (halflife == 0).then_some(InstructionError::Custom(PercolatorError::InvalidInstruction as u32)),
+                        &format!("EWMA price={price} halflife={halflife} fee={min_fee} caller={now_slot}")));
+                    assert_eq!(
+                        env.control_sequences(0).oracle_observation,
+                        if halflife == 0 { 0 } else { sequence }
+                    );
+                    let (cfg, group) = env.market_state();
+                    assert_eq!((group.vault, group.c_tot, group.insurance), (0, 0, 0));
+                    assert_eq!(
+                        (
+                            group.assets[0].oi_eff_long_q,
+                            group.assets[0].oi_eff_short_q
+                        ),
+                        (0, 0)
+                    );
+                    assert_eq!(env.control_sequences(0).trade_fee, 0);
+                    if halflife != 0 {
+                        assert_eq!(
+                            cfg.oracle_mode,
+                            percolator_prog::constants::ORACLE_MODE_EWMA_MARK
+                        );
+                        assert_eq!(cfg.mark_ewma_halflife_slots, halflife);
+                        assert_eq!(cfg.mark_min_fee, min_fee);
+                        assert_eq!(cfg.mark_ewma_e6, price);
+                        assert_eq!(cfg.oracle_target_price_e6, price);
+                        assert_eq!(cfg.mark_ewma_last_slot, 7);
+                        assert_eq!(cfg.last_good_oracle_slot, 7);
+                        assert_eq!(group.assets[0].slot_last, 7);
+                        assert_eq!(group.assets[0].effective_price, price);
+                    }
+                }
+                // Zero halflife failures do not consume MAX; a mode change is still live.
+                let ix = Instruction {
+                    program_id: env.program_id,
+                    accounts: vec![
+                        AccountMeta::new(env.admin.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                    ],
+                    data: ProgInstruction::ConfigureAuthMark {
+                        market_id: env.asset_market_id(0),
+                        authority_epoch: env.control_sequences(0).authority_epoch,
+                        observation_sequence: u64::MAX,
+                        asset_index: 0,
+                        now_slot: u64::MAX,
+                        initial_mark_e6: 1,
+                    }
+                    .encode(),
+                };
+                peak = peak.max(inv023_boundary_send(
+                    &mut env,
+                    ix,
+                    (halflife != 0).then_some(InstructionError::Custom(
+                        PercolatorError::EngineStale as u32,
+                    )),
+                    "cross-mode terminal observation sequence",
+                ));
+                assert_eq!(env.control_sequences(0).oracle_observation, u64::MAX);
+                if halflife == 0 {
+                    let (cfg, group) = env.market_state();
+                    assert_eq!(
+                        cfg.oracle_mode,
+                        percolator_prog::constants::ORACLE_MODE_AUTH_MARK
+                    );
+                    assert_eq!(
+                        (
+                            cfg.mark_ewma_e6,
+                            cfg.mark_ewma_last_slot,
+                            group.assets[0].slot_last
+                        ),
+                        (1, 7, 7)
+                    );
+                }
+                worlds += 1;
+            }
+        }
+    }
+    assert_eq!(worlds, 32);
+    eprintln!("INV-023 EWMA boundary product: {worlds} worlds, peak {peak} CU");
+}
+
+#[test]
+fn v16_program_boundary_product_crank_shape_and_tail_counts_confine_caller_slot() {
+    let max = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
+    assert_eq!(max, 14, "revisit the configured-scope boundary product");
+    let mut worlds = 0;
+    let mut peak = 0;
+    // 14 is the portfolio exposure cap, not the observation cap (16).
+    for count in [0, 1, max - 1, max, max + 1, 16, 17, 254, 255] {
+        let mut canonical = None;
+        for caller_slot in [0, 1, u64::MAX - 1, u64::MAX] {
+            let mut env = inv018_public_spl_market_with_params(
+                0,
+                V16CuMarketParams {
+                    max_portfolio_assets: percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS,
+                    ..V16CuMarketParams::default()
+                },
+            );
+            let portfolio_key = Keypair::new();
+            system_create_account_for_test(
+                &mut env.svm,
+                &env.payer,
+                &portfolio_key,
+                env.portfolio_account_len,
+                env.program_id,
+            );
+            let portfolio = portfolio_key.pubkey();
+            env.send(
+                ProgInstruction::InitPortfolio,
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[&env.admin.insecure_clone()],
+            )
+            .unwrap();
+            env.portfolios.push(portfolio);
+            set_test_clock(&mut env, 1, 100);
+            let instruction = |env: &V16CuEnv, count: usize, tail_count: u8| Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                data: ProgInstruction::PermissionlessCrank {
+                    now_slot: caller_slot,
+                    observations: (0..count)
+                        .map(|asset| CrankObservationHint {
+                            asset_index: asset as u16,
+                            oracle_accounts: if asset + 1 == count { tail_count } else { 0 },
+                        })
+                        .collect(),
+                }
+                .encode(),
+            };
+            // Supported shapes reach the malformed tail after up to thirteen valid hints.
+            // Counts 15/16 instead reject the first unconfigured asset; 17+ fail decode.
+            if count != 0 {
+                for tail_count in [1, u8::MAX - 1, u8::MAX] {
+                    let ix = instruction(&env, count, tail_count);
+                    let error = if count > 16 {
+                        InstructionError::InvalidInstructionData
+                    } else {
+                        InstructionError::Custom(PercolatorError::InvalidInstruction as u32)
+                    };
+                    peak = peak.max(inv023_boundary_send(
+                        &mut env,
+                        ix,
+                        Some(error),
+                        &format!("crank count={count} tail={tail_count} caller={caller_slot}"),
+                    ));
+                }
+            }
+            let ix = instruction(&env, count, 0);
+            let expected = if count == 0 {
+                Some(InstructionError::Custom(
+                    PercolatorError::EngineNonProgress as u32,
+                ))
+            } else if count > 16 {
+                Some(InstructionError::InvalidInstructionData)
+            } else if count > max {
+                Some(InstructionError::Custom(
+                    PercolatorError::InvalidInstruction as u32,
+                ))
+            } else {
+                None
+            };
+            peak = peak.max(inv023_boundary_send(
+                &mut env,
+                ix,
+                expected,
+                "zero-tail shape boundary",
+            ));
+            if count != 0 && count <= max {
+                let group = env.market_state().1;
+                let slots: Vec<_> = group
+                    .assets
+                    .iter()
+                    .take(max)
+                    .map(|asset| asset.slot_last)
+                    .collect();
+                assert!(slots[..count].iter().all(|slot| *slot == 1));
+                let frame = (
+                    group.current_slot,
+                    slots,
+                    group.vault,
+                    group.c_tot,
+                    group.insurance,
+                    env.portfolio_state(portfolio).capital.get(),
+                );
+                if let Some(ref expected) = canonical {
+                    assert_eq!(&frame, expected);
+                } else {
+                    canonical = Some(frame);
+                }
+            } else {
+                // A decoder/scope failure must leave the one-hint canonical route usable.
+                let ix = instruction(&env, 1, 0);
+                peak = peak.max(inv023_boundary_send(&mut env, ix, None, "one-hint retry"));
+                assert_eq!(env.market_state().1.assets[0].slot_last, 1);
+            }
+            let group = env.market_state().1;
+            let account = env.portfolio_state(portfolio);
+            assert_eq!((account.capital.get(), account.pnl.get()), (0, 0));
+            assert!(account
+                .legs
+                .iter()
+                .all(|leg| !leg.try_to_runtime().unwrap().active));
+            assert_eq!((group.vault, group.c_tot, group.insurance), (0, 0, 0));
+            assert!(group
+                .assets
+                .iter()
+                .take(max)
+                .all(|asset| asset.effective_price == 100
+                    && asset.oi_eff_long_q == 0
+                    && asset.oi_eff_short_q == 0));
+            worlds += 1;
+        }
+    }
+    assert_eq!(worlds, 36);
+    eprintln!("INV-023 crank boundary product: {worlds} worlds, peak {peak} CU");
+}
+
 fn assert_late_bad_crank_hint_rolls_back(label: &str, bad_tail: CrankObservationHint) {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
@@ -417,13 +731,13 @@ fn v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes() {
     }
     assert_eq!(role_variants, production_variants);
 
-    // INV-083 owns the 234 field-or-no-data boundary matrix. Source-lock the composition edge so
+    // INV-083 owns the 239 field-or-no-data boundary matrix. Source-lock the composition edge so
     // its closure cannot silently disappear while INV-023 continues to claim it.
     assert!(inv023_source_contains_test(
         BOUNDARY_TESTS,
         "v16_program_every_public_input_field_has_a_boundary_profile_and_executable_witness",
     ));
-    assert!(BOUNDARY_TESTS.contains("const EXPECTED_FIELD_COUNT: usize = 234;"));
+    assert!(BOUNDARY_TESTS.contains("const EXPECTED_FIELD_COUNT: usize = 239;"));
     assert!(BOUNDARY_TESTS.contains("const EXPECTED_TYPE_COUNT: usize = 52;"));
 
     let dispatcher = inv023_dispatcher_source(PRODUCTION);

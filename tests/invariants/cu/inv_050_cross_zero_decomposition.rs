@@ -559,6 +559,294 @@ fn v16_program_post_adl_generated_interior_quantities_span_ratios_and_directions
     );
 }
 
+#[test]
+fn v16_program_adl_maker_reduction_bounds_taker_cross_zero_and_matched_book() {
+    use support::fuzz_model::independent_health_certificate;
+    use support::reference_math::{mul_div_ceil, mul_div_floor};
+
+    // A smaller unit-index taker must not flip even when the ADL maker reduces
+    // and both absolute exposures shrink. The exact taker close remains live.
+    for route in AdlCrossZeroRoute::ALL {
+        let mut env = V16CuEnv::new();
+        env.configure_auth_mark_with_cu(0, 100);
+        let owners = std::array::from_fn::<_, 5, _>(|_| Keypair::new());
+        let accounts = owners.each_ref().map(|owner| env.create_portfolio(owner));
+        let [maker, loser, other_long, taker, other_short] = accounts;
+        let deposits = [1_000, 900, 1_000_000, 1_000_000, 1_000_000];
+        let sources =
+            std::array::from_fn::<_, 5, _>(|i| env.deposit(&owners[i], accounts[i], deposits[i]));
+        for (long, short, q) in [(0, 1, 2 * POS_SCALE), (2, 3, POS_SCALE), (2, 4, POS_SCALE)] {
+            env.trade_asset_with_cu(
+                0,
+                &owners[long],
+                accounts[long],
+                &owners[short],
+                accounts[short],
+                q as i128,
+                100,
+                0,
+            );
+        }
+        env.svm.warp_to_slot(6);
+        env.push_auth_mark_with_cu(6, 500);
+        let crank = ProgInstruction::PermissionlessCrank {
+            now_slot: 6,
+            observations: crank_observations(0),
+        };
+        for portfolio in [loser, maker] {
+            env.crank_if_actionable(portfolio, crank.clone());
+        }
+        env.crank_steps_after_market_catchup(loser, crank.clone(), 2);
+        for portfolio in accounts {
+            env.crank_if_actionable(portfolio, crank.clone());
+        }
+        let matcher = route.uses_cpi().then(|| {
+            let program = Pubkey::new_unique();
+            env.svm.add_program(
+                program,
+                &std::fs::read(auth_matcher_program_path()).unwrap(),
+            );
+            let (context, delegate, _) =
+                env.init_auth_matcher_context_via_system_create(program, &owners[0], maker);
+            (program, context, delegate)
+        });
+
+        let before = env.market_state().1;
+        let asset = before.assets[0];
+        assert_eq!(before.mode, MarketModeV16::Live);
+        assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
+        assert_eq!(
+            [asset.mode_long, asset.mode_short],
+            [SideModeV16::Normal; 2]
+        );
+        assert!(before
+            .pending_domain_loss_barriers
+            .iter()
+            .all(|count| *count == 0));
+        assert_eq!(asset.effective_price, 500);
+        assert_eq!(asset.raw_oracle_target_price, 500);
+        let maker_leg = active_leg_for_asset(&env.portfolio_state(maker), 0);
+        let raw_q = maker_leg.basis_pos_q.unsigned_abs();
+        let exit_q = mul_div_ceil(raw_q, asset.a_long, maker_leg.a_basis).unwrap();
+        assert_eq!(raw_q, 2 * POS_SCALE);
+        assert!(asset.a_long < ADL_ONE && asset.a_long > 0);
+        assert_eq!(asset.a_short, ADL_ONE);
+        assert!(POS_SCALE < exit_q && exit_q < raw_q);
+        assert!(
+            exit_q - POS_SCALE < POS_SCALE,
+            "even the maker's exact exit would shrink taker absolute exposure"
+        );
+        assert!(
+            asset.oi_eff_long_q >= raw_q + 1,
+            "pooled preflight must admit oversized maker reductions"
+        );
+        assert!(
+            active_leg_for_asset(&env.portfolio_state(loser), 0)
+                .basis_pos_q
+                .unsigned_abs()
+                < raw_q
+        );
+
+        // Decode every leg independently: effective exposure, retained attribution,
+        // and loss weights are separate quantities, including after the taker clears.
+        let census = |env: &V16CuEnv| {
+            let group = env.market_state().1;
+            let asset = group.assets[0];
+            let mut oi = [0; 2];
+            let mut counts = [0; 2];
+            let mut weights = [0; 2];
+            let positions = accounts.map(|key| {
+                let state = env.portfolio_state(key);
+                let legs: Vec<_> = state
+                    .legs
+                    .iter()
+                    .map(|leg| leg.try_to_runtime().unwrap())
+                    .filter(|leg| leg.active)
+                    .collect();
+                assert!(legs.len() <= 1);
+                legs.first().map_or(0, |leg| {
+                    assert_eq!(leg.asset_index, 0);
+                    let (side, a, epoch, sign) = match leg.side {
+                        SideV16::Long => (0, asset.a_long, asset.epoch_long, 1),
+                        SideV16::Short => (1, asset.a_short, asset.epoch_short, -1),
+                    };
+                    assert_eq!(leg.epoch_snap, epoch);
+                    assert!(a > 0 && a <= leg.a_basis);
+                    let effective =
+                        mul_div_ceil(leg.basis_pos_q.unsigned_abs(), a, leg.a_basis).unwrap();
+                    assert!(
+                        effective > 0,
+                        "no zero-basis obligation in this solvent fixture"
+                    );
+                    assert_eq!(leg.basis_pos_q.signum(), sign);
+                    assert_eq!(
+                        leg.loss_weight,
+                        mul_div_ceil(
+                            leg.basis_pos_q.unsigned_abs(),
+                            percolator::SOCIAL_WEIGHT_SCALE,
+                            leg.a_basis,
+                        )
+                        .unwrap()
+                    );
+                    oi[side] += effective;
+                    counts[side] += 1;
+                    weights[side] += leg.loss_weight;
+                    sign * effective as i128
+                })
+            });
+            assert_eq!(positions.iter().sum::<i128>(), 0);
+            assert_eq!(oi, [asset.oi_eff_long_q, asset.oi_eff_short_q]);
+            assert_eq!(
+                counts,
+                [asset.stored_pos_count_long, asset.stored_pos_count_short]
+            );
+            assert_eq!(
+                weights,
+                [asset.loss_weight_sum_long, asset.loss_weight_sum_short]
+            );
+            assert_eq!(
+                [
+                    asset.pending_obligation_count_long,
+                    asset.pending_obligation_count_short
+                ],
+                [0; 2]
+            );
+            assert_eq!(
+                group.c_tot,
+                accounts
+                    .map(|key| env.portfolio_state(key).capital.get())
+                    .iter()
+                    .sum()
+            );
+            assert_eq!(group.vault, deposits.iter().sum());
+            assert_eq!(group.vault, env.token_amount(env.vault) as u128);
+            assert!(group.vault >= group.c_tot + group.insurance);
+            positions
+        };
+        let positions_before = census(&env);
+        assert_eq!(positions_before[0], exit_q as i128);
+        assert_eq!(positions_before[3], -(POS_SCALE as i128));
+        let economics = accounts.map(|key| {
+            let state = env.portfolio_state(key);
+            (state.capital.get(), state.pnl.get())
+        });
+        let custody_keys = [sources.as_slice(), &[env.vault, env.mint]].concat();
+        let custody_before: Vec<_> = custody_keys
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect();
+        let mut tracked = [
+            accounts.as_slice(),
+            &owners.each_ref().map(|owner| owner.pubkey()),
+            custody_keys.as_slice(),
+            &[env.market],
+        ]
+        .concat();
+        if let Some((program, context, delegate)) = matcher {
+            tracked.extend([program, context, delegate]);
+        }
+        for invalid_q in [POS_SCALE + 1, exit_q, raw_q + 1] {
+            let snapshot: Vec<_> = tracked.iter().map(|key| env.svm.get_account(key)).collect();
+            assert_adl_route_rejects_exactly(
+                &mut env,
+                route,
+                &owners[3],
+                taker,
+                &owners[0],
+                maker,
+                invalid_q as i128,
+                500,
+                matcher,
+                true,
+                "a reducing ADL maker cannot authorize the unit-index taker's new side",
+            );
+            assert_eq!(
+                tracked
+                    .iter()
+                    .map(|key| env.svm.get_account(key))
+                    .collect::<Vec<_>>(),
+                snapshot
+            );
+        }
+        let untouched = [loser, other_long, other_short].map(|key| env.svm.get_account(&key));
+        let cu = try_adl_cross_zero_route(
+            &mut env,
+            route,
+            &owners[3],
+            taker,
+            &owners[0],
+            maker,
+            POS_SCALE as i128,
+            500,
+            matcher,
+        )
+        .expect("exact taker close must leave the ADL maker strictly reduced");
+        assert_cu_within(
+            "ADL maker reduction with exact taker close",
+            cu,
+            TRADE_CU_LIMIT,
+        );
+        let after = env.market_state().1;
+        let mut expected = positions_before;
+        expected[0] -= POS_SCALE as i128;
+        expected[3] = 0;
+        assert_eq!(census(&env), expected);
+        assert_eq!(
+            after.assets[0].oi_eff_long_q,
+            asset.oi_eff_long_q - POS_SCALE
+        );
+        assert_eq!(
+            after.assets[0].oi_eff_short_q,
+            asset.oi_eff_short_q - POS_SCALE
+        );
+        assert_eq!(after.assets[0].a_long, asset.a_long);
+        assert_eq!(
+            [loser, other_long, other_short].map(|key| env.svm.get_account(&key)),
+            untouched
+        );
+        assert_eq!(
+            custody_keys
+                .iter()
+                .map(|key| env.svm.get_account(key))
+                .collect::<Vec<_>>(),
+            custody_before
+        );
+        for (i, key) in accounts.into_iter().enumerate() {
+            let state = env.portfolio_state(key);
+            assert_eq!((state.capital.get(), state.pnl.get()), economics[i]);
+            if i == 0 || i == 3 {
+                assert_eq!(
+                    health_cert(&state),
+                    independent_health_certificate(
+                        "post-ADL asymmetric cross-zero",
+                        &after,
+                        &state
+                    )
+                    .unwrap()
+                );
+            }
+        }
+        assert!(!has_active_leg_for_asset(&env.portfolio_state(taker), 0));
+        let remaining = active_leg_for_asset(&env.portfolio_state(maker), 0);
+        let remaining_raw =
+            mul_div_floor(exit_q - POS_SCALE, maker_leg.a_basis, asset.a_long).unwrap();
+        assert_eq!(remaining.side, SideV16::Long);
+        assert_eq!(remaining.a_basis, maker_leg.a_basis);
+        assert_eq!(remaining.basis_pos_q, remaining_raw as i128);
+        assert!(
+            remaining_raw > exit_q - POS_SCALE,
+            "the reduced maker must still carry real ADL residue"
+        );
+        println!(
+            "{route:?}: maker effective {exit_q} -> {}, taker close {}, OI {} -> {}, {cu} CU",
+            exit_q - POS_SCALE,
+            POS_SCALE,
+            asset.oi_eff_long_q,
+            after.assets[0].oi_eff_long_q
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn create_public_active_close_on_asset(
     env: &mut V16CuEnv,

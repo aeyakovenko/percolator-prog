@@ -13,6 +13,10 @@
 //! also runs the independent stock and encumbrance census after every public
 //! setup, mark, crank, lifecycle, and forfeit transition, reconciles engine
 //! custody to SPL balances, and proves the route does not mint supply.
+//! After the owner-forfeit prerequisite, the same four cells require a bounded
+//! keeper-only stale-resolution/payout suffix for every funded portfolio, with
+//! exact owner-window and terminal-retry rollback. Economic completion does not
+//! claim permissionless portfolio deletion or asset/market retirement.
 //! Supplementary public-route evidence is intentionally not duplicated here:
 //! `cu/inv_028_source_domain_realizability_cap.rs` takes a live counterparty lien through exact
 //! expiry/impairment and terminal disposition for all funded portfolios, while
@@ -24,9 +28,11 @@
 //! publicly reachable topology.
 
 use crate::support::fuzz_model::{assert_public_encumbrance_census, assert_public_stock_census};
-use crate::support::v16_svm::{MarketConfig, V16Svm};
-use percolator::{BOUND_SCALE, POS_SCALE};
+use crate::support::v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT};
+use percolator::{active_bitmap_is_empty, MarketModeV16, BOUND_SCALE, POS_SCALE};
+use percolator_prog::error::PercolatorError;
 use percolator_prog::ix::CrankObservationHint;
+use solana_sdk::signature::Signer;
 
 const ASSET: u16 = 0;
 const SOURCE_DOMAIN: usize = 0;
@@ -46,6 +52,34 @@ fn assert_resource_census(label: &str, env: &V16Svm) {
         .unwrap_or_else(|error| panic!("{label} stock census failed: {error}"));
     assert_public_encumbrance_census(label, env)
         .unwrap_or_else(|error| panic!("{label} encumbrance census failed: {error}"));
+}
+
+fn assert_resource_terminal(env: &V16Svm, actor: usize) {
+    let account = env.primary_portfolio(actor);
+    let market = env.primary_market_state().1;
+    assert_eq!(market.mode, MarketModeV16::Resolved);
+    assert_eq!(account.capital.get(), 0);
+    assert_eq!(account.pnl.get(), 0);
+    assert_eq!(account.reserved_pnl.get(), 0);
+    assert_eq!(account.fee_credits.get(), 0);
+    assert_eq!(account.cancel_deposit_escrow.get(), 0);
+    assert_eq!(account.stale_state, 0);
+    assert_eq!(account.b_stale_state, 0);
+    assert_eq!(account.rebalance_lock, 0);
+    assert_eq!(account.liquidation_lock, 0);
+    assert_eq!(account.last_fee_slot.get(), market.resolved_slot);
+    assert_eq!(account.health_cert.valid, 0);
+    assert!(active_bitmap_is_empty(
+        account.active_bitmap.map(|word| word.get())
+    ));
+    assert!(account
+        .source_domains
+        .iter()
+        .all(|source| !source.is_occupied()));
+    let close = account.close_progress.try_to_runtime().unwrap();
+    assert!(!close.active || (close.finalized && close.residual_remaining == 0));
+    let receipt = account.resolved_payout_receipt.try_to_runtime().unwrap();
+    assert!(!receipt.present || receipt.finalized);
 }
 
 fn crank_to_fixed_point(
@@ -88,6 +122,7 @@ fn v16_program_recovery_resource_failure_lattice_preserves_public_exit() {
         };
         config.actor_deposits[0] = 10;
         config.actor_deposits[1] = 3;
+        let deposits = config.actor_deposits;
         let mut env = V16Svm::new([0x78; 32], config);
         env.configure_permissionless_resolve(100, 1)
             .expect("configure public Recovery timing");
@@ -247,5 +282,133 @@ fn v16_program_recovery_resource_failure_lattice_preserves_public_exit() {
         );
         assert_eq!(after.vault as u64, env.token_amount(env.vault));
         assert_eq!(env.token_supply_observed(), supply_before);
+
+        // Owner forfeit ends here. No owner/admin participates in the economic completion.
+        // Freeze this public checkpoint's senior claims, not a full setup-history entitlement.
+        let principal: [u128; PRIMARY_ACTOR_COUNT] = std::array::from_fn(|actor| {
+            let account = env.primary_portfolio(actor);
+            assert_eq!(account.pnl.get(), 0);
+            assert_eq!(account.reserved_pnl.get(), 0);
+            account.capital.get()
+        });
+        assert!(principal[0] > 0 && principal[0] <= deposits[0]);
+        assert_eq!(principal[1], 0);
+        assert_eq!(principal[2..], deposits[2..]);
+        let funded = deposits.iter().sum::<u128>()
+            + u128::from(has_expired_backing)
+            + u128::from(has_tiny_insurance);
+        assert_eq!(after.vault, funded);
+        let destinations_before: [u64; PRIMARY_ACTOR_COUNT] =
+            std::array::from_fn(|actor| env.token_amount(env.actors[actor].destination_token));
+        let cfg = env.primary_market_state().0;
+        let maturity = cfg.last_good_oracle_slot + cfg.permissionless_resolve_stale_slots;
+        env.begin_public_trace();
+        env.resolve_stale_permissionless(maturity)
+            .expect("keeper resolves the stale resource-failure world at exact maturity");
+        assert_eq!(env.primary_market_state().1.mode, MarketModeV16::Resolved);
+        assert_resource_census("INV-078 resource world resolved", &env);
+        let payout_slot = maturity + cfg.force_close_delay_slots;
+        for use_crank in [false, true] {
+            let result = if use_crank {
+                env.crank(0, maturity, vec![])
+            } else {
+                env.close_resolved_primary(0)
+            };
+            let error = result.expect_err("owner window is not yet permissionless");
+            assert!(error.contains(&format!(
+                "Custom({})",
+                PercolatorError::ExpectedSigner as u32
+            )));
+        }
+        env.warp_to_slot(payout_slot);
+        let mut paid = 0u128;
+        for actor in 0..PRIMARY_ACTOR_COUNT {
+            let result = if actor % 2 == 0 {
+                env.crank(actor, payout_slot, vec![])
+            } else {
+                env.close_resolved_primary(actor)
+            };
+            result.expect("one bounded keeper-only terminal call per resource-world account");
+            assert_resource_terminal(&env, actor);
+            let payout =
+                env.token_amount(env.actors[actor].destination_token) - destinations_before[actor];
+            let expected = principal[actor];
+            assert_eq!(
+                u128::from(payout),
+                expected,
+                "resource cell {resource_mask} actor {actor}"
+            );
+            paid += expected;
+            assert_resource_census("INV-078 resource world payout", &env);
+            for other in 0..PRIMARY_ACTOR_COUNT {
+                let delivered = if other <= actor { principal[other] } else { 0 };
+                assert_eq!(
+                    env.primary_portfolio(other).capital.get(),
+                    principal[other] - delivered
+                );
+                assert_eq!(
+                    u128::from(
+                        env.token_amount(env.actors[other].destination_token)
+                            - destinations_before[other]
+                    ),
+                    delivered,
+                    "resource cell {resource_mask} payout prefix {actor} owner {other}"
+                );
+            }
+            assert_eq!(
+                env.primary_market_state().1.c_tot,
+                principal.iter().sum::<u128>() - paid
+            );
+            assert_eq!(env.primary_market_state().1.vault, funded - paid);
+            assert_eq!(u128::from(env.token_amount(env.vault)), funded - paid);
+            for use_crank in [false, true] {
+                let retry = if use_crank {
+                    env.crank(actor, payout_slot, vec![])
+                } else {
+                    env.close_resolved_primary(actor)
+                };
+                let error =
+                    retry.expect_err("completed resource-world account cannot progress twice");
+                assert!(error.contains(&format!(
+                    "Custom({})",
+                    PercolatorError::EngineNonProgress as u32
+                )));
+            }
+        }
+        let terminal = env.primary_market_state().1;
+        assert_eq!(terminal.c_tot, 0);
+        assert_eq!(terminal.vault, funded - principal.iter().sum::<u128>());
+        assert_eq!(
+            terminal.materialized_portfolio_count,
+            PRIMARY_ACTOR_COUNT as u64
+        );
+        assert_eq!(env.token_supply_observed(), supply_before);
+        let trace = env.finish_public_trace();
+        trace
+            .validate_public_execution()
+            .expect("public keeper-only completion with exact rollback");
+        assert_eq!(trace.steps.len(), 3 + 3 * PRIMARY_ACTOR_COUNT);
+        assert_eq!(
+            trace.steps.iter().filter(|step| step.succeeded).count(),
+            1 + PRIMARY_ACTOR_COUNT
+        );
+        for step in &trace.steps {
+            assert_eq!(step.transaction_signers, vec![step.fee_payer]);
+            assert_ne!(step.fee_payer.to_bytes(), cfg.marketauth);
+            assert!(env
+                .actors
+                .iter()
+                .all(|actor| actor.signer.pubkey() != step.fee_payer));
+            assert!(step
+                .accounts
+                .iter()
+                .all(|meta| !meta.is_signer || meta.key == step.fee_payer));
+        }
+        eprintln!(
+            "INV-078 resource cell {resource_mask}: keeper_calls={} paid={paid} remaining_vault={} max_cu={}",
+            trace.steps.len(),
+            terminal.vault,
+            trace.steps.iter().filter_map(|step| step.compute_units).max().unwrap()
+        );
     }
 }

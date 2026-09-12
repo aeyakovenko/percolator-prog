@@ -10,8 +10,595 @@
 //! ordinary risk-increase may create a counterparty-backed source lien when a
 //! fresh backing bucket exists, but the same route must not silently consume
 //! unreserved domain insurance or populate the insurance-backed lien fields.
+//! The mixed-reserve bundle adds a live-lien payout boundary: insurance cannot
+//! replace backing already reserved for risk, even within an atomic transaction.
 
 use super::*;
+
+#[test]
+fn v16_program_mixed_reserve_payout_bundle_preserves_live_lien_classification() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const DOMAIN: usize = 1;
+    const DEPOSIT: u128 = 313;
+    const COUNTERPARTY_DEPOSIT: u128 = 1_000;
+    const BACKING: u128 = 150;
+    const INSURANCE: u128 = 83;
+    const CLAIM: u128 = 20 * (105 - 100);
+    const LOSS: u128 = 10 * (100 - 95);
+    // Per-leg initial margin rounds up: 210 + ceil(11 * 95 / 10) = 315.
+    const LIEN: u128 = 210 + (11 * 95 + 9) / 10 - (DEPOSIT - LOSS);
+    // The counterparty's settled 100-atom loss also enters this backing bucket.
+    const TOTAL_BACKING: u128 = BACKING + CLAIM;
+    // Liened backing cannot also satisfy the remaining generic source-credit cap.
+    const SURPLUS: u128 = TOTAL_BACKING - CLAIM - LIEN;
+    const SUPPLY: u128 = DEPOSIT + COUNTERPARTY_DEPOSIT + BACKING + INSURANCE;
+
+    let mut env = inv018_public_spl_market_with_params(
+        6,
+        V16CuMarketParams {
+            max_portfolio_assets: 2,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            ..V16CuMarketParams::default()
+        },
+    );
+    let owners = [
+        Keypair::new(),
+        Keypair::new(),
+        Keypair::new(),
+        env.admin.insecure_clone(),
+    ];
+    for owner in &owners[..3] {
+        env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    }
+    for role in [
+        processor::ASSET_AUTH_INSURANCE,
+        processor::ASSET_AUTH_INSURANCE_OPERATOR,
+    ] {
+        env.try_update_per_asset_authority_with_cu(
+            &owners[3],
+            Some(&owners[2]),
+            0,
+            role,
+            owners[2].pubkey().to_bytes(),
+        )
+        .unwrap();
+    }
+    let wallets = owners.each_ref().map(Signer::pubkey);
+    let tokens =
+        wallets.map(|owner| create_ata_for_test(&mut env.svm, &env.payer, owner, env.mint));
+    for (token, amount) in
+        tokens
+            .into_iter()
+            .zip([DEPOSIT, COUNTERPARTY_DEPOSIT, INSURANCE, BACKING])
+    {
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &token,
+                &wallets[3],
+                &[],
+                amount as u64,
+            )
+            .unwrap(),
+            &[&owners[3]],
+        )
+        .unwrap();
+    }
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::set_authority(
+            &spl_token::ID,
+            &env.mint,
+            None,
+            spl_token::instruction::AuthorityType::MintTokens,
+            &wallets[3],
+            &[],
+        )
+        .unwrap(),
+        &[&owners[3]],
+    )
+    .unwrap();
+    let mint_before = env.svm.get_account(&env.mint).unwrap();
+    let mint = Mint::unpack(&mint_before.data).unwrap();
+    assert_eq!(
+        (u128::from(mint.supply), mint.mint_authority),
+        (SUPPLY, COption::None)
+    );
+
+    let funding_accounts = |env: &V16CuEnv, actor: usize| {
+        vec![
+            AccountMeta::new(wallets[actor], true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(tokens[actor], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ]
+    };
+    let mut portfolios = Vec::new();
+    for actor in 0..2 {
+        let key = Keypair::new();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &key,
+            env.portfolio_account_len,
+            env.program_id,
+        );
+        env.send(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(wallets[actor], true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(key.pubkey(), false),
+            ],
+            &[&owners[actor]],
+        )
+        .unwrap();
+        let mut accounts = funding_accounts(&env, actor);
+        accounts.insert(2, AccountMeta::new(key.pubkey(), false));
+        env.send(
+            env.deposit_ix(key.pubkey(), [DEPOSIT, COUNTERPARTY_DEPOSIT][actor]),
+            accounts,
+            &[&owners[actor]],
+        )
+        .unwrap();
+        portfolios.push(key.pubkey());
+        env.portfolios.push(key.pubkey());
+    }
+    let [winner, counterparty] = [portfolios[0], portfolios[1]];
+    let epoch = env.control_sequences(0).authority_epoch;
+    for (actor, ix) in [
+        (
+            2,
+            ProgInstruction::TopUpInsuranceDomain {
+                domain: DOMAIN as u16,
+                market_id: env.asset_market_id(0),
+                authority_epoch: epoch,
+                intent_id: 0,
+                amount: INSURANCE,
+            },
+        ),
+        (
+            3,
+            ProgInstruction::TopUpBackingBucket {
+                domain: DOMAIN as u16,
+                market_id: env.asset_market_id(0),
+                authority_epoch: epoch,
+                intent_id: 0,
+                backing_fee_bps: 0,
+                insurance_share_bps: 0,
+                amount: BACKING,
+                expiry_slot: 100,
+            },
+        ),
+    ] {
+        let cu = env
+            .send(ix, funding_accounts(&env, actor), &[&owners[actor]])
+            .unwrap();
+        assert_cu_within("INV-033 mixed reserve funding", cu, CUSTODY_CU_LIMIT);
+    }
+
+    env.svm.warp_to_slot(1);
+    for asset in 0..2 {
+        env.configure_auth_mark_for_asset_as_admin(asset, 1, 100);
+        let cu = env.trade_asset_with_cu(
+            asset,
+            &owners[0],
+            winner,
+            &owners[1],
+            counterparty,
+            [20, 10][asset as usize] * POS_SCALE as i128,
+            100,
+            0,
+        );
+        assert_cu_within("INV-033 open", cu, MULTI_ASSET_OPEN_TRADE_CU_LIMIT);
+    }
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 95);
+    for (portfolio, asset) in [(counterparty, 0), (winner, 0), (counterparty, 1)] {
+        let cu = env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations_for_assets(&[asset, 1 - asset]),
+            },
+        );
+        assert_cu_within("INV-033 settle", cu, CRANK_CU_LIMIT);
+    }
+    let trade_cu = env.trade_asset_with_cu(
+        1,
+        &owners[0],
+        winner,
+        &owners[1],
+        counterparty,
+        POS_SCALE as i128,
+        95,
+        0,
+    );
+    assert_cu_within(
+        "INV-033 create mixed-funded lien",
+        trade_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+
+    let assert_state = |env: &V16CuEnv,
+                        paid_insurance: u128,
+                        paid_backing: u128,
+                        lien: u128,
+                        converted: bool,
+                        withdrawn: bool| {
+        let group = env.market_state().1;
+        let a = env.portfolio_state(winner);
+        let b = env.portfolio_state(counterparty);
+        let source = state::portfolio_source_domain(&a, DOMAIN);
+        let remaining_claim = if converted { 0 } else { CLAIM };
+        let consumed = if converted { CLAIM } else { 0 };
+        let payout = if withdrawn { DEPOSIT - LOSS + CLAIM } else { 0 };
+        assert_eq!(
+            (a.capital.get(), a.pnl.get()),
+            (DEPOSIT - LOSS + consumed - payout, remaining_claim as i128)
+        );
+        assert_eq!(
+            (b.capital.get(), b.pnl.get()),
+            (COUNTERPARTY_DEPOSIT - CLAIM, LOSS as i128)
+        );
+        assert_eq!(
+            source.source_claim_bound_num.get(),
+            remaining_claim * BOUND_SCALE
+        );
+        assert_eq!(source.source_claim_liened_num.get(), lien * BOUND_SCALE);
+        assert_eq!(
+            source.source_claim_counterparty_liened_num.get(),
+            lien * BOUND_SCALE
+        );
+        assert_eq!(
+            source.source_lien_counterparty_backing_num.get(),
+            lien * BOUND_SCALE
+        );
+        assert_eq!(source.source_lien_effective_reserved.get(), lien);
+        let credit = &group.source_credit[DOMAIN];
+        let bucket = &group.source_backing_buckets[DOMAIN];
+        let backing = TOTAL_BACKING - paid_backing - consumed;
+        assert_eq!(
+            credit.positive_claim_bound_num,
+            remaining_claim * BOUND_SCALE
+        );
+        assert_eq!(
+            credit.exact_positive_claim_num,
+            remaining_claim * BOUND_SCALE
+        );
+        assert_eq!(credit.fresh_reserved_backing_num, backing * BOUND_SCALE);
+        assert_eq!(credit.valid_liened_backing_num, lien * BOUND_SCALE);
+        assert_eq!(credit.spent_backing_num, consumed * BOUND_SCALE);
+        assert_eq!(credit.provider_receivable_num, consumed * BOUND_SCALE);
+        assert_eq!(credit.credit_rate_num, percolator::CREDIT_RATE_SCALE);
+        assert_eq!(
+            bucket.fresh_unliened_backing_num,
+            (backing - lien) * BOUND_SCALE
+        );
+        assert_eq!(bucket.valid_liened_backing_num, lien * BOUND_SCALE);
+        assert_eq!(bucket.consumed_liened_backing_num, consumed * BOUND_SCALE);
+        for (account, face, reserved) in [(&a, remaining_claim, lien), (&b, LOSS, 0)] {
+            assert_eq!(
+                account
+                    .source_domains
+                    .iter()
+                    .map(|slot| slot.source_claim_bound_num.get())
+                    .sum::<u128>(),
+                face * BOUND_SCALE
+            );
+            assert_eq!(
+                account
+                    .source_domains
+                    .iter()
+                    .map(|slot| slot.source_claim_liened_num.get())
+                    .sum::<u128>(),
+                reserved * BOUND_SCALE
+            );
+            assert_eq!(
+                account
+                    .source_domains
+                    .iter()
+                    .map(|slot| slot.source_lien_counterparty_backing_num.get())
+                    .sum::<u128>(),
+                reserved * BOUND_SCALE
+            );
+            for slot in &account.source_domains {
+                assert_eq!(slot.source_claim_insurance_liened_num.get(), 0);
+                assert_eq!(slot.source_lien_insurance_backing_num.get(), 0);
+                assert_eq!(slot.source_lien_capital_at_risk_fee_revenue.get(), 0);
+            }
+        }
+        for (domain, credit) in group.source_credit.iter().enumerate() {
+            assert_eq!(credit.insurance_credit_reserved_num, 0);
+            assert_eq!(credit.valid_liened_insurance_num, 0);
+            assert_eq!(credit.impaired_liened_insurance_num, 0);
+            assert_eq!(credit.impaired_liened_backing_num, 0);
+            assert_eq!(
+                group.source_backing_buckets[domain].impaired_liened_backing_num,
+                0
+            );
+            assert_eq!(
+                group.source_backing_buckets[domain].utilization_fee_earnings,
+                0
+            );
+            assert_eq!(group.insurance_domain_spent[domain], 0);
+            assert_eq!(
+                group.insurance_domain_budget[domain],
+                if domain == DOMAIN {
+                    INSURANCE - paid_insurance
+                } else {
+                    0
+                }
+            );
+            if domain != DOMAIN {
+                let peer_claim = if domain == 2 { LOSS } else { 0 };
+                assert_eq!(credit.positive_claim_bound_num, peer_claim * BOUND_SCALE);
+                assert_eq!(credit.exact_positive_claim_num, peer_claim * BOUND_SCALE);
+                assert_eq!(credit.fresh_reserved_backing_num, peer_claim * BOUND_SCALE);
+                assert_eq!(credit.valid_liened_backing_num, 0);
+                let peer_bucket = &group.source_backing_buckets[domain];
+                assert_eq!(
+                    peer_bucket.fresh_unliened_backing_num,
+                    peer_claim * BOUND_SCALE
+                );
+                assert_eq!(peer_bucket.valid_liened_backing_num, 0);
+                assert_eq!(peer_bucket.consumed_liened_backing_num, 0);
+            }
+        }
+        assert_eq!(group.source_insurance_credit_reserved_total_atoms, 0);
+        assert_eq!(
+            group.source_claim_bound_total_num,
+            (remaining_claim + LOSS) * BOUND_SCALE
+        );
+        assert_eq!(group.pnl_pos_tot, remaining_claim + LOSS);
+        assert_eq!(group.insurance, INSURANCE - paid_insurance);
+        assert_domain_budget_remaining_total_consistent(&group, "INV-033 disjoint insurance");
+        assert_eq!(group.c_tot, a.capital.get() + b.capital.get());
+        assert_eq!(group.vault, SUPPLY - paid_insurance - paid_backing - payout);
+        assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+        assert_eq!(group.vault, group.c_tot + group.insurance + backing + LOSS);
+        assert_eq!(
+            tokens.map(|key| u128::from(env.token_amount(key))),
+            [payout, 0, paid_insurance, paid_backing]
+        );
+        assert_eq!(
+            group.vault
+                + tokens
+                    .iter()
+                    .map(|key| u128::from(env.token_amount(*key)))
+                    .sum::<u128>(),
+            SUPPLY
+        );
+        assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_before);
+    };
+    assert_state(&env, 0, 0, LIEN, false, false);
+    let portfolio_before = [winner, counterparty].map(|key| env.svm.get_account(&key));
+    let payout_accounts = |env: &V16CuEnv, actor: usize| {
+        vec![
+            AccountMeta::new(wallets[actor], true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(tokens[actor], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ]
+    };
+    let mut max_bundle_cu = 0;
+    for (amount, accepted) in [(SURPLUS + 1, false), (SURPLUS, true)] {
+        env.svm.expire_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[
+                heap_ix(),
+                ComputeBudgetInstruction::set_compute_unit_limit((2 * CUSTODY_CU_LIMIT) as u32),
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: payout_accounts(&env, 2),
+                    data: env
+                        .withdraw_insurance_asset_instruction(wallets[2], 0, INSURANCE)
+                        .encode(),
+                },
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: payout_accounts(&env, 3),
+                    data: ProgInstruction::WithdrawBackingBucket {
+                        domain: DOMAIN as u16,
+                        market_id: env.asset_market_id(0),
+                        authority_epoch: epoch,
+                        amount,
+                    }
+                    .encode(),
+                },
+            ],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &owners[2], &owners[3]],
+            env.svm.latest_blockhash(),
+        );
+        let fee = u64::from(tx.message.header.num_required_signatures)
+            * FeeStructure::default().lamports_per_signature;
+        let mut keys = tx.message.account_keys.clone();
+        keys.extend([
+            winner,
+            counterparty,
+            env.mint,
+            tokens[0],
+            tokens[1],
+            wallets[0],
+            wallets[1],
+        ]);
+        keys.sort();
+        keys.dedup();
+        let before = keys
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>();
+        let result = env.svm.send_transaction(tx);
+        let meta = if accepted {
+            result.expect("insurance and genuinely surplus backing are independently payable")
+        } else {
+            let failed = result.expect_err("insurance cannot replace one missing backing atom");
+            assert_eq!(
+                failed.err,
+                TransactionError::InstructionError(
+                    3,
+                    InstructionError::Custom(PercolatorError::EngineLockActive as u32)
+                )
+            );
+            assert!(
+                failed
+                    .meta
+                    .logs
+                    .iter()
+                    .any(|line| line == &format!("Program {} success", spl_token::ID)),
+                "insurance SPL transfer must complete before the backing rejection"
+            );
+            for (key, mut account) in keys.iter().zip(before) {
+                if *key == env.payer.pubkey() {
+                    account.as_mut().unwrap().lamports -= fee;
+                }
+                assert_eq!(
+                    env.svm.get_account(key),
+                    account,
+                    "mixed-payout rollback: {key}"
+                );
+            }
+            assert_state(&env, 0, 0, LIEN, false, false);
+            failed.meta
+        };
+        assert_cu_within(
+            "INV-033 mixed reserve payout bundle",
+            meta.compute_units_consumed,
+            2 * CUSTODY_CU_LIMIT,
+        );
+        max_bundle_cu = max_bundle_cu.max(meta.compute_units_consumed);
+        assert_eq!(
+            [winner, counterparty].map(|key| env.svm.get_account(&key)),
+            portfolio_before
+        );
+    }
+    assert_state(&env, INSURANCE, SURPLUS, LIEN, false, false);
+
+    for (asset, size, price) in [(1, 11, 95), (0, 20, 105)] {
+        let cu = env.trade_asset_with_cu(
+            asset,
+            &owners[0],
+            winner,
+            &owners[1],
+            counterparty,
+            -size * POS_SCALE as i128,
+            price,
+            0,
+        );
+        assert_cu_within(
+            "INV-033 flatten after reserve payout",
+            cu,
+            MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+        );
+        assert_state(&env, INSURANCE, SURPLUS, LIEN, false, false);
+    }
+    let flat_counterparty = env.svm.get_account(&counterparty);
+    let mut release_cu = 0;
+    let mut release_steps = 0;
+    for _ in 0..8 {
+        let a = env.portfolio_state(winner);
+        if state::portfolio_source_domain(&a, DOMAIN)
+            .source_lien_counterparty_backing_num
+            .get()
+            == 0
+        {
+            break;
+        }
+        let cu = env.crank(
+            winner,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations_for_assets(&[0, 1]),
+            },
+        );
+        assert_cu_within("INV-033 release", cu, CRANK_CU_LIMIT);
+        release_cu = release_cu.max(cu);
+        release_steps += 1;
+        let a = env.portfolio_state(winner);
+        let remaining = state::portfolio_source_domain(&a, DOMAIN)
+            .source_lien_counterparty_backing_num
+            .get();
+        assert!(
+            remaining == 0 || remaining == LIEN * BOUND_SCALE,
+            "one-domain release cannot partially relabel the lien"
+        );
+        assert_state(
+            &env,
+            INSURANCE,
+            SURPLUS,
+            remaining / BOUND_SCALE,
+            false,
+            false,
+        );
+        assert_eq!(env.svm.get_account(&counterparty), flat_counterparty);
+    }
+    assert_state(&env, INSURANCE, SURPLUS, 0, false, false);
+    assert!(release_cu > 0, "suffix must publicly release a real lien");
+    for portfolio in [winner, counterparty] {
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(
+            &env.portfolio_state(portfolio)
+        )));
+    }
+    let released_payout_cu =
+        env.withdraw_backing_bucket_to_admin_token_with_cu(tokens[3], DOMAIN as u16, LIEN);
+    assert_cu_within(
+        "INV-033 released backing payout",
+        released_payout_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_state(&env, INSURANCE, BACKING, 0, false, false);
+    // Provider withdrawal changes the risk epoch even for this now-flat owner.
+    let refresh_cu = env.crank(
+        winner,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations_for_assets(&[0, 1]),
+        },
+    );
+    assert_cu_within(
+        "INV-033 post-payout recertification",
+        refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert_state(&env, INSURANCE, BACKING, 0, false, false);
+    let convert_cu = env.convert_released_pnl_with_cu(&owners[0], winner, CLAIM);
+    assert_cu_within("INV-033 consume backing once", convert_cu, CUSTODY_CU_LIMIT);
+    assert_state(&env, INSURANCE, BACKING, 0, true, false);
+    let cu = env
+        .send(
+            env.withdraw_ix(winner, DEPOSIT - LOSS + CLAIM),
+            vec![
+                AccountMeta::new(wallets[0], true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(winner, false),
+                AccountMeta::new(tokens[0], false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owners[0]],
+        )
+        .unwrap();
+    assert_cu_within("INV-033 owner payout", cu, CUSTODY_CU_LIMIT);
+    assert_state(&env, INSURANCE, BACKING, 0, true, true);
+    assert_eq!(env.svm.get_account(&counterparty), flat_counterparty);
+    println!("INV-031/032/033 mixed reserve bundle: lien={LIEN}, insurance={INSURANCE}, provider={SURPLUS}+{LIEN}, claim={CLAIM}, owner={}, release_steps={release_steps}, CU trade={trade_cu}, bundle={max_bundle_cu}, release={release_cu}, released_payout={released_payout_cu}, refresh={refresh_cu}, conversion={convert_cu}, withdrawal={cu}", DEPOSIT - LOSS + CLAIM);
+}
 
 #[derive(Debug)]
 struct SourceLienClassification {

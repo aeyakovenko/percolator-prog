@@ -3,6 +3,7 @@
 # accounts are authorities, unbound destinations, or authenticated external observations.
 # EXHAUSTIVE means every current type-correct instance-bound role has a mutating same-instance
 # control and a cross-instance rejection with exact rollback in the named test.
+# EXHAUSTIVE is local role-matrix coverage, not full-domain proof; see invariant_status.tsv for verdicts.
 # PARTIAL/OPEN rows are the finite tractable queue and must name the uncovered role family.
 tag	variant	status	instance_bound_roles	evidence	remaining_gap
 0	InitMarket	NO_MIXED_ROLE	new_market	-	-

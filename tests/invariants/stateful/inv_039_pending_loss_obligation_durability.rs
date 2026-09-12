@@ -26,6 +26,10 @@
 //! strict partial liquidation from byte-identical fixtures, book the same payer/receiver transfer,
 //! terminate every funded user, and produce identical destination-token payouts under the public
 //! trace oracle.
+//! `v16_program_deposit_preserves_flat_pending_obligation_and_close_partition` deposits into
+//! the flat retained-obligation holder in both side orientations while its counterparty close
+//! still has residual work. Exact owner capital and custody credit must not release loss weight,
+//! settle PnL, or credit the separate close partition. Funding uses a signed SPL transfer.
 //! INV-027 owns the stale-cohort novation guard because its economic obligation is protection of
 //! a fresh entrant's principal. This file retains the independent pending-obligation and
 //! accrual-ordering matrices that lead to that broader seniority property.
@@ -112,6 +116,116 @@ fn v16_program_partial_liquidation_cannot_erase_pending_funding() {
     assert!(discovery.control_terminal && discovery.reordered_terminal);
     assert!(discovery.control_max_crank_cu < TX_CU_LIMIT);
     assert!(discovery.reordered_max_crank_cu < TX_CU_LIMIT);
+}
+
+#[test]
+fn v16_program_deposit_preserves_flat_pending_obligation_and_close_partition() {
+    use crate::support::fuzz_model::{public_b_close_seed, verify_close_residual_partition};
+    use percolator::{SideV16, POS_SCALE};
+    use solana_sdk::{signature::Signer, transaction::Transaction};
+
+    const HOLDER: usize = 0;
+    const CLOSE_OWNER: usize = 1;
+    const DONOR: usize = 2;
+    const DEPOSIT: u64 = 7;
+
+    for side in [SideV16::Long, SideV16::Short] {
+        let mut env = public_b_close_seed(side, POS_SCALE / 2, 1)
+            .expect("public active close with a retained counterparty obligation");
+        env.begin_public_trace();
+
+        // Supply the holder's empty source account without changing program-owned state.
+        let source = env.actors[HOLDER].source_token;
+        let donor = &env.actors[DONOR];
+        let funding = spl_token::instruction::transfer(
+            &spl_token::ID,
+            &donor.source_token,
+            &source,
+            &donor.signer.pubkey(),
+            &[],
+            DEPOSIT,
+        )
+        .unwrap();
+        let funding = Transaction::new_signed_with_payer(
+            &[funding],
+            Some(&donor.signer.pubkey()),
+            &[&donor.signer],
+            env.svm.latest_blockhash(),
+        );
+        env.land_retained(funding).expect("signed SPL funding");
+
+        let holder_before = env.primary_portfolio(HOLDER);
+        let leg_before = holder_before.legs[0].try_to_runtime().unwrap();
+        assert!(leg_before.active);
+        assert_eq!(leg_before.side, side);
+        assert_eq!(leg_before.basis_pos_q, 0);
+        assert_ne!(leg_before.loss_weight, 0);
+        let close_before = env
+            .primary_portfolio(CLOSE_OWNER)
+            .close_progress
+            .try_to_runtime()
+            .unwrap();
+        assert!(close_before.active && !close_before.finalized && !close_before.canceled);
+        assert_ne!(close_before.residual_remaining, 0);
+        verify_close_residual_partition("before pending-holder deposit", &close_before).unwrap();
+        let (_, group_before) = env.primary_market_state();
+        let asset_before = group_before.assets[0];
+        let pending_count = match side {
+            SideV16::Long => asset_before.pending_obligation_count_long,
+            SideV16::Short => asset_before.pending_obligation_count_short,
+        };
+        assert_eq!(pending_count, 1);
+        let portfolios_before = env.all_primary_portfolio_data();
+        let tokens_before = env.all_token_account_data();
+        let backing_before = env.backing_domain_ledger_data();
+        let matchers_before = env.all_matcher_context_data();
+        let lamports_before = env.all_economic_account_lamports();
+        let vault_before = env.token_amount(env.vault);
+        let source_before = env.token_amount(source);
+
+        env.deposit_primary(HOLDER, u128::from(DEPOSIT))
+            .expect("deposit into flat pending-obligation holder");
+
+        let holder_after = env.primary_portfolio(HOLDER);
+        let (_, group_after) = env.primary_market_state();
+        assert_eq!(holder_after.legs[0].try_to_runtime().unwrap(), leg_before);
+        assert_eq!(holder_after.pnl.get(), holder_before.pnl.get());
+        assert_eq!(
+            holder_after.capital.get(),
+            holder_before.capital.get() + u128::from(DEPOSIT)
+        );
+        assert_eq!(group_after.assets, group_before.assets);
+        assert_eq!(group_after.c_tot, group_before.c_tot + u128::from(DEPOSIT));
+        assert_eq!(group_after.vault, group_before.vault + u128::from(DEPOSIT));
+        assert_eq!(env.token_amount(env.vault), vault_before + DEPOSIT);
+        assert_eq!(env.token_amount(source), source_before - DEPOSIT);
+        let close_after = env
+            .primary_portfolio(CLOSE_OWNER)
+            .close_progress
+            .try_to_runtime()
+            .unwrap();
+        assert_eq!(close_after, close_before);
+        verify_close_residual_partition("after pending-holder deposit", &close_after).unwrap();
+
+        for (actor, before) in portfolios_before.iter().enumerate() {
+            if actor != HOLDER {
+                assert_eq!(&env.primary_portfolio_data(actor), before);
+            }
+        }
+        for (key, before) in tokens_before {
+            if key != source && key != env.vault {
+                assert_eq!(env.svm.get_account(&key).unwrap().data, before);
+            }
+        }
+        assert_eq!(env.backing_domain_ledger_data(), backing_before);
+        assert_eq!(env.all_matcher_context_data(), matchers_before);
+        assert_eq!(env.all_economic_account_lamports(), lamports_before);
+        assert_eq!(env.token_supply_observed(), env.initial_token_supply);
+        assert_eq!(u128::from(env.mint_supply()), env.initial_token_supply);
+        env.finish_public_trace()
+            .validate_public_execution()
+            .expect("authenticated funding and deposit with exact public token flow");
+    }
 }
 
 proptest! {

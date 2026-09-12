@@ -12,6 +12,9 @@
 
 use super::*;
 
+#[path = "inv_021_funded_lifecycle_atomicity.rs"]
+mod funded_lifecycle_atomicity;
+
 fn inv021_init_portfolio_ix(env: &V16CuEnv, owner: Pubkey, portfolio: Pubkey) -> Instruction {
     Instruction {
         program_id: env.program_id,
@@ -392,6 +395,132 @@ fn v16_program_issue404_atomic_close_reinit_rolls_back_without_phantom_count() {
 }
 
 #[test]
+fn v16_program_funded_atomic_portfolio_reuse_clears_wrapper_tail_and_conserves_rent() {
+    use percolator_prog::constants::{PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF};
+
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::from_bytes(&env.admin.to_bytes()).unwrap();
+    let portfolio_key = Keypair::new();
+    let portfolio = portfolio_key.pubkey();
+    let rent = env.svm.get_sysvar::<solana_sdk::rent::Rent>();
+    let required_rent = rent.minimum_balance(env.portfolio_account_len);
+    let create = system_instruction::create_account(
+        &owner.pubkey(),
+        &portfolio,
+        required_rent,
+        env.portfolio_account_len as u64,
+        &env.program_id,
+    );
+    let init = inv021_init_portfolio_ix(&env, owner.pubkey(), portfolio);
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), create, init.clone()],
+        &[&owner, &portfolio_key],
+    )
+    .expect("System creation and exact-rent public initialization");
+    let fresh = env.svm.get_account(&portfolio).unwrap();
+
+    let matcher = Pubkey::new_unique();
+    env.svm.add_program(
+        matcher,
+        &std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF"),
+    );
+    for replacement_lamports in [required_rent + 1, required_rent] {
+        let (context, _, _) =
+            env.init_auth_matcher_context_via_system_create(matcher, &owner, portfolio);
+        let config = env.portfolio_matcher_config(portfolio);
+        assert_eq!(config.enabled(), 1);
+        assert_eq!(config.trade_fee_cap_bps(), 10_000);
+        assert_eq!(env.portfolio_matcher_sequence(portfolio), 1);
+        let old = env.svm.get_account(&portfolio).unwrap();
+        assert_eq!(
+            state::read_portfolio_matcher_expiry(&old.data).unwrap(),
+            u64::MAX
+        );
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let mut expected_owner = env.svm.get_account(&owner.pubkey()).unwrap();
+        expected_owner.lamports -= replacement_lamports;
+        let external_keys = [env.vault, env.mint, context];
+        let external_before = external_keys.map(|key| env.svm.get_account(&key));
+        let next_id = env.market_state().0.next_portfolio_id;
+        let close = Instruction {
+            program_id: env.program_id,
+            accounts: init.accounts.clone(),
+            data: env.close_portfolio_ix(portfolio).encode(),
+        };
+        let refund =
+            system_instruction::transfer(&owner.pubkey(), &portfolio, replacement_lamports);
+
+        // One transaction retains the old backing buffer across shrink/refund/grow.
+        // The existing unfunded atomic rejection and cross-transaction reuse miss this path.
+        env.svm.expire_blockhash();
+        let cu = send_raw_ixs(
+            &mut env.svm,
+            &env.payer,
+            vec![heap_ix(), cu_ix(), close, refund, init.clone()],
+            &[&owner],
+        )
+        .expect("funded atomic close/refund/reinit must remain usable");
+        assert_cu_within(
+            "INV-021 funded atomic portfolio reuse",
+            cu,
+            CUSTODY_CU_LIMIT,
+        );
+
+        let after = env.svm.get_account(&portfolio).unwrap();
+        let mut expected_data = fresh.data.clone();
+        expected_data[PORTFOLIO_ID_OFF..PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN]
+            .copy_from_slice(&next_id.to_le_bytes());
+        assert_eq!(
+            after.data, expected_data,
+            "every byte, including matcher capability, expiry and sequence, is freshly initialized"
+        );
+        assert_eq!(after.owner, env.program_id);
+        assert!(!after.executable);
+        assert_eq!(after.lamports, replacement_lamports);
+        assert!(rent.is_exempt(after.lamports, after.data.len()));
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap().lamports,
+            market_before.lamports + old.lamports,
+            "only the old incarnation's lamports reach the market slab"
+        );
+        assert_eq!(
+            env.svm.get_account(&owner.pubkey()).unwrap(),
+            expected_owner
+        );
+        assert_eq!(
+            external_keys.map(|key| env.svm.get_account(&key)),
+            external_before,
+            "reincarnation cannot mutate SPL custody or the former matcher context"
+        );
+        let (cfg, group) = env.market_state();
+        assert_eq!(group.materialized_portfolio_count, 1);
+        assert_eq!(cfg.next_portfolio_id, next_id + 1);
+        println!("INV-021 atomic reuse: lamports={replacement_lamports}, CU={cu}");
+    }
+
+    // The second pass reauthorized the first replacement through the public control route;
+    // the final replacement must also retain an ordinary owner close path.
+    let market_lamports = env.svm.get_account(&env.market).unwrap().lamports;
+    let close_cu = env.close_portfolio_with_cu(&owner, portfolio);
+    assert_cu_within(
+        "INV-021 post-atomic-reuse close",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 0);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports + required_rent
+    );
+    if let Some(closed) = env.svm.get_account(&portfolio) {
+        assert_eq!(closed.lamports, 0);
+        assert!(closed.data.is_empty());
+    }
+}
+
+#[test]
 fn v16_program_undersized_init_grows_account_then_close_sweeps_rent_exactly() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
@@ -494,6 +623,147 @@ fn v16_program_funded_close_rejects_exact_rollback_and_remains_withdrawable() {
         env.token_amount(dest),
         400_000,
         "owner can still withdraw after the rejected close",
+    );
+}
+
+#[test]
+fn v16_program_portfolio_growth_close_and_reuse_preserve_unrelated_claim_exit() {
+    let PublicReleasedPnlFixture {
+        mut env,
+        winner_owner,
+        winner,
+        loser,
+    } = public_released_pnl_fixture();
+    let (_, initial_market) = env.market_state();
+    let market_lamports = env.svm.get_account(&env.market).unwrap().lamports;
+    let survivors = [winner, loser, env.mint].map(|key| (key, env.svm.get_account(&key).unwrap()));
+    assert!(initial_market.source_claim_bound_total_num > 0);
+    assert!(env
+        .portfolio_state(winner)
+        .source_domains
+        .iter()
+        .any(|source| source.is_occupied()));
+
+    let assert_surviving_claim =
+        |env: &V16CuEnv, live_siblings: u64, sibling_capital: u128, swept_lamports: u64| {
+            for (key, before) in &survivors {
+                assert_eq!(
+                    env.svm.get_account(key).as_ref(),
+                    Some(before),
+                    "unrelated lifecycle preserves claimant, counterparty, and mint accounts"
+                );
+            }
+            let (_, market) = env.market_state();
+            assert_eq!(
+                market.materialized_portfolio_count,
+                initial_market.materialized_portfolio_count + live_siblings
+            );
+            assert_eq!(market.c_tot, initial_market.c_tot + sibling_capital);
+            assert_eq!(market.pnl_pos_tot, initial_market.pnl_pos_tot);
+            assert_eq!(
+                market.source_claim_bound_total_num,
+                initial_market.source_claim_bound_total_num
+            );
+            assert_eq!(market.source_credit, initial_market.source_credit);
+            assert_eq!(market.vault, initial_market.vault + sibling_capital);
+            assert_eq!(env.token_amount(env.vault) as u128, market.vault);
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap().lamports,
+                market_lamports + swept_lamports,
+                "portfolio rent is not quote backing and goes only to the market slab"
+            );
+        };
+
+    let owner = Keypair::new();
+    let replacement_owner = Keypair::new();
+    env.ensure_signer_account(owner.pubkey());
+    let sibling = Keypair::new();
+    let portfolio = sibling.pubkey();
+    let required_len = env.portfolio_account_len;
+    let rent = env.svm.get_sysvar::<solana_sdk::rent::Rent>();
+    let exact_rent = rent.minimum_balance(required_len);
+    let create = system_instruction::create_account(
+        &env.payer.pubkey(),
+        &portfolio,
+        exact_rent,
+        (required_len / 3) as u64,
+        &env.program_id,
+    );
+    let init = inv021_init_portfolio_ix(&env, owner.pubkey(), portfolio);
+    env.svm.expire_blockhash();
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), create, init],
+        &[&sibling, &owner],
+    )
+    .expect("System-created undersized portfolio grows at exact final-size rent");
+
+    let old_portfolio_id = env.portfolio_id(portfolio);
+    let mut swept_lamports = 0;
+    for (generation, cycle_owner) in [&owner, &replacement_owner].into_iter().enumerate() {
+        let expected_rent = if generation == 0 {
+            exact_rent
+        } else {
+            inv021_reinitialize_closed_portfolio(
+                &mut env,
+                portfolio,
+                old_portfolio_id,
+                cycle_owner,
+            );
+            1_000_000_000
+        };
+        let account = env.svm.get_account(&portfolio).unwrap();
+        assert_eq!(account.data.len(), required_len);
+        assert_eq!(account.lamports, expected_rent);
+        assert!(rent.is_exempt(account.lamports, account.data.len()));
+        assert_surviving_claim(&env, 1, 0, swept_lamports);
+
+        let source = env.deposit(cycle_owner, portfolio, 7);
+        assert_eq!(env.token_amount(source), 0);
+        assert_surviving_claim(&env, 1, 7, swept_lamports);
+        let destination = env.withdraw(cycle_owner, portfolio, 7);
+        assert_eq!(env.token_amount(destination), 7);
+        assert_surviving_claim(&env, 1, 0, swept_lamports);
+
+        let owner_before_close = env.svm.get_account(&cycle_owner.pubkey()).unwrap();
+        env.close_portfolio_with_cu(cycle_owner, portfolio);
+        swept_lamports += expected_rent;
+        let closed = env.svm.get_account(&portfolio).unwrap();
+        assert_eq!(closed.lamports, 0);
+        assert!(closed.data.is_empty());
+        assert_eq!(
+            env.svm.get_account(&cycle_owner.pubkey()).unwrap(),
+            owner_before_close,
+            "neither incarnation's owner receives the portfolio rent"
+        );
+        assert_surviving_claim(&env, 0, 0, swept_lamports);
+    }
+
+    env.convert_released_pnl_with_cu(&winner_owner, winner, PUBLIC_RELEASED_PNL_FIXTURE_AMOUNT);
+    let expected_exit = 1_000_000 + PUBLIC_RELEASED_PNL_FIXTURE_AMOUNT;
+    assert_eq!(env.portfolio_state(winner).capital.get(), expected_exit);
+    let vault_before_exit = env.token_amount(env.vault);
+    let destination = env.withdraw(&winner_owner, winner, expected_exit);
+    assert_eq!(env.token_amount(destination) as u128, expected_exit);
+    assert_eq!(
+        (vault_before_exit - env.token_amount(env.vault)) as u128,
+        expected_exit,
+        "the surviving principal and backed claim both reach the owner's SPL account"
+    );
+    let exited = env.portfolio_state(winner);
+    assert_eq!(exited.capital.get(), 0);
+    assert_eq!(exited.pnl.get(), 0);
+    assert!(exited
+        .source_domains
+        .iter()
+        .all(|source| !source.is_occupied()));
+    let (_, market) = env.market_state();
+    assert_eq!(market.source_claim_bound_total_num, 0);
+    assert_eq!(market.vault, env.token_amount(env.vault) as u128);
+    assert_eq!(
+        market.materialized_portfolio_count,
+        initial_market.materialized_portfolio_count
     );
 }
 

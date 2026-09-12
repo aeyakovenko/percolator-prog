@@ -11,6 +11,10 @@
 //! is nonvacuous in both generations: public trades earn the fees, the old request is live before
 //! retirement, stale replay frames every economic account, and the fresh request transfers the
 //! exact current-generation amount from bucket and vault to the authorized destination.
+//! `v16_program_cross_slot_activation_consumes_one_retained_generation_frontier` retains two
+//! activations for different retired slots at the same frontier. In both landing orders, only
+//! the first may consume that generation; the other target stays unchanged, its stale request
+//! rolls back exactly, and a fresh request consumes the next generation with one exact fee.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -142,6 +146,154 @@ fn v16_program_retained_activation_binds_exact_next_generation_frontier() {
         AssetLifecycleV16::Active
     );
     assert_eq!(env.token_supply_observed(), supply_before);
+}
+
+#[test]
+fn v16_program_cross_slot_activation_consumes_one_retained_generation_frontier() {
+    const FIRST_CREATOR: usize = 2;
+    const SECOND_CREATOR: usize = 3;
+    const PRICE: u64 = 100;
+    const ACTIVATE_SLOT: u64 = 4;
+
+    let economic_frame = |env: &V16Svm| {
+        env.all_economic_account_lamports()
+            .into_iter()
+            .map(|(key, _)| {
+                (
+                    key,
+                    env.svm.get_account(&key).expect("tracked economic account"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for (first_asset, second_asset) in [(1u16, 2u16), (2, 1)] {
+        let mut env = V16Svm::new([0xa4; 32], MarketConfig::default());
+        env.update_market_init_fee_policy(1)
+            .expect("enable permissionless activation");
+        env.warp_to_slot(3);
+        for asset in [first_asset, second_asset] {
+            env.retire_asset(asset, 3).expect("retire an empty asset");
+        }
+        let (_, before) = env.primary_market_state();
+        let target = before.next_market_id;
+        let second_profile = env.primary_profile(second_asset as usize);
+        assert_eq!(
+            before.assets[first_asset as usize].lifecycle,
+            AssetLifecycleV16::Retired
+        );
+        assert_eq!(
+            before.assets[second_asset as usize].lifecycle,
+            AssetLifecycleV16::Retired
+        );
+        let first_source = env.actors[FIRST_CREATOR].source_token;
+        let second_source = env.actors[SECOND_CREATOR].source_token;
+        let first_balance = env.token_amount(first_source);
+        let second_balance = env.token_amount(second_source);
+        let vault_before = env.token_amount(env.vault);
+        let supply_before = env.token_supply_observed();
+
+        // Both signed requests are individually valid before either consumes the shared frontier.
+        let first = env.build_retained_permissionless_asset_activation(
+            FIRST_CREATOR,
+            first_asset,
+            ACTIVATE_SLOT,
+            PRICE,
+            1,
+            FIRST_CREATOR,
+            FIRST_CREATOR,
+            FIRST_CREATOR,
+            FIRST_CREATOR,
+        );
+        let second = env.build_retained_permissionless_asset_activation(
+            SECOND_CREATOR,
+            second_asset,
+            ACTIVATE_SLOT,
+            PRICE,
+            1,
+            SECOND_CREATOR,
+            SECOND_CREATOR,
+            SECOND_CREATOR,
+            SECOND_CREATOR,
+        );
+        env.warp_to_slot(ACTIVATE_SLOT);
+        env.land_retained(first)
+            .expect("first activation consumes the shared generation frontier");
+        let (_, after_first) = env.primary_market_state();
+        assert_eq!(after_first.assets[first_asset as usize].market_id, target);
+        assert_eq!(
+            after_first.assets[first_asset as usize].lifecycle,
+            AssetLifecycleV16::Active
+        );
+        assert_eq!(after_first.next_market_id, target + 1);
+        assert_eq!(
+            after_first.assets[second_asset as usize],
+            before.assets[second_asset as usize]
+        );
+        assert_eq!(env.primary_profile(second_asset as usize), second_profile);
+        assert_eq!(env.token_amount(first_source), first_balance - 1);
+        assert_eq!(env.token_amount(second_source), second_balance);
+        assert_eq!(env.token_amount(env.vault), vault_before + 1);
+        assert_eq!(after_first.vault, before.vault + 1);
+        assert_eq!(after_first.insurance, before.insurance + 1);
+        assert_eq!(env.token_supply_observed(), supply_before);
+
+        let frame_before = economic_frame(&env);
+        let error = env
+            .land_retained(second)
+            .expect_err("a different slot cannot consume the same retained generation");
+        let expected = format!(
+            "Custom({})",
+            PercolatorError::AssetGenerationMismatch as u32
+        );
+        assert!(
+            error.contains(&expected),
+            "expected {expected}, got {error}"
+        );
+        assert!(
+            economic_frame(&env) == frame_before,
+            "stale activation changed economic accounts"
+        );
+        assert_eq!(env.token_supply_observed(), supply_before);
+
+        let first_profile = env.primary_profile(first_asset as usize);
+        env.warp_to_slot(ACTIVATE_SLOT + 1);
+        let fresh = env.build_retained_permissionless_asset_activation(
+            SECOND_CREATOR,
+            second_asset,
+            ACTIVATE_SLOT + 1,
+            PRICE,
+            1,
+            SECOND_CREATOR,
+            SECOND_CREATOR,
+            SECOND_CREATOR,
+            SECOND_CREATOR,
+        );
+        env.land_retained(fresh)
+            .expect("rebinding the unchanged target slot to the next generation remains live");
+        let (_, after_second) = env.primary_market_state();
+        assert_eq!(
+            after_second.assets[second_asset as usize].market_id,
+            target + 1
+        );
+        assert_eq!(
+            after_second.assets[second_asset as usize].lifecycle,
+            AssetLifecycleV16::Active
+        );
+        assert_eq!(after_second.next_market_id, target + 2);
+        assert_eq!(
+            after_second.assets[first_asset as usize],
+            after_first.assets[first_asset as usize]
+        );
+        assert_eq!(env.primary_profile(first_asset as usize), first_profile);
+        assert_eq!(after_second.assets[0], before.assets[0]);
+        assert_eq!(env.token_amount(first_source), first_balance - 1);
+        assert_eq!(env.token_amount(second_source), second_balance - 1);
+        assert_eq!(env.token_amount(env.vault), vault_before + 2);
+        assert_eq!(after_second.vault, before.vault + 2);
+        assert_eq!(after_second.insurance, before.insurance + 2);
+        assert_eq!(env.token_supply_observed(), supply_before);
+    }
 }
 
 #[test]

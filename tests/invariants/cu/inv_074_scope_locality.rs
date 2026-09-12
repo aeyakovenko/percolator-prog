@@ -6,6 +6,8 @@
 //! permissionless-oracle, base-stale, and non-base-route regressions exercise the deployed public
 //! wrapper with real SBF/LiteSVM accounts. The stateful INV-086 terminal graph additionally keeps
 //! an unrelated 777-atom flat portfolio live in all twelve genuine partial-receipt worlds.
+//! The local stale_touch_order module adds INV-034/074/088 evidence across same-instance assets
+//! and same-mint independent instances, both last-touch orders, and single/batch no-CPI routes.
 //!
 //! Guarantee boundary: these bounded public worlds certify the covered scope
 //! relationships, not every possible cross-domain composition. Partial-receipt-to-flat-principal
@@ -15,6 +17,559 @@
 //! portfolio/domain/lifecycle cross-products stay open in the audit matrix.
 
 use super::*;
+
+// INV-034/074/088 share this bounded public-history matrix, not a shared fixture edit.
+mod stale_touch_order {
+    use super::*;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    const PRINCIPAL: u128 = 1_000_000;
+    const NOW: u64 = 8;
+
+    struct World {
+        env: V16CuEnv,
+        markets: Vec<(Pubkey, Pubkey, Pubkey)>,
+        owners: [Keypair; 6],
+        portfolios: [Pubkey; 6],
+        tokens: [Pubkey; 6],
+        scopes: [usize; 6],
+        positions: [[i128; 2]; 6],
+        paid: [u128; 6],
+        peak_cu: u64,
+    }
+
+    impl World {
+        fn new(cross_instance: bool) -> Self {
+            let params = V16CuMarketParams {
+                max_portfolio_assets: 2,
+                max_accrual_dt_slots: 1,
+                ..V16CuMarketParams::default()
+            };
+            let mut env = crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::
+                inv018_public_spl_market_with_params(6, params);
+            let mut markets = vec![(env.market, env.vault, env.vault_authority)];
+            if cross_instance {
+                let market = Keypair::new();
+                system_create_account_for_test(
+                    &mut env.svm,
+                    &env.payer,
+                    &market,
+                    state::market_account_len_for_capacity(2).unwrap(),
+                    env.program_id,
+                );
+                let authority = Pubkey::find_program_address(
+                    &[b"vault", market.pubkey().as_ref()],
+                    &env.program_id,
+                )
+                .0;
+                let vault = create_ata_for_test(&mut env.svm, &env.payer, authority, env.mint);
+                send_tx(
+                    &mut env.svm,
+                    env.program_id,
+                    &env.payer,
+                    init_market_instruction(&params),
+                    vec![
+                        AccountMeta::new(env.admin.pubkey(), true),
+                        AccountMeta::new(market.pubkey(), false),
+                        AccountMeta::new_readonly(env.mint, false),
+                    ],
+                    &[&env.admin],
+                )
+                .unwrap();
+                markets.push((market.pubkey(), vault, authority));
+            }
+            let keys = std::array::from_fn::<_, 6, _>(|_| Keypair::new());
+            let mut world = Self {
+                env,
+                markets,
+                owners: std::array::from_fn(|_| Keypair::new()),
+                portfolios: keys.each_ref().map(Signer::pubkey),
+                tokens: [Pubkey::default(); 6],
+                scopes: [
+                    0,
+                    0,
+                    usize::from(cross_instance),
+                    usize::from(cross_instance),
+                    0,
+                    usize::from(cross_instance),
+                ],
+                positions: [[0; 2]; 6],
+                paid: [0; 6],
+                peak_cu: 0,
+            };
+            for scope in 0..world.markets.len() {
+                world.select(scope);
+                for asset in 0..2 {
+                    world
+                        .env
+                        .configure_auth_mark_for_asset_as_admin(asset, 0, 100);
+                }
+            }
+            for actor in 0..6 {
+                world.select(world.scopes[actor]);
+                let env = &mut world.env;
+                send_raw_tx(
+                    &mut env.svm,
+                    &env.payer,
+                    system_instruction::transfer(
+                        &env.payer.pubkey(),
+                        &world.owners[actor].pubkey(),
+                        1_000_000_000,
+                    ),
+                    &[],
+                )
+                .unwrap();
+                system_create_account_for_test(
+                    &mut env.svm,
+                    &env.payer,
+                    &keys[actor],
+                    env.portfolio_account_len,
+                    env.program_id,
+                );
+                env.send(
+                    ProgInstruction::InitPortfolio,
+                    vec![
+                        AccountMeta::new(world.owners[actor].pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(world.portfolios[actor], false),
+                    ],
+                    &[&world.owners[actor]],
+                )
+                .unwrap();
+                env.portfolios.push(world.portfolios[actor]);
+                world.tokens[actor] = create_ata_for_test(
+                    &mut env.svm,
+                    &env.payer,
+                    world.owners[actor].pubkey(),
+                    env.mint,
+                );
+                send_raw_tx(
+                    &mut env.svm,
+                    &env.payer,
+                    spl_token::instruction::mint_to(
+                        &spl_token::ID,
+                        &env.mint,
+                        &world.tokens[actor],
+                        &env.admin.pubkey(),
+                        &[],
+                        PRINCIPAL as u64,
+                    )
+                    .unwrap(),
+                    &[&env.admin],
+                )
+                .unwrap();
+                env.send(
+                    env.deposit_ix(world.portfolios[actor], PRINCIPAL),
+                    vec![
+                        AccountMeta::new(world.owners[actor].pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(world.portfolios[actor], false),
+                        AccountMeta::new(world.tokens[actor], false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[&world.owners[actor]],
+                )
+                .unwrap();
+            }
+            let env = &mut world.env;
+            send_raw_tx(
+                &mut env.svm,
+                &env.payer,
+                spl_token::instruction::set_authority(
+                    &spl_token::ID,
+                    &env.mint,
+                    None,
+                    spl_token::instruction::AuthorityType::MintTokens,
+                    &env.admin.pubkey(),
+                    &[],
+                )
+                .unwrap(),
+                &[&env.admin],
+            )
+            .unwrap();
+            world.census();
+            world
+        }
+
+        fn select(&mut self, scope: usize) {
+            // Only select the host sender's account tuple; never restore or edit on-chain bytes.
+            (self.env.market, self.env.vault, self.env.vault_authority) = self.markets[scope];
+        }
+
+        fn group(&self, scope: usize) -> MarketGroupV16 {
+            state::read_market(
+                &self
+                    .env
+                    .svm
+                    .get_account(&self.markets[scope].0)
+                    .unwrap()
+                    .data,
+            )
+            .unwrap()
+            .1
+        }
+
+        fn snapshot(&self) -> Vec<(Pubkey, Option<Account>)> {
+            let mut keys = vec![
+                self.env.mint,
+                self.env.admin.pubkey(),
+                solana_sdk::sysvar::clock::ID,
+            ];
+            for (market, vault, authority) in &self.markets {
+                keys.extend([*market, *vault, *authority]);
+            }
+            keys.extend(self.portfolios);
+            keys.extend(self.tokens);
+            keys.extend(self.owners.each_ref().map(Signer::pubkey));
+            keys.into_iter()
+                .map(|key| (key, self.env.svm.get_account(&key)))
+                .collect()
+        }
+
+        fn census(&self) {
+            for actor in 0..6 {
+                let account = self.env.portfolio_state(self.portfolios[actor]);
+                assert_eq!(account.capital.get(), PRINCIPAL - self.paid[actor]);
+                assert_eq!(account.pnl.get(), 0);
+                assert_eq!(
+                    u128::from(self.env.token_amount(self.tokens[actor])),
+                    self.paid[actor]
+                );
+                let mut observed = [0i128; 2];
+                for leg in account
+                    .legs
+                    .iter()
+                    .map(|leg| leg.try_to_runtime().unwrap())
+                    .filter(|leg| leg.active)
+                {
+                    assert_eq!(leg.a_basis, ADL_ONE);
+                    assert_eq!(observed[leg.asset_index as usize], 0);
+                    observed[leg.asset_index as usize] = leg.basis_pos_q;
+                }
+                assert_eq!(observed, self.positions[actor]);
+            }
+            for scope in 0..self.markets.len() {
+                let group = self.group(scope);
+                let capital: u128 = (0..6)
+                    .filter(|actor| self.scopes[*actor] == scope)
+                    .map(|actor| PRINCIPAL - self.paid[actor])
+                    .sum();
+                assert_eq!(group.mode, MarketModeV16::Live);
+                assert_eq!(group.c_tot, capital);
+                assert_eq!(group.vault, capital);
+                assert_eq!(
+                    u128::from(self.env.token_amount(self.markets[scope].1)),
+                    capital
+                );
+                assert_eq!(group.insurance, 0);
+                assert_eq!(group.pnl_pos_tot, 0);
+                assert_eq!(group.negative_pnl_account_count, 0);
+                for asset in 0..2 {
+                    let local: Vec<i128> = (0..6)
+                        .filter(|actor| self.scopes[*actor] == scope)
+                        .map(|actor| self.positions[actor][asset])
+                        .collect();
+                    let state = group.assets[asset];
+                    assert_eq!(state.effective_price, 100);
+                    assert_eq!(state.a_long, ADL_ONE);
+                    assert_eq!(state.a_short, ADL_ONE);
+                    assert_eq!(
+                        state.oi_eff_long_q,
+                        local
+                            .iter()
+                            .filter(|q| **q > 0)
+                            .map(|q| q.unsigned_abs())
+                            .sum::<u128>()
+                    );
+                    assert_eq!(
+                        state.oi_eff_short_q,
+                        local
+                            .iter()
+                            .filter(|q| **q < 0)
+                            .map(|q| q.unsigned_abs())
+                            .sum::<u128>()
+                    );
+                    assert_eq!(
+                        state.stored_pos_count_long,
+                        local.iter().filter(|q| **q > 0).count() as u64
+                    );
+                    assert_eq!(
+                        state.stored_pos_count_short,
+                        local.iter().filter(|q| **q < 0).count() as u64
+                    );
+                }
+            }
+            let mint =
+                Mint::unpack(&self.env.svm.get_account(&self.env.mint).unwrap().data).unwrap();
+            assert_eq!(mint.supply, (6 * PRINCIPAL) as u64);
+            assert_eq!(mint.mint_authority, COption::None);
+        }
+
+        fn touch(&mut self, actor: usize, asset: u16, slot: u64) {
+            self.select(self.scopes[actor]);
+            let cu = self.env.crank(
+                self.portfolios[actor],
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(asset),
+                },
+            );
+            assert_cu_within("stale-scope public touch", cu, CRANK_CU_LIMIT);
+            self.peak_cu = self.peak_cu.max(cu);
+            self.census();
+        }
+
+        fn trade(&mut self, actor: usize, asset: u16, size: i128, batch: bool, reject: bool) {
+            self.select(self.scopes[actor]);
+            let a = self.portfolios[actor];
+            let b = self.portfolios[actor + 1];
+            let ix = if batch {
+                self.env.batch_trade_no_cpi_ix(
+                    a,
+                    b,
+                    vec![BatchTradeLeg {
+                        asset_index: asset,
+                        market_id: self.env.asset_market_id(asset),
+                        size_q: size,
+                        exec_price: 100,
+                        fee_bps: 0,
+                    }],
+                )
+            } else {
+                self.env.trade_no_cpi_ix(a, b, asset, size, 100, 0)
+            };
+            self.env.svm.expire_blockhash();
+            let tx = Transaction::new_signed_with_payer(
+                &[
+                    heap_ix(),
+                    cu_ix(),
+                    Instruction {
+                        program_id: self.env.program_id,
+                        accounts: vec![
+                            AccountMeta::new(self.owners[actor].pubkey(), true),
+                            AccountMeta::new(self.owners[actor + 1].pubkey(), true),
+                            AccountMeta::new(self.env.market, false),
+                            AccountMeta::new(a, false),
+                            AccountMeta::new(b, false),
+                        ],
+                        data: ix.encode(),
+                    },
+                ],
+                Some(&self.env.payer.pubkey()),
+                &[
+                    &self.env.payer,
+                    &self.owners[actor],
+                    &self.owners[actor + 1],
+                ],
+                self.env.svm.latest_blockhash(),
+            );
+            let before = self.snapshot();
+            let payer_before = self.env.svm.get_account(&self.env.payer.pubkey()).unwrap();
+            let result = self.env.svm.send_transaction(tx);
+            if reject {
+                let error =
+                    result.expect_err("a current last touch cannot certify a stale account");
+                assert_eq!(
+                    error.err,
+                    TransactionError::InstructionError(
+                        2,
+                        InstructionError::Custom(PercolatorError::EngineLockActive as u32)
+                    )
+                );
+                assert_eq!(
+                    self.snapshot(),
+                    before,
+                    "stale admission must roll back all economic accounts"
+                );
+                let mut payer_after = self.env.svm.get_account(&self.env.payer.pubkey()).unwrap();
+                payer_after.lamports +=
+                    3 * solana_sdk::fee::FeeStructure::default().lamports_per_signature;
+                assert_eq!(
+                    payer_after, payer_before,
+                    "only the network signature fee may escape rollback"
+                );
+            } else {
+                let cu = result
+                    .expect("funded current scope must remain usable")
+                    .compute_units_consumed;
+                assert_cu_within("stale-scope trade", cu, MULTI_ASSET_OPEN_TRADE_CU_LIMIT);
+                self.peak_cu = self.peak_cu.max(cu);
+                self.positions[actor][asset as usize] += size;
+                self.positions[actor + 1][asset as usize] -= size;
+            }
+            self.census();
+        }
+
+        fn withdraw(&mut self, actor: usize) {
+            self.select(self.scopes[actor]);
+            let env = &mut self.env;
+            env.svm.expire_blockhash();
+            let cu = env
+                .send(
+                    env.withdraw_ix(self.portfolios[actor], PRINCIPAL),
+                    vec![
+                        AccountMeta::new(self.owners[actor].pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(self.portfolios[actor], false),
+                        AccountMeta::new(self.tokens[actor], false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[&self.owners[actor]],
+                )
+                .unwrap();
+            assert_cu_within("stale-scope funded principal exit", cu, CUSTODY_CU_LIMIT);
+            self.peak_cu = self.peak_cu.max(cu);
+            self.paid[actor] = PRINCIPAL;
+            self.census();
+        }
+
+        fn stale_frame(&self, asset: u16) -> (Vec<u8>, Vec<(Pubkey, Option<Account>)>) {
+            let market = self.env.svm.get_account(&self.markets[0].0).unwrap();
+            let engine = market_engine_slot_bytes(&market.data, asset as usize).to_vec();
+            let mut keys = vec![
+                self.portfolios[0],
+                self.portfolios[1],
+                self.tokens[0],
+                self.tokens[1],
+            ];
+            if self.markets.len() == 2 {
+                keys.extend([
+                    self.markets[0].0,
+                    self.markets[0].1,
+                    self.portfolios[4],
+                    self.tokens[4],
+                ]);
+            }
+            (
+                engine,
+                keys.into_iter()
+                    .map(|key| (key, self.env.svm.get_account(&key)))
+                    .collect(),
+            )
+        }
+    }
+
+    fn run(cross_instance: bool) {
+        let mut peak_cu = 0;
+        let mut worlds = 0;
+        let mut summary_values = [false; 2];
+        for stale_asset in 0..2u16 {
+            for stale_last in [false, true] {
+                for batch in [false, true] {
+                    let label = format!("cross_instance={cross_instance} stale_asset={stale_asset} stale_last={stale_last} batch={batch}");
+                    eprintln!("{label}");
+                    let mut world = World::new(cross_instance);
+                    let current_asset = if cross_instance {
+                        stale_asset
+                    } else {
+                        1 - stale_asset
+                    };
+                    world.trade(0, stale_asset, 10 * POS_SCALE as i128, batch, false);
+                    world.env.svm.warp_to_slot(NOW - 1);
+                    for _ in 0..NOW {
+                        if world.group(world.scopes[5]).assets[current_asset as usize].slot_last
+                            == NOW - 1
+                        {
+                            break;
+                        }
+                        world.touch(5, current_asset, NOW - 1);
+                    }
+                    assert_eq!(
+                        world.group(world.scopes[5]).assets[current_asset as usize].slot_last,
+                        NOW - 1
+                    );
+                    world.env.svm.warp_to_slot(NOW);
+                    let order = if stale_last {
+                        [(5, current_asset), (4, stale_asset)]
+                    } else {
+                        [(4, stale_asset), (5, current_asset)]
+                    };
+                    for (actor, asset) in order {
+                        world.touch(actor, asset, NOW);
+                    }
+                    let stale = world.group(0);
+                    summary_values[usize::from(stale.loss_stale_active)] = true;
+                    assert_eq!(stale.current_slot, NOW);
+                    assert!(stale.assets[stale_asset as usize].slot_last < NOW);
+                    assert_eq!(
+                        world.group(world.scopes[5]).assets[current_asset as usize].slot_last,
+                        NOW
+                    );
+                    // Derive local staleness from every actual leg, not the market boolean/cert cache.
+                    for actor in 0..2 {
+                        let account = world.env.portfolio_state(world.portfolios[actor]);
+                        let stale_legs = account
+                            .legs
+                            .iter()
+                            .map(|leg| leg.try_to_runtime().unwrap())
+                            .filter(|leg| {
+                                leg.active && stale.assets[leg.asset_index as usize].slot_last < NOW
+                            })
+                            .count();
+                        assert_eq!(stale_legs, 1, "{label}");
+                    }
+                    let frame = world.stale_frame(stale_asset);
+                    for size in [POS_SCALE as i128, -(POS_SCALE as i128)] {
+                        // The stale asset's own risk gate cannot borrow another asset's progress.
+                        world.trade(0, stale_asset, POS_SCALE as i128, batch, true);
+                        world.trade(2, current_asset, size, batch, false);
+                        assert_eq!(
+                            world.stale_frame(stale_asset),
+                            frame,
+                            "{label}: unrelated trade frame"
+                        );
+                    }
+                    for actor in [2, 3, 5] {
+                        world.withdraw(actor);
+                        assert_eq!(
+                            world.stale_frame(stale_asset),
+                            frame,
+                            "{label}: unrelated exit frame"
+                        );
+                    }
+                    world.trade(0, stale_asset, POS_SCALE as i128, batch, true);
+                    // Repair only the affected asset, then execute the previously rejected shape.
+                    for _ in 0..NOW {
+                        if world.group(0).assets[stale_asset as usize].slot_last == NOW {
+                            break;
+                        }
+                        world.touch(4, stale_asset, NOW);
+                    }
+                    assert_eq!(world.group(0).assets[stale_asset as usize].slot_last, NOW);
+                    world.trade(0, stale_asset, POS_SCALE as i128, batch, false);
+                    world.trade(0, stale_asset, -(11 * POS_SCALE as i128), batch, false);
+                    for actor in [0, 1, 4] {
+                        world.withdraw(actor);
+                    }
+                    assert_eq!(world.paid, [PRINCIPAL; 6]);
+                    peak_cu = peak_cu.max(world.peak_cu);
+                    worlds += 1;
+                }
+            }
+        }
+        assert_eq!(worlds, 8);
+        if !cross_instance {
+            assert_eq!(
+                summary_values, [true; 2],
+                "both summary values must exercise the same local lag"
+            );
+        }
+        eprintln!("INV-034/074/088 stale touch order: cross_instance={cross_instance}, worlds={worlds}, peak_cu={peak_cu}");
+    }
+
+    #[test]
+    fn v16_program_stale_domain_touch_order_preserves_local_admission_and_funded_exit() {
+        run(false);
+    }
+
+    #[test]
+    fn v16_program_stale_instance_touch_order_preserves_independent_custody() {
+        run(true);
+    }
+}
 
 fn configure_scope_probe_asset(env: &mut V16CuEnv, creator: &Keypair, start_slot: u64) {
     let creator_key = creator.pubkey();
@@ -1169,7 +1724,7 @@ fn inv074_source_defines_function(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_scope_locality_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const ENGINE_PIN: &str = "394fd0bf2cb7d73df425eb3754dc3be1a0c44336";
     const CLASSES: &[Inv074ScopeClass] = &[
         Inv074ScopeClass {
             class: "market and portfolio quote-value frames",

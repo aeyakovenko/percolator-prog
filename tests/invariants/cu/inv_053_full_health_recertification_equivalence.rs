@@ -11,6 +11,10 @@
 //! matrix proves every one of the fourteen active slots is mandatory when it has pending accrual,
 //! then executes the complete refresh below the CU ceiling. The stateful matrix supplies bounded
 //! coverage over all four trade routes and both active-leg orders.
+//! The rounded nontraded-lag boundary test adds an exact admission discriminator: with unchanged
+//! K/F, equity, and effective prices, omitting or flooring the lag penalty would admit one extra
+//! position quantum. Stale and publicly refreshed certificates both reject it atomically; the
+//! exact-limit control matches snapshot full refresh and the independent model within bounded CU.
 
 use super::*;
 
@@ -1068,4 +1072,235 @@ fn v16_program_max_shape_refresh_rejects_each_single_omitted_pending_leg() {
     );
     assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+}
+
+#[test]
+fn v16_program_rounded_nontraded_lag_full_refresh_preserves_exact_trade_boundary() {
+    use crate::support::fuzz_model::{
+        assert_current_certificate_matches_independent,
+        assert_current_certificate_matches_snapshot_full_refresh,
+    };
+
+    const SLOT: u64 = 1;
+    const PRICE: u64 = 100;
+    const TARGET: u64 = 99;
+    const LAG_SIZE_Q: i128 = (10 * POS_SCALE + POS_SCALE / 10) as i128;
+    const CAPITAL: u128 = 122;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(SLOT);
+    for asset in [0, 1] {
+        env.configure_auth_mark_for_asset_as_admin(asset, SLOT, PRICE);
+    }
+    let owner = Keypair::new();
+    let peer_owner = Keypair::new();
+    let keeper_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let peer = env.create_portfolio(&peer_owner);
+    let keeper = env.create_portfolio(&keeper_owner);
+    let owner_tokens = env.deposit(&owner, portfolio, CAPITAL);
+    let peer_tokens = env.deposit(&peer_owner, peer, 10_000);
+    let open_cu = env.trade_asset_with_cu(
+        1,
+        &owner,
+        portfolio,
+        &peer_owner,
+        peer,
+        LAG_SIZE_Q,
+        PRICE,
+        0,
+    );
+    assert_cu_within("rounded-lag opening", open_cu, TRADE_CU_LIMIT);
+
+    let assert_exact_certificate = |env: &V16CuEnv, key| {
+        let label = format!("rounded nontraded lag: {key}");
+        assert!(assert_current_certificate_matches_snapshot_full_refresh(
+            &label,
+            &env.svm.get_account(&env.market).unwrap().data,
+            &env.svm.get_account(&key).unwrap().data,
+        )
+        .expect("current certificate must be no healthier than full recomputation"));
+        assert!(assert_current_certificate_matches_independent(
+            &label,
+            &env.market_state().1,
+            &env.portfolio_state(key),
+        )
+        .expect("explicit recertification must equal every independent lane and epoch"));
+    };
+    for key in [portfolio, peer] {
+        assert_exact_certificate(&env, key);
+    }
+    let before = env.market_state().1;
+    let old_portfolio = env.svm.get_account(&portfolio).unwrap();
+    let old_peer = env.svm.get_account(&peer).unwrap();
+    let old_cert = health_cert(&env.portfolio_state(portfolio));
+    assert_eq!(old_cert.certified_equity, CAPITAL as i128);
+    assert_eq!(old_cert.certified_initial_req, 101);
+    assert_eq!(old_cert.certified_maintenance_req, 101);
+    assert_eq!(old_cert.certified_worst_case_loss, 1_010);
+
+    // Observe through a flat keeper in the same slot: only the raw target changes.
+    // No marked loss, funding settlement, or stale traded cohort can explain rejection.
+    env.push_auth_mark_for_asset_as_admin(1, SLOT, TARGET);
+    let observe_cu = env.crank(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: SLOT,
+            observations: crank_observations(1),
+        },
+    );
+    assert_cu_within("rounded-lag target observation", observe_cu, CRANK_CU_LIMIT);
+    let lagged = env.market_state().1;
+    assert_eq!(lagged.current_slot, before.current_slot);
+    assert_eq!(lagged.assets[1].effective_price, PRICE);
+    assert_eq!(lagged.assets[1].raw_oracle_target_price, TARGET);
+    assert_eq!(lagged.assets[1].k_long, before.assets[1].k_long);
+    assert_eq!(lagged.assets[1].k_short, before.assets[1].k_short);
+    assert_eq!(lagged.assets[1].f_long_num, before.assets[1].f_long_num);
+    assert_eq!(lagged.assets[1].f_short_num, before.assets[1].f_short_num);
+    assert_eq!(lagged.oracle_epoch, before.oracle_epoch + 1);
+    assert_eq!(lagged.funding_epoch, before.funding_epoch);
+    assert_eq!(lagged.risk_epoch, before.risk_epoch);
+    assert_eq!(lagged.asset_set_epoch, before.asset_set_epoch);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), old_portfolio);
+    assert_eq!(env.svm.get_account(&peer).unwrap(), old_peer);
+    assert!(old_cert.cert_oracle_epoch < lagged.oracle_epoch);
+
+    // ceil(10.1 * (100 - 99)) = 11, not 10. One new unit costs 10 IM atoms;
+    // one additional position quantum rounds its notional up and costs 11 IM atoms.
+    let lag_numerator = LAG_SIZE_Q as u128 * u128::from(PRICE - TARGET);
+    assert_ne!(lag_numerator % POS_SCALE, 0);
+    let lag_penalty = lag_numerator.div_ceil(POS_SCALE);
+    assert_eq!(lag_penalty, 11);
+    assert!(old_cert.certified_initial_req + 11 < CAPITAL);
+    assert_eq!(
+        old_cert.certified_initial_req + lag_numerator / POS_SCALE + 11,
+        CAPITAL
+    );
+    assert_eq!(old_cert.certified_initial_req + lag_penalty + 10, CAPITAL);
+    assert_eq!(
+        old_cert.certified_initial_req + lag_penalty + 11,
+        CAPITAL + 1
+    );
+
+    let trade = |env: &mut V16CuEnv, size_q| {
+        env.svm.expire_blockhash();
+        env.try_trade_asset_with_cu(0, &owner, portfolio, &peer_owner, peer, size_q, PRICE, 0)
+    };
+    let tracked = [
+        env.market,
+        portfolio,
+        peer,
+        keeper,
+        env.vault,
+        env.mint,
+        owner_tokens,
+        peer_tokens,
+        owner.pubkey(),
+        peer_owner.pubkey(),
+        keeper_owner.pubkey(),
+        env.admin.pubkey(),
+    ];
+    let reject_exactly = |env: &mut V16CuEnv, size_q| {
+        let snapshot: Vec<_> = tracked.iter().map(|key| env.svm.get_account(key)).collect();
+        let mut payer_before = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        let error = trade(env, size_q).expect_err("rounded nontraded lag must bound fresh risk");
+        assert!(
+            error.contains(&format!(
+                "Custom({})",
+                PercolatorError::EngineInvalidConfig as u32
+            )),
+            "risk increase must fail health admission, not a stale-cohort guard: {error}"
+        );
+        for (key, expected) in tracked.iter().zip(snapshot) {
+            assert_eq!(
+                env.svm.get_account(key),
+                expected,
+                "rejection changed {key}"
+            );
+        }
+        payer_before.lamports -=
+            3 * solana_sdk::fee::FeeStructure::default().lamports_per_signature;
+        assert_eq!(
+            env.svm.get_account(&env.payer.pubkey()).unwrap(),
+            payer_before
+        );
+    };
+
+    reject_exactly(&mut env, POS_SCALE as i128 + 1);
+    let mut refresh_cu = 0;
+    for key in [portfolio, peer] {
+        refresh_cu = refresh_cu.max(env.crank(
+            key,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: SLOT,
+                observations: crank_observations_for_assets(&[0, 1]),
+            },
+        ));
+        assert_exact_certificate(&env, key);
+    }
+    assert_cu_within(
+        "rounded-lag canonical full refresh",
+        refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+    let refreshed = health_cert(&env.portfolio_state(portfolio));
+    assert_eq!(refreshed.certified_equity, old_cert.certified_equity);
+    assert_eq!(refreshed.certified_initial_req, 112);
+    assert_eq!(refreshed.certified_maintenance_req, 112);
+    assert_eq!(refreshed.certified_worst_case_loss, 1_021);
+    assert_eq!(refreshed.certified_liq_deficit, 0);
+    assert_eq!(
+        health_cert(&env.portfolio_state(peer)).certified_initial_req,
+        101
+    );
+    reject_exactly(&mut env, POS_SCALE as i128 + 1);
+
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let control_cu = trade(&mut env, POS_SCALE as i128)
+        .expect("full refresh must preserve the exact affordable risk increase");
+    assert_cu_within(
+        "rounded-lag exact-limit trade",
+        control_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    for (key, sign) in [(portfolio, 1), (peer, -1)] {
+        assert_exact_certificate(&env, key);
+        let account = env.portfolio_state(key);
+        assert_eq!(
+            active_leg_for_asset(&account, 0).basis_pos_q,
+            sign * POS_SCALE as i128
+        );
+        assert_eq!(
+            active_leg_for_asset(&account, 1).basis_pos_q,
+            sign * LAG_SIZE_Q
+        );
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&account)),
+            2
+        );
+        assert_eq!(account.pnl.get(), 0);
+    }
+    let admitted = health_cert(&env.portfolio_state(portfolio));
+    assert_eq!(admitted.certified_equity, CAPITAL as i128);
+    assert_eq!(admitted.certified_initial_req, CAPITAL);
+    assert_eq!(admitted.certified_maintenance_req, 122);
+    assert_eq!(admitted.certified_worst_case_loss, 1_121);
+    assert_eq!(admitted.certified_liq_deficit, 0);
+    let group = env.market_state().1;
+    assert_eq!(
+        group.assets[1], lagged.assets[1],
+        "untraded lag must remain in force"
+    );
+    assert_eq!(group.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(group.assets[0].oi_eff_short_q, POS_SCALE);
+    assert_eq!(group.vault, CAPITAL + 10_000);
+    assert_eq!(group.c_tot, group.vault);
+    assert_eq!(group.insurance, 0);
+    assert_eq!(env.token_amount(env.vault) as u128, group.vault);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    reject_exactly(&mut env, 1);
+    println!(
+        "INV-053 rounded nontraded lag: 3 exact rejections, 6 exact certificates; open={open_cu}, observe={observe_cu}, refresh={refresh_cu}, control={control_cu} CU"
+    );
 }

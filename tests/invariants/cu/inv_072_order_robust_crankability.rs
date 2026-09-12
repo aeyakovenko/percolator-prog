@@ -468,6 +468,131 @@ fn v16_program_bad_hints_cannot_block_public_expired_close_recovery() {
     );
 }
 
+#[test]
+fn v16_program_pending_close_hint_table_matches_canonical_economics() {
+    let (fixture, retained_oracle) =
+        public_asset1_bankrupt_close_fixture_with_asset0_external_oracle();
+    let PublicActiveCloseFixture {
+        mut env,
+        loss,
+        live_peer,
+        ..
+    } = fixture;
+    set_test_clock(&mut env, 4, 101);
+    let fresh_oracle = env.set_pyth_price_with_conf(&[0x58; 32], 100, -6, 0, 101);
+    for _ in 0..3 {
+        env.crank_with_oracle_tail(
+            live_peer,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: crank_observations(0),
+            },
+            &[fresh_oracle],
+        );
+    }
+    let (_, group_before) = env.market_state();
+    assert_eq!(group_before.assets[0].slot_last, 4);
+    assert!(group_before.vault > 0);
+    let close_before = close_progress(&env.portfolio_state(loss));
+    assert!(close_before.active && close_before.residual_remaining > 0);
+    assert!(env.svm.get_sysvar::<Clock>().slot <= close_before.max_close_slot);
+    let market = env.svm.get_account(&env.market).unwrap();
+    let profile = state::read_asset_oracle_profile(&market.data, 0).unwrap();
+    assert_eq!(profile.oracle_leg_publish_times[0], 101);
+
+    let mut keys = vec![
+        env.market,
+        env.vault,
+        env.mint,
+        retained_oracle,
+        fresh_oracle,
+    ];
+    keys.extend_from_slice(&env.portfolios);
+    let frame = |env: &V16CuEnv| -> Vec<(Pubkey, Account)> {
+        keys.iter()
+            .map(|key| (*key, env.svm.get_account(key).unwrap()))
+            .collect()
+    };
+    let assert_frame = |env: &V16CuEnv, expected: &[(Pubkey, Account)], label: &str| {
+        for (key, account) in expected {
+            assert!(
+                env.svm.get_account(key).as_ref() == Some(account),
+                "{label}: account {key} must match exactly",
+            );
+        }
+    };
+    let crank = |env: &mut V16CuEnv, assets: &[u16], oracles: &[Pubkey]| {
+        let observations = assets
+            .iter()
+            .map(|&asset| inv072_hint_with_accounts(asset, u8::from(asset == 0)))
+            .collect();
+        let mut accounts = inv072_crank_accounts(env, loss, Inv072ExtraTail::None);
+        accounts.extend(
+            oracles
+                .iter()
+                .map(|key| AccountMeta::new_readonly(*key, false)),
+        );
+        let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations,
+            },
+            accounts,
+            &[],
+        );
+        payer.lamports -= solana_sdk::fee::FeeStructure::default().lamports_per_signature;
+        assert_eq!(
+            env.svm.get_account(&env.payer.pubkey()).unwrap(),
+            payer,
+            "crank may only charge the payer the transaction fee",
+        );
+        result
+    };
+
+    let prefix = frame(&env);
+    let cu = crank(&mut env, &[], &[]).expect("canonical pending-close continuation");
+    assert_cu_within("INV-072 canonical close economics", cu, CRANK_CU_LIMIT);
+    assert!(
+        close_progress(&env.portfolio_state(loss)).residual_remaining
+            < close_before.residual_remaining,
+        "canonical action must consume a real close residual",
+    );
+    assert!(
+        env.market_state().1.assets[1].b_long_num > group_before.assets[1].b_long_num,
+        "canonical action must book a nonzero loss to the source domain",
+    );
+    let canonical = frame(&env);
+
+    let cases: [(&str, &[u16], &[Pubkey], bool); 7] = [
+        ("forward", &[0, 1], &[fresh_oracle], true),
+        ("reverse", &[1, 0], &[fresh_oracle], true),
+        ("missing selected asset", &[0], &[fresh_oracle], true),
+        ("missing all hints", &[], &[], true),
+        ("missing oracle tail", &[0, 1], &[], false),
+        ("duplicated", &[0, 0], &[fresh_oracle, fresh_oracle], false),
+        ("stale retained oracle", &[1, 0], &[retained_oracle], false),
+    ];
+    for (label, assets, oracles, should_progress) in cases {
+        // Replay captured public state; rejected calls must retry without restoration.
+        for (key, account) in &prefix {
+            env.svm.set_account(*key, account.clone()).unwrap();
+        }
+        let attempted = crank(&mut env, assets, oracles);
+        let cu = if should_progress {
+            attempted.unwrap_or_else(|error| panic!("{label}: canonical work blocked: {error}"))
+        } else {
+            attempted.expect_err(label);
+            assert_frame(&env, &prefix, label);
+            crank(&mut env, &[], &[])
+                .unwrap_or_else(|error| panic!("{label}: canonical retry blocked: {error}"))
+        };
+        assert_cu_within(label, cu, CRANK_CU_LIMIT);
+        assert_frame(&env, &canonical, label);
+    }
+}
+
 // but it must not liquidate or pay a cranker reward for work it did not perform.
 #[test]
 fn v16_program_budgeted_out_of_order_crank_refreshes_without_unearned_reward() {

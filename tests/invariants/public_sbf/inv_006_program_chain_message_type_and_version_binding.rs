@@ -10,9 +10,17 @@
 //! evidence establishes practical cluster binding through the signed recent blockhash and its
 //! bounded validity window; it does not claim an application-level genesis-domain field exists.
 
-use super::support::v16_svm::{MarketConfig, V16Svm};
+use super::support::v16_svm::{MarketConfig, V16Svm, TX_CU_LIMIT};
 use percolator_prog::ix::Instruction as ProgInstruction;
-use solana_sdk::{hash::Hash, pubkey::Pubkey};
+use solana_sdk::{
+    compute_budget::ComputeBudgetInstruction,
+    hash::Hash,
+    instruction::{AccountMeta, Instruction},
+    message::{v0, Message, VersionedMessage},
+    pubkey::Pubkey,
+    signature::Signer,
+    transaction::{TransactionError, VersionedTransaction},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PersistentSnapshot {
@@ -103,6 +111,101 @@ fn retained_transaction_binds_program_market_kind_schema_and_blockhash() {
     assert_tamper_rejected_without_effect("recent blockhash", |_env, tx| {
         tx.message.recent_blockhash = Hash::new_unique();
     });
+}
+
+#[test]
+fn retained_deposit_signatures_cannot_cross_legacy_and_v0_message_versions() {
+    for (label, sign_v0) in [("legacy to v0", false), ("v0 to legacy", true)] {
+        let mut env = V16Svm::new([0x26; 32], MarketConfig::default());
+        let owner = env.actors[0].signer.pubkey();
+        let source = env.actors[0].source_token;
+        let sequence = env.primary_portfolio_matcher_sequence(0);
+        let amount = 1_337u64;
+        let deposit = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(owner, true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.actors[0].portfolio, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: ProgInstruction::Deposit {
+                portfolio_id: env.primary_portfolio_id(0),
+                expected_sequence: sequence,
+                amount: u128::from(amount),
+            }
+            .encode(),
+        };
+        let legacy = Message::new_with_blockhash(
+            &[
+                ComputeBudgetInstruction::request_heap_frame(256 * 1024),
+                ComputeBudgetInstruction::set_compute_unit_limit(TX_CU_LIMIT as u32),
+                deposit,
+            ],
+            Some(&owner),
+            &env.svm.latest_blockhash(),
+        );
+        let before_accounts: Vec<_> = legacy
+            .account_keys
+            .iter()
+            .map(|key| (*key, env.svm.get_account(key)))
+            .collect();
+        // Empty lookups keep all keys, flags, instructions, and the blockhash identical.
+        let versioned = VersionedMessage::V0(v0::Message {
+            header: legacy.header,
+            account_keys: legacy.account_keys.clone(),
+            recent_blockhash: legacy.recent_blockhash,
+            instructions: legacy.instructions.clone(),
+            address_table_lookups: vec![],
+        });
+        let legacy = VersionedMessage::Legacy(legacy);
+        let (original, alternate) = if sign_v0 {
+            (versioned, legacy)
+        } else {
+            (legacy, versioned)
+        };
+        let control = VersionedTransaction::try_new(original, &[&env.actors[0].signer])
+            .expect("sign the original message version");
+        let mut tampered = control.clone();
+        tampered.message = alternate;
+        tampered
+            .sanitize()
+            .expect("the alternate envelope is structurally valid");
+        let before = snapshot(&env);
+        let before_capital = env.primary_portfolio(0).capital.get();
+        let before_source = env.token_amount(source);
+        let before_vault = env.token_amount(env.vault);
+
+        let error = env
+            .svm
+            .send_transaction(tampered)
+            .expect_err("a retained signature cannot authorize the other message version");
+        assert_eq!(error.err, TransactionError::SignatureFailure, "{label}");
+        assert_eq!(snapshot(&env), before, "{label}: persistent state is exact");
+        for (key, account) in before_accounts {
+            assert_eq!(
+                env.svm.get_account(&key),
+                account,
+                "{label}: full account {key}, including payer lamports, is unchanged"
+            );
+        }
+
+        let meta = env
+            .svm
+            .send_transaction(control)
+            .expect("the correctly signed version must still execute the public deposit");
+        assert!(meta.compute_units_consumed <= TX_CU_LIMIT, "{label}");
+        assert_eq!(
+            env.primary_portfolio(0).capital.get(),
+            before_capital + u128::from(amount)
+        );
+        assert_eq!(env.token_amount(source), before_source - amount);
+        assert_eq!(env.token_amount(env.vault), before_vault + amount);
+        assert_eq!(env.primary_portfolio_matcher_sequence(0), sequence + 1);
+        assert_eq!(env.token_supply_observed(), env.initial_token_supply);
+    }
 }
 
 #[test]

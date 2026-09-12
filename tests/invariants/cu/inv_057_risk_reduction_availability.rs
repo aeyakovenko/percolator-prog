@@ -14,6 +14,253 @@
 
 use super::*;
 
+#[path = "inv_057_funded_owner_routes.rs"]
+mod funded_owner_routes;
+
+// Unlike the bilateral fee-policy exits below, this composes a newly installed batch gate
+// with nonunit ADL and a counterparty-free exit. All economic state comes from public calls.
+#[test]
+fn v16_program_backing_fee_gate_preserves_post_adl_owner_only_reduction() {
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const CAPITAL: u128 = 10_000;
+    const OPEN_Q: u128 = 2 * POS_SCALE;
+    const BACKING: u128 = 37;
+    const INSURANCE: u128 = 53;
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let long_tokens = env.deposit(&long_owner, long, CAPITAL);
+    let short_tokens = env.deposit(&short_owner, short, CAPITAL);
+    let backing_tokens = env.top_up_backing_bucket(1, BACKING, 100);
+    let insurance_tokens = env.top_up_insurance(INSURANCE);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        OPEN_Q as i128,
+        100,
+        0,
+    );
+    let adl_cu = env.rebalance_reduce_with_cu(&long_owner, long, 0, OPEN_Q / 2);
+    assert_cu_within("public half-ADL setup", adl_cu, CUSTODY_CU_LIMIT);
+
+    let staged = env.market_state().1;
+    let short_leg = active_leg_for_asset(&env.portfolio_state(short), 0);
+    assert_eq!(staged.mode, MarketModeV16::Live);
+    assert_eq!(staged.assets[0].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(staged.assets[0].a_short, ADL_ONE / 2);
+    assert_eq!(short_leg.basis_pos_q, -(OPEN_Q as i128));
+    assert_eq!(
+        reference_current_epoch_effective_abs(&staged, short_leg),
+        OPEN_Q / 2
+    );
+    assert_eq!(staged.assets[0].oi_eff_long_q, OPEN_Q / 2);
+    assert_eq!(staged.assets[0].oi_eff_short_q, OPEN_Q / 2);
+
+    let tracked = [
+        env.market,
+        long,
+        short,
+        env.vault,
+        env.mint,
+        long_tokens,
+        short_tokens,
+        backing_tokens,
+        insurance_tokens,
+        long_owner.pubkey(),
+        short_owner.pubkey(),
+        env.admin.pubkey(),
+    ];
+    let frame = |env: &V16CuEnv| tracked.map(|key| env.svm.get_account(&key).unwrap());
+    let batch = |env: &V16CuEnv| {
+        let ix = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+                AccountMeta::new(short, false),
+            ],
+            data: env
+                .batch_trade_no_cpi_ix(
+                    long,
+                    short,
+                    vec![BatchTradeLeg {
+                        asset_index: 0,
+                        market_id: env.asset_market_id(0),
+                        size_q: -((POS_SCALE / 2) as i128),
+                        exec_price: 100,
+                        fee_bps: 0,
+                    }],
+                )
+                .encode(),
+        };
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), ix],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &long_owner, &short_owner],
+            env.svm.latest_blockhash(),
+        )
+    };
+    let before_control = frame(&env);
+    let control = env
+        .svm
+        .simulate_transaction(batch(&env).into())
+        .expect("the post-ADL bilateral reduction is admissible before fee activation");
+    assert_cu_within(
+        "ungated post-ADL batch control",
+        control.compute_units_consumed,
+        TRADE_CU_LIMIT,
+    );
+    assert_eq!(
+        frame(&env),
+        before_control,
+        "simulation must not change the exposed state"
+    );
+
+    let policy_cu = env.update_backing_fee_policy_with_cu(0, 77, 5_000);
+    assert_cu_within("activate batch fee gate", policy_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.market_state().0.backing_trade_fee_policy_count, 1);
+    let before_rejection = frame(&env);
+    env.svm.expire_blockhash();
+    let gated_batch = batch(&env);
+    let mut expected_payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+    expected_payer.lamports -= FeeStructure::default().lamports_per_signature
+        * u64::from(gated_batch.message.header.num_required_signatures);
+    let rejected = env
+        .svm
+        .send_transaction(gated_batch)
+        .expect_err("the new fee policy must reject the otherwise valid bilateral reduction");
+    assert_eq!(
+        rejected.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::InvalidInstruction as u32),
+        )
+    );
+    assert_cu_within(
+        "fee-gated post-ADL batch rejection",
+        rejected.meta.compute_units_consumed,
+        TRADE_CU_LIMIT,
+    );
+    assert_eq!(
+        frame(&env),
+        before_rejection,
+        "batch rejection must roll back every tracked account"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.payer.pubkey()).unwrap(),
+        expected_payer,
+        "only the transaction's signature fees survive rejection"
+    );
+
+    // Only the short owner and fee payer participate after rejection. The long account
+    // remains byte-identical even though its effective quantity decreases through ADL.
+    let (config_before, group_before) = env.market_state();
+    let owner_before = env.portfolio_state(short);
+    let epoch_before = env.portfolio_position_epoch(short);
+    let effective_before = reference_current_epoch_effective_abs(&group_before, short_leg);
+    let reduce_q = effective_before / 2;
+    let expected_raw_after = reference_raw_basis_for_current_effective(
+        &group_before,
+        short_leg,
+        effective_before - reduce_q,
+    );
+    let before_reduce = frame(&env);
+    env.svm.expire_blockhash();
+    let reduce_cu = env.rebalance_reduce_with_cu(&short_owner, short, 0, reduce_q);
+    assert_cu_within(
+        "fee-gated post-ADL owner-only reduction",
+        reduce_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    for (key, before) in tracked.into_iter().zip(before_reduce) {
+        if key != env.market && key != short {
+            assert_eq!(
+                env.svm.get_account(&key).unwrap(),
+                before,
+                "owner-only exit frame {key}"
+            );
+        }
+    }
+
+    let (config_after, group_after) = env.market_state();
+    let owner_after = env.portfolio_state(short);
+    let leg_after = active_leg_for_asset(&owner_after, 0);
+    assert_eq!(leg_after.basis_pos_q, -(expected_raw_after as i128));
+    assert_eq!(
+        reference_current_epoch_effective_abs(&group_after, leg_after),
+        effective_before - reduce_q
+    );
+    assert_eq!(
+        group_after.assets[0].oi_eff_long_q,
+        group_before.assets[0].oi_eff_long_q - reduce_q
+    );
+    assert_eq!(
+        group_after.assets[0].oi_eff_short_q,
+        group_before.assets[0].oi_eff_short_q - reduce_q
+    );
+    assert_eq!(
+        reference_current_epoch_effective_abs(
+            &group_after,
+            active_leg_for_asset(&env.portfolio_state(long), 0),
+        ),
+        effective_before - reduce_q,
+        "the absent counterparty's unchanged basis must match the reduced OI"
+    );
+    assert_eq!(env.portfolio_position_epoch(short), epoch_before + 1);
+    assert_eq!(group_after.assets[0].stored_pos_count_long, 1);
+    assert_eq!(group_after.assets[0].stored_pos_count_short, 1);
+    assert_eq!(group_after.mode, MarketModeV16::Live);
+    assert_eq!(group_after.assets[0].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(
+        config_after, config_before,
+        "owner exit must not clear or rewrite the fee gate"
+    );
+    assert_eq!(
+        (owner_before.capital.get(), owner_before.pnl.get()),
+        (CAPITAL, 0)
+    );
+    assert_eq!(
+        (owner_after.capital, owner_after.pnl),
+        (owner_before.capital, owner_before.pnl)
+    );
+    assert_eq!(owner_after.source_domains, owner_before.source_domains);
+    assert_eq!(group_after.c_tot, 2 * CAPITAL);
+    assert_eq!(group_after.pnl_pos_tot, 0);
+    assert_eq!(group_after.insurance, INSURANCE);
+    assert_eq!(
+        group_after.insurance_domain_budget,
+        group_before.insurance_domain_budget
+    );
+    assert_eq!(
+        group_after.source_backing_buckets,
+        group_before.source_backing_buckets
+    );
+    assert_eq!(
+        group_after.source_backing_buckets[1].fresh_unliened_backing_num,
+        BACKING * BOUND_SCALE
+    );
+    assert_eq!(group_after.vault, 2 * CAPITAL + BACKING + INSURANCE);
+    assert_eq!(u128::from(env.token_amount(env.vault)), group_after.vault);
+    println!(
+        "INV-057 fee-gated post-ADL owner reduction: control={} CU, reject={} CU, reduce={reduce_cu} CU, effective={effective_before}->{}",
+        control.compute_units_consumed,
+        rejected.meta.compute_units_consumed,
+        effective_before - reduce_q,
+    );
+}
+
 #[test]
 fn v16_attack_tradecpi_open_and_exit_remain_live_with_backing_fee_policy() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);

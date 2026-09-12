@@ -1894,7 +1894,7 @@ fn assert_source_claim_bound_attribution(
     Ok(())
 }
 
-fn assert_reservation_encumbrance_census(
+pub(crate) fn assert_reservation_encumbrance_census(
     label: &str,
     group: &MarketGroupV16,
     portfolios: &[PortfolioAccountV16],
@@ -2213,7 +2213,7 @@ fn bound_num_to_atoms_ceil(value: u128, label: &str) -> Result<u128, String> {
     }
 }
 
-fn assert_market_stock_census(
+pub(crate) fn assert_market_stock_census(
     label: &str,
     group: &MarketGroupV16,
     market_data: &[u8],
@@ -12714,6 +12714,7 @@ pub struct BoundedRecoveryFrontierEvidence {
     pub unique_edge_count: usize,
     pub fresh_seed_world_count: usize,
     pub exact_expiry_seed_world_count: usize,
+    pub after_expiry_seed_world_count: usize,
     pub nonflat_seed_world_count: usize,
     pub bounded_exit_world_count: usize,
     pub value_moving_exit_world_count: usize,
@@ -14181,6 +14182,7 @@ fn build_underfunded_live_reference_prefix(
         trade_route,
         backing_plan,
         UnderfundedAuxiliaryExit::BilateralTrade,
+        None,
     )
 }
 
@@ -14266,6 +14268,7 @@ fn build_underfunded_live_reference_prefix_with_auxiliary_exit(
     trade_route: TradeRoute,
     backing_plan: UnderfundedBackingPlan,
     auxiliary_exit: UnderfundedAuxiliaryExit,
+    empty_market_setup: Option<fn(&mut V16Svm) -> Result<(), String>>,
 ) -> Result<ScenarioRunner, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
@@ -14285,25 +14288,40 @@ fn build_underfunded_live_reference_prefix_with_auxiliary_exit(
     const SNAPSHOT_SLOT: u64 = 12;
     const EXPIRY_SLOT: u64 = 13;
 
+    let config = MarketConfig {
+        initial_price: INITIAL_PRICE,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        actor_deposits: [
+            1_000,
+            250,
+            1_000,
+            250,
+            UNDERFUNDED_TERMINAL_UNRELATED_PRINCIPAL,
+        ],
+        ..MarketConfig::default()
+    };
     let mut runner = ScenarioRunner::new_unprefixed_with_market_config(
         seed,
         MarketConfig {
-            initial_price: INITIAL_PRICE,
-            maintenance_margin_bps: 1_000,
-            initial_margin_bps: 1_000,
-            max_price_move_bps_per_slot: 500,
-            max_accrual_dt_slots: 1,
-            min_funding_lifetime_slots: 1,
-            actor_deposits: [
-                1_000,
-                250,
-                1_000,
-                250,
-                UNDERFUNDED_TERMINAL_UNRELATED_PRINCIPAL,
-            ],
-            ..MarketConfig::default()
+            actor_deposits: if empty_market_setup.is_some() {
+                [0; PRIMARY_ACTOR_COUNT]
+            } else {
+                config.actor_deposits
+            },
+            ..config
         },
     )?;
+    if let Some(setup) = empty_market_setup {
+        setup(&mut runner.env)?;
+        for (actor, amount) in config.actor_deposits.into_iter().enumerate() {
+            runner.env.deposit_primary(actor, amount)?;
+        }
+        runner.assert_global_invariants()?;
+    }
     if bridge_disposition == UnderfundedBridgeDisposition::UnattributedLossLiquidation {
         runner.run_safety_prefix(&[Action::ConfigurePermissionlessResolve {
             stale_slots: 1,
@@ -14724,6 +14742,7 @@ fn build_underfunded_resolved_reference_seed(
         authority_plan,
         backing_plan,
         UnderfundedAuxiliaryExit::BilateralTrade,
+        None,
     )
 }
 
@@ -14734,6 +14753,7 @@ fn build_underfunded_resolved_reference_seed_with_auxiliary_exit(
     authority_plan: Option<UnderfundedAuthorityPlan>,
     backing_plan: UnderfundedBackingPlan,
     auxiliary_exit: UnderfundedAuxiliaryExit,
+    empty_market_setup: Option<fn(&mut V16Svm) -> Result<(), String>>,
 ) -> Result<UnderfundedResolvedSeed, String> {
     const JUNIOR_WINNER: usize = 0;
     const JUNIOR_LOSER: usize = 1;
@@ -14754,6 +14774,7 @@ fn build_underfunded_resolved_reference_seed_with_auxiliary_exit(
         TradeRoute::NoCpi,
         backing_plan,
         auxiliary_exit,
+        empty_market_setup,
     )?;
 
     let before_resolution = runner.env.primary_market_state().1;
@@ -16034,6 +16055,47 @@ fn require_resolved_receipt_blocks_lifecycle_reentry(
     Ok(rejected)
 }
 
+/// Public partial-receipt checkpoint; the two backed domains expire at 13 and `second_expiry`.
+pub fn public_resolved_receipt_seed(
+    backing_atoms: [u128; 2],
+    second_expiry: u64,
+) -> Result<V16Svm, String> {
+    public_resolved_receipt_seed_with_setup(backing_atoms, second_expiry, None)
+}
+
+/// Optional public setup runs before the unchanged seed's initial deposits.
+pub fn public_resolved_receipt_seed_with_setup(
+    backing_atoms: [u128; 2],
+    second_expiry: u64,
+    empty_market_setup: Option<fn(&mut V16Svm) -> Result<(), String>>,
+) -> Result<V16Svm, String> {
+    if backing_atoms
+        .iter()
+        .any(|amount| !(1..=199).contains(amount))
+        || second_expiry < 14
+    {
+        return Err(
+            "receipt seed requires two partial backing amounts and ordered expiries".into(),
+        );
+    }
+    let UnderfundedResolvedSeed { runner, .. } =
+        build_underfunded_resolved_reference_seed_with_auxiliary_exit(
+            BoundedExpiryLanding::Before,
+            false,
+            true,
+            None,
+            UnderfundedBackingPlan {
+                backed_atoms: backing_atoms[0],
+                extra_backing: Some((5, backing_atoms[1], second_expiry)),
+                extra_backed_trade: true,
+            },
+            UnderfundedAuxiliaryExit::BilateralTrade,
+            empty_market_setup,
+        )?;
+    runner.assert_global_invariants()?;
+    Ok(runner.env)
+}
+
 pub fn verify_resolved_receipt_split_topups() -> Result<ResolvedReceiptSplitTopupEvidence, String> {
     const CLAIMANT: usize = 0;
     const BACKED_WINNER: usize = 2;
@@ -16727,6 +16789,7 @@ pub fn verify_recovery_to_resolved_receipt_order_matrix(
                     None,
                     recovery_backing_plan,
                     UnderfundedAuxiliaryExit::Recovery { winner_first },
+                    None,
                 )?;
             let initial_receipt = runner
                 .env
@@ -17511,7 +17574,7 @@ pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraph
 }
 
 fn build_bounded_recovery_reference_seed(
-    exact_expiry: bool,
+    landing: BoundedExpiryLanding,
 ) -> Result<(ScenarioRunner, bool), String> {
     let scenario = Scenario {
         seed: [0x8d; 32],
@@ -17584,21 +17647,27 @@ fn build_bounded_recovery_reference_seed(
     }
 
     let expiry_slot = backing.expiry_slot;
-    if exact_expiry {
-        runner.env.warp_to_slot(expiry_slot);
-        node = runner.bounded_reference_node()?;
-        if runner.env.current_slot() != expiry_slot
-            || node.source_backing_buckets[0].status != BackingBucketStatusV16::Fresh as u8
-        {
-            return Err(format!(
-                "INV-086 exact-expiry Recovery seed normalized before a public consumer: {node:?}"
-            ));
+    match landing {
+        BoundedExpiryLanding::Before => {
+            if runner.env.current_slot() >= expiry_slot {
+                return Err(format!(
+                    "INV-086 fresh Recovery seed reached backing expiry {} >= {expiry_slot}",
+                    runner.env.current_slot()
+                ));
+            }
         }
-    } else if runner.env.current_slot() >= expiry_slot {
-        return Err(format!(
-            "INV-086 fresh Recovery seed reached backing expiry {} >= {expiry_slot}",
-            runner.env.current_slot()
-        ));
+        BoundedExpiryLanding::At | BoundedExpiryLanding::After => {
+            let landing_slot = landing.slot(expiry_slot);
+            runner.env.warp_to_slot(landing_slot);
+            node = runner.bounded_reference_node()?;
+            if runner.env.current_slot() != landing_slot
+                || node.source_backing_buckets[0].status != BackingBucketStatusV16::Fresh as u8
+            {
+                return Err(format!(
+                    "INV-086 {landing:?} Recovery seed normalized before a public consumer: {node:?}"
+                ));
+            }
+        }
     }
     Ok((runner, nonflat))
 }
@@ -17607,15 +17676,25 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
 {
     type ExactEdge = (AuthenticatedGraphState, u8, AuthenticatedGraphState);
 
-    let (fresh_control, _) = build_bounded_recovery_reference_seed(false)?;
-    let (expiry_control, _) = build_bounded_recovery_reference_seed(true)?;
-    if fresh_control.snapshot() != expiry_control.snapshot() {
+    let (fresh_control, _) = build_bounded_recovery_reference_seed(BoundedExpiryLanding::Before)?;
+    let (expiry_control, _) = build_bounded_recovery_reference_seed(BoundedExpiryLanding::At)?;
+    let (late_control, _) = build_bounded_recovery_reference_seed(BoundedExpiryLanding::After)?;
+    if fresh_control.snapshot() != expiry_control.snapshot()
+        || fresh_control.snapshot() != late_control.snapshot()
+    {
         return Err(
             "INV-086 Recovery expiry controls did not replay to byte-identical economic state"
                 .into(),
         );
     }
-    if fresh_control.authenticated_graph_state() == expiry_control.authenticated_graph_state() {
+    let authenticated_controls = [
+        fresh_control.authenticated_graph_state(),
+        expiry_control.authenticated_graph_state(),
+        late_control.authenticated_graph_state(),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    if authenticated_controls.len() != BoundedExpiryLanding::ALL.len() {
         return Err("INV-086 Recovery expiry controls did not vary authenticated Clock".into());
     }
 
@@ -17625,6 +17704,7 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
         edges: BTreeSet<ExactEdge>,
         fresh_seed_world_count: usize,
         exact_expiry_seed_world_count: usize,
+        after_expiry_seed_world_count: usize,
         nonflat_seed_world_count: usize,
         bounded_exit_world_count: usize,
         value_moving_exit_world_count: usize,
@@ -17641,6 +17721,7 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
             self.edges.extend(other.edges);
             self.fresh_seed_world_count += other.fresh_seed_world_count;
             self.exact_expiry_seed_world_count += other.exact_expiry_seed_world_count;
+            self.after_expiry_seed_world_count += other.after_expiry_seed_world_count;
             self.nonflat_seed_world_count += other.nonflat_seed_world_count;
             self.bounded_exit_world_count += other.bounded_exit_world_count;
             self.value_moving_exit_world_count += other.value_moving_exit_world_count;
@@ -17673,13 +17754,14 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
     }
 
     fn replay_recovery_word(
-        exact_expiry: bool,
+        landing: BoundedExpiryLanding,
         word: &[(usize, Action)],
         graph: &mut RecoveryAccumulator,
     ) -> Result<(), String> {
-        let (mut runner, nonflat) = build_bounded_recovery_reference_seed(exact_expiry)?;
-        graph.fresh_seed_world_count += usize::from(!exact_expiry);
-        graph.exact_expiry_seed_world_count += usize::from(exact_expiry);
+        let (mut runner, nonflat) = build_bounded_recovery_reference_seed(landing)?;
+        graph.fresh_seed_world_count += usize::from(landing == BoundedExpiryLanding::Before);
+        graph.exact_expiry_seed_world_count += usize::from(landing == BoundedExpiryLanding::At);
+        graph.after_expiry_seed_world_count += usize::from(landing == BoundedExpiryLanding::After);
         graph.nonflat_seed_world_count += usize::from(nonflat);
 
         let mut before_exact = runner.authenticated_graph_state();
@@ -17690,13 +17772,13 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
                 .run_safety_prefix(std::slice::from_ref(action))
                 .map_err(|error| {
                     format!(
-                        "INV-086 Recovery word expiry={exact_expiry} {word:?} failed at position {position}: {error}"
+                        "INV-086 Recovery word landing={landing:?} {word:?} failed at position {position}: {error}"
                     )
                 })?;
             let after_economic = runner.bounded_reference_node()?;
             let after_exact = runner.authenticated_graph_state();
             bounded_source_credit_transition_evidence(
-                &format!("INV-030 Recovery edge expiry={exact_expiry} action={action_index}"),
+                &format!("INV-030 Recovery edge landing={landing:?} action={action_index}"),
                 &before_economic,
                 &after_economic,
             )?;
@@ -17732,7 +17814,7 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
             .run_direct_user_exit_campaign()
             .map_err(|error| {
                 format!(
-                    "INV-073 Recovery word expiry={exact_expiry} {word:?} had no bounded owner exit: {error}"
+                    "INV-073 Recovery word landing={landing:?} {word:?} had no bounded owner exit: {error}"
                 )
             })?;
         graph.bounded_exit_world_count += 1;
@@ -17747,7 +17829,7 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
         })?;
         if destination_total <= destination_total_before {
             return Err(format!(
-                "INV-073 Recovery word expiry={exact_expiry} {word:?} exited without increasing funded user destinations: {destination_total_before}->{destination_total}"
+                "INV-073 Recovery word landing={landing:?} {word:?} exited without increasing funded user destinations: {destination_total_before}->{destination_total}"
             ));
         }
         graph.value_moving_exit_world_count += 1;
@@ -17769,9 +17851,9 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
             ]);
         }
     }
-    let jobs = [false, true]
+    let jobs = BoundedExpiryLanding::ALL
         .into_iter()
-        .flat_map(|exact_expiry| words.iter().cloned().map(move |word| (exact_expiry, word)))
+        .flat_map(|landing| words.iter().cloned().map(move |word| (landing, word)))
         .collect::<Vec<_>>();
     let worker_count = std::thread::available_parallelism()
         .map(usize::from)
@@ -17785,8 +17867,8 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
             .map(|chunk| {
                 scope.spawn(move || -> Result<RecoveryAccumulator, String> {
                     let mut graph = RecoveryAccumulator::default();
-                    for (exact_expiry, word) in chunk {
-                        replay_recovery_word(*exact_expiry, word, &mut graph)?;
+                    for (landing, word) in chunk {
+                        replay_recovery_word(*landing, word, &mut graph)?;
                     }
                     Ok(graph)
                 })
@@ -17811,6 +17893,7 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
         unique_edge_count: graph.edges.len(),
         fresh_seed_world_count: graph.fresh_seed_world_count,
         exact_expiry_seed_world_count: graph.exact_expiry_seed_world_count,
+        after_expiry_seed_world_count: graph.after_expiry_seed_world_count,
         nonflat_seed_world_count: graph.nonflat_seed_world_count,
         bounded_exit_world_count: graph.bounded_exit_world_count,
         value_moving_exit_world_count: graph.value_moving_exit_world_count,
@@ -17822,7 +17905,22 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
     })
 }
 
-fn build_bounded_b_reference_seed(winner_side: SideV16) -> Result<(ScenarioRunner, u128), String> {
+/// Public active close before its first B booking, with an independently funded live cohort.
+/// Actors 0/1 own the close; actor 2 is on `winner_side` and actor 3 is its matched peer.
+/// Construction uses the existing public close runner and its per-transition global checks.
+pub fn public_b_close_seed(
+    winner_side: SideV16,
+    cohort_q: u128,
+    public_b_chunk_atoms: u128,
+) -> Result<V16Svm, String> {
+    Ok(build_public_b_close_seed(winner_side, cohort_q, public_b_chunk_atoms)?.env)
+}
+
+fn build_public_b_close_seed(
+    winner_side: SideV16,
+    cohort_q: u128,
+    public_b_chunk_atoms: u128,
+) -> Result<ScenarioRunner, String> {
     const CLOSE_WINNER: usize = 0;
     const CLOSE_LOSER: usize = 1;
     const B_OWNER: usize = 2;
@@ -17839,6 +17937,7 @@ fn build_bounded_b_reference_seed(winner_side: SideV16) -> Result<(ScenarioRunne
         initial_margin_bps: 1_000,
         actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
         actor_token_balances: [1_000_000, 161_600, 2_000_000, 1_000_000, 1],
+        public_b_chunk_atoms,
         ..MarketConfig::default()
     };
     let seed_byte = match winner_side {
@@ -17847,9 +17946,10 @@ fn build_bounded_b_reference_seed(winner_side: SideV16) -> Result<(ScenarioRunne
     };
     let mut runner = ScenarioRunner::new_unprefixed_with_market_config([seed_byte; 32], config)?;
 
+    let cohort_q = i128::try_from(cohort_q).map_err(|_| "public B cohort quantity overflow")?;
     let independent_q = match winner_side {
-        SideV16::Long => POS_SCALE as i128 / 2,
-        SideV16::Short => -(POS_SCALE as i128 / 2),
+        SideV16::Long => cohort_q,
+        SideV16::Short => -cohort_q,
     };
     if !runner.execute_trade(
         TradeRoute::NoCpi,
@@ -17873,6 +17973,16 @@ fn build_bounded_b_reference_seed(winner_side: SideV16) -> Result<(ScenarioRunne
         TradeRoute::NoCpi,
         winner_side,
     )?;
+
+    Ok(runner)
+}
+
+fn build_bounded_b_reference_seed(winner_side: SideV16) -> Result<(ScenarioRunner, u128), String> {
+    const CLOSE_LOSER: usize = 1;
+    const B_OWNER: usize = 2;
+    const ASSET: usize = 0;
+    let mut runner =
+        build_public_b_close_seed(winner_side, POS_SCALE / 2, percolator::MAX_VAULT_TVL)?;
 
     for step in 0..32 {
         let close = runner

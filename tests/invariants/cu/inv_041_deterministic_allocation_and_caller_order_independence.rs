@@ -4,15 +4,21 @@
 //!
 //! Evidence in this file (I/C plus invariant-specific M assertions): force-close chunking,
 //! multi-observation crank ordering, and all `4!` Recovery exit orders for two positions per side.
+//! The child module crosses all `3!` equal Live claim orders with both close directions after
+//! scarce backing replacement, including atomic rollback of a SPL-paying caller-cap bundle.
 //! These tests exercise the deployed public wrapper with real SBF/LiteSVM accounts and assert
 //! economic state, token custody, side counters, liveness, and compute outcomes.
 //!
 //! Guarantee boundary: the Recovery matrix exhausts four-party landing orders with unequal
 //! one-/two-lot weights and a real 100-to-150 mark move, and independently reconstructs its side
-//! state after every instruction. Liquidation, insurance, lien, payout, claim, and
-//! close-preemption ordering remain separate open partitions.
+//! state after every instruction. The Live child covers one exact half-funded source and
+//! untouched insurance; liquidation, insurance consumption, liens, other claim/rate shapes,
+//! terminal payouts, and close-preemption ordering remain separate partitions.
 
 use super::*;
+
+#[path = "inv_041_equal_claim_refill_order.rs"]
+mod equal_claim_refill_order;
 
 const FOUR_PARTY_RECOVERY_ASSET: usize = 1;
 

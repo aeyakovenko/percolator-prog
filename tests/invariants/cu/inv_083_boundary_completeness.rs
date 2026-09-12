@@ -7,7 +7,7 @@
 //! Evidence in this file (I/C): oversized batch leg vectors at the public decode
 //! boundary reject as instruction data errors rather than allocating a large
 //! vector or panicking the SBF program. The machine-readable class roster and
-//! source-locked caller-input inventory assign all 230 field-or-no-data subjects across 52 public
+//! source-locked caller-input inventory assign all 239 field-or-no-data subjects across 52 public
 //! input types to 20 semantic boundary profiles, per-field public evidence, and
 //! profile-level boundary evidence. InitMarket's complete validation predicate
 //! is exercised through public exact-rollback failures and live retries. Other
@@ -20,6 +20,390 @@
 //! separately owned by INV-085.
 
 use super::*;
+
+use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
+use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
+
+// Keep the exact caller fields: send_tx intentionally refreshes generation/intent guards.
+fn inv083_boundary_transaction(env: &V16CuEnv, instruction: Instruction) -> Transaction {
+    let tx = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), instruction],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &env.admin],
+        env.svm.latest_blockhash(),
+    );
+    tx.verify().unwrap();
+    assert!(bincode::serialize(&tx).unwrap().len() <= 1232);
+    tx
+}
+
+fn inv083_land_boundary(
+    env: &mut V16CuEnv,
+    tx: Transaction,
+    expected: Result<(), PercolatorError>,
+    label: &str,
+) -> u64 {
+    let mut keys = tx.message.account_keys.clone();
+    keys.extend([env.mint, env.vault, solana_sdk::sysvar::clock::ID]);
+    keys.sort_unstable();
+    keys.dedup();
+    let before: Vec<_> = keys.iter().map(|key| env.svm.get_account(key)).collect();
+    let fee = FeeStructure::default().lamports_per_signature
+        * u64::from(tx.message.header.num_required_signatures);
+    let rejected = expected.is_err();
+    let result = env.svm.send_transaction(tx);
+    let cu = match (result, expected) {
+        (Ok(meta), Ok(())) => meta.compute_units_consumed,
+        (Err(failure), Err(error)) => {
+            assert_eq!(
+                failure.err,
+                TransactionError::InstructionError(2, InstructionError::Custom(error as u32)),
+                "{label}: exact wrapper rejection"
+            );
+            failure.meta.compute_units_consumed
+        }
+        (actual, expected) => panic!("{label}: expected {expected:?}, got {actual:?}"),
+    };
+    assert_cu_within(label, cu, CUSTODY_CU_LIMIT);
+    for (key, mut account) in keys.into_iter().zip(before) {
+        if key == env.payer.pubkey() {
+            account.as_mut().unwrap().lamports -= fee;
+        } else if !rejected
+            && key != env.admin.pubkey()
+            && key != env.mint
+            && key != solana_sdk::sysvar::clock::ID
+        {
+            continue;
+        }
+        assert_eq!(env.svm.get_account(&key), account, "{label}: {key}");
+    }
+    cu
+}
+
+fn inv083_funded_backing_world() -> (V16CuEnv, Pubkey) {
+    let mut env = inv018_public_spl_market(0);
+    let token = create_ata_for_test(&mut env.svm, &env.payer, env.admin.pubkey(), env.mint);
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &token,
+                &env.admin.pubkey(),
+                &[],
+                3,
+            )
+            .unwrap(),
+            spl_token::instruction::set_authority(
+                &spl_token::ID,
+                &env.mint,
+                None,
+                spl_token::instruction::AuthorityType::MintTokens,
+                &env.admin.pubkey(),
+                &[],
+            )
+            .unwrap(),
+        ],
+        &[&env.admin],
+    )
+    .unwrap();
+    (env, token)
+}
+
+fn inv083_backing_instruction(
+    env: &V16CuEnv,
+    token: Pubkey,
+    domain: u16,
+    intent_id: u64,
+    amount: u128,
+    expiry_slot: u64,
+) -> Instruction {
+    Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(token, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::TopUpBackingBucket {
+            domain,
+            market_id: env.asset_market_id(0),
+            authority_epoch: env.control_sequences(0).authority_epoch,
+            intent_id,
+            backing_fee_bps: 0,
+            insurance_share_bps: 0,
+            amount,
+            expiry_slot,
+        }
+        .encode(),
+    }
+}
+
+#[test]
+fn v16_program_boundary_product_retained_backing_expiry_and_terminal_intents() {
+    let mut worlds = 0;
+    let mut peak = 0;
+    // 2 domains x 2 amounts x 2 expiries x 3 authenticated landing boundaries.
+    for domain in [0, 1] {
+        for amount in [0, 1] {
+            for expiry in [7, u64::MAX - 1] {
+                for landing in [expiry - 1, expiry, expiry + 1] {
+                    let (mut env, token) = inv083_funded_backing_world();
+                    set_test_clock(&mut env, expiry - 1, 100);
+                    for (intent, expected) in [(0, Err(PercolatorError::EngineStale)), (1, Ok(()))]
+                    {
+                        let ix = inv083_backing_instruction(&env, token, domain, intent, 0, 0);
+                        let tx = inv083_boundary_transaction(&env, ix);
+                        peak = peak.max(inv083_land_boundary(
+                            &mut env,
+                            tx,
+                            expected,
+                            "initial intent",
+                        ));
+                    }
+                    let retained_ix = inv083_backing_instruction(
+                        &env,
+                        token,
+                        domain,
+                        u64::MAX - 1,
+                        amount,
+                        expiry,
+                    );
+                    let retained = inv083_boundary_transaction(&env, retained_ix.clone());
+                    let signed_bytes = bincode::serialize(&retained).unwrap();
+                    let preflight = env
+                        .svm
+                        .simulate_transaction(retained.clone().into())
+                        .expect("unchanged retained instruction is live before expiry");
+                    assert_cu_within(
+                        "retained pre-expiry control",
+                        preflight.compute_units_consumed,
+                        CUSTODY_CU_LIMIT,
+                    );
+                    assert_eq!(env.control_sequences(0).backing_top_up, 1);
+                    set_test_clock(&mut env, landing, 100);
+                    assert_eq!(bincode::serialize(&retained).unwrap(), signed_bytes);
+                    let accepted = amount == 0 || landing < expiry;
+                    peak = peak.max(inv083_land_boundary(
+                        &mut env, retained,
+                        if accepted { Ok(()) } else { Err(PercolatorError::InvalidInstruction) },
+                        &format!("retained domain={domain} amount={amount} expiry={expiry} landing={landing}"),
+                    ));
+                    assert_eq!(
+                        env.control_sequences(0).backing_top_up,
+                        if accepted { u64::MAX - 1 } else { 1 }
+                    );
+                    let funded = if accepted { amount } else { 0 };
+                    let group = env.market_state().1;
+                    assert_eq!((group.vault, group.c_tot, group.insurance), (funded, 0, 0));
+                    for side in 0..2 {
+                        assert_eq!(
+                            group.source_backing_buckets[side].fresh_unliened_backing_num,
+                            if side == domain as usize {
+                                funded * BOUND_SCALE
+                            } else {
+                                0
+                            }
+                        );
+                    }
+                    assert_eq!(env.token_amount(token), 3 - funded as u64);
+                    assert_eq!(env.token_amount(env.vault), funded as u64);
+
+                    // Even a zero-value intent consumes MAX without wrapping or granting a new lane.
+                    let engine_before = market_engine_slot_bytes(
+                        &env.svm.get_account(&env.market).unwrap().data,
+                        0,
+                    )
+                    .to_vec();
+                    let terminal = inv083_backing_instruction(&env, token, domain, u64::MAX, 0, 0);
+                    let tx = inv083_boundary_transaction(&env, terminal);
+                    peak = peak.max(inv083_land_boundary(
+                        &mut env,
+                        tx,
+                        Ok(()),
+                        "terminal zero intent",
+                    ));
+                    let terminal_market = env.svm.get_account(&env.market).unwrap();
+                    assert_eq!(
+                        market_engine_slot_bytes(&terminal_market.data, 0),
+                        engine_before
+                    );
+                    assert_eq!(env.token_amount(token), 3 - funded as u64);
+                    assert_eq!(env.token_amount(env.vault), funded as u64);
+                    for stale in [0, 1, u64::MAX - 1, u64::MAX] {
+                        env.svm.expire_blockhash();
+                        let ix = inv083_backing_instruction(&env, token, 1 - domain, stale, 0, 0);
+                        let tx = inv083_boundary_transaction(&env, ix);
+                        peak = peak.max(inv083_land_boundary(
+                            &mut env,
+                            tx,
+                            Err(PercolatorError::EngineStale),
+                            "sibling-domain stale intent",
+                        ));
+                    }
+                    env.svm.expire_blockhash();
+                    let retry = inv083_boundary_transaction(&env, retained_ix);
+                    assert_eq!(
+                        retry.message.instructions[2].data,
+                        bincode::deserialize::<Transaction>(&signed_bytes)
+                            .unwrap()
+                            .message
+                            .instructions[2]
+                            .data
+                    );
+                    peak = peak.max(inv083_land_boundary(
+                        &mut env,
+                        retry,
+                        Err(PercolatorError::EngineStale),
+                        "retained retry after terminal intent",
+                    ));
+                    assert_eq!(env.svm.get_account(&env.market).unwrap(), terminal_market);
+                    assert_eq!(env.control_sequences(0).backing_top_up, u64::MAX);
+                    assert_eq!(env.control_sequences(0).insurance_top_up, 0);
+                    worlds += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(worlds, 24);
+    eprintln!("INV-083 retained expiry product: {worlds} worlds, peak {peak} CU");
+}
+
+#[test]
+fn v16_program_boundary_product_terminal_policy_and_wide_topup_amounts() {
+    let mut peak = 0;
+    for fee in [0, 1, 9_999, 10_000, 10_001, u64::MAX - 1, u64::MAX] {
+        let mut env = inv018_public_spl_market(0);
+        let engine_before =
+            market_engine_slot_bytes(&env.svm.get_account(&env.market).unwrap().data, 0).to_vec();
+        let mut sequence = 0;
+        for proposed in [0, 1, u64::MAX - 1, u64::MAX] {
+            let ix = Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                data: ProgInstruction::UpdateTradeFeePolicy {
+                    trade_fee_base_bps: fee,
+                    policy_sequence: proposed,
+                    authority_epoch: env.control_sequences(0).authority_epoch,
+                }
+                .encode(),
+            };
+            let expected = if fee > 10_000 {
+                Err(PercolatorError::InvalidInstruction)
+            } else if proposed == 0 {
+                Err(PercolatorError::EngineStale)
+            } else {
+                Ok(())
+            };
+            if expected.is_ok() {
+                sequence = proposed;
+            }
+            let tx = inv083_boundary_transaction(&env, ix);
+            peak = peak.max(inv083_land_boundary(
+                &mut env,
+                tx,
+                expected,
+                "fee x terminal policy ID",
+            ));
+            assert_eq!(env.control_sequences(0).trade_fee, sequence);
+            assert_eq!(
+                env.market_state().0.trade_fee_base_bps,
+                if sequence == 0 { 0 } else { fee }
+            );
+            assert_eq!(
+                market_engine_slot_bytes(&env.svm.get_account(&env.market).unwrap().data, 0),
+                engine_before
+            );
+            assert_eq!(env.control_sequences(0).oracle_observation, 0);
+        }
+        // The rejected max-ID proposals above must not burn an otherwise usable ID.
+        env.svm.expire_blockhash();
+        let ix = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: ProgInstruction::UpdateTradeFeePolicy {
+                trade_fee_base_bps: 1,
+                policy_sequence: u64::MAX,
+                authority_epoch: env.control_sequences(0).authority_epoch,
+            }
+            .encode(),
+        };
+        let tx = inv083_boundary_transaction(&env, ix);
+        peak = peak.max(inv083_land_boundary(
+            &mut env,
+            tx,
+            if sequence == 0 {
+                Ok(())
+            } else {
+                Err(PercolatorError::EngineStale)
+            },
+            "max policy retry",
+        ));
+        assert_eq!(env.control_sequences(0).trade_fee, u64::MAX);
+        assert_eq!(
+            env.market_state().0.trade_fee_base_bps,
+            if sequence == 0 { 1 } else { fee }
+        );
+        assert_eq!(
+            market_engine_slot_bytes(&env.svm.get_account(&env.market).unwrap().data, 0),
+            engine_before
+        );
+    }
+    for domain in [0, 1] {
+        let (mut env, token) = inv083_funded_backing_world();
+        set_test_clock(&mut env, 5, 100);
+        for amount in [
+            u64::MAX as u128 - 1,
+            u64::MAX as u128,
+            u64::MAX as u128 + 1,
+            u128::MAX - 1,
+            u128::MAX,
+        ] {
+            let ix = inv083_backing_instruction(&env, token, domain, u64::MAX, amount, 6);
+            let tx = inv083_boundary_transaction(&env, ix);
+            peak = peak.max(inv083_land_boundary(
+                &mut env,
+                tx,
+                Err(if amount > u64::MAX as u128 {
+                    PercolatorError::InvalidInstruction
+                } else {
+                    PercolatorError::InvalidTokenAccount
+                }),
+                "wide amount x terminal intent",
+            ));
+            assert_eq!(env.control_sequences(0).backing_top_up, 0);
+        }
+        for (intent, amount) in [(u64::MAX - 1, 0), (u64::MAX, 1)] {
+            let ix = inv083_backing_instruction(&env, token, domain, intent, amount, 6);
+            let tx = inv083_boundary_transaction(&env, ix);
+            peak = peak.max(inv083_land_boundary(
+                &mut env,
+                tx,
+                Ok(()),
+                "unconsumed wide-amount retry",
+            ));
+        }
+        assert_eq!(env.control_sequences(0).backing_top_up, u64::MAX);
+        assert_eq!(env.token_amount(token), 2);
+        assert_eq!(env.token_amount(env.vault), 1);
+        assert_eq!(env.market_state().1.vault, 1);
+        assert_eq!(
+            env.market_state().1.source_backing_buckets[domain as usize].fresh_unliened_backing_num,
+            BOUND_SCALE
+        );
+    }
+    eprintln!("INV-083 policy/amount product: 9 worlds, peak {peak} CU");
+}
 
 const INV_083_BOUNDARY_ROSTER: &str = include_str!("../inv_083_boundary_roster.tsv");
 const INV_083_CALLER_INPUT_ROSTER: &str = include_str!("../inv_023_caller_input_roster.tsv");
@@ -176,7 +560,8 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
     use std::collections::{BTreeMap, BTreeSet};
 
     const HEADER: &str = "type\tfields\tclassification\tevidence";
-    const EXPECTED_FIELD_COUNT: usize = 234;
+    // 236 named public fields plus the three unit-variant no-data subjects.
+    const EXPECTED_FIELD_COUNT: usize = 239;
     const EXPECTED_TYPE_COUNT: usize = 52;
 
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -254,14 +639,14 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
         "every boundary profile must own at least one current public input field"
     );
     let expected_profile_counts = BTreeMap::from([
-        ("amount", 23),
+        ("amount", 25),
         ("authenticated-time", 12),
         ("basis-points", 21),
         ("bitmask", 1),
         ("count", 5),
         ("duration", 9),
         ("enum", 5),
-        ("expiry", 1),
+        ("expiry", 2),
         ("identity", 76),
         ("ignored", 1),
         ("index", 24),
@@ -270,7 +655,7 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
         ("price", 12),
         ("rate", 2),
         ("ratio", 2),
-        ("replay", 20),
+        ("replay", 22),
         ("scale", 1),
         ("shape", 3),
         ("signed-quantity", 4),

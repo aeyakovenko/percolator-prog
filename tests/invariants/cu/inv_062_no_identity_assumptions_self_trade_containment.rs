@@ -12,6 +12,11 @@
 //! portfolio, and market identities. The complete engine portfolios, market,
 //! oracle profile, SPL custody, fees, and terminal payouts must remain equal. CPI
 //! legs receive fresh episode-bound matcher consent.
+//! `v16_program_common_control_partial_liquidation_matches_independent_owners_and_routes` extends
+//! the same identity-independence rule past open/close round trips into a genuine authenticated
+//! mark move, certificate refresh, and partial liquidation. A common owner must receive the same
+//! bounded mark, matched OI, unchanged counterparty account, custody, and value result as two
+//! independent owners over the same public no-CPI/CPI routes.
 //! Paid off-mark coalition attacks
 //! are independently exercised by INV-045's fee-reserve and liquidation-reward
 //! models; this file owns the identity-independence and terminal-custody assertion.
@@ -412,6 +417,286 @@ fn v16_program_common_control_round_trip_is_conserved_across_routes_and_mark_mod
         }
     }
     assert_eq!(worlds, 96, "common-control route-pair census changed");
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CommonControlLiquidationOutcome {
+    effective_price: u64,
+    raw_target_price: u64,
+    long_oi_q: u128,
+    short_oi_q: u128,
+    target_effective_q: u128,
+    peer_effective_q: u128,
+    target_capital: u128,
+    target_pnl: i128,
+    peer_capital: u128,
+    peer_pnl: i128,
+    target_equity: i128,
+    target_initial_req: u128,
+    target_maintenance_req: u128,
+    liquidation_reduction_q: u128,
+    insurance: u128,
+    c_tot: u128,
+    pnl_pos_tot: u128,
+    vault: u128,
+    spl_vault: u64,
+}
+
+fn common_control_pair_value_with_insurance(env: &V16CuEnv, target: Pubkey, peer: Pubkey) -> i128 {
+    [target, peer]
+        .into_iter()
+        .map(|portfolio| {
+            let account = env.portfolio_state(portfolio);
+            i128::try_from(account.capital.get())
+                .expect("portfolio capital fits signed value")
+                .checked_add(account.pnl.get())
+                .expect("bounded portfolio value")
+        })
+        .try_fold(
+            i128::try_from(env.market_state().1.insurance).expect("insurance fits signed value"),
+            |sum, value| sum.checked_add(value),
+        )
+        .expect("bounded common-control value sum")
+}
+
+fn crank_common_control_account(
+    env: &mut V16CuEnv,
+    portfolio: Pubkey,
+    observations: Vec<CrankObservationHint>,
+) {
+    env.crank(
+        portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations,
+        },
+    );
+}
+
+fn assert_common_control_certificate(
+    label: &str,
+    group: &MarketGroupV16,
+    account: &PortfolioAccountV16,
+    expected_liq_deficit: u128,
+) {
+    assert!(
+        crate::support::fuzz_model::assert_current_certificate_matches_independent(
+            label, group, account,
+        )
+        .unwrap_or_else(|error| panic!("{label}: {error}")),
+        "{label}: certificate is not current"
+    );
+    assert_eq!(
+        health_cert(account).certified_liq_deficit,
+        expected_liq_deficit,
+        "{label}: unexpected liquidation decision"
+    );
+}
+
+fn run_common_control_liquidation_world(
+    route: CommonControlRoute,
+    common_owner: bool,
+) -> CommonControlLiquidationOutcome {
+    const INITIAL_PRICE: u64 = 100;
+    const TARGET_PRICE: u64 = 95;
+    const TARGET_DEPOSIT: u128 = 14;
+    const PEER_DEPOSIT: u128 = 200;
+    const MOVE_BPS: u64 = 500;
+
+    let label = format!("{route:?}/common_owner={common_owner}");
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, MOVE_BPS);
+    env.svm.warp_to_slot(0);
+    env.configure_auth_mark_with_cu(0, INITIAL_PRICE);
+
+    let target_owner = Keypair::new();
+    let independent_peer_owner = Keypair::new();
+    let peer_owner = if common_owner {
+        &target_owner
+    } else {
+        &independent_peer_owner
+    };
+    let target = env.create_portfolio(&target_owner);
+    let peer = env.create_portfolio(peer_owner);
+    env.deposit(&target_owner, target, TARGET_DEPOSIT);
+    env.deposit(peer_owner, peer, PEER_DEPOSIT);
+
+    let matcher = common_control_route_uses_matcher(route)
+        .then(|| configure_common_control_matcher(&mut env, peer_owner, peer));
+    execute_common_control_trade(
+        &mut env,
+        route,
+        &target_owner,
+        target,
+        peer_owner,
+        peer,
+        matcher,
+        POS_SCALE as i128,
+        INITIAL_PRICE,
+        0,
+    );
+
+    let opened = env.market_state().1;
+    assert_eq!(opened.assets[0].oi_eff_long_q, POS_SCALE, "{label}");
+    assert_eq!(opened.assets[0].oi_eff_short_q, POS_SCALE, "{label}");
+    let conserved_value = common_control_pair_value_with_insurance(&env, target, peer);
+    let spl_vault = env.token_amount(env.vault);
+    assert_eq!(conserved_value, i128::from(spl_vault), "{label}");
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, TARGET_PRICE);
+    let pending_group = env.market_state().1;
+    let pending_cert = health_cert(&env.portfolio_state(target));
+    assert_eq!(
+        pending_group.assets[0].effective_price, INITIAL_PRICE,
+        "{label}"
+    );
+    assert_eq!(
+        pending_group.assets[0].raw_oracle_target_price, TARGET_PRICE,
+        "{label}"
+    );
+    assert!(
+        pending_cert.valid && pending_cert.cert_oracle_epoch < pending_group.oracle_epoch,
+        "{label}: authenticated target must stale the prior certificate"
+    );
+
+    crank_common_control_account(&mut env, target, crank_observations(0));
+    let marked_group = env.market_state().1;
+    let marked_target = env.portfolio_state(target);
+    assert_eq!(
+        marked_group.assets[0].effective_price, TARGET_PRICE,
+        "{label}"
+    );
+    assert_eq!(
+        INITIAL_PRICE.abs_diff(marked_group.assets[0].effective_price),
+        INITIAL_PRICE * MOVE_BPS / 10_000,
+        "{label}: authenticated mark escaped its elapsed movement bound"
+    );
+    assert_common_control_certificate(
+        &format!("{label}/marked-target"),
+        &marked_group,
+        &marked_target,
+        1,
+    );
+
+    crank_common_control_account(&mut env, peer, vec![]);
+    let peer_refreshed_group = env.market_state().1;
+    let peer_refreshed = env.portfolio_state(peer);
+    assert_common_control_certificate(
+        &format!("{label}/refreshed-peer"),
+        &peer_refreshed_group,
+        &peer_refreshed,
+        0,
+    );
+    assert_eq!(
+        common_control_pair_value_with_insurance(&env, target, peer),
+        conserved_value,
+        "{label}: paired mark settlement changed public value"
+    );
+
+    crank_common_control_account(&mut env, target, vec![]);
+    let liquidatable_group = env.market_state().1;
+    let liquidatable_target = env.portfolio_state(target);
+    assert_eq!(
+        liquidatable_group.assets[0].oi_eff_long_q, POS_SCALE,
+        "{label}: recertification cannot liquidate"
+    );
+    assert_common_control_certificate(
+        &format!("{label}/liquidatable-target"),
+        &liquidatable_group,
+        &liquidatable_target,
+        1,
+    );
+
+    let peer_before_liquidation = env.svm.get_account(&peer).unwrap();
+    crank_common_control_account(&mut env, target, vec![]);
+    let group = env.market_state().1;
+    let target_state = env.portfolio_state(target);
+    let peer_state = env.portfolio_state(peer);
+    let liquidation_reduction_q = POS_SCALE
+        .checked_sub(group.assets[0].oi_eff_long_q)
+        .expect("liquidation cannot increase OI");
+    assert!(
+        liquidation_reduction_q > 0 && liquidation_reduction_q < POS_SCALE,
+        "{label}: fixture requires a genuine partial liquidation"
+    );
+    assert_eq!(
+        group.assets[0].oi_eff_long_q, group.assets[0].oi_eff_short_q,
+        "{label}: liquidation must preserve matched effective OI"
+    );
+    assert_eq!(
+        env.svm.get_account(&peer).unwrap(),
+        peer_before_liquidation,
+        "{label}: target liquidation mutated the counterparty account"
+    );
+    let target_cert = health_cert(&target_state);
+    assert_common_control_certificate(
+        &format!("{label}/liquidated-target"),
+        &group,
+        &target_state,
+        0,
+    );
+
+    let target_effective_q =
+        reference_current_epoch_effective_abs(&group, active_leg_for_asset(&target_state, 0));
+    let peer_effective_q =
+        reference_current_epoch_effective_abs(&group, active_leg_for_asset(&peer_state, 0));
+    assert_eq!(target_effective_q, group.assets[0].oi_eff_long_q, "{label}");
+    assert_eq!(peer_effective_q, group.assets[0].oi_eff_short_q, "{label}");
+    assert_eq!(env.token_amount(env.vault), spl_vault, "{label}");
+    assert_eq!(group.vault, u128::from(spl_vault), "{label}");
+    assert_eq!(
+        common_control_pair_value_with_insurance(&env, target, peer),
+        conserved_value,
+        "{label}: liquidation changed pair value plus insurance"
+    );
+
+    CommonControlLiquidationOutcome {
+        effective_price: group.assets[0].effective_price,
+        raw_target_price: group.assets[0].raw_oracle_target_price,
+        long_oi_q: group.assets[0].oi_eff_long_q,
+        short_oi_q: group.assets[0].oi_eff_short_q,
+        target_effective_q,
+        peer_effective_q,
+        target_capital: target_state.capital.get(),
+        target_pnl: target_state.pnl.get(),
+        peer_capital: peer_state.capital.get(),
+        peer_pnl: peer_state.pnl.get(),
+        target_equity: target_cert.certified_equity,
+        target_initial_req: target_cert.certified_initial_req,
+        target_maintenance_req: target_cert.certified_maintenance_req,
+        liquidation_reduction_q,
+        insurance: group.insurance,
+        c_tot: group.c_tot,
+        pnl_pos_tot: group.pnl_pos_tot,
+        vault: group.vault,
+        spl_vault,
+    }
+}
+
+#[test]
+fn v16_program_common_control_partial_liquidation_matches_independent_owners_and_routes() {
+    let mut route_baseline = None;
+    let mut worlds = 0usize;
+
+    for route in [CommonControlRoute::NoCpi, CommonControlRoute::Cpi] {
+        let common = run_common_control_liquidation_world(route, true);
+        let independent = run_common_control_liquidation_world(route, false);
+        assert_eq!(
+            common, independent,
+            "{route:?}: owner identity changed public liquidation economics"
+        );
+        if let Some(baseline) = &route_baseline {
+            assert_eq!(
+                &common, baseline,
+                "{route:?}: trade transport changed public liquidation economics"
+            );
+        } else {
+            route_baseline = Some(common);
+        }
+        worlds += 2;
+    }
+
+    assert_eq!(worlds, 4, "common-control liquidation census changed");
 }
 
 #[test]

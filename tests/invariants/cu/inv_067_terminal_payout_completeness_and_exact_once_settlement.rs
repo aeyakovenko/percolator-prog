@@ -14,11 +14,322 @@
 //! `v16_program_retained_recovery_haircut_prerequisite_matrix_keeps_prior_claim_floor` lands a
 //! retained forfeit after a real B haircut and proves the predecessor still pays at least the
 //! complete earlier claim.
+//! `v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once` composes a positive
+//! partial-receipt payout with a same-transaction rejected portfolio close, then proves exact
+//! rollback, alternate-handler retry, replay idempotence, and every claimant's public exit.
+//! `v16_program_resolved_crank_topup_batch_order_retries_pay_exactly_once` orders two valid
+//! payout routes against one positive due within a successful transaction. Crank-first and
+//! top-up-first batches each transfer exactly once despite a duplicate top-up, and fresh-blockhash
+//! retries preserve the receipt. Both unequal claimants complete public cleanup in both orders.
+//! `v16_program_terminal_provider_and_insurance_retries_preserve_separate_entitlements` pays
+//! real trading claims before distinct asset-1 providers exit, checks retained withdrawals and
+//! atomic payout rollback against still-funded unrelated insurance, and reconciles every SPL atom.
+//! `v16_program_receipt_terminal_suffix_partitions_rounding_burn_surplus_and_rent` carries
+//! completed receipt floors through the actual mint burn, raw-surplus sweep and slab tombstone.
 //!
 //! Guarantee boundary: this is one adversarial public lifecycle matrix, not an exhaustive proof of
 //! every terminal residual partition.
 
 use super::*;
+
+#[path = "inv_067_receipt_partition_confluence.rs"]
+mod receipt_partition_confluence;
+
+#[path = "inv_067_terminal_claim_late_expiry.rs"]
+pub(super) mod late_expiry;
+
+#[path = "inv_067_terminal_provider_insurance_retries.rs"]
+mod provider_insurance_retries;
+
+#[path = "inv_067_receipt_rail_liquidity.rs"]
+mod receipt_rail_liquidity;
+
+#[path = "inv_067_receipt_terminal_disposition.rs"]
+mod receipt_terminal_disposition;
+
+#[path = "inv_067_receipt_expiry_interleavings.rs"]
+mod receipt_expiry_interleavings;
+
+#[path = "inv_067_receipt_source_realization.rs"]
+mod receipt_source_realization;
+
+#[test]
+fn v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once() {
+    late_expiry::verify_receipt_payout_and_portfolio_close_retry();
+}
+
+#[test]
+fn v16_program_resolved_crank_topup_batch_order_retries_pay_exactly_once() {
+    use late_expiry::World;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    const FACES: [u128; 5] = [700, 0, 1_000, 0, 1_300];
+    const CAPITAL: [u128; 5] = [1_000, 0, 1_000, 0, 1_000];
+    const INITIAL_RESIDUAL: u128 = 501;
+    const FINAL_RESIDUAL: u128 = 851;
+    const TOTAL_FACE: u128 = 3_000;
+
+    let crank = |world: &World, actor| {
+        let mut instruction = world.payout(actor, false);
+        instruction.data = ProgInstruction::PermissionlessCrank {
+            now_slot: 13,
+            observations: vec![],
+        }
+        .encode();
+        instruction
+    };
+    let nonprogress = |index| {
+        TransactionError::InstructionError(
+            index,
+            InstructionError::Custom(PercolatorError::EngineNonProgress as u32),
+        )
+    };
+    let mut peak_cu = 0;
+    for (claimant, topup_first) in [(0, false), (0, true), (4, false), (4, true)] {
+        // This shared fixture uses only System, SPL and wrapper instructions to create
+        // deposits, real trading claims, debtor settlement and the pending backing expiry.
+        let mut world = World::before_receipts();
+        for actor in [0, 4] {
+            for _ in 0..8 {
+                if world.receipt(actor).present {
+                    break;
+                }
+                world.land(&[world.payout(actor, false)], false).unwrap();
+            }
+            let receipt = world.receipt(actor);
+            assert!(receipt.present && !receipt.finalized);
+            assert_eq!(receipt.terminal_positive_claim_face, FACES[actor]);
+            assert_eq!(
+                receipt.prior_bound_contribution_num,
+                FACES[actor] * BOUND_SCALE
+            );
+            assert_eq!(
+                receipt.paid_effective,
+                FACES[actor] * INITIAL_RESIDUAL / TOTAL_FACE
+            );
+            assert_eq!(
+                u128::from(world.env.token_amount(world.actors[actor].token)),
+                CAPITAL[actor] + receipt.paid_effective
+            );
+        }
+        let original = world.receipt(claimant);
+        let retained_crank = crank(&world, claimant);
+        let retained_topup = world.payout(claimant, true);
+        world.env.svm.warp_to_slot(13);
+        world.land(&[world.payout(2, false)], false).unwrap();
+        assert_eq!(world.receipt(claimant), original);
+        let ledger = world.env.market_state().1.resolved_payout_ledger;
+        assert_eq!(ledger.snapshot_slot, 12);
+        assert_eq!(ledger.snapshot_residual, FINAL_RESIDUAL);
+        assert_eq!(ledger.current_payout_rate_num, FINAL_RESIDUAL * BOUND_SCALE);
+        assert_eq!(ledger.current_payout_rate_den, TOTAL_FACE * BOUND_SCALE);
+        assert_eq!(
+            ledger.terminal_claim_bound_unreceipted_num,
+            FACES[2] * BOUND_SCALE
+        );
+        let expected_paid = FACES[claimant] * FINAL_RESIDUAL / TOTAL_FACE;
+        let due = expected_paid.checked_sub(original.paid_effective).unwrap();
+        assert_eq!(due, if claimant == 0 { 82 } else { 151 });
+        let pending = world.frame();
+        let token = world.actors[claimant].token;
+        let portfolio = world.actors[claimant].portfolio;
+        let tokens_before = world.env.token_amount(token);
+        let vault_before = world.env.token_amount(world.env.vault);
+
+        // Existing receipt tests replay separate transactions or reject a later close.
+        // Here both payout handlers and a duplicate top-up commit in the same transaction,
+        // so later calls must observe the first call's paid receipt before any commit.
+        let batch = if topup_first {
+            [
+                retained_topup.clone(),
+                retained_crank.clone(),
+                retained_topup.clone(),
+            ]
+        } else {
+            [
+                retained_crank.clone(),
+                retained_topup.clone(),
+                retained_topup.clone(),
+            ]
+        };
+        let payout_batch = world
+            .land(&batch, false)
+            .expect("the first handler pays once and subsequent handlers share its receipt");
+        assert_cu_within(
+            "resolved crank/top-up batch",
+            payout_batch.compute_units_consumed,
+            500_000,
+        );
+        for (program, successes) in [(world.env.program_id, 3), (spl_token::ID, 1)] {
+            assert_eq!(
+                payout_batch
+                    .logs
+                    .iter()
+                    .filter(|line| **line == format!("Program {program} success"))
+                    .count(),
+                successes,
+                "all three wrapper calls must commit exactly one SPL transfer"
+            );
+        }
+        assert_eq!(
+            u128::from(world.env.token_amount(token) - tokens_before),
+            due
+        );
+        assert_eq!(
+            u128::from(vault_before - world.env.token_amount(world.env.vault)),
+            due
+        );
+        let mut expected_receipt = original;
+        expected_receipt.paid_effective = expected_paid;
+        assert_eq!(world.receipt(claimant), expected_receipt);
+        assert_eq!(world.env.market_state().1.resolved_payout_ledger, ledger);
+        world.assert_frame_except(
+            &pending,
+            &[world.env.market, world.env.vault, portfolio, token],
+        );
+        world.custody();
+
+        // World::land expires the blockhash on every submission, so these execute the
+        // program again rather than being short-circuited as duplicate transactions.
+        for instructions in [
+            batch.to_vec(),
+            vec![retained_crank],
+            vec![world.payout(claimant, false)],
+            vec![retained_topup],
+        ] {
+            let before = world.frame();
+            match world.land(&instructions, false) {
+                Ok(meta) => assert!(
+                    !meta
+                        .logs
+                        .iter()
+                        .any(|line| *line == format!("Program {} success", spl_token::ID)),
+                    "a paid receipt replay must not transfer tokens"
+                ),
+                Err(failure) => assert_eq!(
+                    failure.err,
+                    nonprogress(if topup_first && instructions.len() == 3 {
+                        3
+                    } else {
+                        2
+                    })
+                ),
+            }
+            assert_eq!(
+                world.frame(),
+                before,
+                "all three public routes share the paid receipt"
+            );
+        }
+
+        // Materialize the remaining claimant and drain every portfolio through the crank
+        // route. The bound prevents treating repeated nonprogress as terminal completion.
+        let expected: [u128; 5] = std::array::from_fn(|actor| {
+            CAPITAL[actor] + FACES[actor] * FINAL_RESIDUAL / TOTAL_FACE
+        });
+        for _ in 0..16 {
+            for actor in [2, 4, 0, 1, 3] {
+                if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio) {
+                    continue;
+                }
+                let before = world.frame();
+                match world.land(&[crank(&world, actor)], false) {
+                    Ok(meta) => {
+                        assert_cu_within(
+                            "resolved crank terminal cleanup",
+                            meta.compute_units_consumed,
+                            CUSTODY_CU_LIMIT,
+                        );
+                        assert_ne!(
+                            world.frame(),
+                            before,
+                            "successful cleanup must make progress"
+                        );
+                        world.assert_frame_except(
+                            &before,
+                            &[
+                                world.env.market,
+                                world.env.vault,
+                                world.actors[actor].portfolio,
+                                world.actors[actor].token,
+                            ],
+                        );
+                    }
+                    Err(failure) => {
+                        assert_eq!(failure.err, nonprogress(2));
+                        assert_eq!(world.frame(), before);
+                    }
+                }
+                world.custody();
+                for (actor, limit) in expected.iter().enumerate() {
+                    assert!(
+                        u128::from(world.env.token_amount(world.actors[actor].token)) <= *limit
+                    );
+                }
+            }
+            if world
+                .actors
+                .iter()
+                .all(|actor| resolved_portfolio_is_terminal(&world.env, actor.portfolio))
+            {
+                break;
+            }
+        }
+        for (actor, payout) in expected.into_iter().enumerate() {
+            let portfolio = world.actors[actor].portfolio;
+            assert!(resolved_portfolio_is_terminal(&world.env, portfolio));
+            assert_eq!(
+                u128::from(world.env.token_amount(world.actors[actor].token)),
+                payout
+            );
+            let before = world.frame();
+            world.land(&[world.payout(actor, true)], false).unwrap();
+            assert_eq!(
+                world.frame(),
+                before,
+                "terminal receipt cannot be paid again"
+            );
+            let cu = world
+                .env
+                .close_portfolio_with_cu(&world.actors[actor].owner, portfolio);
+            assert_cu_within(
+                "crank/top-up terminal portfolio close",
+                cu,
+                CUSTODY_CU_LIMIT,
+            );
+            peak_cu = peak_cu.max(cu);
+            world.custody();
+        }
+        let group = world.env.market_state().1;
+        assert_eq!(group.materialized_portfolio_count, 0);
+        assert_eq!(
+            [
+                group.c_tot,
+                group.pnl_pos_tot,
+                group.source_claim_bound_total_num,
+                group.insurance
+            ],
+            [0; 4]
+        );
+        assert_eq!(
+            group.vault,
+            FINAL_RESIDUAL
+                - FACES
+                    .map(|face| face * FINAL_RESIDUAL / TOTAL_FACE)
+                    .iter()
+                    .sum::<u128>(),
+            "only the independently calculated payout rounding residue remains"
+        );
+        assert_eq!(group.vault, 2);
+        assert_eq!(world.env.token_amount(world.provider_token), 1);
+        peak_cu = peak_cu.max(world.peak_cu);
+        println!(
+            "INV-067 claimant {claimant}, topup_first={topup_first}: due {due}; exact-once batch CU {}",
+            payout_batch.compute_units_consumed
+        );
+    }
+    println!("INV-067 crank/top-up order: 4 public worlds, 4 exact-once batches, 16 fresh-blockhash retries, all 20 portfolios closed; peak suffix CU {peak_cu}");
+}
 
 #[test]
 fn v16_program_retained_recovery_haircut_prerequisite_matrix_keeps_prior_claim_floor() {

@@ -14,12 +14,22 @@
 //! atomically recertified with its exact deficit, unrelated certificates are staled by the composed
 //! source-risk writes, risk-bearing reuse rejects, and a flat unrelated owner retains its
 //! state-independent principal exit.
+//! The fee-only admission witness also crosses all four trade transports, including one-leg
+//! batches with a system-created authenticated matcher. Every current control is checked against
+//! the existing snapshot full-refresh and independent certificate oracles.
+//! Sequential authenticated marks on disjoint participant legs leave unequal certificate ages.
+//! A new shared position must recertify both participants exactly as complete public refresh,
+//! including the older participant's unsettled loss, in either taker/maker orientation.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
 
 use super::*;
+use crate::support::fuzz_model::{
+    assert_current_certificate_matches_independent,
+    assert_current_certificate_matches_snapshot_full_refresh, TradeRoute,
+};
 
 const PUBLIC_RELEASED_PNL: u128 = PUBLIC_RELEASED_PNL_FIXTURE_AMOUNT;
 const PUBLIC_RELEASED_PNL_SOURCE_DOMAIN: usize = 1;
@@ -156,6 +166,254 @@ fn refresh_and_convert_public_claim(
         group_after.vault as u64,
         env.token_amount(env.vault),
         "certificate refresh and conversion preserve SPL custody parity"
+    );
+}
+
+#[test]
+fn v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom() {
+    run_fee_only_admission_case(TradeRoute::NoCpi);
+}
+
+#[test]
+fn v16_program_fee_only_invalidation_cannot_preserve_cpi_or_batch_trade_headroom() {
+    for route in [
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        run_fee_only_admission_case(route);
+    }
+}
+
+fn run_fee_only_admission_case(route: TradeRoute) {
+    const PRICE: u64 = 100;
+    const CAPITAL: u128 = 200;
+    const FEE: u128 = 37;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: PRICE,
+        maintenance_margin_bps: 5_000,
+        initial_margin_bps: 10_000,
+        maintenance_fee_per_slot: FEE,
+        max_price_move_bps_per_slot: 500,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, PRICE);
+    let owner = Keypair::new();
+    let peer_owner = Keypair::new();
+    let keeper_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let peer = env.create_portfolio(&peer_owner);
+    let keeper = env.create_portfolio(&keeper_owner);
+    env.deposit(&owner, portfolio, CAPITAL);
+    env.deposit(&peer_owner, peer, 1_000);
+    let matcher = matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi)
+        .then(|| auth_matcher_for_lp_via_system_create(&mut env, &peer_owner, peer));
+    let trade = |env: &mut V16CuEnv, size_q| {
+        let ix = match route {
+            TradeRoute::NoCpi => env.trade_no_cpi_ix(portfolio, peer, 0, size_q, PRICE, 0),
+            TradeRoute::Cpi => env.trade_cpi_ix(portfolio, peer, 0, size_q, 0, PRICE),
+            TradeRoute::BatchNoCpi => env.batch_trade_no_cpi_ix(
+                portfolio,
+                peer,
+                vec![BatchTradeLeg {
+                    asset_index: 0,
+                    market_id: env.asset_market_id(0),
+                    size_q,
+                    exec_price: PRICE,
+                    fee_bps: 0,
+                }],
+            ),
+            TradeRoute::BatchCpi => env.batch_trade_cpi_ix_with_caps(
+                portfolio,
+                peer,
+                vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    market_id: env.asset_market_id(0),
+                    size_q,
+                    fee_bps: 0,
+                    limit_price: PRICE,
+                }],
+                0,
+                0,
+            ),
+        };
+        env.svm.expire_blockhash();
+        if let Some((program, context, delegate)) = matcher {
+            env.send(
+                ix,
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(peer, false),
+                    AccountMeta::new_readonly(program, false),
+                    AccountMeta::new(context, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                &[&owner],
+            )
+        } else {
+            env.send(
+                ix,
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(peer_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(peer, false),
+                ],
+                &[&owner, &peer_owner],
+            )
+        }
+    };
+    let assert_exact_certificate = |env: &V16CuEnv, account_key| {
+        let label = format!("{route:?} fee-only account {account_key}");
+        let market = env.svm.get_account(&env.market).unwrap();
+        let account = env.svm.get_account(&account_key).unwrap();
+        assert!(assert_current_certificate_matches_snapshot_full_refresh(
+            &label,
+            &market.data,
+            &account.data,
+        )
+        .expect("current certificate must match the snapshot full-refresh oracle"));
+        assert!(assert_current_certificate_matches_independent(
+            &label,
+            &env.market_state().1,
+            &env.portfolio_state(account_key),
+        )
+        .expect("explicit recertification must match every independent health lane exactly"));
+    };
+    let open_cu = trade(&mut env, POS_SCALE as i128).expect("funded opening trade");
+    assert_cu_within("fee-only opening trade", open_cu, TRADE_CU_LIMIT);
+
+    // Advance only the market's zero-move interval before isolating the account-local debit.
+    env.svm.warp_to_slot(2);
+    env.crank(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    let before = env.market_state().1;
+    let account_before = env.portfolio_state(portfolio);
+    let cert_before = health_cert(&account_before);
+    assert!(cert_is_current(&env, portfolio));
+    assert_eq!(account_before.last_fee_slot.get(), 1);
+    assert_eq!(account_before.capital.get(), CAPITAL);
+    assert_eq!(cert_before.certified_equity, CAPITAL as i128);
+    assert_eq!(cert_before.certified_initial_req, PRICE as u128);
+    assert_exact_certificate(&env, portfolio);
+    assert_eq!(
+        cert_before.certified_equity - cert_before.certified_initial_req as i128,
+        PRICE as i128,
+        "the pre-debit certificate has exactly one additional unit of initial-margin headroom"
+    );
+    let peer_before = env.svm.get_account(&peer).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let sync_cu = env.sync_maintenance_fee_with_cu(portfolio, None, 2);
+    assert_cu_within(
+        "fee-only certificate invalidation",
+        sync_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let after = env.market_state().1;
+    let debited = env.portfolio_state(portfolio);
+    assert_eq!(after.oracle_epoch, before.oracle_epoch);
+    assert_eq!(after.funding_epoch, before.funding_epoch);
+    assert_eq!(after.risk_epoch, before.risk_epoch);
+    assert_eq!(after.asset_set_epoch, before.asset_set_epoch);
+    assert_eq!(active_bitmap(&debited), active_bitmap(&account_before));
+    assert_eq!(after.assets[0], before.assets[0]);
+    assert_eq!(debited.capital.get(), CAPITAL - FEE);
+    assert_eq!(debited.last_fee_slot.get(), 2);
+    assert_eq!(after.c_tot, before.c_tot - FEE);
+    assert_eq!(after.insurance, before.insurance + FEE);
+    assert_eq!(env.svm.get_account(&peer).unwrap(), peer_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert!(
+        !cert_is_current(&env, portfolio),
+        "the fee debit must invalidate the touched cache despite unchanged global epoch keys"
+    );
+
+    let mut tracked = vec![
+        env.market,
+        portfolio,
+        peer,
+        keeper,
+        env.vault,
+        owner.pubkey(),
+        peer_owner.pubkey(),
+    ];
+    if let Some((program, context, delegate)) = matcher {
+        tracked.extend([program, context, delegate]);
+    }
+    let snapshot: Vec<_> = tracked.iter().map(|key| env.svm.get_account(key)).collect();
+    let error = trade(&mut env, POS_SCALE as i128)
+        .expect_err("pre-debit headroom cannot authorize a post-debit risk increase");
+    assert!(
+        error.contains(&format!(
+            "Custom({})",
+            PercolatorError::EngineInvalidConfig as u32
+        )),
+        "{route:?}: the unaffordable increase must fail health admission: {error}"
+    );
+    for (key, expected) in tracked.into_iter().zip(snapshot) {
+        assert_eq!(
+            env.svm.get_account(&key),
+            expected,
+            "{route:?}: rejected increase changed {key}"
+        );
+    }
+
+    let refresh_cu = env.crank(
+        portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    assert_cu_within("public post-fee full refresh", refresh_cu, CRANK_CU_LIMIT);
+    assert!(cert_is_current(&env, portfolio));
+    let refreshed = health_cert(&env.portfolio_state(portfolio));
+    assert_eq!(refreshed.certified_equity, (CAPITAL - FEE) as i128);
+    assert_eq!(
+        refreshed.certified_initial_req,
+        cert_before.certified_initial_req
+    );
+    assert_eq!(
+        refreshed.certified_maintenance_req,
+        cert_before.certified_maintenance_req
+    );
+    assert_eq!(
+        refreshed.certified_worst_case_loss,
+        cert_before.certified_worst_case_loss
+    );
+    assert_eq!(refreshed.certified_liq_deficit, 0);
+    assert_exact_certificate(&env, portfolio);
+
+    // A smaller increase remains affordable after the same debit and canonical refresh.
+    let trade_cu = trade(&mut env, (POS_SCALE / 2) as i128)
+        .expect("affordable increase must succeed on the same transport and matcher grant");
+    assert_cu_within("affordable post-fee increase", trade_cu, TRADE_CU_LIMIT);
+    let live = env.portfolio_state(portfolio);
+    assert!(cert_is_current(&env, portfolio));
+    assert_eq!(
+        active_leg_for_asset(&live, 0).basis_pos_q,
+        (3 * POS_SCALE / 2) as i128
+    );
+    assert_eq!(live.capital.get(), CAPITAL - FEE);
+    assert_eq!(health_cert(&live).certified_equity, (CAPITAL - FEE) as i128);
+    assert_eq!(health_cert(&live).certified_initial_req, 150);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    for account_key in [portfolio, peer] {
+        assert_exact_certificate(&env, account_key);
+    }
+    println!(
+        "{route:?} fee-only admission: exact rejection; open={open_cu}, fee={sync_cu}, refresh={refresh_cu}, control={trade_cu} CU"
     );
 }
 
@@ -928,4 +1186,271 @@ fn v16_attack_target_only_lag_invalidates_unrelated_single_trade_cert() {
     );
     assert_eq!(long_cert.certified_maintenance_req, 1_200);
     assert_eq!(short_cert.certified_maintenance_req, 1_100);
+}
+
+#[test]
+fn v16_program_disjoint_observation_histories_recertify_both_trade_participants() {
+    use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+
+    const PRICE: u64 = 1_000_000;
+    const MARKS: [u64; 3] = [PRICE, 950_000, 1_050_000];
+    const DEPOSIT: u128 = 10_000_000;
+    const LOSS: u128 = 50_000;
+    let unit = POS_SCALE as i128;
+    let mut reference = None;
+    let mut peak_cu = 0;
+
+    for explicit_refresh in [true, false] {
+        for reverse_participants in [false, true] {
+            let label = format!("explicit={explicit_refresh}/reverse={reverse_participants}");
+            let mut env = inv018_public_spl_market_with_params(
+                0,
+                V16CuMarketParams {
+                    max_portfolio_assets: 3,
+                    initial_price: PRICE,
+                    ..V16CuMarketParams::default()
+                },
+            );
+            set_test_clock(&mut env, 1, 100);
+            for asset in 0..3 {
+                env.configure_auth_mark_for_asset_as_admin(asset, 1, PRICE);
+            }
+            let owners = std::array::from_fn::<_, 4, _>(|_| Keypair::new());
+            let funded = owners.each_ref().map(|owner| {
+                env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+                let portfolio = Keypair::new();
+                system_create_account_for_test(
+                    &mut env.svm,
+                    &env.payer,
+                    &portfolio,
+                    env.portfolio_account_len,
+                    env.program_id,
+                );
+                env.send(
+                    ProgInstruction::InitPortfolio,
+                    vec![
+                        AccountMeta::new(owner.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio.pubkey(), false),
+                    ],
+                    &[owner],
+                )
+                .expect("public portfolio initialization");
+                env.portfolios.push(portfolio.pubkey());
+                let tokens =
+                    create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+                send_raw_tx(
+                    &mut env.svm,
+                    &env.payer,
+                    spl_token::instruction::mint_to(
+                        &spl_token::ID,
+                        &env.mint,
+                        &tokens,
+                        &env.admin.pubkey(),
+                        &[],
+                        DEPOSIT as u64,
+                    )
+                    .unwrap(),
+                    &[&env.admin],
+                )
+                .expect("public collateral mint");
+                env.send(
+                    env.deposit_ix(portfolio.pubkey(), DEPOSIT),
+                    vec![
+                        AccountMeta::new(owner.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio.pubkey(), false),
+                        AccountMeta::new(tokens, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[owner],
+                )
+                .expect("public deposit");
+                (portfolio.pubkey(), tokens)
+            });
+            let portfolios = funded.map(|(portfolio, _)| portfolio);
+            let refresh = |env: &mut V16CuEnv, portfolio| {
+                env.svm.expire_blockhash();
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: u64::MAX,
+                        observations: (0..3).flat_map(crank_observations).collect(),
+                    },
+                )
+            };
+            refresh(&mut env, portfolios[3]);
+            for (actor, asset, quantity) in [(0, 1, unit), (1, 2, -unit)] {
+                env.trade_asset_with_cu(
+                    asset,
+                    &owners[actor],
+                    portfolios[actor],
+                    &owners[2],
+                    portfolios[2],
+                    quantity,
+                    PRICE,
+                    0,
+                );
+            }
+            let untouched = env.svm.get_account(&portfolios[1]).unwrap();
+            set_test_clock(&mut env, 2, 101);
+            env.push_auth_mark_for_asset_as_admin(1, u64::MAX, MARKS[1]);
+            refresh(&mut env, portfolios[3]);
+            refresh(&mut env, portfolios[0]);
+            assert!(cert_is_current(&env, portfolios[0]));
+            assert_eq!(
+                env.portfolio_state(portfolios[0]).capital.get(),
+                DEPOSIT - LOSS
+            );
+            assert_eq!(env.svm.get_account(&portfolios[1]).unwrap(), untouched);
+            let newer = env.svm.get_account(&portfolios[0]).unwrap();
+            let newer_cert = health_cert(&env.portfolio_state(portfolios[0]));
+            let older_cert = health_cert(&env.portfolio_state(portfolios[1]));
+            assert!(older_cert.cert_oracle_epoch < newer_cert.cert_oracle_epoch);
+
+            // Only the flat keeper observes the second mark. One participant has already
+            // paid its disjoint-leg loss; the other still carries its original leg and cache.
+            set_test_clock(&mut env, 3, 102);
+            env.push_auth_mark_for_asset_as_admin(2, 0, MARKS[2]);
+            refresh(&mut env, portfolios[3]);
+            let market = env.svm.get_account(&env.market).unwrap();
+            let group = env.market_state().1;
+            assert!(newer_cert.cert_oracle_epoch < group.oracle_epoch);
+            assert_eq!(env.svm.get_account(&portfolios[0]).unwrap(), newer);
+            assert_eq!(env.svm.get_account(&portfolios[1]).unwrap(), untouched);
+            for (asset, observed_slot) in [(1, 2), (2, 3)] {
+                let profile = state::read_asset_oracle_profile(&market.data, asset).unwrap();
+                assert_eq!(profile.last_good_oracle_slot, observed_slot);
+                assert_eq!(group.assets[asset].effective_price, MARKS[asset]);
+                assert_eq!(group.assets[asset].slot_last, 3);
+            }
+            assert_eq!(
+                active_leg_for_asset(&env.portfolio_state(portfolios[0]), 1).k_snap,
+                group.assets[1].k_long,
+            );
+            assert_ne!(
+                active_leg_for_asset(&env.portfolio_state(portfolios[1]), 2).k_snap,
+                group.assets[2].k_short,
+            );
+
+            let mut framed = vec![
+                portfolios[2],
+                portfolios[3],
+                env.mint,
+                env.vault,
+                env.admin.pubkey(),
+            ];
+            framed.extend(funded.map(|(_, tokens)| tokens));
+            framed.extend(owners.each_ref().map(|owner| owner.pubkey()));
+            let before = framed
+                .iter()
+                .map(|key| env.svm.get_account(key).unwrap())
+                .collect::<Vec<_>>();
+            if explicit_refresh {
+                for _ in 0..2 {
+                    for portfolio in &portfolios[..2] {
+                        if !cert_is_current(&env, *portfolio) {
+                            let cu = refresh(&mut env, *portfolio);
+                            peak_cu = peak_cu.max(cu);
+                            assert_cu_within("disjoint complete refresh", cu, 500_000);
+                        }
+                    }
+                }
+                for portfolio in &portfolios[..2] {
+                    assert!(assert_current_certificate_matches_snapshot_full_refresh(
+                        &label,
+                        &env.svm.get_account(&env.market).unwrap().data,
+                        &env.svm.get_account(portfolio).unwrap().data,
+                    )
+                    .expect("complete pre-trade evidence must match both health oracles"));
+                }
+            }
+
+            let (taker, maker, quantity) = if reverse_participants {
+                (1, 0, -unit)
+            } else {
+                (0, 1, unit)
+            };
+            let cu = env.trade_asset_with_cu(
+                0,
+                &owners[taker],
+                portfolios[taker],
+                &owners[maker],
+                portfolios[maker],
+                quantity,
+                PRICE,
+                0,
+            );
+            peak_cu = peak_cu.max(cu);
+            assert_cu_within("disjoint-history favorable trade", cu, 750_000);
+            let market = env.svm.get_account(&env.market).unwrap();
+            let group = env.market_state().1;
+            let certificates =
+                [0, 1].map(|actor| {
+                    let portfolio = env.svm.get_account(&portfolios[actor]).unwrap();
+                    assert!(assert_current_certificate_matches_snapshot_full_refresh(
+                        &label,
+                        &market.data,
+                        &portfolio.data,
+                    )
+                    .expect("both participants must match independent and full-refresh health"));
+                    let account = env.portfolio_state(portfolios[actor]);
+                    assert!(assert_current_certificate_matches_independent(
+                        &label, &group, &account
+                    )
+                    .expect("every certificate lane must equal the independent full-health model"));
+                    let cert = health_cert(&account);
+                    assert_eq!(account.capital.get(), DEPOSIT - LOSS);
+                    assert_eq!(account.pnl.get(), 0);
+                    assert_eq!(cert.certified_equity, (DEPOSIT - LOSS) as i128);
+                    assert_eq!(
+                        cert.certified_initial_req,
+                        u128::from(PRICE + MARKS[actor + 1])
+                    );
+                    assert_eq!(cert.certified_maintenance_req, cert.certified_initial_req);
+                    assert_eq!(cert.certified_liq_deficit, 0);
+                    assert_eq!(
+                        active_leg_for_asset(&account, 0).basis_pos_q,
+                        if actor == 0 { unit } else { -unit }
+                    );
+                    let leg = active_leg_for_asset(&account, actor + 1);
+                    assert_eq!(leg.basis_pos_q, if actor == 0 { unit } else { -unit });
+                    assert_eq!(
+                        leg.k_snap,
+                        if actor == 0 {
+                            group.assets[1].k_long
+                        } else {
+                            group.assets[2].k_short
+                        }
+                    );
+                    cert
+                });
+            if let Some(expected) = &reference {
+                assert_eq!(
+                    &certificates, expected,
+                    "{label}: public refresh and on-demand admission must agree"
+                );
+            } else {
+                reference = Some(certificates);
+            }
+            for asset in &group.assets[..3] {
+                assert_eq!(asset.oi_eff_long_q, POS_SCALE);
+                assert_eq!(asset.oi_eff_short_q, POS_SCALE);
+            }
+            assert_eq!(group.vault, 4 * DEPOSIT);
+            assert_eq!(group.c_tot, 4 * DEPOSIT - 2 * LOSS);
+            assert_eq!(group.insurance, 0);
+            assert_eq!(env.token_amount(env.vault) as u128, 4 * DEPOSIT);
+            assert_eq!(
+                framed
+                    .iter()
+                    .map(|key| env.svm.get_account(key).unwrap())
+                    .collect::<Vec<_>>(),
+                before,
+                "{label}: unrelated portfolios, custody and signers must remain exact"
+            );
+        }
+    }
+    println!("disjoint observation histories: 4 public worlds, 8 exact full-health certificates, peak {peak_cu} CU");
 }

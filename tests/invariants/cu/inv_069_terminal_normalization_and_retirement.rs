@@ -14,6 +14,362 @@
 
 use super::*;
 
+// Expired principal is still booked custody after its slot is retired and reused.
+// A new provider must recover only its own funding; CloseSlab owns the old residue.
+#[test]
+fn v16_program_reused_asset_keeps_expired_residue_out_of_new_provider_principal() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const OLD: u64 = 307;
+    const NEW: u64 = 401;
+    const SURPLUS: u64 = 17;
+    const SUPPLY: u64 = OLD + NEW + SURPLUS;
+    const EXPIRY: u64 = 5;
+    const DOMAIN: usize = 2;
+    const CU_LIMIT: u64 = 300_000;
+
+    let mut env = inv018_public_spl_market_with_params(
+        0,
+        V16CuMarketParams {
+            max_portfolio_assets: 2,
+            ..V16CuMarketParams::default()
+        },
+    );
+    let admin = env.admin.insecure_clone();
+    let provider = Keypair::new();
+    env.svm.airdrop(&provider.pubkey(), 1_000_000_000).unwrap();
+    let old_token = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
+    let new_token = create_ata_for_test(&mut env.svm, &env.payer, provider.pubkey(), env.mint);
+    let mut peak_cu = 0;
+    let mut check_cu = |cu| {
+        assert_cu_within("INV-069 reused-slot residue", cu, CU_LIMIT);
+        peak_cu = peak_cu.max(cu);
+    };
+    check_cu(env.init_market_cu);
+    for (token, amount) in [(old_token, OLD + SURPLUS), (new_token, NEW)] {
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &token,
+                &admin.pubkey(),
+                &[],
+                amount,
+            )
+            .unwrap(),
+            &[&admin],
+        )
+        .unwrap();
+    }
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::set_authority(
+            &spl_token::ID,
+            &env.mint,
+            None,
+            spl_token::instruction::AuthorityType::MintTokens,
+            &admin.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .unwrap();
+    env.svm.warp_to_slot(1);
+    check_cu(env.top_up_backing_bucket_from_admin_token_with_cu(
+        old_token,
+        DOMAIN as u16,
+        OLD.into(),
+        EXPIRY,
+    ));
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::transfer(
+            &spl_token::ID,
+            &old_token,
+            &env.vault,
+            &admin.pubkey(),
+            &[],
+            SURPLUS,
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .unwrap();
+
+    let mint_before = env.svm.get_account(&env.mint).unwrap();
+    let token_keys = [old_token, new_token, env.vault];
+    let token_frames = token_keys.map(|key| env.svm.get_account(&key).unwrap());
+    let old_id = env.asset_market_id(1);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let slot_start =
+        MARKET_GROUP_OFF + core::mem::size_of::<percolator::MarketGroupV16HeaderAccount>();
+    let slot_end =
+        slot_start + core::mem::size_of::<percolator::Market<state::AssetOracleStorageV16>>();
+    let other_slot = market_before.data[slot_start..slot_end].to_vec();
+
+    // Fixed public funding and completed withdrawals determine stocks, never engine deltas.
+    let stock = |env: &V16CuEnv, fresh: u64, new_deposited: bool, new_paid: bool| {
+        let held = if new_deposited && !new_paid { NEW } else { 0 };
+        let amounts = [0, NEW - held, OLD + held + SURPLUS];
+        assert_eq!(amounts.iter().sum::<u64>(), SUPPLY);
+        for ((key, before), amount) in token_keys.iter().zip(&token_frames).zip(amounts) {
+            let mut expected = before.clone();
+            let mut token = TokenAccount::unpack(&expected.data).unwrap();
+            token.amount = amount;
+            TokenAccount::pack(token, &mut expected.data).unwrap();
+            assert_eq!(env.svm.get_account(key), Some(expected));
+        }
+        assert_eq!(env.svm.get_account(&env.mint), Some(mint_before.clone()));
+        let mint = Mint::unpack(&mint_before.data).unwrap();
+        assert_eq!(mint.supply, SUPPLY);
+        assert_eq!(mint.mint_authority, COption::None);
+        assert_eq!(mint.freeze_authority, COption::None);
+        let market = env.svm.get_account(&env.market).unwrap();
+        let (_, group) = state::read_market(&market.data).unwrap();
+        assert_eq!((group.c_tot, group.insurance), (0, 0));
+        assert_eq!(group.vault, u128::from(OLD + held));
+        assert_eq!(group.materialized_portfolio_count, 0);
+        for (domain, (bucket, source)) in group
+            .source_backing_buckets
+            .iter()
+            .zip(&group.source_credit)
+            .enumerate()
+        {
+            let expected = if domain == DOMAIN { fresh } else { 0 };
+            assert_eq!(
+                bucket.fresh_unliened_backing_num,
+                u128::from(expected) * BOUND_SCALE
+            );
+            assert_eq!(
+                source.fresh_reserved_backing_num,
+                u128::from(expected) * BOUND_SCALE
+            );
+            assert_eq!(bucket.utilization_fee_earnings, 0);
+            assert_eq!(source.positive_claim_bound_num, 0);
+            assert_eq!(source.valid_liened_backing_num, 0);
+        }
+        crate::support::fuzz_model::assert_market_stock_census(
+            "INV-069 reused residue",
+            &group,
+            &market.data,
+            &[],
+            u128::from(amounts[2] - SURPLUS),
+        )
+        .unwrap();
+        crate::support::fuzz_model::assert_reservation_encumbrance_census(
+            "INV-069 reused residue",
+            &group,
+            &[],
+        )
+        .unwrap();
+        if group.mode == MarketModeV16::Live {
+            assert_eq!(&market.data[slot_start..slot_end], other_slot.as_slice());
+        }
+    };
+    stock(&env, OLD, false, false);
+    env.svm.warp_to_slot(EXPIRY);
+    assert_eq!(env.svm.get_account(&env.market), Some(market_before));
+    check_cu(env.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_RETIRE,
+        1,
+        EXPIRY,
+        0,
+    ));
+    stock(&env, 0, false, false);
+    let assert_retired = |env: &V16CuEnv, market_id| {
+        let (cfg, group) = env.market_state();
+        assert_eq!(cfg.free_market_slot_count, 1);
+        assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Retired);
+        assert_eq!(group.assets[1].market_id, market_id);
+        for domain in [2, 3] {
+            assert_eq!(
+                group.source_credit[domain],
+                percolator::SourceCreditStateV16::EMPTY
+            );
+            assert_eq!(
+                group.source_backing_buckets[domain],
+                percolator::BackingBucketV16 {
+                    market_id,
+                    ..percolator::BackingBucketV16::EMPTY
+                }
+            );
+        }
+    };
+    assert_retired(&env, old_id);
+    check_cu(env.activate_asset_with_authorities(
+        1,
+        EXPIRY + 1,
+        100,
+        admin.pubkey(),
+        admin.pubkey(),
+        provider.pubkey(),
+        admin.pubkey(),
+    ));
+    let new_id = env.asset_market_id(1);
+    assert_ne!(new_id, old_id);
+    assert_eq!(env.market_state().0.free_market_slot_count, 0);
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Active
+    );
+    stock(&env, 0, false, false);
+    check_cu(
+        env.send(
+            ProgInstruction::TopUpBackingBucket {
+                authority_epoch: env.control_sequences(1).authority_epoch,
+                intent_id: 0,
+                market_id: new_id,
+                domain: DOMAIN as u16,
+                backing_fee_bps: 0,
+                insurance_share_bps: 0,
+                amount: NEW.into(),
+                expiry_slot: 100,
+            },
+            vec![
+                AccountMeta::new(provider.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(new_token, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&provider],
+        )
+        .unwrap(),
+    );
+    stock(&env, NEW, true, false);
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[DOMAIN].market_id,
+        new_id
+    );
+
+    let withdrawal = |amount| Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(provider.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(new_token, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::WithdrawBackingBucket {
+            domain: DOMAIN as u16,
+            market_id: new_id,
+            authority_epoch: env.control_sequences(1).authority_epoch,
+            amount,
+        }
+        .encode(),
+    };
+    let overclaim = withdrawal(u128::from(NEW + 1));
+    let payable = withdrawal(NEW.into());
+    env.svm.expire_blockhash();
+    let tx = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), overclaim],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &provider],
+        env.svm.latest_blockhash(),
+    );
+    let fee = u64::from(tx.message.header.num_required_signatures)
+        * FeeStructure::default().lamports_per_signature;
+    let mut keys = tx.message.account_keys.clone();
+    keys.extend([env.mint, old_token, admin.pubkey()]);
+    keys.sort_unstable();
+    keys.dedup();
+    let frame: Vec<_> = keys.iter().map(|key| env.svm.get_account(key)).collect();
+    let failure = env
+        .svm
+        .send_transaction(tx)
+        .expect_err("old residue is not new principal");
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::EngineLockActive as u32)
+        )
+    );
+    check_cu(failure.meta.compute_units_consumed);
+    for (key, mut before) in keys.into_iter().zip(frame) {
+        if key == env.payer.pubkey() {
+            before.as_mut().unwrap().lamports -= fee;
+        }
+        assert_eq!(
+            env.svm.get_account(&key),
+            before,
+            "exact rollback for {key}"
+        );
+    }
+    stock(&env, NEW, true, false);
+    check_cu(send_raw_tx(&mut env.svm, &env.payer, payable, &[&provider]).unwrap());
+    stock(&env, 0, true, true);
+    check_cu(env.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_RETIRE,
+        1,
+        EXPIRY + 1,
+        0,
+    ));
+    assert_retired(&env, new_id);
+    stock(&env, 0, true, true);
+    env.resolve();
+    stock(&env, 0, true, true);
+
+    let market = env.svm.get_account(&env.market).unwrap();
+    let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
+    let provider_before = env.svm.get_account(&provider.pubkey());
+    check_cu(
+        env.send(
+            ProgInstruction::CloseSlab {
+                authority_epoch: env.control_sequences(0).authority_epoch,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(old_token, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.mint, false),
+            ],
+            &[&admin],
+        )
+        .unwrap(),
+    );
+    let tombstone = env.svm.get_account(&env.market).unwrap();
+    assert_closed_market_tombstone(&tombstone);
+    assert_eq!(
+        tombstone.lamports,
+        env.svm
+            .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN)
+    );
+    assert!(env.svm.get_account(&env.vault).is_none_or(|account| {
+        account.lamports == 0 && account.data.iter().all(|byte| *byte == 0)
+    }));
+    let mut expected_mint = mint_before.clone();
+    let mut mint = Mint::unpack(&expected_mint.data).unwrap();
+    mint.supply = SUPPLY - OLD;
+    Mint::pack(mint, &mut expected_mint.data).unwrap();
+    assert_eq!(env.svm.get_account(&env.mint), Some(expected_mint));
+    for (i, amount) in [SURPLUS, NEW].into_iter().enumerate() {
+        let mut expected = token_frames[i].clone();
+        let mut token = TokenAccount::unpack(&expected.data).unwrap();
+        token.amount = amount;
+        TokenAccount::pack(token, &mut expected.data).unwrap();
+        assert_eq!(env.svm.get_account(&token_keys[i]), Some(expected));
+    }
+    let mut expected_admin = admin_before;
+    expected_admin.lamports += market.lamports + token_frames[2].lamports - tombstone.lamports;
+    assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
+    assert_eq!(env.svm.get_account(&provider.pubkey()), provider_before);
+    println!("INV-069 reused-slot residue: {SUPPLY} = {OLD} burn + {NEW} new-provider payout + {SURPLUS} sweep; peak checked step {peak_cu} CU");
+}
+
 fn terminal_spent_asset_env(with_provider_receivable: bool) -> (V16CuEnv, Keypair) {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
     let admin = env.admin.insecure_clone();
@@ -612,7 +968,7 @@ struct Inv069TerminalBlockerClass {
 
 #[test]
 fn v16_program_terminal_blocker_census_composes_engine_retirement_before_wrapper_cleanup() {
-    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const ENGINE_PIN: &str = "394fd0bf2cb7d73df425eb3754dc3be1a0c44336";
     const CLASSES: &[Inv069TerminalBlockerClass] = &[
         Inv069TerminalBlockerClass {
             class: "live OI, stored legs, stale cohorts, side modes, and prior epochs",

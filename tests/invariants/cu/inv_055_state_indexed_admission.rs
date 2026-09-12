@@ -16,6 +16,9 @@
 
 use super::*;
 
+#[path = "inv_055_mixed_lifecycle_batches.rs"]
+mod mixed_lifecycle_batches;
+
 fn inv055_assert_init_portfolio_rejects_current_market_mode(env: &mut V16CuEnv, label: &str) {
     let owner = Keypair::new();
     env.ensure_signer_account(owner.pubkey());

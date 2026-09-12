@@ -7,12 +7,22 @@
 //! same-account close/B priority composition, and current solvent partial-liquidation progress. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! A fixed-Clock two-asset terminal-accrual trace replays a completed asset's hint before/after
+//! still-pending work: every accepted call lowers decoded remaining work and frames the completed
+//! asset, then permissionless stale resolution enters the lower mode. This is a finite,
+//! funding-disabled hint-reclassification boundary, not a payout or complete lifecycle-rank proof.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[path = "inv_071_terminal_cursor_time.rs"]
+mod terminal_cursor_time;
+
+#[path = "inv_071_recovery_obligation_finalization.rs"]
+mod recovery_obligation_finalization;
 
 fn inv071_close_pending(ledger: CloseProgressLedgerV16) -> bool {
     ledger.active && !ledger.finalized && !ledger.canceled && ledger.residual_remaining != 0
@@ -26,6 +36,7 @@ struct Inv071PublicCloseBOverlap {
     b_before: percolator::PortfolioLegV16,
     close_before: CloseProgressLedgerV16,
     shutdown_slot: u64,
+    solvent_peer: (Pubkey, Pubkey),
 }
 
 struct Inv071PublicBAdverseOverlap {
@@ -36,6 +47,7 @@ struct Inv071PublicBAdverseOverlap {
     b_before: percolator::PortfolioLegV16,
     adverse_before: percolator::PortfolioLegV16,
     now_slot: u64,
+    solvent_peer: (Pubkey, Pubkey),
 }
 
 fn inv071_public_b_adverse_overlap() -> Inv071PublicBAdverseOverlap {
@@ -45,6 +57,8 @@ fn inv071_public_b_adverse_overlap() -> Inv071PublicBAdverseOverlap {
         asset1_counterparty_owner: target_owner,
         asset1_counterparty: target,
         live_counterparty,
+        live_peer_owner,
+        live_peer,
         ..
     } = public_asset1_bankrupt_close_fixture_with_counterparty_asset0_short();
 
@@ -135,6 +149,7 @@ fn inv071_public_b_adverse_overlap() -> Inv071PublicBAdverseOverlap {
         b_before,
         adverse_before,
         now_slot: shutdown_slot,
+        solvent_peer: (live_peer_owner.pubkey(), live_peer),
     }
 }
 
@@ -146,6 +161,7 @@ fn inv071_public_close_b_overlap() -> Inv071PublicCloseBOverlap {
         target_b,
         b_before,
         now_slot: shutdown_slot,
+        solvent_peer,
         ..
     } = inv071_public_b_adverse_overlap();
 
@@ -169,6 +185,7 @@ fn inv071_public_close_b_overlap() -> Inv071PublicCloseBOverlap {
         b_before,
         close_before,
         shutdown_slot,
+        solvent_peer,
     }
 }
 
@@ -740,6 +757,94 @@ fn v16_program_public_pending_close_preempts_b_stale_then_exposes_b_progress() {
     );
 }
 
+// This rank is deliberately local to the frozen close/B fixture: no new marks,
+// backing, fees or source claims are introduced by its permissionless suffix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Inv071ResolvedContinuationRank {
+    mode: u8,
+    lapsed_backing: usize,
+    deferred_b: u128,
+    close_residual: u128,
+    retained_legs: u64,
+    source_domains: usize,
+    nonterminal: bool,
+}
+
+fn inv071_resolved_continuation_rank(
+    env: &V16CuEnv,
+    target: Pubkey,
+    target_b: u128,
+) -> Inv071ResolvedContinuationRank {
+    let account = env.portfolio_state(target);
+    let group = env.market_state().1;
+    let now = env.svm.get_sysvar::<Clock>().slot;
+    let close = close_progress(&account);
+    let deferred_b = if has_active_leg_for_asset(&account, 1) {
+        let leg = active_leg_for_asset(&account, 1);
+        target_b.checked_sub(leg.b_snap).expect("frozen B target") + u128::from(leg.b_stale)
+    } else {
+        0
+    };
+    Inv071ResolvedContinuationRank {
+        mode: match group.mode {
+            MarketModeV16::Live => 2,
+            MarketModeV16::Recovery => 1,
+            MarketModeV16::Resolved => 0,
+        },
+        lapsed_backing: group
+            .source_backing_buckets
+            .iter()
+            .enumerate()
+            .filter(|(domain, bucket)| {
+                has_active_leg_for_asset(&account, domain / 2)
+                    && bucket.status == percolator::BackingBucketStatusV16::Fresh
+                    && bucket.expiry_slot <= now
+            })
+            .count(),
+        deferred_b,
+        close_residual: if inv071_close_pending(close) {
+            close.residual_remaining
+        } else {
+            0
+        },
+        retained_legs: active_bitmap(&account)
+            .iter()
+            .map(|word| u64::from(word.count_ones()))
+            .sum(),
+        source_domains: account
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        nonterminal: !resolved_portfolio_is_terminal(env, target),
+    }
+}
+
+fn inv071_continuation_frame(env: &V16CuEnv, extra: &[Pubkey]) -> Vec<(Pubkey, Option<Account>)> {
+    [env.market, env.vault, env.mint, env.admin.pubkey()]
+        .into_iter()
+        .chain(env.portfolios.iter().copied())
+        .chain(extra.iter().copied())
+        .map(|key| (key, env.svm.get_account(&key)))
+        .collect()
+}
+
+fn inv071_assert_continuation_frame(
+    env: &V16CuEnv,
+    before: &[(Pubkey, Option<Account>)],
+    allowed: &[Pubkey],
+) {
+    for (key, account) in before {
+        if !allowed.contains(key) {
+            assert_eq!(
+                &env.svm.get_account(key),
+                account,
+                "continuation frame {key}"
+            );
+        }
+    }
+}
+
 #[test]
 fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_progress() {
     let Inv071PublicCloseBOverlap {
@@ -749,8 +854,22 @@ fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_prog
         target_b,
         b_before,
         close_before,
+        solvent_peer: (peer_owner, peer),
         ..
     } = inv071_public_close_b_overlap();
+
+    let destination = env.token_account(target_owner.pubkey(), 0);
+    let peer_destination = env.token_account(peer_owner, 0);
+    let extra = [
+        target_owner.pubkey(),
+        peer_owner,
+        destination,
+        peer_destination,
+    ];
+    let initial_vault = env.token_amount(env.vault);
+    assert_eq!(initial_vault, 2 + 10 + 1_000 + 1_000, "public deposits");
+    assert!(!resolved_portfolio_is_terminal(&env, target));
+    assert_eq!(env.portfolio_state(peer).capital.get(), 1_000);
 
     let expired_slot = close_before
         .max_close_slot
@@ -761,6 +880,8 @@ fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_prog
     let target_before = env.svm.get_account(&target).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let group_before = env.market_state().1;
+    let live_frame = inv071_continuation_frame(&env, &extra);
+    let live_rank = inv071_resolved_continuation_rank(&env, target, target_b);
 
     // Expiration is a market-terminal condition and must outrank account-local
     // B settlement. The authenticated Clock drives the decision; the caller's
@@ -786,6 +907,12 @@ fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_prog
         CRANK_CU_LIMIT,
     );
     let recovered = env.market_state().1;
+    let recovery_rank = inv071_resolved_continuation_rank(&env, target, target_b);
+    assert!(
+        recovery_rank < live_rank,
+        "Live -> Recovery must lower concrete rank"
+    );
+    inv071_assert_continuation_frame(&env, &live_frame, &[env.market]);
     assert_eq!(recovered.mode, MarketModeV16::Recovery);
     assert_eq!(
         recovered.recovery_reason,
@@ -807,6 +934,8 @@ fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_prog
     // deferred account-local obligation while changing the market mode.
     let recovery_market = env.svm.get_account(&env.market).unwrap();
     let recovery_target = env.svm.get_account(&target).unwrap();
+    let recovery_frame = inv071_continuation_frame(&env, &extra);
+    let recovery_config = env.market_state().0;
     env.svm.expire_blockhash();
     let finalize_cu = env
         .send(
@@ -828,54 +957,102 @@ fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_prog
         CRANK_CU_LIMIT,
     );
     let resolved = env.market_state().1;
+    let resolved_rank = inv071_resolved_continuation_rank(&env, target, target_b);
+    assert!(
+        resolved_rank < recovery_rank,
+        "FinalizeRecovery must lower concrete rank"
+    );
+    assert_eq!(resolved_rank.deferred_b, recovery_rank.deferred_b);
+    assert_eq!(resolved_rank.close_residual, recovery_rank.close_residual);
+    let mut expected_resolved = recovered.clone();
+    expected_resolved.mode = MarketModeV16::Resolved;
+    expected_resolved.current_slot = expired_slot;
+    expected_resolved.resolved_slot = expired_slot;
+    expected_resolved.loss_stale_active = false;
+    assert_eq!(
+        resolved, expected_resolved,
+        "only mode, authenticated slots and loss-stale flag may change"
+    );
+    let mut expected_market = recovery_market.clone();
+    state::write_market(
+        &mut expected_market.data,
+        &recovery_config,
+        &expected_resolved,
+    )
+    .expect("encode expected value-neutral finalization without writing SVM state");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), expected_market);
+    inv071_assert_continuation_frame(&env, &recovery_frame, &[env.market]);
     assert_eq!(resolved.mode, MarketModeV16::Resolved);
     assert_ne!(env.svm.get_account(&env.market).unwrap(), recovery_market);
     assert_eq!(env.svm.get_account(&target).unwrap(), recovery_target);
     assert_eq!(resolved.vault as u64, env.token_amount(env.vault));
 
-    // After the owner exit window, a third party can drive the same account's
-    // resolved continuation. The deferred B leg must be processed or removed in
-    // bounded successful calls rather than becoming hidden by global Recovery.
+    // The unresolved close and B leg survive finalization. The owner window is
+    // authenticated by Clock, then every accepted continuation must lower work
+    // decoded from the account, not merely mutate its clock or certificate.
     let force_close_delay = env.market_state().0.force_close_delay_slots;
+    assert_eq!(force_close_delay, 5);
     let resolved_crank_slot = resolved
         .resolved_slot
         .checked_add(force_close_delay)
-        .and_then(|slot| slot.checked_add(1))
         .expect("resolved permissionless slot fits u64");
+    let target_accounts = vec![
+        AccountMeta::new_readonly(target_owner.pubkey(), false),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(target, false),
+        AccountMeta::new(destination, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    env.svm.warp_to_slot(resolved_crank_slot - 1);
+    let before_window_attempt = inv071_continuation_frame(&env, &extra);
+    let before_window_rank = inv071_resolved_continuation_rank(&env, target, target_b);
+    env.svm.expire_blockhash();
+    let early_error = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                observations: vec![],
+            },
+            target_accounts.clone(),
+            &[],
+        )
+        .expect_err("caller slot cannot bypass the owner window");
+    assert!(
+        early_error.contains(&format!(
+            "Custom({})",
+            PercolatorError::ExpectedSigner as u32
+        )),
+        "{early_error}"
+    );
+    inv071_assert_continuation_frame(&env, &before_window_attempt, &[]);
+    assert_eq!(
+        inv071_resolved_continuation_rank(&env, target, target_b),
+        before_window_rank
+    );
+
     env.svm.warp_to_slot(resolved_crank_slot);
-    let destination = env.token_account(target_owner.pubkey(), 0);
-    let mut b_disposed = false;
+    let mut max_cu = declare_cu.max(finalize_cu);
+    let mut progress_steps = 0;
+    let mut b_steps = 0;
+    let mut expiry_steps = 0;
     for _ in 0..16 {
-        let before = env.portfolio_state(target);
-        if !has_active_leg_for_asset(&before, 1) {
-            b_disposed = true;
+        if resolved_portfolio_is_terminal(&env, target) {
             break;
         }
-        let current_b = active_leg_for_asset(&before, 1);
-        if current_b.b_snap >= target_b {
-            b_disposed = true;
-            break;
-        }
-        let market_step_before = env.svm.get_account(&env.market).unwrap();
-        let target_step_before = env.svm.get_account(&target).unwrap();
-        let vault_step_before = env.svm.get_account(&env.vault).unwrap();
-        let destination_step_before = env.svm.get_account(&destination).unwrap();
+        let before_rank = inv071_resolved_continuation_rank(&env, target, target_b);
+        let before = inv071_continuation_frame(&env, &extra);
+        let account_before = env.portfolio_state(target);
+        let group_before = env.market_state().1;
         env.svm.expire_blockhash();
         let step_cu = env
             .send(
                 ProgInstruction::PermissionlessCrank {
-                    now_slot: resolved_crank_slot,
+                    now_slot: 0,
                     observations: vec![],
                 },
-                vec![
-                    AccountMeta::new_readonly(target_owner.pubkey(), false),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(target, false),
-                    AccountMeta::new(destination, false),
-                    AccountMeta::new(env.vault, false),
-                    AccountMeta::new_readonly(env.vault_authority, false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
-                ],
+                target_accounts.clone(),
                 &[],
             )
             .expect("Resolved must keep processing the deferred B-bearing account");
@@ -884,25 +1061,174 @@ fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_prog
             step_cu,
             CRANK_CU_LIMIT,
         );
+        max_cu = max_cu.max(step_cu);
+        let after_rank = inv071_resolved_continuation_rank(&env, target, target_b);
         assert!(
-            env.svm.get_account(&env.market).unwrap() != market_step_before
-                || env.svm.get_account(&target).unwrap() != target_step_before
-                || env.svm.get_account(&env.vault).unwrap() != vault_step_before
-                || env.svm.get_account(&destination).unwrap() != destination_step_before,
-            "a successful resolved continuation must mutate persistent state or custody"
+            after_rank < before_rank,
+            "concrete resolved rank: {before_rank:?} -> {after_rank:?}"
         );
+        inv071_assert_continuation_frame(&env, &before, &[env.market, target]);
         assert_eq!(
-            env.market_state().1.vault as u64,
-            env.token_amount(env.vault)
+            env.token_amount(destination),
+            0,
+            "no payout of residual loss"
+        );
+        assert_eq!(env.token_amount(env.vault), initial_vault);
+        assert_eq!(env.market_state().1.vault, u128::from(initial_vault));
+        assert_eq!(env.market_state().1.c_tot, group_before.c_tot);
+        assert_eq!(env.market_state().1.insurance, group_before.insurance);
+        if after_rank.lapsed_backing < before_rank.lapsed_backing {
+            expiry_steps += 1;
+            assert_eq!(before_rank.lapsed_backing - after_rank.lapsed_backing, 1);
+            inv071_assert_continuation_frame(&env, &before, &[env.market]);
+            let after = env.market_state().1;
+            assert_eq!(after.c_tot, group_before.c_tot);
+            assert_eq!(after.insurance, group_before.insurance);
+            assert_eq!(after.pnl_pos_tot, group_before.pnl_pos_tot);
+            let changed: Vec<_> = group_before
+                .source_backing_buckets
+                .iter()
+                .zip(&after.source_backing_buckets)
+                .filter(|(old, new)| old != new)
+                .collect();
+            assert_eq!(changed.len(), 1);
+            let (old, new) = changed[0];
+            assert!(old.fresh_unliened_backing_num > 0);
+            assert_eq!(old.valid_liened_backing_num, 0);
+            let mut expected = *old;
+            expected.fresh_unliened_backing_num = 0;
+            expected.status = percolator::BackingBucketStatusV16::Expired;
+            assert_eq!(*new, expected, "exact retained backing normalization");
+        }
+        if after_rank.deferred_b < before_rank.deferred_b {
+            b_steps += 1;
+            let account_after = env.portfolio_state(target);
+            let mut expected_b = active_leg_for_asset(&account_before, 1);
+            expected_b.b_snap = target_b;
+            expected_b.b_rem = 0;
+            expected_b.b_stale = false;
+            assert_eq!(active_leg_for_asset(&account_after, 1), expected_b);
+            let mut expected_close = close_progress(&account_before);
+            expected_close.b_loss_booked += 1;
+            expected_close.residual_remaining -= 1;
+            assert_eq!(close_progress(&account_after), expected_close);
+            assert_eq!(account_after.capital, account_before.capital);
+            assert_eq!(
+                account_after.pnl.get(),
+                account_before.pnl.get(),
+                "one B loss atom and one close-booked atom offset without custody movement"
+            );
+        }
+        progress_steps += 1;
+    }
+    assert_eq!(
+        b_steps, 1,
+        "fixture retains one concrete B-chunk continuation"
+    );
+    assert_eq!(
+        expiry_steps, 1,
+        "retained expiry prerequisite must be observed"
+    );
+    assert!(
+        progress_steps > b_steps,
+        "continue beyond the old B-disposed stopping point"
+    );
+    assert!(resolved_portfolio_is_terminal(&env, target));
+    assert_eq!(
+        inv071_resolved_continuation_rank(&env, target, target_b),
+        Inv071ResolvedContinuationRank {
+            mode: 0,
+            lapsed_backing: 0,
+            deferred_b: 0,
+            close_residual: 0,
+            retained_legs: 0,
+            source_domains: 0,
+            nonterminal: false,
+        }
+    );
+
+    // The peer's public one-unit short opened at 100 and froze at 400, with
+    // zero fees/funding. Its 1,000 deposited atoms therefore leave exactly 700.
+    let peer_accounts = vec![
+        AccountMeta::new_readonly(peer_owner, false),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(peer, false),
+        AccountMeta::new(peer_destination, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    let peer_rank = inv071_resolved_continuation_rank(&env, peer, target_b);
+    assert_eq!(peer_rank.retained_legs, 1);
+    let before_peer = inv071_continuation_frame(&env, &extra);
+    let peer_c_tot = env.market_state().1.c_tot;
+    let peer_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![],
+            },
+            peer_accounts.clone(),
+            &[],
+        )
+        .expect("funded peer retains a permissionless value-moving continuation");
+    assert_cu_within(
+        "public expired-close funded peer payout",
+        peer_cu,
+        CRANK_CU_LIMIT,
+    );
+    max_cu = max_cu.max(peer_cu);
+    assert!(inv071_resolved_continuation_rank(&env, peer, target_b) < peer_rank);
+    assert!(resolved_portfolio_is_terminal(&env, peer));
+    assert_eq!(env.token_amount(peer_destination), 700);
+    assert_eq!(env.token_amount(env.vault), initial_vault - 700);
+    assert_eq!(env.market_state().1.vault, u128::from(initial_vault - 700));
+    assert_eq!(env.market_state().1.c_tot, peer_c_tot - 1_000);
+    for (key, amount) in [(env.vault, initial_vault - 700), (peer_destination, 700)] {
+        let mut expected = before_peer
+            .iter()
+            .find(|(candidate, _)| *candidate == key)
+            .unwrap()
+            .1
+            .clone()
+            .unwrap();
+        let mut token = TokenAccount::unpack(&expected.data).unwrap();
+        token.amount = amount;
+        TokenAccount::pack(token, &mut expected.data).unwrap();
+        assert_eq!(
+            env.svm.get_account(&key).unwrap(),
+            expected,
+            "only the exact SPL amount may change"
         );
     }
-    let terminal_target = env.portfolio_state(target);
-    b_disposed |= !has_active_leg_for_asset(&terminal_target, 1)
-        || active_leg_for_asset(&terminal_target, 1).b_snap >= target_b;
-    assert!(
-        b_disposed,
-        "global recovery must not hide the pre-existing B obligation from bounded resolved progress"
+    inv071_assert_continuation_frame(
+        &env,
+        &before_peer,
+        &[env.market, peer, env.vault, peer_destination],
     );
+
+    for accounts in [target_accounts, peer_accounts] {
+        let terminal_frame = inv071_continuation_frame(&env, &extra);
+        env.svm.expire_blockhash();
+        let error = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 0,
+                    observations: vec![],
+                },
+                accounts,
+                &[],
+            )
+            .expect_err("economically terminal continuation must reject");
+        assert!(is_engine_non_progress_error(&error), "{error}");
+        inv071_assert_continuation_frame(&env, &terminal_frame, &[]);
+    }
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        4,
+        "economic disposition is not administrative deletion"
+    );
+    eprintln!("INV-071/072/082 concrete continuation: target_steps={progress_steps} expiry_steps={expiry_steps} B_steps={b_steps} peer_payout=700 exact_rejections=3 max_cu={max_cu}");
 }
 
 #[test]
@@ -2297,6 +2623,223 @@ fn v16_program_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     assert!(after_group.vault >= after_group.c_tot + after_group.insurance);
 }
 
+#[test]
+fn v16_program_completed_terminal_hint_replay_preserves_remaining_crank_rank() {
+    const OPEN_SLOT: u64 = 1;
+    const MARK_SLOT: u64 = 2;
+    const STALE_SLOTS: u64 = 6;
+    const RESOLVE_SLOT: u64 = MARK_SLOT + STALE_SLOTS;
+    const PRICE: u64 = 100;
+    const TARGETS: [u64; 2] = [101, 150];
+    const DEPOSIT: u128 = 1_000_000;
+
+    // At fixed time with zero funding and one immutable endpoint per asset, only an unfinished
+    // price interval needs terminal accrual. Its remaining authenticated slots are a finite rank;
+    // reaching the endpoint removes that interval even if unused slots remain. No selector or
+    // modeled engine transition participates in this oracle.
+    let rank = |group: &MarketGroupV16| -> (u8, u64) {
+        let mode = match group.mode {
+            MarketModeV16::Live => 1,
+            MarketModeV16::Resolved => return (0, 0),
+            other => panic!("unexpected terminal-accrual mode: {other:?}"),
+        };
+        let remaining = TARGETS
+            .iter()
+            .enumerate()
+            .filter(|(index, target)| group.assets[*index].effective_price != **target)
+            .map(|(index, _)| {
+                RESOLVE_SLOT
+                    .checked_sub(group.assets[index].slot_last)
+                    .unwrap()
+            })
+            .sum();
+        (mode, remaining)
+    };
+    let mut traces = Vec::new();
+    let mut max_cu = 0;
+    for order in [[0, 1], [1, 0]] {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            max_portfolio_assets: 2,
+            max_price_move_bps_per_slot: 1_000,
+            max_accrual_dt_slots: 1,
+            ..V16CuMarketParams::default()
+        });
+        env.configure_permissionless_resolve_with_cu(STALE_SLOTS, 1);
+        env.svm.warp_to_slot(OPEN_SLOT);
+        for asset in [0, 1] {
+            assert_eq!(
+                env.market_state().1.assets[asset as usize].lifecycle,
+                AssetLifecycleV16::Active
+            );
+            env.configure_auth_mark_for_asset_as_admin(asset, OPEN_SLOT, PRICE);
+        }
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        let long_source = env.deposit(&long_owner, long, DEPOSIT);
+        let short_source = env.deposit(&short_owner, short, DEPOSIT);
+        for asset in [0, 1] {
+            env.trade_asset_with_cu(
+                asset,
+                &long_owner,
+                long,
+                &short_owner,
+                short,
+                POS_SCALE as i128,
+                PRICE,
+                0,
+            );
+        }
+        env.svm.warp_to_slot(MARK_SLOT);
+        for (asset, target) in TARGETS.into_iter().enumerate() {
+            env.push_auth_mark_for_asset_as_admin(asset as u16, MARK_SLOT, target);
+        }
+        env.svm.warp_to_slot(RESOLVE_SLOT);
+        let initial = env.market_state().1;
+        assert_eq!(initial.config.max_abs_funding_e9_per_slot, 0);
+        for asset in &initial.assets[..2] {
+            assert_eq!(asset.effective_price, PRICE);
+            assert_eq!(asset.oi_eff_long_q, POS_SCALE);
+            assert_eq!(asset.oi_eff_short_q, POS_SCALE);
+            assert!(asset.slot_last < MARK_SLOT);
+        }
+        let initial_rank = rank(&initial);
+        assert!(initial_rank.1 > 0);
+        let frame = inv071_continuation_frame(
+            &env,
+            &[
+                long_owner.pubkey(),
+                short_owner.pubkey(),
+                long_source,
+                short_source,
+            ],
+        );
+        env.svm.expire_blockhash();
+        let premature = env
+            .send(
+                ProgInstruction::ResolveStalePermissionless {
+                    now_slot: OPEN_SLOT,
+                },
+                vec![AccountMeta::new(env.market, false)],
+                &[],
+            )
+            .expect_err("pending terminal accrual must block resolution");
+        assert!(is_engine_stale_error(&premature), "{premature}");
+        inv071_assert_continuation_frame(&env, &frame, &[]);
+
+        // The identical observation list is retained after asset 0 stops needing accrual. The
+        // stale caller slot is also held fixed; only the authenticated Clock defines the horizon.
+        let instruction = ProgInstruction::PermissionlessCrank {
+            now_slot: OPEN_SLOT,
+            observations: crank_observations_for_assets(&order),
+        };
+        let mut trace = Vec::new();
+        let mut completed_hint_replays = 0;
+        while rank(&env.market_state().1).1 > 0 {
+            assert!(trace.len() < initial_rank.1 as usize, "finite crank bound");
+            let before = env.market_state().1;
+            let before_rank = rank(&before);
+            let completed_profile = state::read_asset_oracle_profile(
+                &env.svm.get_account(&env.market).unwrap().data,
+                0,
+            )
+            .unwrap();
+            let completed_hint = before.assets[0].effective_price == TARGETS[0];
+            if completed_hint {
+                assert!(before.assets[0].slot_last < RESOLVE_SLOT);
+                assert_eq!(completed_profile.funding_mark_pending_e6, 0);
+                assert_ne!(before.assets[1].effective_price, TARGETS[1]);
+                assert!(before.assets[1].slot_last < RESOLVE_SLOT);
+            }
+            env.svm.expire_blockhash();
+            let cu = env
+                .send(
+                    instruction.clone(),
+                    vec![
+                        AccountMeta::new_readonly(env.payer.pubkey(), false),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(long, false),
+                    ],
+                    &[],
+                )
+                .expect("completed terminal hint must not block remaining bounded accrual");
+            assert_cu_within("INV-071 completed terminal hint replay", cu, CRANK_CU_LIMIT);
+            max_cu = max_cu.max(cu);
+            let after = env.market_state().1;
+            let after_rank = rank(&after);
+            assert!(
+                after_rank < before_rank,
+                "{order:?}: successful crank must reduce rank: {before_rank:?} -> {after_rank:?}"
+            );
+            assert_eq!(after.mode, MarketModeV16::Live);
+            assert_eq!(env.svm.get_sysvar::<Clock>().slot, RESOLVE_SLOT);
+            inv071_assert_continuation_frame(&env, &frame, &[env.market]);
+            assert_eq!(
+                (after.vault, after.c_tot, after.insurance),
+                (2 * DEPOSIT, 2 * DEPOSIT, 0)
+            );
+            if completed_hint {
+                completed_hint_replays += 1;
+                assert_eq!(after.assets[0], before.assets[0]);
+                assert_eq!(
+                    state::read_asset_oracle_profile(
+                        &env.svm.get_account(&env.market).unwrap().data,
+                        0,
+                    )
+                    .unwrap(),
+                    completed_profile,
+                    "completed discovery hint must not manufacture profile-only progress"
+                );
+                assert!(after.assets[1].slot_last > before.assets[1].slot_last);
+            }
+            trace.push((after_rank, [after.assets[0], after.assets[1]]));
+        }
+        assert!(
+            completed_hint_replays >= 2,
+            "must replay a stale hint across multiple steps"
+        );
+        let ready = env.market_state().1;
+        assert_eq!(rank(&ready), (1, 0));
+        assert_eq!(
+            [
+                ready.assets[0].effective_price,
+                ready.assets[1].effective_price
+            ],
+            TARGETS
+        );
+        env.svm.expire_blockhash();
+        let resolve_cu = env
+            .send(
+                ProgInstruction::ResolveStalePermissionless {
+                    now_slot: OPEN_SLOT,
+                },
+                vec![AccountMeta::new(env.market, false)],
+                &[],
+            )
+            .expect("completed accrual must enable permissionless stale resolution");
+        assert_cu_within(
+            "INV-071 completed-hint stale resolution",
+            resolve_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        max_cu = max_cu.max(resolve_cu);
+        let resolved = env.market_state().1;
+        assert_eq!(rank(&resolved), (0, 0));
+        assert_eq!(resolved.resolved_slot, RESOLVE_SLOT);
+        inv071_assert_continuation_frame(&env, &frame, &[env.market]);
+        eprintln!(
+            "INV-071 terminal hint replay: order={order:?} cranks={} completed_hint_replays={completed_hint_replays} initial_rank={initial_rank:?} final_rank=(0, 0) exact_rejections=1 max_cu={max_cu}",
+            trace.len()
+        );
+        traces.push(trace);
+    }
+    assert_eq!(
+        traces[0], traces[1],
+        "hint order must preserve every economic rank edge"
+    );
+}
+
 // Same-slot retries must not double-realize loss or funding. The sole public crank must make real
 // progress until settlement is complete, then reject at the fixed point with exact rollback.
 #[test]
@@ -2458,7 +3001,7 @@ fn inv071_source_defines_function(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const ENGINE_PIN: &str = "394fd0bf2cb7d73df425eb3754dc3be1a0c44336";
     const CLASSES: &[Inv071ProgressClass] = &[
         Inv071ProgressClass {
             class: "summary fidelity selector totality and wrapper dispatch",

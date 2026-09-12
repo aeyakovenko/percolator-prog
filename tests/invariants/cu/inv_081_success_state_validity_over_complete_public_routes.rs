@@ -13,6 +13,10 @@
 //! token/account frames. Rejected routes are checked by byte-for-byte snapshots of market,
 //! portfolio, backing-ledger, matcher-context, and SPL-token state.
 //!
+//! A separate native-quote round trip checks wrapped-SOL token amounts and backing lamports
+//! together, excluding rent and unsynced SOL from capital, through live owner withdrawal and
+//! redemption. It consumes the existing stock/encumbrance censuses and engine shape contracts.
+//!
 //! The source-composition gate in this file closes the route-count dimension without duplicating
 //! those scenarios. It joins the complete decoder/route/account/input/admission inventories to the
 //! wrapper-to-engine transition, wrapper-field, value, stock, certificate, position/OI, scope,
@@ -29,6 +33,9 @@
 use crate::support::fuzz_model::{
     run_scenario, Action, HintMode, Scenario, SmallMarketConfig, TradeRoute,
 };
+
+#[path = "inv_081_fee_resolution_atomicity.rs"]
+mod fee_resolution_atomicity;
 
 #[derive(Clone, Copy)]
 struct Inv081CompositionOwner {
@@ -85,7 +92,7 @@ fn inv081_source_defines_kani_proof(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_success_state_validity_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const ENGINE_PIN: &str = "394fd0bf2cb7d73df425eb3754dc3be1a0c44336";
     const OWNERS: &[Inv081CompositionOwner] = &[
         Inv081CompositionOwner {
             layer: "production instruction and public witness roster",
@@ -351,5 +358,329 @@ fn v16_program_public_route_oracle_checks_success_and_reject_frames_fixed_case()
     assert!(
         coverage.liquidation_steps != 0 && coverage.liquidated_abs_q != 0,
         "liquidation progress must remain part of the complete public route oracle"
+    );
+}
+
+pub(super) fn inv081_public_native_market() -> super::V16CuEnv {
+    inv081_public_native_market_with_capacity(1)
+}
+
+pub(super) fn inv081_public_native_market_with_capacity(capacity: usize) -> super::V16CuEnv {
+    use super::*;
+
+    let mut svm = LiteSVM::new();
+    let program_id = percolator_prog::id();
+    for (program, path) in [
+        (program_id, program_path()),
+        (spl_token::ID, spl_token_program_path()),
+        (
+            associated_token_program_id(),
+            associated_token_program_path(),
+        ),
+    ] {
+        svm.add_program(program, &std::fs::read(path).unwrap());
+    }
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+    svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
+
+    // LiteSVM omits the native mint genesis account. All subsequent accounts and economic
+    // transitions are created through System, ATA, SPL, or the public wrapper, never byte edits.
+    let mint = spl_token::native_mint::ID;
+    svm.set_account(
+        mint,
+        Account {
+            lamports: svm.minimum_balance_for_rent_exemption(Mint::LEN),
+            data: make_mint_data_with_decimals(spl_token::native_mint::DECIMALS),
+            owner: spl_token::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    let params = V16CuMarketParams::default();
+    let market = Keypair::new();
+    let market_len = state::market_account_len_for_capacity(capacity).unwrap();
+    let market_rent = svm
+        .minimum_balance_for_rent_exemption(market_len)
+        .max(1_000_000_000);
+    send_raw_tx(
+        &mut svm,
+        &payer,
+        system_instruction::create_account(
+            &payer.pubkey(),
+            &market.pubkey(),
+            market_rent,
+            market_len as u64,
+            &program_id,
+        ),
+        &[&market],
+    )
+    .expect("public System native market creation");
+    let vault_authority =
+        Pubkey::find_program_address(&[b"vault", market.pubkey().as_ref()], &program_id).0;
+    let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint);
+    let init_market_cu = send_tx(
+        &mut svm,
+        program_id,
+        &payer,
+        init_market_instruction(&params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new_readonly(mint, false),
+        ],
+        &[&admin],
+    )
+    .expect("public native-quote market initialization");
+    V16CuEnv {
+        svm,
+        program_id,
+        payer,
+        admin,
+        init_market_cu,
+        market: market.pubkey(),
+        mint,
+        vault,
+        vault_authority,
+        portfolio_account_len: state::portfolio_account_len_for_market_slots(1).unwrap(),
+        portfolios: Vec::new(),
+    }
+}
+
+#[test]
+fn v16_program_native_quote_roundtrip_preserves_lamports_rent_and_unsynced_value() {
+    use super::*;
+    use crate::support::fuzz_model::{
+        assert_market_stock_census, assert_reservation_encumbrance_census,
+    };
+
+    const WRAPPED: u64 = 137;
+    const UNSYNCED: u64 = 19;
+    const PARTIAL: u64 = 37;
+
+    let mut env = inv081_public_native_market();
+    let owner = Keypair::new();
+    env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    let mint = env.mint;
+    let vault = env.vault;
+    let vault_authority = env.vault_authority;
+    let portfolio = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &portfolio,
+        env.portfolio_account_len,
+        env.program_id,
+    );
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio.pubkey(), false),
+        ],
+        &[&owner],
+    )
+    .expect("public portfolio initialization");
+    let portfolio = portfolio.pubkey();
+    env.portfolios.push(portfolio);
+    let user_token = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), mint);
+    let empty_user = env.svm.get_account(&user_token).unwrap();
+    let empty_vault = env.svm.get_account(&vault).unwrap();
+    let token_rent = env
+        .svm
+        .minimum_balance_for_rent_exemption(TokenAccount::LEN);
+    for (account, token_owner) in [
+        (&empty_user, owner.pubkey()),
+        (&empty_vault, vault_authority),
+    ] {
+        let token = TokenAccount::unpack(&account.data).unwrap();
+        assert_eq!(token.mint, mint);
+        assert_eq!(token.owner, token_owner);
+        assert_eq!(token.is_native, COption::Some(token_rent));
+        assert_eq!(token.amount, 0);
+        assert_eq!(account.lamports, token_rent);
+    }
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&owner.pubkey(), &user_token, WRAPPED),
+        &[&owner],
+    )
+    .unwrap();
+    assert_eq!(env.token_amount(user_token), 0);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::sync_native(&spl_token::ID, &user_token).unwrap(),
+        &[],
+    )
+    .unwrap();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&owner.pubkey(), &user_token, UNSYNCED),
+        &[&owner],
+    )
+    .unwrap();
+
+    let config = env.market_state().0;
+    assert_eq!(config.collateral_mint, mint.to_bytes());
+    let portfolio_id = env.portfolio_id(portfolio);
+    let portfolio_rent = env.svm.get_account(&portfolio).unwrap().lamports;
+    let market_lamports = env.svm.get_account(&env.market).unwrap().lamports;
+    let passive_keys = [
+        env.mint,
+        env.admin.pubkey(),
+        owner.pubkey(),
+        vault_authority,
+    ];
+    let passive_before = passive_keys.map(|key| env.svm.get_account(&key));
+    let check = |env: &V16CuEnv, capital: u64, sequence: u64, closed: bool| {
+        for (key, initial, amount, unsynced) in [
+            (user_token, &empty_user, WRAPPED - capital, UNSYNCED),
+            (vault, &empty_vault, capital, 0),
+        ] {
+            let mut expected = initial.clone();
+            let mut token = TokenAccount::unpack(&expected.data).unwrap();
+            token.amount = amount;
+            TokenAccount::pack(token, &mut expected.data).unwrap();
+            expected.lamports += amount + unsynced;
+            assert_eq!(
+                env.svm.get_account(&key),
+                Some(expected),
+                "native custody must change only token amount and its backing lamports at {key}"
+            );
+        }
+        assert_eq!(
+            passive_keys.map(|key| env.svm.get_account(&key)),
+            passive_before
+        );
+        let mut market_data = env.svm.get_account(&env.market).unwrap().data;
+        let (cfg, group) = state::read_market(&market_data).unwrap();
+        assert_eq!(cfg, config);
+        assert_eq!(
+            (group.vault, group.c_tot, group.insurance),
+            (capital.into(), capital.into(), 0)
+        );
+        assert_eq!(group.mode, MarketModeV16::Live);
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap().lamports,
+            market_lamports + if closed { portfolio_rent } else { 0 }
+        );
+        let portfolios = if closed {
+            assert_eq!(capital, 0);
+            assert!(env
+                .svm
+                .get_account(&portfolio)
+                .is_none_or(|account| { account.lamports == 0 && account.data.is_empty() }));
+            Vec::new()
+        } else {
+            assert_eq!(env.portfolio_id(portfolio), portfolio_id);
+            assert_eq!(env.portfolio_matcher_sequence(portfolio), sequence);
+            assert_eq!(env.portfolio_position_epoch(portfolio), 0);
+            assert_eq!(
+                env.svm.get_account(&portfolio).unwrap().lamports,
+                portfolio_rent
+            );
+            let account = env.portfolio_state(portfolio);
+            assert_eq!(account.capital.get(), u128::from(capital));
+            assert_eq!(account.owner, owner.pubkey().to_bytes());
+            vec![account]
+        };
+        assert_market_stock_census(
+            "INV-081 native quote",
+            &group,
+            &market_data,
+            &portfolios,
+            u128::from(env.token_amount(vault)),
+        )
+        .unwrap();
+        assert_reservation_encumbrance_census("INV-081 native quote", &group, &portfolios).unwrap();
+        let (_, view) = state::market_view_mut(&mut market_data).unwrap();
+        view.validate_shape().unwrap();
+        if !closed {
+            let mut data = env.svm.get_account(&portfolio).unwrap().data;
+            state::portfolio_view_mut_for_market_slots(&mut data, 1)
+                .unwrap()
+                .validate_with_market(&view.as_view())
+                .unwrap();
+        }
+    };
+    check(&env, 0, 0, false);
+    let deposit_cu = env
+        .send(
+            env.deposit_ix(portfolio, WRAPPED.into()),
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(user_token, false),
+                AccountMeta::new(vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .expect("deposit native collateral without crediting rent or unsynced SOL");
+    assert_cu_within("native deposit", deposit_cu, CUSTODY_CU_LIMIT);
+    check(&env, WRAPPED, 1, false);
+    for (amount, remaining, sequence) in
+        [(PARTIAL, WRAPPED - PARTIAL, 2), (WRAPPED - PARTIAL, 0, 3)]
+    {
+        let cu = env
+            .send(
+                env.withdraw_ix(portfolio, amount.into()),
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(user_token, false),
+                    AccountMeta::new(vault, false),
+                    AccountMeta::new_readonly(vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&owner],
+            )
+            .expect("withdraw native token atoms and exactly the same backing lamports");
+        assert_cu_within("native withdrawal", cu, CUSTODY_CU_LIMIT);
+        check(&env, remaining, sequence, false);
+    }
+    env.close_portfolio_with_cu(&owner, portfolio);
+    check(&env, 0, 3, true);
+
+    let market_before_redemption = env.svm.get_account(&env.market);
+    let vault_before_redemption = env.svm.get_account(&vault);
+    let mut owner_after_redemption = env.svm.get_account(&owner.pubkey()).unwrap();
+    owner_after_redemption.lamports += token_rent + WRAPPED + UNSYNCED;
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::close_account(
+            &spl_token::ID,
+            &user_token,
+            &owner.pubkey(),
+            &owner.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&owner],
+    )
+    .expect("redeem wrapped SOL plus unsynced SOL and the user's token-account rent");
+    assert_eq!(
+        env.svm.get_account(&owner.pubkey()),
+        Some(owner_after_redemption)
+    );
+    assert!(env
+        .svm
+        .get_account(&user_token)
+        .is_none_or(|account| { account.lamports == 0 && account.data.is_empty() }));
+    assert_eq!(env.svm.get_account(&env.market), market_before_redemption);
+    assert_eq!(env.svm.get_account(&vault), vault_before_redemption);
+    assert_eq!(env.svm.get_account(&mint), passive_before[0]);
+    println!(
+        "INV-081 native roundtrip: {WRAPPED} quote atoms, {UNSYNCED} unbooked lamports, \
+         {token_rent} token rent; partial/full payout and owner redemption are exact"
     );
 }

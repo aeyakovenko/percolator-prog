@@ -28,8 +28,1604 @@
 //! owner-signed reduction and bilateral trade routes clear the leg, normalize the carry, remain
 //! below their CU ceilings, preserve custody, and return all senior capital. These bounded cells
 //! do not replace the remaining lifecycle reachability work required by the charter.
+//!
+//! `v16_program_drain_only_stale_exit_does_not_require_reserve_or_counterparty_signers`
+//! composes exposed DrainOnly risk, stale resolution, an owner-window waiting winner, and the
+//! exact permissionless timeout boundary with funded, nonparticipating reserve owners. Unlike
+//! the Live-only reserve-owner exit witness in INV-024, it disposes real terminal PnL and both
+//! positions. Provider and insurance stocks remain attributed; rows 420/421 and administrative
+//! retirement remain open, not permissionlessly closed by this user-exit witness.
+//!
+//! The restarted-asset witness retains a live leg in the same funded portfolios across another
+//! asset's Recovery/restart, reopens the new generation on the opposite side, and lands discovery
+//! hints retained before shutdown. Both hint orders and both payout orders must finish bounded
+//! terminal accrual and unsigned economic exits with identical, input-derived entitlements.
+//!
+//! `v16_program_spent_insurance_preserves_bounded_keeper_terminal_payouts` consumes insurance
+//! through resolved bankruptcy, then proves ranked unsigned exits, exact source/receipt payout
+//! arithmetic, retained insurance/backing custody, and full rollback for both payout aliases.
+//! It covers exhausted and partially spent budgets on either asset; B booking and retirement
+//! remain outside this finite witness.
+//!
+//! `v16_program_terminal_provider_earnings_and_lazy_ledger_reach_exact_slab_close` leaves earned
+//! provider fees as the sole resolved stock after permissionless user payouts and signed
+//! portfolio deletion/principal withdrawal. A public earnings payment initializes its ledger
+//! and enables slab close; an invalid close suffix rolls both payment and initialization back.
+//! This cooperative-provider witness does not close row 420's absent-signer obligation.
+//!
+//! `v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledger` retains
+//! a publicly initialized insurance ledger across funded terminal beneficiary succession.
+//! A stale-ledger suffix rolls back the preceding SPL payout; omitting the optional ledger
+//! returns the exact reserve and permits slab close without the former beneficiary or operator.
+//! The current beneficiary signs payment and the market authority signs mechanical closure;
+//! this is bounded role-independent evidence, not permissionless retirement or row-421 closure.
+//!
+//! The absent-provider expiry witness pays a funded user and retires both staggered backing
+//! domains with no provider signature after funding. Expiry removes the entire principal claim;
+//! three successful administrator-signed slab calls normalize both domains and burn the residue.
+//! Fresh principal, earnings, and absent insurance beneficiaries remain open in rows 420/421.
 
 use super::*;
+
+#[path = "inv_073_absent_insurer_spent_retirement.rs"]
+mod absent_insurer_spent_retirement;
+
+#[path = "inv_073_absent_provider_expiry_retirement.rs"]
+mod absent_provider_expiry_retirement;
+
+#[path = "inv_073_mixed_backing_expiry_exit.rs"]
+mod mixed_backing_expiry_exit;
+
+#[path = "inv_073_recovery_claim_liability_exit.rs"]
+mod recovery_claim_liability_exit;
+
+#[path = "inv_073_spent_insurance_terminal_exit.rs"]
+mod spent_insurance_terminal_exit;
+
+#[test]
+fn v16_program_terminal_provider_earnings_and_lazy_ledger_reach_exact_slab_close() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const CAPITAL: [u64; 2] = [52_502, 2_000_000];
+    const BACKING: u64 = 100_000;
+    const OPEN_LOTS: u64 = 1_000;
+    const TOTAL_LOTS: u64 = 1_050;
+    const PRICE: u64 = 100;
+    const MARK: u64 = 105;
+    const RATE: u16 = 3_333;
+    const PROFIT: u64 = OPEN_LOTS * (MARK - PRICE);
+    const MARGIN_GAP: u64 = TOTAL_LOTS * MARK / 2 - CAPITAL[0];
+    const EARNINGS: u64 = (MARGIN_GAP * RATE as u64).div_ceil(10_000);
+    const SUPPLY: u64 = CAPITAL[0] + CAPITAL[1] + BACKING;
+    const PAYOUTS: [u64; 2] = [CAPITAL[0] + PROFIT - EARNINGS, CAPITAL[1] - PROFIT];
+
+    let mut env = inv018_public_spl_market_with_params(
+        0,
+        V16CuMarketParams {
+            max_portfolio_assets: 1,
+            initial_margin_bps: 5_000,
+            maintenance_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            ..V16CuMarketParams::default()
+        },
+    );
+    let admin = env.admin.insecure_clone();
+    let provider = Keypair::new();
+    let owners = [Keypair::new(), Keypair::new()];
+    for owner in [&provider, &owners[0], &owners[1]] {
+        env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    }
+    env.send(
+        ProgInstruction::UpdateAssetAuthority {
+            asset_index: 0,
+            market_id: env.asset_market_id(0),
+            authority_epoch: env.control_sequences(0).authority_epoch,
+            kind: processor::ASSET_AUTH_BACKING_BUCKET,
+            new_pubkey: provider.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(provider.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin, &provider],
+    )
+    .unwrap();
+    env.svm.warp_to_slot(1);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+    env.update_backing_fee_policy_with_cu(1, RATE, 0);
+
+    let tokens = [&owners[0], &owners[1], &provider, &admin]
+        .map(|owner| create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint));
+    for (token, amount) in tokens.into_iter().zip([CAPITAL[0], CAPITAL[1], BACKING]) {
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &token,
+                &admin.pubkey(),
+                &[],
+                amount,
+            )
+            .unwrap(),
+            &[&admin],
+        )
+        .unwrap();
+    }
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::set_authority(
+            &spl_token::ID,
+            &env.mint,
+            None,
+            spl_token::instruction::AuthorityType::MintTokens,
+            &admin.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .unwrap();
+    let portfolios = owners.each_ref().map(|owner| {
+        let key = Keypair::new();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &key,
+            env.portfolio_account_len,
+            env.program_id,
+        );
+        env.send(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(key.pubkey(), false),
+            ],
+            &[owner],
+        )
+        .unwrap();
+        env.portfolios.push(key.pubkey());
+        key.pubkey()
+    });
+    for i in 0..2 {
+        env.send(
+            env.deposit_ix(portfolios[i], CAPITAL[i] as u128),
+            vec![
+                AccountMeta::new(owners[i].pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolios[i], false),
+                AccountMeta::new(tokens[i], false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owners[i]],
+        )
+        .unwrap();
+    }
+    env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            market_id: env.asset_market_id(0),
+            authority_epoch: 0,
+            intent_id: 0,
+            backing_fee_bps: RATE,
+            insurance_share_bps: 0,
+            amount: BACKING as u128,
+            expiry_slot: 100,
+        },
+        vec![
+            AccountMeta::new(provider.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(tokens[2], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&provider],
+    )
+    .unwrap();
+    let custody = |env: &V16CuEnv| {
+        let mint = Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data).unwrap();
+        assert_eq!(mint.mint_authority, COption::None);
+        assert_eq!(mint.supply, SUPPLY);
+        assert_eq!(
+            tokens
+                .map(|token| env.token_amount(token))
+                .iter()
+                .sum::<u64>()
+                + env.token_amount(env.vault),
+            SUPPLY
+        );
+        assert_eq!(
+            env.market_state().1.vault,
+            env.token_amount(env.vault) as u128
+        );
+    };
+    custody(&env);
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        portfolios[0],
+        &owners[1],
+        portfolios[1],
+        (OPEN_LOTS as i128) * POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, MARK);
+    for i in [1, 0] {
+        env.crank(
+            portfolios[i],
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert_eq!(env.portfolio_state(portfolios[0]).pnl.get(), PROFIT as i128);
+    env.try_trade_asset_with_backing_fee_cap_with_cu(
+        0,
+        &owners[0],
+        portfolios[0],
+        &owners[1],
+        portfolios[1],
+        ((TOTAL_LOTS - OPEN_LOTS) as i128) * POS_SCALE as i128,
+        MARK,
+        0,
+        RATE,
+    )
+    .expect("signed risk increase earns the provider's one-time backing fee");
+    assert!(EARNINGS > 0);
+    let earned = env.market_state().1;
+    assert_eq!(
+        earned.source_backing_buckets[1].utilization_fee_earnings,
+        EARNINGS as u128
+    );
+    assert_eq!(earned.backing_provider_earnings_total, EARNINGS as u128);
+    assert_eq!(earned.insurance, 0);
+    assert_eq!(
+        env.portfolio_state(portfolios[0]).capital.get(),
+        (CAPITAL[0] - EARNINGS) as u128
+    );
+    assert!(env
+        .portfolio_state(portfolios[0])
+        .source_domains
+        .iter()
+        .any(|source| source.source_lien_counterparty_backing_num.get() > 0));
+    custody(&env);
+    env.resolve();
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    env.svm.warp_to_slot(7);
+    // The fee payer alone pays user claims; provider consent is needed only for its own tail.
+    for _ in 0..8 {
+        for i in [1, 0] {
+            if resolved_portfolio_is_terminal(&env, portfolios[i]) {
+                continue;
+            }
+            env.svm.expire_blockhash();
+            let cu = env
+                .send(
+                    ProgInstruction::CloseResolved {
+                        fee_rate_per_slot: 0,
+                    },
+                    vec![
+                        AccountMeta::new_readonly(owners[i].pubkey(), false),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolios[i], false),
+                        AccountMeta::new(tokens[i], false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[],
+                )
+                .expect("bounded permissionless user disposition");
+            assert_cu_within(
+                "INV-073 user payout before provider earnings",
+                cu,
+                CUSTODY_CU_LIMIT,
+            );
+            custody(&env);
+        }
+        if portfolios
+            .iter()
+            .all(|key| resolved_portfolio_is_terminal(&env, *key))
+        {
+            break;
+        }
+    }
+    assert!(portfolios
+        .iter()
+        .all(|key| resolved_portfolio_is_terminal(&env, *key)));
+    assert_eq!(
+        tokens.map(|key| env.token_amount(key)),
+        [PAYOUTS[0], PAYOUTS[1], 0, 0]
+    );
+    for i in 0..2 {
+        env.close_portfolio_with_cu(&owners[i], portfolios[i]);
+    }
+    env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 1,
+            market_id: env.asset_market_id(0),
+            authority_epoch: env.control_sequences(0).authority_epoch,
+            amount: BACKING as u128,
+        },
+        vec![
+            AccountMeta::new(provider.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(tokens[2], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&provider],
+    )
+    .expect("provider recovers principal while earned fees remain in custody");
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.c_tot, 0);
+    assert_eq!(terminal.materialized_portfolio_count, 0);
+    assert_eq!(terminal.insurance, 0);
+    assert_eq!(terminal.vault, EARNINGS as u128);
+    assert_eq!(terminal.backing_provider_earnings_total, EARNINGS as u128);
+    assert_eq!(
+        terminal.source_backing_buckets[1].fresh_unliened_backing_num,
+        0
+    );
+    custody(&env);
+
+    let ledger = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &ledger,
+        state::backing_domain_ledger_account_len(),
+        env.program_id,
+    );
+    assert!(env
+        .svm
+        .get_account(&ledger.pubkey())
+        .unwrap()
+        .data
+        .iter()
+        .all(|byte| *byte == 0));
+    let payout = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(provider.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger.pubkey(), false),
+            AccountMeta::new(tokens[2], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            market_id: env.asset_market_id(0),
+            authority_epoch: env.control_sequences(0).authority_epoch,
+            amount: EARNINGS as u128,
+        }
+        .encode(),
+    };
+    let close = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(tokens[3], false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.mint, false),
+        ],
+        data: ProgInstruction::CloseSlab {
+            authority_epoch: env.control_sequences(0).authority_epoch,
+        }
+        .encode(),
+    };
+    let frame_keys = [
+        env.market,
+        env.vault,
+        env.mint,
+        ledger.pubkey(),
+        portfolios[0],
+        portfolios[1],
+        tokens[0],
+        tokens[1],
+        tokens[2],
+        tokens[3],
+        owners[0].pubkey(),
+        owners[1].pubkey(),
+        provider.pubkey(),
+        admin.pubkey(),
+        env.payer.pubkey(),
+        solana_sdk::sysvar::clock::ID,
+    ];
+    let frame = |env: &V16CuEnv| frame_keys.map(|key| env.svm.get_account(&key));
+    let payer_index = frame_keys
+        .iter()
+        .position(|key| *key == env.payer.pubkey())
+        .unwrap();
+    let transaction = |env: &V16CuEnv, suffix: Instruction| {
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), payout.clone(), suffix],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &provider, &admin],
+            env.svm.latest_blockhash(),
+        )
+    };
+    let mut before = frame(&env);
+    let close_only = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), close.clone()],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        env.svm.latest_blockhash(),
+    );
+    before[payer_index].as_mut().unwrap().lamports -=
+        u64::from(close_only.message.header.num_required_signatures)
+            * FeeStructure::default().lamports_per_signature;
+    let blocked = env
+        .svm
+        .send_transaction(close_only)
+        .expect_err("unpaid provider earnings block final slab close");
+    assert_eq!(
+        blocked.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::EngineLockActive as u32),
+        )
+    );
+    assert_eq!(frame(&env), before);
+    env.svm
+        .simulate_transaction(transaction(&env, close.clone()).into())
+        .expect("earned provider fee payment and final slab close are jointly payable");
+    assert_eq!(frame(&env), before);
+
+    let mut invalid_close = close.clone();
+    invalid_close.accounts[4] = AccountMeta::new(tokens[2], false);
+    env.svm.expire_blockhash();
+    let mut rollback = frame(&env);
+    let invalid = transaction(&env, invalid_close);
+    let fee = u64::from(invalid.message.header.num_required_signatures)
+        * FeeStructure::default().lamports_per_signature;
+    rollback[payer_index].as_mut().unwrap().lamports -= fee;
+    let failure = env
+        .svm
+        .send_transaction(invalid)
+        .expect_err("invalid slab destination suffix");
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(
+            3,
+            InstructionError::Custom(PercolatorError::InvalidTokenAccount as u32),
+        )
+    );
+    assert_eq!(
+        failure
+            .meta
+            .logs
+            .iter()
+            .filter(|line| **line == format!("Program {} success", spl_token::ID))
+            .count(),
+        1
+    );
+    assert_eq!(
+        frame(&env),
+        rollback,
+        "fee payment and lazy ledger initialization roll back exactly"
+    );
+    custody(&env);
+
+    env.svm.expire_blockhash();
+    let before = frame(&env);
+    let market_lamports = env.svm.get_account(&env.market).unwrap().lamports;
+    let vault_lamports = env.svm.get_account(&env.vault).unwrap().lamports;
+    let admin_lamports = env.svm.get_account(&admin.pubkey()).unwrap().lamports;
+    let meta = env
+        .svm
+        .send_transaction(transaction(&env, close))
+        .expect("unchanged earnings payment retries into final slab disposition");
+    assert_cu_within(
+        "INV-073 provider earnings and slab close",
+        meta.compute_units_consumed,
+        500_000,
+    );
+    assert_cu_within(
+        "INV-073 rejected provider earnings suffix",
+        failure.meta.compute_units_consumed,
+        500_000,
+    );
+    let market = env.svm.get_account(&env.market).unwrap();
+    assert_closed_market_tombstone(&market);
+    let rent = env
+        .svm
+        .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN);
+    assert_eq!(market.lamports, rent);
+    assert_eq!(
+        env.svm.get_account(&admin.pubkey()).unwrap().lamports,
+        admin_lamports + market_lamports + vault_lamports - rent
+    );
+    assert!(env
+        .svm
+        .get_account(&env.vault)
+        .is_none_or(|account| account.lamports == 0 && account.data.is_empty()));
+    assert_eq!(
+        tokens.map(|key| env.token_amount(key)),
+        [PAYOUTS[0], PAYOUTS[1], BACKING + EARNINGS, 0]
+    );
+    assert_eq!(
+        tokens.map(|key| env.token_amount(key)).iter().sum::<u64>(),
+        SUPPLY
+    );
+    let paid =
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledger.pubkey()).unwrap().data)
+            .unwrap();
+    assert_eq!(paid.authority, provider.pubkey().to_bytes());
+    assert_eq!(paid.market_group, env.market.to_bytes());
+    assert_eq!(paid.domain, 1);
+    assert_eq!(paid.total_principal_atoms, 0);
+    // A late ledger observes only future accrual, but can pay preexisting bucket earnings.
+    assert_eq!(paid.total_earnings_atoms, 0);
+    assert_eq!(paid.total_earnings_withdrawn_atoms, EARNINGS as u128);
+    assert_eq!(paid.last_observed_bucket_earnings_atoms, 0);
+    assert_eq!(
+        env.svm.get_account(&env.payer.pubkey()).unwrap().lamports,
+        before[payer_index].as_ref().unwrap().lamports - fee
+    );
+    for (i, key) in frame_keys.iter().enumerate() {
+        if ![
+            env.market,
+            env.vault,
+            ledger.pubkey(),
+            tokens[2],
+            admin.pubkey(),
+            env.payer.pubkey(),
+        ]
+        .contains(key)
+        {
+            assert_eq!(
+                env.svm.get_account(key),
+                before[i],
+                "unrelated terminal account"
+            );
+        }
+    }
+    println!("INV-073 terminal provider earnings: fee={EARNINGS}, users={PAYOUTS:?}, provider={}, peak_CU={}",
+        BACKING + EARNINGS, meta.compute_units_consumed.max(failure.meta.compute_units_consumed));
+}
+
+#[test]
+fn v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledger() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const BUDGETS: [u64; 2] = [19, 28];
+    const FUNDED: u64 = BUDGETS[0] + BUDGETS[1];
+    const FIRST: u64 = 23;
+
+    let mut env = inv018_public_spl_market_with_params(0, V16CuMarketParams::default());
+    let admin = env.admin.insecure_clone();
+    let former = Keypair::new();
+    let operator = Keypair::new();
+    let beneficiary = Keypair::new();
+    for role in [&former, &operator, &beneficiary] {
+        env.svm.airdrop(&role.pubkey(), 1_000_000_000).unwrap();
+    }
+    for (kind, incoming) in [
+        (processor::ASSET_AUTH_INSURANCE, &former),
+        (processor::ASSET_AUTH_INSURANCE_OPERATOR, &operator),
+    ] {
+        env.try_update_per_asset_authority_with_cu(
+            &admin,
+            Some(incoming),
+            0,
+            kind,
+            incoming.pubkey().to_bytes(),
+        )
+        .unwrap();
+    }
+    let wallets = [former.pubkey(), beneficiary.pubkey(), admin.pubkey()];
+    let tokens =
+        wallets.map(|owner| create_ata_for_test(&mut env.svm, &env.payer, owner, env.mint));
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &env.mint,
+            &tokens[0],
+            &admin.pubkey(),
+            &[],
+            FUNDED,
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .unwrap();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::set_authority(
+            &spl_token::ID,
+            &env.mint,
+            None,
+            spl_token::instruction::AuthorityType::MintTokens,
+            &admin.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .unwrap();
+    for (domain, amount) in BUDGETS.into_iter().enumerate() {
+        env.send(
+            ProgInstruction::TopUpInsuranceDomain {
+                domain: domain as u16,
+                market_id: env.asset_market_id(0),
+                authority_epoch: env.control_sequences(0).authority_epoch,
+                intent_id: 0,
+                amount: amount.into(),
+            },
+            vec![
+                AccountMeta::new(former.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(tokens[0], false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&former],
+        )
+        .unwrap();
+    }
+    let ledger = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &ledger,
+        state::insurance_ledger_account_len(),
+        env.program_id,
+    );
+    env.send(
+        ProgInstruction::SyncInsuranceLedger,
+        vec![
+            AccountMeta::new(former.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger.pubkey(), false),
+        ],
+        &[&former],
+    )
+    .unwrap();
+    let ledger_frame = env.svm.get_account(&ledger.pubkey()).unwrap();
+    let record = state::read_insurance_ledger(&ledger_frame.data).unwrap();
+    assert_eq!(record.authority, former.pubkey().to_bytes());
+    assert_eq!(record.last_observed_insurance_atoms, FUNDED.into());
+    assert_eq!(record.total_withdrawn_atoms, 0);
+
+    env.resolve();
+    env.try_update_per_asset_authority_with_cu(
+        &former,
+        Some(&beneficiary),
+        0,
+        processor::ASSET_AUTH_INSURANCE,
+        beneficiary.pubkey().to_bytes(),
+    )
+    .expect("funded terminal beneficiary succession with both holders' consent");
+    let absent_roles = [former.pubkey(), operator.pubkey()];
+    drop(former);
+    drop(operator);
+
+    let mint_frame = env.svm.get_account(&env.mint).unwrap();
+    let mint = Mint::unpack(&mint_frame.data).unwrap();
+    assert_eq!(mint.supply, FUNDED);
+    assert_eq!(mint.mint_authority, COption::None);
+    let check_stock = |env: &V16CuEnv, paid: u64| {
+        let group = env.market_state().1;
+        assert_eq!(group.mode, MarketModeV16::Resolved);
+        assert_eq!(group.materialized_portfolio_count, 0);
+        assert_eq!(group.c_tot, 0);
+        assert_eq!(group.insurance, u128::from(FUNDED - paid));
+        assert_eq!(group.vault, u128::from(FUNDED - paid));
+        assert_eq!(
+            group.insurance_domain_budget_remaining_total,
+            group.insurance
+        );
+        assert_eq!(
+            &group.insurance_domain_budget[..2],
+            &[
+                u128::from(BUDGETS[0].saturating_sub(paid)),
+                u128::from(BUDGETS[1] - paid.saturating_sub(BUDGETS[0])),
+            ]
+        );
+        assert!(group.insurance_domain_budget[2..].iter().all(|v| *v == 0));
+        assert!(group.insurance_domain_spent.iter().all(|v| *v == 0));
+        assert_eq!(tokens.map(|key| env.token_amount(key)), [0, paid, 0]);
+        assert_eq!(env.token_amount(env.vault), FUNDED - paid);
+        assert_eq!(
+            env.token_amount(env.vault) + env.token_amount(tokens[1]),
+            FUNDED
+        );
+        assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_frame);
+        assert_eq!(env.svm.get_account(&ledger.pubkey()).unwrap(), ledger_frame);
+    };
+    check_stock(&env, 0);
+
+    let withdrawal = |amount: u64, attach_ledger: bool| {
+        let mut accounts = vec![
+            AccountMeta::new(beneficiary.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(tokens[1], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        if attach_ledger {
+            accounts.push(AccountMeta::new(ledger.pubkey(), false));
+        }
+        assert!(accounts
+            .iter()
+            .all(|meta| !absent_roles.contains(&meta.pubkey)));
+        Instruction {
+            program_id: env.program_id,
+            accounts,
+            data: ProgInstruction::WithdrawInsuranceAsset {
+                asset_index: 0,
+                market_id: env.asset_market_id(0),
+                authority_epoch: env.control_sequences(0).authority_epoch,
+                amount: amount.into(),
+            }
+            .encode(),
+        }
+    };
+    let prefix = withdrawal(FIRST, false);
+    let invalid_suffix = withdrawal(FUNDED - FIRST, true);
+    let valid_suffix = withdrawal(FUNDED - FIRST, false);
+    assert_eq!(invalid_suffix.data, valid_suffix.data);
+    assert_eq!(&invalid_suffix.accounts[..6], &valid_suffix.accounts);
+
+    let tracked = [
+        env.market,
+        env.vault,
+        env.mint,
+        ledger.pubkey(),
+        tokens[0],
+        tokens[1],
+        tokens[2],
+        wallets[0],
+        wallets[1],
+        wallets[2],
+        absent_roles[1],
+    ];
+    let before = tracked.map(|key| env.svm.get_account(&key));
+    let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+    env.svm.expire_blockhash();
+    let tx = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), prefix.clone(), invalid_suffix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &beneficiary],
+        env.svm.latest_blockhash(),
+    );
+    assert_eq!(tx.message.header.num_required_signatures, 2);
+    payer.lamports -= 2 * FeeStructure::default().lamports_per_signature;
+    let failure = env
+        .svm
+        .send_transaction(tx)
+        .expect_err("former ledger binding rejects");
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(
+            3,
+            InstructionError::Custom(PercolatorError::Unauthorized as u32),
+        )
+    );
+    let token_success = format!("Program {} success", spl_token::ID);
+    assert_eq!(
+        failure
+            .meta
+            .logs
+            .iter()
+            .filter(|log| **log == token_success)
+            .count(),
+        1
+    );
+    assert_eq!(tracked.map(|key| env.svm.get_account(&key)), before);
+    assert_eq!(env.svm.get_account(&env.payer.pubkey()).unwrap(), payer);
+    check_stock(&env, 0);
+
+    // Retain the payment bytes; only omit the stale optional observation on the suffix.
+    env.svm.expire_blockhash();
+    let tx = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), prefix, valid_suffix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &beneficiary],
+        env.svm.latest_blockhash(),
+    );
+    let payout = env
+        .svm
+        .send_transaction(tx)
+        .expect("current beneficiary can drain insurance");
+    assert_eq!(
+        payout
+            .logs
+            .iter()
+            .filter(|log| **log == token_success)
+            .count(),
+        2
+    );
+    payer.lamports -= 2 * FeeStructure::default().lamports_per_signature;
+    assert_eq!(env.svm.get_account(&env.payer.pubkey()).unwrap(), payer);
+    check_stock(&env, FUNDED);
+    for (key, account) in tracked.iter().zip(&before) {
+        if ![env.market, env.vault, tokens[1]].contains(key) {
+            assert_eq!(&env.svm.get_account(key), account);
+        }
+    }
+    drop(beneficiary);
+
+    let market_rent = env.svm.get_account(&env.market).unwrap().lamports;
+    let vault_rent = env.svm.get_account(&env.vault).unwrap().lamports;
+    let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();
+    let tombstone_rent = env
+        .svm
+        .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN);
+    expected_admin.lamports += market_rent + vault_rent - tombstone_rent;
+    let close_cu = env
+        .send(
+            ProgInstruction::CloseSlab {
+                authority_epoch: env.control_sequences(0).authority_epoch,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(tokens[2], false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.mint, false),
+            ],
+            &[&admin],
+        )
+        .expect("stale insurance telemetry cannot prevent ordinary slab close");
+    let closed = env.svm.get_account(&env.market).unwrap();
+    assert_closed_market_tombstone(&closed);
+    assert_eq!(closed.lamports, tombstone_rent);
+    assert_eq!(
+        env.svm.get_account(&admin.pubkey()).unwrap(),
+        expected_admin
+    );
+    if let Some(vault) = env.svm.get_account(&env.vault) {
+        assert_eq!(vault.lamports, 0);
+        assert!(vault.data.iter().all(|byte| *byte == 0));
+    }
+    assert_eq!(tokens.map(|key| env.token_amount(key)), [0, FUNDED, 0]);
+    assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_frame);
+    assert_eq!(env.svm.get_account(&ledger.pubkey()).unwrap(), ledger_frame);
+    for cu in [
+        failure.meta.compute_units_consumed,
+        payout.compute_units_consumed,
+        close_cu,
+    ] {
+        assert_cu_within(
+            "INV-073 terminal insurance stale-ledger exit",
+            cu,
+            CUSTODY_CU_LIMIT,
+        );
+    }
+    println!(
+        "INV-073 terminal stale ledger: rollback={} CU, payout={} CU, close={close_cu} CU",
+        failure.meta.compute_units_consumed, payout.compute_units_consumed
+    );
+}
+
+#[test]
+fn v16_program_restarted_asset_with_retained_live_leg_has_bounded_stale_exit() {
+    const CAPITAL: u128 = 1_000;
+    const PRICE: u64 = 100;
+    const RESTART_PRICE: u64 = 200;
+    const TARGETS: [u64; 2] = [230, 150];
+    const OPEN_SLOT: u64 = 1;
+    const RESTART_SLOT: u64 = 2;
+    const MARK_SLOT: u64 = 3;
+    const STALE_SLOTS: u64 = 6;
+    const RESOLVE_SLOT: u64 = MARK_SLOT + STALE_SLOTS;
+    const EXIT_DELAY: u64 = 2;
+    const NET_PROFIT: u128 = (TARGETS[1] - PRICE) as u128 - (TARGETS[0] - RESTART_PRICE) as u128;
+    const EXPECTED: [u128; 2] = [CAPITAL + NET_PROFIT, CAPITAL - NET_PROFIT];
+
+    for hint_order in [[0, 1], [1, 0]] {
+        for exit_order in [[0usize, 1], [1, 0]] {
+            let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+                max_portfolio_assets: 2,
+                max_price_move_bps_per_slot: 1_000,
+                max_accrual_dt_slots: 1,
+                ..V16CuMarketParams::default()
+            });
+            env.configure_permissionless_resolve_with_cu(STALE_SLOTS, EXIT_DELAY);
+            env.svm.warp_to_slot(OPEN_SLOT);
+            for asset in [0, 1] {
+                env.configure_auth_mark_for_asset_as_admin(asset, OPEN_SLOT, PRICE);
+            }
+            let owners = [Keypair::new(), Keypair::new()];
+            let portfolios = owners.each_ref().map(|owner| env.create_portfolio(owner));
+            let sources =
+                std::array::from_fn::<_, 2, _>(|i| env.deposit(&owners[i], portfolios[i], CAPITAL));
+            let destinations = owners
+                .each_ref()
+                .map(|owner| env.token_account(owner.pubkey(), 0));
+            for asset in [0, 1] {
+                env.trade_asset_with_cu(
+                    asset,
+                    &owners[0],
+                    portfolios[0],
+                    &owners[1],
+                    portfolios[1],
+                    POS_SCALE as i128,
+                    PRICE,
+                    0,
+                );
+            }
+            let retained_crank = ProgInstruction::PermissionlessCrank {
+                now_slot: OPEN_SLOT,
+                observations: crank_observations_for_assets(&hint_order),
+            };
+            let old_generation = env.asset_market_id(0);
+            let surviving_asset = env.market_state().1.assets[1];
+            let surviving_legs =
+                portfolios.map(|key| active_leg_for_asset(&env.portfolio_state(key), 1));
+            let initial_episodes = portfolios.map(|key| env.portfolio_position_epoch(key));
+
+            env.update_asset_lifecycle_as_admin_with_cu(
+                processor::ASSET_ACTION_SHUTDOWN,
+                0,
+                OPEN_SLOT,
+                0,
+            );
+            assert_eq!(
+                env.market_state().1.assets[0].lifecycle,
+                AssetLifecycleV16::Recovery
+            );
+            for i in exit_order {
+                env.svm.expire_blockhash();
+                env.forfeit_recovery_leg_with_cu(
+                    &owners[i],
+                    portfolios[i],
+                    0,
+                    percolator::MAX_VAULT_TVL,
+                );
+                let account = env.portfolio_state(portfolios[i]);
+                if has_active_leg_for_asset(&account, 0) {
+                    assert_eq!(active_leg_for_asset(&account, 0).basis_pos_q, 0);
+                }
+                assert_eq!(active_leg_for_asset(&account, 1), surviving_legs[i]);
+                assert_eq!(account.capital.get(), CAPITAL);
+                assert_eq!(account.pnl.get(), 0);
+                assert!(env.portfolio_position_epoch(portfolios[i]) > initial_episodes[i]);
+            }
+            for i in exit_order {
+                drain_recovery_pending_obligation(
+                    &mut env,
+                    portfolios[i],
+                    0,
+                    "INV-073 pre-restart Recovery cleanup",
+                );
+                let account = env.portfolio_state(portfolios[i]);
+                assert!(!has_active_leg_for_asset(&account, 0));
+                assert_eq!(active_leg_for_asset(&account, 1), surviving_legs[i]);
+                assert_eq!(account.capital.get(), CAPITAL);
+            }
+            env.svm.warp_to_slot(RESTART_SLOT);
+            let admin = env.admin.insecure_clone();
+            env.try_restart_asset_oracle_with_authority(&admin, 0, RESTART_SLOT, RESTART_PRICE)
+                .expect("empty Recovery asset restarts while the same owners retain a live leg");
+            let restarted = env.market_state().1;
+            assert_eq!(restarted.mode, MarketModeV16::Live);
+            assert_eq!(restarted.assets[0].lifecycle, AssetLifecycleV16::Active);
+            assert!(restarted.assets[0].market_id > old_generation);
+            assert_eq!(restarted.assets[1], surviving_asset);
+            env.configure_auth_mark_for_asset_as_admin(0, RESTART_SLOT, RESTART_PRICE);
+            env.trade_asset_with_cu(
+                0,
+                &owners[0],
+                portfolios[0],
+                &owners[1],
+                portfolios[1],
+                -(POS_SCALE as i128),
+                RESTART_PRICE,
+                0,
+            );
+            for i in 0..2 {
+                let account = env.portfolio_state(portfolios[i]);
+                let new_leg = active_leg_for_asset(&account, 0);
+                assert_eq!(new_leg.market_id, restarted.assets[0].market_id);
+                assert_eq!(active_leg_for_asset(&account, 1), surviving_legs[i]);
+                assert_eq!(new_leg.basis_pos_q, -surviving_legs[i].basis_pos_q);
+                assert_eq!(
+                    percolator::active_bitmap_count_ones(active_bitmap(&account)),
+                    2
+                );
+                assert_eq!(account.capital.get(), CAPITAL);
+                assert_eq!(account.pnl.get(), 0);
+                assert!(!resolved_portfolio_is_terminal(&env, portfolios[i]));
+            }
+
+            env.svm.warp_to_slot(MARK_SLOT);
+            for (asset, target) in TARGETS.into_iter().enumerate() {
+                env.push_auth_mark_for_asset_as_admin(asset as u16, MARK_SLOT, target);
+            }
+            let owner_keys = owners.each_ref().map(|owner| owner.pubkey());
+            let tracked = [
+                env.market,
+                env.vault,
+                env.mint,
+                portfolios[0],
+                portfolios[1],
+                sources[0],
+                sources[1],
+                destinations[0],
+                destinations[1],
+                owner_keys[0],
+                owner_keys[1],
+                admin.pubkey(),
+            ];
+            // After the valid lifecycle prefix, only the fee payer submits. In particular, the
+            // retained hint has neither an old-generation authority nor an owner signer to help it.
+            drop(owners);
+            drop(admin);
+            assert!(!owner_keys.contains(&env.payer.pubkey()));
+            env.svm.warp_to_slot(RESOLVE_SLOT);
+            let frame: Vec<_> = tracked
+                .iter()
+                .map(|key| (*key, env.svm.get_account(key)))
+                .collect();
+            let initial = env.market_state().1;
+            assert_eq!(initial.mode, MarketModeV16::Live);
+            assert_eq!(initial.config.max_abs_funding_e9_per_slot, 0);
+            assert_eq!(initial.assets[0].effective_price, RESTART_PRICE);
+            assert_eq!(initial.assets[1].effective_price, PRICE);
+
+            // At a fixed authenticated Clock and with zero funding, an unfinished price interval
+            // consumes at most its remaining slots. Completed endpoints contribute no work.
+            let accrual_rank = |group: &MarketGroupV16| -> u64 {
+                TARGETS
+                    .iter()
+                    .enumerate()
+                    .filter(|(asset, target)| group.assets[*asset].effective_price != **target)
+                    .map(|(asset, _)| {
+                        RESOLVE_SLOT
+                            .checked_sub(group.assets[asset].slot_last)
+                            .unwrap()
+                    })
+                    .sum()
+            };
+            let bound = accrual_rank(&initial);
+            assert!(bound > 0);
+            let mut cranks = 0;
+            let mut max_crank_cu = 0;
+            while accrual_rank(&env.market_state().1) != 0 {
+                assert!(
+                    cranks < bound,
+                    "restarted-generation accrual exceeded its initial rank"
+                );
+                let before = accrual_rank(&env.market_state().1);
+                env.svm.expire_blockhash();
+                let cu = env
+                    .send(
+                        retained_crank.clone(),
+                        vec![
+                            AccountMeta::new_readonly(env.payer.pubkey(), false),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(portfolios[0], false),
+                        ],
+                        &[],
+                    )
+                    .expect(
+                        "pre-restart discovery hints must still advance the funded new episode",
+                    );
+                assert_cu_within(
+                    "INV-073 restarted-asset terminal accrual",
+                    cu,
+                    CRANK_CU_LIMIT,
+                );
+                max_crank_cu = max_crank_cu.max(cu);
+                let after = env.market_state().1;
+                assert!(
+                    accrual_rank(&after) < before,
+                    "accepted accrual must strictly reduce work"
+                );
+                assert_eq!(after.mode, MarketModeV16::Live);
+                assert_eq!(env.svm.get_sysvar::<Clock>().slot, RESOLVE_SLOT);
+                cranks += 1;
+            }
+            assert!(
+                cranks > 1,
+                "must exercise a multi-transaction terminal backlog"
+            );
+            env.svm.expire_blockhash();
+            let resolve_cu = env
+                .send(
+                    ProgInstruction::ResolveStalePermissionless {
+                        now_slot: OPEN_SLOT,
+                    },
+                    vec![AccountMeta::new(env.market, false)],
+                    &[],
+                )
+                .expect("completed old/new-generation accrual enables public resolution");
+            assert_cu_within(
+                "INV-073 restarted-asset stale resolve",
+                resolve_cu,
+                CUSTODY_CU_LIMIT,
+            );
+            let resolved = env.market_state().1;
+            assert_eq!(resolved.mode, MarketModeV16::Resolved);
+            assert_eq!(resolved.resolved_slot, RESOLVE_SLOT);
+            for (asset, target) in TARGETS.into_iter().enumerate() {
+                assert_eq!(resolved.assets[asset].effective_price, target);
+                assert_eq!(resolved.assets[asset].oi_eff_long_q, POS_SCALE);
+                assert_eq!(resolved.assets[asset].oi_eff_short_q, POS_SCALE);
+            }
+            for (key, account) in &frame {
+                if *key != env.market {
+                    assert_eq!(
+                        env.svm.get_account(key),
+                        *account,
+                        "accrual/resolve frame {key}"
+                    );
+                }
+            }
+
+            env.svm.warp_to_slot(RESOLVE_SLOT + EXIT_DELAY);
+            let mut closes = 0;
+            let mut max_exit_cu = 0;
+            let exit_rank = |env: &V16CuEnv| -> u32 {
+                (0..2)
+                    .map(|i| {
+                        percolator::active_bitmap_count_ones(active_bitmap(
+                            &env.portfolio_state(portfolios[i]),
+                        )) + u32::from(u128::from(env.token_amount(destinations[i])) < EXPECTED[i])
+                    })
+                    .sum()
+            };
+            assert_eq!(exit_rank(&env), 6);
+            // Each owner detaches two canonical slots and receives one payout. No signer or
+            // oracle refresh can break a fixed point; six rank-lowering calls must suffice.
+            for _ in 0..3 {
+                for i in exit_order {
+                    if resolved_portfolio_is_terminal(&env, portfolios[i]) {
+                        continue;
+                    }
+                    let before: Vec<_> = tracked
+                        .iter()
+                        .map(|key| (*key, env.svm.get_account(key)))
+                        .collect();
+                    let before_rank = exit_rank(&env);
+                    env.svm.expire_blockhash();
+                    let cu = env
+                        .send(
+                            ProgInstruction::CloseResolved {
+                                fee_rate_per_slot: 0,
+                            },
+                            vec![
+                                AccountMeta::new_readonly(owner_keys[i], false),
+                                AccountMeta::new(env.market, false),
+                                AccountMeta::new(portfolios[i], false),
+                                AccountMeta::new(destinations[i], false),
+                                AccountMeta::new(env.vault, false),
+                                AccountMeta::new_readonly(env.vault_authority, false),
+                                AccountMeta::new_readonly(spl_token::ID, false),
+                            ],
+                            &[],
+                        )
+                        .expect("each scheduled unsigned close must detach risk or pay the owner");
+                    assert_cu_within(
+                        "INV-073 restarted-asset resolved exit",
+                        cu,
+                        CUSTODY_CU_LIMIT,
+                    );
+                    max_exit_cu = max_exit_cu.max(cu);
+                    closes += 1;
+                    assert!(
+                        exit_rank(&env) < before_rank,
+                        "successful terminal continuation must lower the leg/payout rank"
+                    );
+                    let paid = destinations.map(|key| u128::from(env.token_amount(key)));
+                    for j in 0..2 {
+                        assert!(paid[j] <= EXPECTED[j], "owner-local entitlement ceiling");
+                    }
+                    let group = env.market_state().1;
+                    assert_eq!(group.mode, MarketModeV16::Resolved);
+                    assert_eq!(group.vault + paid.iter().sum::<u128>(), 2 * CAPITAL);
+                    assert_eq!(group.vault, u128::from(env.token_amount(env.vault)));
+                    assert_eq!(group.insurance, 0);
+                    for (key, account) in before {
+                        if ![env.market, portfolios[i], env.vault, destinations[i]].contains(&key) {
+                            assert_eq!(env.svm.get_account(&key), account, "exit frame {key}");
+                        }
+                    }
+                }
+            }
+            for i in 0..2 {
+                assert!(
+                    resolved_portfolio_is_terminal(&env, portfolios[i]),
+                    "six-call exit bound"
+                );
+                assert_eq!(u128::from(env.token_amount(destinations[i])), EXPECTED[i]);
+            }
+            assert_eq!(exit_rank(&env), 0);
+            let terminal = env.market_state().1;
+            assert_eq!(
+                (terminal.vault, terminal.c_tot, terminal.pnl_pos_tot),
+                (0, 0, 0)
+            );
+            for asset in &terminal.assets[..2] {
+                assert_eq!((asset.oi_eff_long_q, asset.oi_eff_short_q), (0, 0));
+                assert_eq!(
+                    (asset.stored_pos_count_long, asset.stored_pos_count_short),
+                    (0, 0)
+                );
+            }
+            eprintln!("INV-073 restarted/live exit: hints={hint_order:?} order={exit_order:?} cranks={cranks}/{bound} closes={closes}/6 payouts={EXPECTED:?} crank_cu={max_crank_cu} resolve_cu={resolve_cu} exit_cu={max_exit_cu}");
+        }
+    }
+}
+
+#[test]
+fn v16_program_drain_only_stale_exit_does_not_require_reserve_or_counterparty_signers() {
+    const CAPITAL: u128 = 1_000;
+    const PRICE: u64 = 100;
+    const MARK: u64 = 110;
+    const PROFIT: u128 = (MARK - PRICE) as u128;
+    const BACKING: u128 = 37;
+    const INSURANCE: u128 = 53;
+    const STALE_SLOTS: u64 = 5;
+    const RESOLVE_SLOT: u64 = 1 + STALE_SLOTS;
+    const EXIT_DELAY: u64 = 5;
+
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(STALE_SLOTS, EXIT_DELAY);
+    env.configure_auth_mark_with_cu(0, PRICE);
+    let admin = env.admin.insecure_clone();
+    let provider = Keypair::new();
+    let insurance_owner = Keypair::new();
+    for (kind, authority) in [
+        (processor::ASSET_AUTH_BACKING_BUCKET, &provider),
+        (processor::ASSET_AUTH_INSURANCE, &insurance_owner),
+        (processor::ASSET_AUTH_INSURANCE_OPERATOR, &insurance_owner),
+    ] {
+        env.try_update_per_asset_authority_with_cu(
+            &admin,
+            Some(authority),
+            0,
+            kind,
+            authority.pubkey().to_bytes(),
+        )
+        .expect("install independent reserve owners before funding");
+    }
+    let backing_source = env.top_up_backing_bucket_with_authority(&provider, 0, BACKING, 100);
+    let insurance_source =
+        env.top_up_insurance_domain_with_authority(&insurance_owner, 0, INSURANCE);
+
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loser = env.create_portfolio(&loser_owner);
+    env.deposit(&winner_owner, winner, CAPITAL);
+    env.deposit(&loser_owner, loser, CAPITAL);
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, MARK);
+    for portfolio in [loser, winner] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_DRAIN_ONLY, 0, 0, 0);
+    let staged = env.market_state().1;
+    assert_eq!(staged.mode, MarketModeV16::Live);
+    assert_eq!(staged.assets[0].lifecycle, AssetLifecycleV16::DrainOnly);
+    assert_eq!(staged.assets[0].effective_price, MARK);
+    assert_eq!(staged.assets[0].stored_pos_count_long, 1);
+    assert_eq!(staged.assets[0].stored_pos_count_short, 1);
+    assert_eq!(staged.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(staged.assets[0].oi_eff_short_q, POS_SCALE);
+    assert_eq!(env.portfolio_state(winner).capital.get(), CAPITAL);
+    assert_eq!(env.portfolio_state(winner).pnl.get(), PROFIT as i128);
+    assert_eq!(env.portfolio_state(loser).capital.get(), CAPITAL - PROFIT);
+    assert_eq!(env.portfolio_state(loser).pnl.get(), 0);
+    assert_eq!(
+        staged.source_backing_buckets[0].fresh_unliened_backing_num,
+        BACKING * BOUND_SCALE
+    );
+    assert_eq!(staged.insurance_domain_budget[0], INSURANCE);
+    assert_eq!(staged.vault, 2 * CAPITAL + BACKING + INSURANCE);
+
+    let owners = [winner_owner.pubkey(), loser_owner.pubkey()];
+    let portfolios = [winner, loser];
+    let destinations = [
+        env.token_account(owners[0], 0),
+        env.token_account(owners[1], 0),
+    ];
+    let absent_signers = [
+        admin.pubkey(),
+        provider.pubkey(),
+        insurance_owner.pubkey(),
+        owners[1],
+    ];
+    let tracked = [
+        env.market,
+        env.vault,
+        env.mint,
+        winner,
+        loser,
+        destinations[0],
+        destinations[1],
+        backing_source,
+        insurance_source,
+        owners[0],
+        owners[1],
+        admin.pubkey(),
+        provider.pubkey(),
+        insurance_owner.pubkey(),
+    ];
+    // All subsequent economic calls use only the owner or fee payer. No reserve owner,
+    // market authority, oracle authority, or counterparty can assist this suffix.
+    drop(admin);
+    drop(provider);
+    drop(insurance_owner);
+    drop(loser_owner);
+    assert!(!absent_signers.contains(&env.payer.pubkey()));
+    assert!(!absent_signers.contains(&winner_owner.pubkey()));
+
+    env.svm.warp_to_slot(RESOLVE_SLOT);
+    let before: Vec<_> = tracked
+        .iter()
+        .map(|key| (*key, env.svm.get_account(key)))
+        .collect();
+    env.svm.expire_blockhash();
+    let resolve_cu = env
+        .send(
+            ProgInstruction::ResolveStalePermissionless {
+                now_slot: RESOLVE_SLOT,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .expect("DrainOnly exposure must retain an oracle-free public terminal route");
+    assert_cu_within(
+        "DrainOnly permissionless stale resolve",
+        resolve_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    for (key, account) in before {
+        if key != env.market {
+            assert_eq!(env.svm.get_account(&key), account, "resolution frame {key}");
+        }
+    }
+    let resolved = env.market_state().1;
+    assert_eq!(resolved.mode, MarketModeV16::Resolved);
+    assert_eq!(resolved.resolved_slot, RESOLVE_SLOT);
+    assert_eq!(resolved.vault, staged.vault);
+    assert_eq!(
+        resolved.source_backing_buckets[0],
+        staged.source_backing_buckets[0]
+    );
+    assert_eq!(
+        resolved.insurance_domain_budget,
+        staged.insurance_domain_budget
+    );
+
+    // One owner-signed call detaches the winner but cannot pay ahead of the remaining
+    // counterparty. At the exact timeout, two unsigned calls finish both economic exits.
+    let steps = [
+        (RESOLVE_SLOT, 0, true, None, 0, [0, 1]),
+        (
+            RESOLVE_SLOT,
+            0,
+            true,
+            Some(PercolatorError::EngineNonProgress),
+            0,
+            [0, 1],
+        ),
+        (
+            RESOLVE_SLOT + EXIT_DELAY - 1,
+            1,
+            false,
+            Some(PercolatorError::ExpectedSigner),
+            0,
+            [0, 1],
+        ),
+        (
+            RESOLVE_SLOT + EXIT_DELAY,
+            1,
+            false,
+            None,
+            CAPITAL - PROFIT,
+            [0, 0],
+        ),
+        (
+            RESOLVE_SLOT + EXIT_DELAY,
+            0,
+            false,
+            None,
+            CAPITAL + PROFIT,
+            [0, 0],
+        ),
+    ];
+    let mut paid = [0u128; 2];
+    let mut max_cu = resolve_cu;
+    for (step, (slot, target, owner_signed, expected_error, payout, remaining_legs)) in
+        steps.into_iter().enumerate()
+    {
+        env.svm.warp_to_slot(slot);
+        let before: Vec<_> = tracked
+            .iter()
+            .map(|key| (*key, env.svm.get_account(key)))
+            .collect();
+        let accounts = vec![
+            AccountMeta::new_readonly(owners[target], owner_signed),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolios[target], false),
+            AccountMeta::new(destinations[target], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        assert!(accounts
+            .iter()
+            .all(|meta| !meta.is_signer || !absent_signers.contains(&meta.pubkey)));
+        let signers: Vec<&Keypair> = if owner_signed {
+            vec![&winner_owner]
+        } else {
+            vec![]
+        };
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            accounts,
+            &signers,
+        );
+        let succeeded = expected_error.is_none();
+        if let Some(expected_error) = expected_error {
+            let error =
+                result.expect_err("waiting or premature unsigned close must reject atomically");
+            assert!(
+                error.contains(&format!(
+                    "InstructionError(2, Custom({}))",
+                    expected_error as u32
+                )),
+                "step {step}: {error}"
+            );
+        } else {
+            let cu =
+                result.expect("the next bounded terminal step must not require an absent signer");
+            assert_cu_within("DrainOnly resolved exit", cu, CUSTODY_CU_LIMIT);
+            max_cu = max_cu.max(cu);
+        }
+        for (key, account) in before {
+            let may_change = succeeded
+                && (key == env.market
+                    || key == portfolios[target]
+                    || (payout != 0 && (key == env.vault || key == destinations[target])));
+            if may_change {
+                let after = env.svm.get_account(&key).unwrap();
+                let mut expected = account.unwrap();
+                expected.data = after.data.clone();
+                assert_eq!(
+                    after, expected,
+                    "step {step} must preserve metadata and rent {key}"
+                );
+            } else {
+                assert_eq!(
+                    env.svm.get_account(&key),
+                    account,
+                    "step {step} frame {key}"
+                );
+            }
+        }
+        paid[target] += payout;
+        let group = env.market_state().1;
+        assert_eq!(group.mode, MarketModeV16::Resolved);
+        assert_eq!(
+            group.source_backing_buckets[0],
+            staged.source_backing_buckets[0]
+        );
+        assert_eq!(group.insurance, INSURANCE);
+        assert_eq!(
+            group.insurance_domain_budget,
+            staged.insurance_domain_budget
+        );
+        assert_eq!(group.insurance_domain_budget_remaining_total, INSURANCE);
+        assert_eq!(
+            group.vault,
+            2 * CAPITAL + BACKING + INSURANCE - paid.iter().sum::<u128>()
+        );
+        assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+        assert_eq!(
+            group.assets[0].stored_pos_count_long,
+            remaining_legs[0] as u64
+        );
+        assert_eq!(
+            group.assets[0].stored_pos_count_short,
+            remaining_legs[1] as u64
+        );
+        assert_eq!(
+            group.assets[0].oi_eff_long_q,
+            remaining_legs[0] as u128 * POS_SCALE
+        );
+        assert_eq!(
+            group.assets[0].oi_eff_short_q,
+            remaining_legs[1] as u128 * POS_SCALE
+        );
+        let remaining_capital = [
+            if paid[0] == 0 { CAPITAL } else { 0 },
+            if paid[1] == 0 { CAPITAL - PROFIT } else { 0 },
+        ];
+        let remaining_profit = if paid[0] == 0 { PROFIT } else { 0 };
+        assert_eq!(group.c_tot, remaining_capital.iter().sum::<u128>());
+        assert_eq!(group.pnl_pos_tot, remaining_profit);
+        for target in 0..2 {
+            let account = env.portfolio_state(portfolios[target]);
+            assert_eq!(account.capital.get(), remaining_capital[target]);
+            assert_eq!(
+                account.pnl.get(),
+                if target == 0 {
+                    remaining_profit as i128
+                } else {
+                    0
+                }
+            );
+            assert_eq!(
+                percolator::active_bitmap_count_ones(active_bitmap(&account)),
+                remaining_legs[target]
+            );
+            assert_eq!(
+                u128::from(env.token_amount(destinations[target])),
+                paid[target]
+            );
+        }
+        if step == 0 {
+            assert!(!resolved_receipt(&env.portfolio_state(winner)).present);
+        }
+    }
+    assert_eq!(paid, [CAPITAL + PROFIT, CAPITAL - PROFIT]);
+    assert!(resolved_portfolio_is_terminal(&env, winner));
+    assert!(resolved_portfolio_is_terminal(&env, loser));
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.c_tot, 0);
+    assert_eq!(terminal.pnl_pos_tot, 0);
+    assert_eq!(terminal.assets[0].oi_eff_long_q, 0);
+    assert_eq!(terminal.assets[0].oi_eff_short_q, 0);
+    assert_eq!(
+        terminal.materialized_portfolio_count, 2,
+        "user payout is not administrative deletion"
+    );
+    assert_eq!(terminal.vault, BACKING + INSURANCE);
+    eprintln!("INV-073 DrainOnly stale exit: progress_calls=3 exact_rejections=2 payouts={paid:?} retained_reserves={} max_cu={max_cu}", BACKING + INSURANCE);
+}
 
 #[test]
 fn v16_stateful_liveness_oracle_has_no_known_failure_quarantine() {
@@ -5051,7 +6647,7 @@ fn inv073_source_defines_test(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_terminal_disposition_and_administrative_retirement_are_source_complete() {
-    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const ENGINE_PIN: &str = "394fd0bf2cb7d73df425eb3754dc3be1a0c44336";
     const PHASES: &[Inv073TerminalPhase] = &[
         Inv073TerminalPhase {
             rank_lane: "economic-work",

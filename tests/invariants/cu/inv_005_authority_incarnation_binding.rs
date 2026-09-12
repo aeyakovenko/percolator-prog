@@ -10,6 +10,20 @@
 //! `v16_program_authority_handoffs_share_one_incoming_key_validator` source-locks both authority
 //! handoff handlers to one validator: the market authority cannot be burned, while the asset-admin
 //! role retains its explicitly authorized burn path.
+//! `v16_program_oracle_authority_aba_is_asset_scoped_and_rolls_back_retained_prefix` retains
+//! same-key oracle requests for two assets across one asset's A-to-B-to-A rotation. It checks
+//! stale-epoch rollback, including an executed sibling prefix, and both scopes' live controls.
+//! `v16_program_funded_insurance_handoff_preserves_incumbent_oracle_and_operator` splits a
+//! funded insurer's roles: succession invalidates the unchanged oracle key's old epoch, while
+//! fresh observation consent and the independent operator's payout preserve user principal.
+//! `v16_program_shutdown_insurance_withdrawal_retains_market_authority_epoch_across_aba`
+//! covers the non-base shutdown-drain fallback, not the matrix's local-operator withdrawal.
+//! A prevalidated signed request cannot revive after market-authority A-to-B-to-A even though
+//! the withdrawal asset's epoch is unchanged; an epoch-only replacement moves exact SPL value.
+//! `v16_program_backing_withdrawal_aba_rolls_back_spl_and_ledger_prefix` retains live,
+//! ledger-backed principal withdrawals across an incumbent backing-operator A-to-B-to-A handoff.
+//! The stale suffix rejects before token CPI and rolls back the other asset's successful SPL and
+//! ledger prefix; unrotated consent and an epoch-only replacement pay exact principal afterward.
 //! `v16_program_adversarial_role_containment_matrix_is_source_complete` separately treats every
 //! correctly authorized role as economically hostile. It source-locks all configured, matcher,
 //! delegate, and permissionless callsites to explicit maximum/forbidden effects and independent
@@ -21,6 +35,18 @@
 //! intentionally permitted inside that envelope.
 
 use super::*;
+
+#[path = "inv_005_backing_role_refunding.rs"]
+mod backing_role_refunding;
+
+#[path = "inv_005_retained_insurance_management.rs"]
+mod retained_insurance_management;
+
+#[path = "inv_005_funded_backing_succession.rs"]
+mod funded_backing_succession;
+
+#[path = "inv_005_funded_oracle_succession.rs"]
+mod funded_oracle_succession;
 
 fn inv005_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
@@ -4222,6 +4248,1117 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     assert!(
         r_new.is_ok(),
         "the NEW oracle authority can push after rotation: {r_new:?}"
+    );
+}
+
+#[test]
+fn v16_program_funded_insurance_handoff_preserves_incumbent_oracle_and_operator() {
+    use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const INSURANCE: u128 = 37;
+    const CAPITAL: u128 = 23;
+    let mut env = inv018_public_spl_market_with_params(6, V16CuMarketParams::default());
+    let admin = env.admin.insecure_clone();
+    let incumbent = Keypair::new();
+    let incoming = Keypair::new();
+    let operator = Keypair::new();
+    let user = Keypair::new();
+    let actors = [&incumbent, &incoming, &operator, &admin, &user];
+    for actor in actors {
+        env.ensure_signer_account(actor.pubkey());
+    }
+    for (role, holder) in [
+        (processor::ASSET_AUTH_INSURANCE, &incumbent),
+        (processor::ASSET_AUTH_ORACLE, &incumbent),
+        (processor::ASSET_AUTH_INSURANCE_OPERATOR, &operator),
+    ] {
+        env.try_update_per_asset_authority_with_cu(
+            &admin,
+            Some(holder),
+            0,
+            role,
+            holder.pubkey().to_bytes(),
+        )
+        .expect("configure the independently held roles before funding");
+    }
+    env.configure_auth_mark_for_asset_with_authority(0, &incumbent, 0, 100);
+
+    let wallets =
+        actors.map(|actor| create_ata_for_test(&mut env.svm, &env.payer, actor.pubkey(), env.mint));
+    for (wallet, amount) in [(wallets[0], INSURANCE), (wallets[4], CAPITAL)] {
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &wallet,
+                &admin.pubkey(),
+                &[],
+                amount as u64,
+            )
+            .unwrap(),
+            &[&admin],
+        )
+        .unwrap();
+    }
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::set_authority(
+            &spl_token::ID,
+            &env.mint,
+            None,
+            spl_token::instruction::AuthorityType::MintTokens,
+            &admin.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .unwrap();
+    let sequences = env.control_sequences(0);
+    env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            market_id: env.asset_market_id(0),
+            authority_epoch: sequences.authority_epoch,
+            intent_id: next_control_sequence(sequences.insurance_top_up),
+            amount: INSURANCE,
+        },
+        vec![
+            AccountMeta::new(incumbent.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(wallets[0], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&incumbent],
+    )
+    .unwrap();
+    let portfolio_key = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &portfolio_key,
+        env.portfolio_account_len,
+        env.program_id,
+    );
+    let portfolio = portfolio_key.pubkey();
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&user],
+    )
+    .unwrap();
+    env.portfolios.push(portfolio);
+    env.send(
+        env.deposit_ix(portfolio, CAPITAL),
+        vec![
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(wallets[4], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&user],
+    )
+    .unwrap();
+
+    let mut protected = vec![
+        env.market,
+        env.mint,
+        env.vault,
+        env.vault_authority,
+        portfolio,
+    ];
+    protected.extend(wallets);
+    protected.extend(actors.map(Signer::pubkey));
+    let profile = |env: &V16CuEnv| {
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap()
+    };
+    let assert_stock = |env: &V16CuEnv, paid: u128| {
+        let (cfg, group) = env.market_state();
+        assert_eq!(cfg.marketauth, admin.pubkey().to_bytes());
+        assert_eq!(group.mode, MarketModeV16::Live);
+        assert_eq!(group.assets[0].lifecycle, AssetLifecycleV16::Active);
+        assert_eq!(group.c_tot, CAPITAL);
+        let user_state = env.portfolio_state(portfolio);
+        assert_eq!(user_state.owner, user.pubkey().to_bytes());
+        assert_eq!(user_state.capital.get(), CAPITAL);
+        assert_eq!(user_state.pnl.get(), 0);
+        assert_eq!(group.insurance, INSURANCE - paid);
+        assert_eq!(group.insurance_domain_budget[0], INSURANCE - paid);
+        assert!(group.insurance_domain_budget[1..]
+            .iter()
+            .all(|amount| *amount == 0));
+        assert_eq!(group.vault, CAPITAL + INSURANCE - paid);
+        assert_eq!(env.token_amount(env.vault) as u128, group.vault);
+        assert_eq!(
+            wallets.map(|key| env.token_amount(key) as u128),
+            [0, 0, paid, 0, 0]
+        );
+        let mint = Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data).unwrap();
+        assert_eq!(mint.mint_authority, COption::None);
+        assert_eq!(mint.supply as u128, CAPITAL + INSURANCE);
+        assert_eq!(mint.supply as u128, group.vault + paid);
+    };
+    let land = |env: &mut V16CuEnv,
+                instructions: &[Instruction],
+                signers: &[&Keypair],
+                changed: &[Pubkey],
+                error: Option<(u8, PercolatorError)>| {
+        env.svm.expire_blockhash();
+        let mut ixs = vec![heap_ix(), cu_ix()];
+        ixs.extend_from_slice(instructions);
+        let mut signatures = vec![&env.payer];
+        signatures.extend_from_slice(signers);
+        let tx = Transaction::new_signed_with_payer(
+            &ixs,
+            Some(&env.payer.pubkey()),
+            &signatures,
+            env.svm.latest_blockhash(),
+        );
+        let before = protected
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>();
+        let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        payer.lamports -= FeeStructure::default().lamports_per_signature
+            * u64::from(tx.message.header.num_required_signatures);
+        let rejected = error.is_some();
+        let result = env.svm.send_transaction(tx);
+        let meta = if let Some((index, error)) = error {
+            let failure = result.expect_err("role and epoch boundaries must reject");
+            assert_eq!(
+                failure.err,
+                TransactionError::InstructionError(index, InstructionError::Custom(error as u32))
+            );
+            failure.meta
+        } else {
+            result.expect("consented management and incumbent continuations remain live")
+        };
+        assert_eq!(env.svm.get_account(&env.payer.pubkey()).unwrap(), payer);
+        for (key, account) in protected.iter().zip(before) {
+            if rejected || !changed.contains(key) {
+                assert_eq!(env.svm.get_account(key), account, "account frame: {key}");
+            }
+        }
+        assert_cu_within(
+            "funded insurance role split",
+            meta.compute_units_consumed,
+            CUSTODY_CU_LIMIT,
+        );
+        meta
+    };
+    let sequences = env.control_sequences(0);
+    let market_id = env.asset_market_id(0);
+    let handoff = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(incumbent.pubkey(), true),
+            AccountMeta::new_readonly(incoming.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::UpdateAssetAuthority {
+            asset_index: 0,
+            market_id,
+            authority_epoch: sequences.authority_epoch,
+            kind: processor::ASSET_AUTH_INSURANCE,
+            new_pubkey: incoming.pubkey().to_bytes(),
+        }
+        .encode(),
+    };
+    let push =
+        |env: &V16CuEnv, signer: Pubkey, authority_epoch, observation_sequence| Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(signer, true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: ProgInstruction::PushAuthMark {
+                asset_index: 0,
+                market_id,
+                authority_epoch,
+                observation_sequence,
+                now_slot: u64::MAX,
+                mark_e6: 110,
+            }
+            .encode(),
+        };
+    env.svm.warp_to_slot(2);
+    assert_stock(&env, 0);
+    let initial_profile = profile(&env);
+    let before_handoff = env.market_state();
+    let observation = next_control_sequence(sequences.oracle_observation);
+    let stale = push(
+        &env,
+        incumbent.pubkey(),
+        sequences.authority_epoch,
+        observation,
+    );
+    // The oracle key stays incumbent, but the insurance transfer advances their shared epoch.
+    let meta = land(
+        &mut env,
+        &[handoff.clone(), stale],
+        &[&incumbent, &incoming],
+        &[],
+        Some((3, PercolatorError::EngineStale)),
+    );
+    assert_eq!(
+        meta.logs
+            .iter()
+            .filter(|line| **line == format!("Program {} success", env.program_id))
+            .count(),
+        1
+    );
+    assert!(!meta
+        .logs
+        .iter()
+        .any(|line| line.contains(&format!("Program {} invoke", spl_token::ID))));
+    assert_eq!(env.control_sequences(0), sequences);
+    assert_eq!(profile(&env), initial_profile);
+    assert_eq!(env.market_state(), before_handoff);
+    assert_stock(&env, 0);
+    let mut peak_cu = meta.compute_units_consumed;
+
+    let epoch = sequences.authority_epoch + 1;
+    let fresh = push(&env, incumbent.pubkey(), epoch, observation);
+    let market = env.market;
+    let meta = land(
+        &mut env,
+        &[handoff, fresh],
+        &[&incumbent, &incoming],
+        &[market],
+        None,
+    );
+    peak_cu = peak_cu.max(meta.compute_units_consumed);
+    assert_eq!(
+        meta.logs
+            .iter()
+            .filter(|line| **line == format!("Program {} success", env.program_id))
+            .count(),
+        2
+    );
+    assert!(!meta
+        .logs
+        .iter()
+        .any(|line| line.contains(&format!("Program {} invoke", spl_token::ID))));
+    let current = profile(&env);
+    assert_eq!(current.insurance_authority, incoming.pubkey().to_bytes());
+    assert_eq!(current.insurance_operator, operator.pubkey().to_bytes());
+    assert_eq!(current.oracle_authority, incumbent.pubkey().to_bytes());
+    assert_eq!(current.asset_admin, initial_profile.asset_admin);
+    assert_eq!(
+        current.backing_bucket_authority,
+        initial_profile.backing_bucket_authority
+    );
+    assert_eq!(
+        (current.mark_ewma_e6, current.oracle_target_price_e6),
+        (110, 110)
+    );
+    assert_eq!(
+        (current.mark_ewma_last_slot, current.last_good_oracle_slot),
+        (2, 2)
+    );
+    let mut expected_sequences = sequences;
+    expected_sequences.authority_epoch = epoch;
+    expected_sequences.oracle_observation = observation;
+    assert_eq!(env.control_sequences(0), expected_sequences);
+    let mut expected_group = before_handoff.1;
+    expected_group.assets[0].raw_oracle_target_price = 110;
+    expected_group.oracle_epoch += 1;
+    assert_eq!(
+        env.market_state().1,
+        expected_group,
+        "only the authenticated raw target and its oracle epoch change"
+    );
+    assert_stock(&env, 0);
+
+    let withdrawal = |env: &V16CuEnv, signer: Pubkey, destination| Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(signer, true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            market_id,
+            authority_epoch: epoch,
+            amount: INSURANCE,
+        }
+        .encode(),
+    };
+    for ix in [
+        push(
+            &env,
+            incoming.pubkey(),
+            epoch,
+            next_control_sequence(observation),
+        ),
+        withdrawal(&env, incoming.pubkey(), wallets[1]),
+    ] {
+        let meta = land(
+            &mut env,
+            &[ix],
+            &[&incoming],
+            &[],
+            Some((2, PercolatorError::Unauthorized)),
+        );
+        peak_cu = peak_cu.max(meta.compute_units_consumed);
+        assert_stock(&env, 0);
+    }
+    let ix = withdrawal(&env, operator.pubkey(), wallets[2]);
+    let changed = [market, env.vault, wallets[2]];
+    let meta = land(&mut env, &[ix], &[&operator], &changed, None);
+    peak_cu = peak_cu.max(meta.compute_units_consumed);
+    assert_eq!(profile(&env), current);
+    assert_eq!(env.control_sequences(0), expected_sequences);
+    assert_stock(&env, INSURANCE);
+    eprintln!("INV-005 funded insurance role split: one history, three exact rejections, one atomic handoff/observation, one operator payout, peak {peak_cu} CU");
+}
+
+#[test]
+fn v16_program_oracle_authority_aba_is_asset_scoped_and_rolls_back_retained_prefix() {
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    let mut env = V16CuEnv::new();
+    env.activate_asset(1, 1, 100);
+    for asset_index in 0..2 {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 1, 100);
+    }
+    env.svm.warp_to_slot(2);
+    let authority_a = env.admin.insecure_clone();
+    let authority_b = Keypair::new();
+    env.ensure_signer_account(authority_b.pubkey());
+    let market_ids = [env.asset_market_id(0), env.asset_market_id(1)];
+    let sequences = [env.control_sequences(0), env.control_sequences(1)];
+    let marks = [110, 120];
+    let profile = |env: &V16CuEnv, asset_index| {
+        state::read_asset_oracle_profile(
+            &env.svm.get_account(&env.market).unwrap().data,
+            asset_index,
+        )
+        .unwrap()
+    };
+    let push = |env: &V16CuEnv, asset_index: u16, authority_epoch| Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(authority_a.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::PushAuthMark {
+            market_id: market_ids[asset_index as usize],
+            asset_index,
+            now_slot: 2,
+            mark_e6: marks[asset_index as usize],
+            observation_sequence: next_control_sequence(
+                sequences[asset_index as usize].oracle_observation,
+            ),
+            authority_epoch,
+        }
+        .encode(),
+    };
+    let sign = |env: &V16CuEnv, instructions: &[Instruction]| {
+        Transaction::new_signed_with_payer(
+            instructions,
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &authority_a],
+            env.svm.latest_blockhash(),
+        )
+    };
+    let unrotated = push(&env, 0, sequences[0].authority_epoch);
+    let rotated = push(&env, 1, sequences[1].authority_epoch);
+    // Distinct signed envelopes retain identical control bytes before either handoff.
+    let retained_unrotated = sign(&env, &[heap_ix(), cu_ix(), unrotated.clone()]);
+    let retained_rotated = sign(&env, &[heap_ix(), cu_ix(), rotated.clone()]);
+    let retained_pair = sign(&env, &[heap_ix(), cu_ix(), unrotated, rotated]);
+    for tx in [&retained_unrotated, &retained_rotated, &retained_pair] {
+        tx.verify()
+            .expect("retained requests are signed before rotation");
+    }
+
+    for (step, from, to) in [
+        (1, &authority_a, &authority_b),
+        (2, &authority_b, &authority_a),
+    ] {
+        env.try_update_per_asset_authority_with_cu(
+            from,
+            Some(to),
+            1,
+            processor::ASSET_AUTH_ORACLE,
+            to.pubkey().to_bytes(),
+        )
+        .expect("co-signed asset-1 oracle handoff");
+        assert_eq!(profile(&env, 1).oracle_authority, to.pubkey().to_bytes());
+        for asset_index in 0..2 {
+            let current = env.control_sequences(asset_index);
+            assert_eq!(
+                current.authority_epoch,
+                sequences[asset_index].authority_epoch + if asset_index == 1 { step } else { 0 },
+                "only the rotated asset's authority epoch advances"
+            );
+            assert_eq!(
+                current.oracle_observation,
+                sequences[asset_index].oracle_observation
+            );
+            assert_eq!(
+                env.asset_market_id(asset_index as u16),
+                market_ids[asset_index]
+            );
+            assert_eq!(profile(&env, asset_index).mark_ewma_e6, 100);
+        }
+        assert_eq!(
+            profile(&env, 0).oracle_authority,
+            authority_a.pubkey().to_bytes()
+        );
+    }
+
+    let frame_keys = retained_pair
+        .message
+        .account_keys
+        .iter()
+        .copied()
+        .filter(|key| *key != env.payer.pubkey())
+        .chain([env.mint, env.vault, authority_b.pubkey()])
+        .collect::<Vec<_>>();
+    let frame = |env: &V16CuEnv| {
+        frame_keys
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>()
+    };
+    for (tx, failed_instruction) in [(retained_rotated, 2), (retained_pair, 3)] {
+        let before = frame(&env);
+        let mut payer_before = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        let fee = FeeStructure::default().lamports_per_signature
+            * u64::from(tx.message.header.num_required_signatures);
+        let rejected = env
+            .svm
+            .send_transaction(tx)
+            .expect_err("old epoch cannot revive at A");
+        assert_eq!(
+            rejected.err,
+            TransactionError::InstructionError(
+                failed_instruction,
+                InstructionError::Custom(PercolatorError::EngineStale as u32),
+            )
+        );
+        if failed_instruction == 3 {
+            assert!(
+                rejected
+                    .meta
+                    .logs
+                    .contains(&format!("Program {} success", env.program_id)),
+                "the untouched asset's retained prefix executes before the stale suffix rejects"
+            );
+        }
+        assert_eq!(
+            frame(&env),
+            before,
+            "rejection restores all non-payer accounts exactly"
+        );
+        payer_before.lamports -= fee;
+        assert_eq!(
+            env.svm.get_account(&env.payer.pubkey()).unwrap(),
+            payer_before,
+            "the network signature fee is the only permitted lamport delta"
+        );
+    }
+
+    env.svm
+        .send_transaction(retained_unrotated)
+        .expect("asset-0 consent survives asset-1 rotation and the rolled-back prefix");
+    assert_eq!(profile(&env, 0).mark_ewma_e6, marks[0]);
+    assert_eq!(profile(&env, 1).mark_ewma_e6, 100);
+    assert_eq!(
+        env.control_sequences(1).oracle_observation,
+        sequences[1].oracle_observation
+    );
+
+    // Only the epoch changes; generation, signer, observation sequence, slot and mark stay fixed.
+    let fresh = sign(
+        &env,
+        &[
+            heap_ix(),
+            cu_ix(),
+            push(&env, 1, env.control_sequences(1).authority_epoch),
+        ],
+    );
+    env.svm
+        .send_transaction(fresh)
+        .expect("current asset-1 consent remains executable");
+    for asset_index in 0..2 {
+        assert_eq!(profile(&env, asset_index).mark_ewma_e6, marks[asset_index]);
+        assert_eq!(
+            env.control_sequences(asset_index).oracle_observation,
+            next_control_sequence(sequences[asset_index].oracle_observation),
+            "each scope consumes exactly one successful observation"
+        );
+    }
+}
+
+#[test]
+fn v16_program_backing_withdrawal_aba_rolls_back_spl_and_ledger_prefix() {
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const DOMAINS: [u16; 2] = [0, 2];
+    const PRINCIPAL: [u128; 2] = [700, 1_100];
+    const WITHDRAWAL: [u128; 2] = [200, 400];
+    const EXPIRY: u64 = 10_000;
+    let mut env = V16CuEnv::new();
+    env.activate_asset(1, 1, 100);
+    let admin = env.admin.insecure_clone();
+    let authority_a = Keypair::new();
+    let authority_b = Keypair::new();
+    env.ensure_signer_account(authority_b.pubkey());
+    let ledger_keys = [Keypair::new(), Keypair::new()];
+    let ledgers = [ledger_keys[0].pubkey(), ledger_keys[1].pubkey()];
+    let sources = PRINCIPAL.map(|amount| env.token_account(authority_a.pubkey(), amount as u64));
+    let destinations = [
+        env.token_account(authority_a.pubkey(), 0),
+        env.token_account(authority_a.pubkey(), 0),
+    ];
+    let read_ledger = |env: &V16CuEnv, index: usize| {
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledgers[index]).unwrap().data)
+            .unwrap()
+    };
+    let profile = |env: &V16CuEnv, index| {
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, index)
+            .unwrap()
+    };
+
+    for index in 0..2 {
+        env.try_update_per_asset_authority_with_cu(
+            &admin,
+            Some(&authority_a),
+            index as u16,
+            processor::ASSET_AUTH_BACKING_BUCKET,
+            authority_a.pubkey().to_bytes(),
+        )
+        .expect("cold admin can install A while the backing role is empty");
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &ledger_keys[index],
+            state::backing_domain_ledger_account_len(),
+            env.program_id,
+        );
+        let sequences = env.control_sequences(index);
+        let market_id = env.asset_market_id(index as u16);
+        env.send(
+            ProgInstruction::TopUpBackingBucket {
+                domain: DOMAINS[index],
+                market_id,
+                authority_epoch: sequences.authority_epoch,
+                intent_id: next_control_sequence(sequences.backing_top_up),
+                backing_fee_bps: 0,
+                insurance_share_bps: 0,
+                amount: PRINCIPAL[index],
+                expiry_slot: EXPIRY,
+            },
+            vec![
+                AccountMeta::new(authority_a.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(sources[index], false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledgers[index], false),
+            ],
+            &[&authority_a],
+        )
+        .expect("public top-up initializes the ledger and funds withdrawable principal");
+        assert_eq!(env.token_amount(sources[index]), 0);
+        assert_eq!(
+            read_ledger(&env, index),
+            state::BackingDomainLedgerAccountV16 {
+                market_group: env.market.to_bytes(),
+                authority: authority_a.pubkey().to_bytes(),
+                domain: DOMAINS[index],
+                total_principal_atoms: PRINCIPAL[index],
+                total_deposited_atoms: PRINCIPAL[index],
+                ..Default::default()
+            }
+        );
+    }
+
+    let market_ids = [env.asset_market_id(0), env.asset_market_id(1)];
+    let sequences = [env.control_sequences(0), env.control_sequences(1)];
+    let profiles = [profile(&env, 0), profile(&env, 1)];
+    let original_ledgers = [read_ledger(&env, 0), read_ledger(&env, 1)];
+    let (config, funded) = env.market_state();
+    assert_ne!(authority_a.pubkey(), admin.pubkey());
+    assert_eq!(funded.mode, MarketModeV16::Live);
+    assert_eq!(funded.vault, PRINCIPAL.iter().sum::<u128>());
+    assert_eq!(env.token_amount(env.vault), funded.vault as u64);
+    for index in 0..2 {
+        assert_eq!(funded.assets[index].lifecycle, AssetLifecycleV16::Active);
+        let bucket = &funded.source_backing_buckets[DOMAINS[index] as usize];
+        assert_eq!(
+            bucket.fresh_unliened_backing_num,
+            PRINCIPAL[index] * BOUND_SCALE
+        );
+        assert_eq!(bucket.expiry_slot, EXPIRY);
+    }
+
+    // Retained requests bypass helpers that bind an instruction to current state.
+    let withdrawal = |env: &V16CuEnv, index: usize, authority_epoch| Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(authority_a.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(destinations[index], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledgers[index], false),
+        ],
+        data: ProgInstruction::WithdrawBackingBucket {
+            domain: DOMAINS[index],
+            market_id: market_ids[index],
+            authority_epoch,
+            amount: WITHDRAWAL[index],
+        }
+        .encode(),
+    };
+    let sign = |env: &V16CuEnv, instructions: &[Instruction]| {
+        Transaction::new_signed_with_payer(
+            instructions,
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &authority_a],
+            env.svm.latest_blockhash(),
+        )
+    };
+    let unrotated = withdrawal(&env, 0, sequences[0].authority_epoch);
+    let rotated = withdrawal(&env, 1, sequences[1].authority_epoch);
+    let retained_unrotated = sign(&env, &[heap_ix(), cu_ix(), unrotated.clone()]);
+    let retained_rotated = sign(&env, &[heap_ix(), cu_ix(), rotated.clone()]);
+    let retained_pair = sign(&env, &[heap_ix(), cu_ix(), unrotated, rotated]);
+    for tx in [&retained_unrotated, &retained_rotated, &retained_pair] {
+        tx.verify()
+            .expect("A signs before either incumbent handoff");
+    }
+    let frame_keys = retained_pair
+        .message
+        .account_keys
+        .iter()
+        .copied()
+        .filter(|key| *key != env.payer.pubkey())
+        .chain([
+            env.mint,
+            sources[0],
+            sources[1],
+            admin.pubkey(),
+            authority_b.pubkey(),
+        ])
+        .collect::<Vec<_>>();
+    let frame = |env: &V16CuEnv| {
+        frame_keys
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>()
+    };
+    let before_simulation = frame(&env);
+    let payer_before_simulation = env.svm.get_account(&env.payer.pubkey());
+    let simulation = env
+        .svm
+        .simulate_transaction(retained_pair.clone().into())
+        .expect("both retained withdrawals are admissible before rotation");
+    assert_eq!(frame(&env), before_simulation);
+    assert_eq!(
+        env.svm.get_account(&env.payer.pubkey()),
+        payer_before_simulation
+    );
+
+    for (step, from, to) in [
+        (1, &authority_a, &authority_b),
+        (2, &authority_b, &authority_a),
+    ] {
+        env.try_update_per_asset_authority_with_cu(
+            from,
+            Some(to),
+            1,
+            processor::ASSET_AUTH_BACKING_BUCKET,
+            to.pubkey().to_bytes(),
+        )
+        .expect("funded backing transfers with incumbent and incoming signatures");
+        assert_eq!(env.market_state().0, config);
+        for index in 0..2 {
+            let mut expected_sequences = sequences[index];
+            let mut expected_profile = profiles[index];
+            if index == 1 {
+                expected_sequences.authority_epoch += step;
+                expected_profile.backing_bucket_authority = to.pubkey().to_bytes();
+            }
+            assert_eq!(env.control_sequences(index), expected_sequences);
+            assert_eq!(profile(&env, index), expected_profile);
+            assert_eq!(env.asset_market_id(index as u16), market_ids[index]);
+            assert_eq!(read_ledger(&env, index), original_ledgers[index]);
+        }
+    }
+
+    let token_invoke = format!("Program {} invoke [2]", spl_token::ID);
+    let wrapper_success = format!("Program {} success", env.program_id);
+    let mut stale_cu = Vec::new();
+    for (tx, failed_instruction, successful_prefixes) in
+        [(retained_rotated, 2, 0), (retained_pair, 3, 1)]
+    {
+        assert_eq!(tx.message.recent_blockhash, env.svm.latest_blockhash());
+        let before = frame(&env);
+        let mut payer_before = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        let fee = FeeStructure::default().lamports_per_signature
+            * u64::from(tx.message.header.num_required_signatures);
+        let rejected = env
+            .svm
+            .send_transaction(tx)
+            .expect_err("restoring A cannot revive retained backing-withdrawal consent");
+        assert_eq!(
+            rejected.err,
+            TransactionError::InstructionError(
+                failed_instruction,
+                InstructionError::Custom(PercolatorError::EngineStale as u32),
+            )
+        );
+        assert_eq!(
+            rejected
+                .meta
+                .logs
+                .iter()
+                .filter(|log| **log == token_invoke)
+                .count(),
+            successful_prefixes,
+            "the stale withdrawal must reject before SPL CPI"
+        );
+        assert_eq!(
+            rejected
+                .meta
+                .logs
+                .iter()
+                .filter(|log| **log == wrapper_success)
+                .count(),
+            successful_prefixes,
+            "the unrotated withdrawal completes before the stale suffix rejects"
+        );
+        assert_eq!(
+            frame(&env),
+            before,
+            "rollback restores both ledgers, SPL accounts and market"
+        );
+        payer_before.lamports -= fee;
+        assert_eq!(
+            env.svm.get_account(&env.payer.pubkey()).unwrap(),
+            payer_before
+        );
+        stale_cu.push(rejected.meta.compute_units_consumed);
+    }
+
+    let unrotated_success = env
+        .svm
+        .send_transaction(retained_unrotated)
+        .expect("asset-0 consent survives asset-1 ABA and the rolled-back withdrawal prefix");
+    assert_eq!(env.token_amount(destinations[0]), WITHDRAWAL[0] as u64);
+    assert_eq!(env.token_amount(destinations[1]), 0);
+    assert_eq!(read_ledger(&env, 1), original_ledgers[1]);
+
+    // Only the epoch differs: A, generation, domain, ledger, destination and amount are fixed.
+    let fresh = sign(
+        &env,
+        &[
+            heap_ix(),
+            cu_ix(),
+            withdrawal(&env, 1, env.control_sequences(1).authority_epoch),
+        ],
+    );
+    let fresh_success = env
+        .svm
+        .send_transaction(fresh)
+        .expect("current asset-1 consent still withdraws principal through the original ledger");
+    let (_, after) = env.market_state();
+    let mut expected_buckets = funded.source_backing_buckets.clone();
+    for index in 0..2 {
+        assert_eq!(env.token_amount(sources[index]), 0);
+        assert_eq!(
+            env.token_amount(destinations[index]),
+            WITHDRAWAL[index] as u64
+        );
+        let mut expected_ledger = original_ledgers[index];
+        expected_ledger.total_principal_atoms -= WITHDRAWAL[index];
+        expected_ledger.total_principal_withdrawn_atoms += WITHDRAWAL[index];
+        assert_eq!(read_ledger(&env, index), expected_ledger);
+        expected_buckets[DOMAINS[index] as usize].fresh_unliened_backing_num -=
+            WITHDRAWAL[index] * BOUND_SCALE;
+        let mut expected_sequences = sequences[index];
+        expected_sequences.authority_epoch += if index == 1 { 2 } else { 0 };
+        assert_eq!(env.control_sequences(index), expected_sequences);
+        assert_eq!(profile(&env, index), profiles[index]);
+        assert_eq!(env.asset_market_id(index as u16), market_ids[index]);
+    }
+    assert_eq!(after.source_backing_buckets, expected_buckets);
+    assert_eq!(after.vault, funded.vault - WITHDRAWAL.iter().sum::<u128>());
+    assert_eq!(env.token_amount(env.vault), after.vault as u64);
+    assert_eq!(after.insurance, funded.insurance);
+    assert_eq!(after.c_tot, funded.c_tot);
+    assert_eq!(after.mode, MarketModeV16::Live);
+    eprintln!(
+        "INV-005 live backing ABA CU: prevalidated_pair={}, stale_single={}, stale_pair={}, unrotated={}, fresh={}",
+        simulation.compute_units_consumed,
+        stale_cu[0],
+        stale_cu[1],
+        unrotated_success.compute_units_consumed,
+        fresh_success.compute_units_consumed,
+    );
+}
+
+#[test]
+fn v16_program_shutdown_insurance_withdrawal_retains_market_authority_epoch_across_aba() {
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const ASSET: u16 = 1;
+    const DOMAIN: u16 = 2;
+    const PRINCIPAL: u128 = 1_000;
+    const WITHDRAWAL: u128 = 400;
+    const OTHER_INSURANCE: u128 = 250;
+    let mut env = V16CuEnv::new();
+    let authority_a = env.admin.insecure_clone();
+    let authority_b = Keypair::new();
+    let local_authority = Keypair::new();
+    env.ensure_signer_account(authority_b.pubkey());
+    env.ensure_signer_account(local_authority.pubkey());
+    env.activate_asset_with_authorities(
+        ASSET,
+        1,
+        100,
+        local_authority.pubkey(),
+        local_authority.pubkey(),
+        local_authority.pubkey(),
+        local_authority.pubkey(),
+    );
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    let (source, _) =
+        env.top_up_insurance_domain_with_authority_and_cu(&local_authority, DOMAIN, PRINCIPAL);
+    let (other_source, _) =
+        env.top_up_insurance_domain_with_authority_and_cu(&authority_a, 0, OTHER_INSURANCE);
+    let destination = env.token_account(authority_a.pubkey(), 0);
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, ASSET, 2, 0);
+    env.svm.warp_to_slot(7);
+
+    let market_id = env.asset_market_id(ASSET);
+    let market_epoch = env.control_sequences(0).authority_epoch;
+    let local_sequences = env.control_sequences(ASSET as usize);
+    let profile = state::read_asset_oracle_profile(
+        &env.svm.get_account(&env.market).unwrap().data,
+        ASSET as usize,
+    )
+    .unwrap();
+    let (_, before_group) = env.market_state();
+    assert_eq!(before_group.mode, MarketModeV16::Live);
+    assert_eq!(
+        before_group.assets[ASSET as usize].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    assert_eq!(before_group.assets[ASSET as usize].oi_eff_long_q, 0);
+    assert_eq!(before_group.assets[ASSET as usize].oi_eff_short_q, 0);
+    assert_eq!(profile.last_good_oracle_slot, 2);
+    assert_eq!(
+        profile.insurance_operator,
+        local_authority.pubkey().to_bytes()
+    );
+    assert_eq!(
+        profile.insurance_authority,
+        local_authority.pubkey().to_bytes()
+    );
+    assert_ne!(authority_a.pubkey(), local_authority.pubkey());
+    assert_eq!(market_epoch, local_sequences.authority_epoch);
+    assert_eq!(before_group.insurance, PRINCIPAL + OTHER_INSURANCE);
+    assert_eq!(
+        before_group.insurance_domain_budget[DOMAIN as usize],
+        PRINCIPAL
+    );
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(other_source), 0);
+    assert_eq!(
+        env.token_amount(env.vault),
+        (PRINCIPAL + OTHER_INSURANCE) as u64
+    );
+
+    // Encode directly: current-state binding helpers must not refresh retained consent.
+    let withdrawal = |authority_epoch| Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(authority_a.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: ASSET,
+            market_id,
+            authority_epoch,
+            amount: WITHDRAWAL,
+        }
+        .encode(),
+    };
+    let retained_ix = withdrawal(market_epoch);
+    let fresh_ix = withdrawal(market_epoch + 2);
+    let sign = |env: &V16CuEnv, ix: Instruction| {
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), ix],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &authority_a],
+            env.svm.latest_blockhash(),
+        )
+    };
+    let retained = sign(&env, retained_ix);
+    retained
+        .verify()
+        .expect("consent is signed before either handoff");
+    let frame_keys = retained
+        .message
+        .account_keys
+        .iter()
+        .copied()
+        .filter(|key| *key != env.payer.pubkey())
+        .chain([
+            env.mint,
+            source,
+            other_source,
+            authority_b.pubkey(),
+            local_authority.pubkey(),
+        ])
+        .collect::<Vec<_>>();
+    let frame = |env: &V16CuEnv| {
+        frame_keys
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>()
+    };
+    let before_simulation = frame(&env);
+    let simulation = env
+        .svm
+        .simulate_transaction(retained.clone().into())
+        .expect("A's retained request is admissible through the matured shutdown fallback");
+    assert_eq!(frame(&env), before_simulation);
+
+    for (step, from, to) in [
+        (1, &authority_a, &authority_b),
+        (2, &authority_b, &authority_a),
+    ] {
+        let authority_epoch = env.control_sequences(0).authority_epoch;
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateAuthority {
+                authority_epoch,
+                new_pubkey: to.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(from.pubkey(), true),
+                AccountMeta::new(to.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[from, to],
+        )
+        .expect("co-signed market-authority handoff");
+        assert_eq!(env.market_state().0.marketauth, to.pubkey().to_bytes());
+        assert_eq!(
+            env.control_sequences(0).authority_epoch,
+            market_epoch + step
+        );
+        assert_eq!(env.control_sequences(ASSET as usize), local_sequences);
+        assert_eq!(env.asset_market_id(ASSET), market_id);
+        assert_eq!(
+            state::read_asset_oracle_profile(
+                &env.svm.get_account(&env.market).unwrap().data,
+                ASSET as usize,
+            )
+            .unwrap(),
+            profile
+        );
+    }
+
+    // The target asset still has the old epoch, but fallback consent belongs to asset 0.
+    assert_ne!(
+        env.control_sequences(0).authority_epoch,
+        local_sequences.authority_epoch
+    );
+    assert_eq!(
+        retained.message.recent_blockhash,
+        env.svm.latest_blockhash()
+    );
+    let before_rejection = frame(&env);
+    let mut payer_before = env.svm.get_account(&env.payer.pubkey()).unwrap();
+    let fee = FeeStructure::default().lamports_per_signature
+        * u64::from(retained.message.header.num_required_signatures);
+    let rejected = env
+        .svm
+        .send_transaction(retained)
+        .expect_err("restoring A must not revive the old shutdown withdrawal");
+    assert_eq!(
+        rejected.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::EngineStale as u32),
+        )
+    );
+    assert_eq!(
+        frame(&env),
+        before_rejection,
+        "all non-payer accounts roll back exactly"
+    );
+    payer_before.lamports -= fee;
+    assert_eq!(
+        env.svm.get_account(&env.payer.pubkey()).unwrap(),
+        payer_before
+    );
+
+    // Only the epoch differs from the retained request: signer, generation and value are fixed.
+    let fresh = sign(&env, fresh_ix);
+    let success = env
+        .svm
+        .send_transaction(fresh)
+        .expect("current market-authority consent can withdraw through the shutdown fallback");
+    let (_, after_group) = env.market_state();
+    assert_eq!(env.token_amount(destination), WITHDRAWAL as u64);
+    assert_eq!(
+        env.token_amount(env.vault),
+        (PRINCIPAL + OTHER_INSURANCE - WITHDRAWAL) as u64
+    );
+    assert_eq!(after_group.vault, before_group.vault - WITHDRAWAL);
+    assert_eq!(after_group.insurance, before_group.insurance - WITHDRAWAL);
+    let mut expected_budgets = before_group.insurance_domain_budget;
+    expected_budgets[DOMAIN as usize] -= WITHDRAWAL;
+    assert_eq!(after_group.insurance_domain_budget, expected_budgets);
+    assert_eq!(env.control_sequences(ASSET as usize), local_sequences);
+    assert_eq!(env.control_sequences(0).authority_epoch, market_epoch + 2);
+    assert_eq!(env.asset_market_id(ASSET), market_id);
+    eprintln!(
+        "INV-005 shutdown insurance ABA CU: prevalidated={}, stale={}, fresh={}",
+        simulation.compute_units_consumed,
+        rejected.meta.compute_units_consumed,
+        success.compute_units_consumed,
     );
 }
 

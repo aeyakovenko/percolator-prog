@@ -5,6 +5,9 @@
 //! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value`, `v16_program_mixed_direction_fee_allocation_matches_independent_side_ledger`, `v16_attack_mixed_direction_batch_fees_conserve_by_asset`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! `v16_program_retained_redirect_bundle_preserves_fee_rounding_and_policy_order` adds
+//! residue-sensitive single/batch fee attribution across a policy boundary, paid-prefix rollback
+//! on supersession, zero-activity domain isolation, and exact live SPL recovery.
 //!
 //! Guarantee boundary: the route matrix certifies the independently discovered negative-size
 //! account-ordering case through terminal payout. The source-complete policy/destination census at
@@ -1476,6 +1479,487 @@ fn v16_attack_permissionless_create_fee_funds_asset0_insurance() {
     assert_domain_budget_remaining_total_consistent(&after, "permissionless create fee");
 }
 
+fn inv036_public_fee_redirect_market() -> V16CuEnv {
+    let mut svm = LiteSVM::new();
+    let program_id = percolator_prog::id();
+    for (id, path) in [
+        (program_id, program_path()),
+        (spl_token::ID, spl_token_program_path()),
+        (
+            associated_token_program_id(),
+            associated_token_program_path(),
+        ),
+    ] {
+        svm.add_program(id, &std::fs::read(path).expect("read SBF"));
+    }
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+    svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
+    let mint = inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_create_public_spl_mint(
+        &mut svm, &payer, admin.pubkey(), 0,
+    );
+    let params = V16CuMarketParams {
+        max_portfolio_assets: 4,
+        trade_fee_base_bps: 100,
+        ..V16CuMarketParams::default()
+    };
+    let market = Keypair::new();
+    system_create_account_for_test(
+        &mut svm,
+        &payer,
+        &market,
+        state::market_account_len_for_capacity(4).unwrap(),
+        program_id,
+    );
+    let vault_authority =
+        Pubkey::find_program_address(&[b"vault", market.pubkey().as_ref()], &program_id).0;
+    let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint);
+    let init_market_cu = send_tx(
+        &mut svm,
+        program_id,
+        &payer,
+        init_market_instruction(&params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new_readonly(mint, false),
+        ],
+        &[&admin],
+    )
+    .expect("initialize public four-asset market");
+    V16CuEnv {
+        svm,
+        program_id,
+        payer,
+        admin,
+        init_market_cu,
+        market: market.pubkey(),
+        mint,
+        vault,
+        vault_authority,
+        portfolio_account_len: state::portfolio_account_len_for_market_slots(4).unwrap(),
+        portfolios: Vec::new(),
+    }
+}
+
+#[test]
+fn v16_program_retained_redirect_bundle_preserves_fee_rounding_and_policy_order() {
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const DEPOSIT: u64 = 10_000;
+    const BUNDLE_CU_LIMIT: u64 = 400_000;
+    const CURRENT_REDIRECT_BPS: u16 = 6_667;
+    const NEXT_REDIRECT_BPS: u16 = 3_333;
+    // Each participant pays exactly 11 and 17 atoms: price 100, quantities 11/17, fee 100 bps.
+    // Round and split each payer's redirect BEFORE accumulating into the base asset's domains.
+    let fee_domains = |bps: u16| {
+        let mut domains = [0u128; 8];
+        for (asset, fee) in [(1, 11u128), (2, 17u128)] {
+            let redirect = fee * u128::from(bps) / 10_000;
+            for side in 0..2 {
+                domains[2 * asset + side] += fee - redirect;
+                domains[0] += redirect / 2;
+                domains[1] += redirect - redirect / 2;
+            }
+        }
+        domains
+    };
+    let opening_domains = fee_domains(CURRENT_REDIRECT_BPS);
+    let closing_domains = fee_domains(NEXT_REDIRECT_BPS);
+    assert_eq!(opening_domains, [16, 20, 4, 4, 6, 6, 0, 0]);
+    assert_eq!(closing_domains, [6, 10, 8, 8, 12, 12, 0, 0]);
+    assert_ne!(opening_domains[0], opening_domains[1]);
+
+    for batch in [false, true] {
+        let mut env = inv036_public_fee_redirect_market();
+        for asset in 0..4 {
+            env.configure_auth_mark_for_asset_as_admin(asset, 0, 100);
+        }
+        let owners = [Keypair::new(), Keypair::new()];
+        let mut portfolios = Vec::new();
+        let mut tokens = Vec::new();
+        for owner in &owners {
+            env.ensure_signer_account(owner.pubkey());
+            let portfolio = Keypair::new();
+            system_create_account_for_test(
+                &mut env.svm,
+                &env.payer,
+                &portfolio,
+                env.portfolio_account_len,
+                env.program_id,
+            );
+            env.send(
+                ProgInstruction::InitPortfolio,
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio.pubkey(), false),
+                ],
+                &[owner],
+            )
+            .unwrap();
+            let token = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+            send_raw_tx(
+                &mut env.svm,
+                &env.payer,
+                spl_token::instruction::mint_to(
+                    &spl_token::ID,
+                    &env.mint,
+                    &token,
+                    &env.admin.pubkey(),
+                    &[],
+                    DEPOSIT,
+                )
+                .unwrap(),
+                &[&env.admin],
+            )
+            .unwrap();
+            env.send(
+                env.deposit_ix(portfolio.pubkey(), DEPOSIT.into()),
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio.pubkey(), false),
+                    AccountMeta::new(token, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[owner],
+            )
+            .unwrap();
+            portfolios.push(portfolio.pubkey());
+            tokens.push(token);
+        }
+        let [a, b] = [portfolios[0], portfolios[1]];
+        let trade_instructions = |env: &V16CuEnv, close: bool| {
+            let legs: Vec<_> = [(1, 11i128), (2, -17i128)]
+                .into_iter()
+                .map(|(asset_index, quantity)| BatchTradeLeg {
+                    asset_index,
+                    market_id: env.asset_market_id(asset_index),
+                    size_q: quantity * POS_SCALE as i128 * if close { -1 } else { 1 },
+                    exec_price: 100,
+                    fee_bps: 100,
+                })
+                .collect();
+            let requests = if batch {
+                vec![env.batch_trade_no_cpi_ix(a, b, legs)]
+            } else {
+                legs.into_iter()
+                    .map(|leg| env.trade_no_cpi_ix(a, b, leg.asset_index, leg.size_q, 100, 100))
+                    .collect()
+            };
+            requests
+                .into_iter()
+                .enumerate()
+                .map(|(offset, mut request)| {
+                    // A single fill advances both position epochs once; a batch advances once total.
+                    match &mut request {
+                        ProgInstruction::TradeNoCpi {
+                            account_a_position_epoch,
+                            account_b_position_epoch,
+                            ..
+                        }
+                        | ProgInstruction::BatchTradeNoCpi {
+                            account_a_position_epoch,
+                            account_b_position_epoch,
+                            ..
+                        } => {
+                            *account_a_position_epoch += offset as u64;
+                            *account_b_position_epoch += offset as u64;
+                        }
+                        _ => unreachable!(),
+                    }
+                    Instruction {
+                        program_id: env.program_id,
+                        accounts: vec![
+                            AccountMeta::new(owners[0].pubkey(), true),
+                            AccountMeta::new(owners[1].pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(a, false),
+                            AccountMeta::new(b, false),
+                        ],
+                        data: request.encode(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let authority_epoch = env.control_sequences(0).authority_epoch;
+        let redirect = |env: &V16CuEnv, policy_sequence| Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: ProgInstruction::UpdateFeeRedirectPolicy {
+                policy_sequence,
+                redirect_bps: NEXT_REDIRECT_BPS,
+                authority_epoch,
+            }
+            .encode(),
+        };
+        let transaction =
+            |env: &V16CuEnv, trades: Vec<Instruction>, policy: Option<Instruction>| {
+                let mut instructions = vec![heap_ix(), cu_ix()];
+                instructions.extend(trades);
+                let mut signers = vec![&env.payer, &owners[0], &owners[1]];
+                if let Some(policy) = policy {
+                    instructions.push(policy);
+                    signers.push(&env.admin);
+                }
+                let tx = Transaction::new_signed_with_payer(
+                    &instructions,
+                    Some(&env.payer.pubkey()),
+                    &signers,
+                    env.svm.latest_blockhash(),
+                );
+                tx.verify().unwrap();
+                assert!(
+                    bincode::serialized_size(&tx).unwrap()
+                        <= solana_sdk::packet::PACKET_DATA_SIZE as u64
+                );
+                tx
+            };
+        let prefix = trade_instructions(&env, false);
+        let retained = transaction(&env, prefix.clone(), Some(redirect(&env, 1)));
+        let signed_bytes = bincode::serialize(&retained).unwrap();
+        let custody = |env: &V16CuEnv| {
+            [env.vault, env.mint, tokens[0], tokens[1]]
+                .map(|key| env.svm.get_account(&key).unwrap())
+        };
+        let custody_before = custody(&env);
+        let frame = |env: &V16CuEnv| {
+            [
+                env.market,
+                a,
+                b,
+                env.vault,
+                env.mint,
+                tokens[0],
+                tokens[1],
+                owners[0].pubkey(),
+                owners[1].pubkey(),
+                env.admin.pubkey(),
+            ]
+            .map(|key| env.svm.get_account(&key).unwrap())
+        };
+        let before_simulation = frame(&env);
+        let simulation = env
+            .svm
+            .simulate_transaction(retained.clone().into())
+            .expect("retained paid-prefix bundle is valid before supersession");
+        assert_cu_within(
+            "redirect bundle simulation",
+            simulation.compute_units_consumed,
+            BUNDLE_CU_LIMIT,
+        );
+        assert_eq!(frame(&env), before_simulation);
+
+        let cu = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateFeeRedirectPolicy {
+                policy_sequence: 2,
+                redirect_bps: CURRENT_REDIRECT_BPS,
+                authority_epoch,
+            },
+            vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&env.admin],
+        )
+        .unwrap();
+        assert_cu_within("new redirect policy", cu, CUSTODY_CU_LIMIT);
+        assert_eq!(env.control_sequences(0).fee_redirect, 2);
+        assert_eq!(bincode::serialize(&retained).unwrap(), signed_bytes);
+        assert_eq!(
+            transaction(&env, prefix.clone(), Some(redirect(&env, 1))),
+            retained
+        );
+        let before_rejection = frame(&env);
+        let mut expected_payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        expected_payer.lamports -= FeeStructure::default().lamports_per_signature
+            * u64::from(retained.message.header.num_required_signatures);
+        let error = env
+            .svm
+            .send_transaction(retained)
+            .expect_err("superseded redirect suffix rejects");
+        assert_eq!(
+            error.err,
+            TransactionError::InstructionError(
+                (2 + prefix.len()) as u8,
+                InstructionError::Custom(PercolatorError::EngineStale as u32),
+            )
+        );
+        assert_eq!(
+            error
+                .meta
+                .logs
+                .iter()
+                .filter(|line| **line == format!("Program {} success", env.program_id))
+                .count(),
+            prefix.len()
+        );
+        assert_eq!(
+            frame(&env),
+            before_rejection,
+            "all paid-prefix account writes roll back"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.payer.pubkey()).unwrap(),
+            expected_payer
+        );
+        assert_cu_within(
+            "stale redirect paid-prefix rollback",
+            error.meta.compute_units_consumed,
+            BUNDLE_CU_LIMIT,
+        );
+
+        // Only the admin policy sequence changes. The exact rejected trade intents stay usable.
+        let fresh = transaction(&env, prefix, Some(redirect(&env, 3)));
+        let opened = env
+            .svm
+            .send_transaction(fresh)
+            .expect("fresh policy suffix and paid prefix remain live");
+        assert_cu_within(
+            "fresh redirect paid-prefix bundle",
+            opened.compute_units_consumed,
+            BUNDLE_CU_LIMIT,
+        );
+        assert_eq!(env.control_sequences(0).fee_redirect, 3);
+        assert_eq!(env.control_sequences(0).authority_epoch, authority_epoch);
+        assert_eq!(
+            env.market_state().0.fee_redirect_to_market_0_bps,
+            NEXT_REDIRECT_BPS
+        );
+        let assert_fees = |env: &V16CuEnv, expected: &[u128; 8], paid_per_owner: u128| {
+            let group = env.market_state().1;
+            assert_eq!(&group.insurance_domain_budget[..], expected);
+            assert_eq!(group.insurance, 2 * paid_per_owner);
+            assert_eq!(group.c_tot, 2 * (u128::from(DEPOSIT) - paid_per_owner));
+            assert_eq!(group.vault, 2 * u128::from(DEPOSIT));
+            assert_eq!(group.vault, group.c_tot + group.insurance);
+            assert_eq!(group.vault, u128::from(env.token_amount(env.vault)));
+            for portfolio in [a, b] {
+                assert_eq!(
+                    env.portfolio_state(portfolio).capital.get(),
+                    u128::from(DEPOSIT) - paid_per_owner
+                );
+                assert_eq!(env.portfolio_state(portfolio).pnl.get(), 0);
+            }
+            assert_eq!(group.assets[3].lifecycle, AssetLifecycleV16::Active);
+            assert_eq!(group.assets[3].oi_eff_long_q, 0);
+            assert_eq!(group.assets[3].oi_eff_short_q, 0);
+            assert_domain_budget_remaining_total_consistent(
+                &group,
+                "policy-bound per-fee redirect",
+            );
+        };
+        // The policy update follows the paid prefix, so it cannot reroute those earlier fees.
+        assert_fees(&env, &opening_domains, 28);
+        assert_eq!(custody(&env), custody_before);
+        for (asset, quantity) in [(1, 11i128), (2, -17i128)] {
+            let size = quantity * POS_SCALE as i128;
+            assert_eq!(
+                active_leg_for_asset(&env.portfolio_state(a), asset).basis_pos_q,
+                size
+            );
+            assert_eq!(
+                active_leg_for_asset(&env.portfolio_state(b), asset).basis_pos_q,
+                -size
+            );
+        }
+        let close = transaction(&env, trade_instructions(&env, true), None);
+        let closed = env
+            .svm
+            .send_transaction(close)
+            .expect("fee-bearing close under the new redirect policy");
+        assert_cu_within(
+            "redirect-policy close",
+            closed.compute_units_consumed,
+            BUNDLE_CU_LIMIT,
+        );
+        let mut remaining_domains =
+            std::array::from_fn(|i| opening_domains[i] + closing_domains[i]);
+        assert_fees(&env, &remaining_domains, 56);
+        assert_eq!(custody(&env), custody_before);
+        for portfolio in [a, b] {
+            for asset in 0..4 {
+                assert!(!has_active_leg_for_asset(
+                    &env.portfolio_state(portfolio),
+                    asset
+                ));
+            }
+        }
+        for (index, owner) in owners.iter().enumerate() {
+            let cu = env
+                .send(
+                    env.withdraw_ix(portfolios[index], u128::from(DEPOSIT) - 56),
+                    vec![
+                        AccountMeta::new(owner.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolios[index], false),
+                        AccountMeta::new(tokens[index], false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[owner],
+                )
+                .expect("owner withdraws exact post-fee principal while Live");
+            assert_cu_within("redirect-policy owner withdrawal", cu, CUSTODY_CU_LIMIT);
+            assert_eq!(env.token_amount(tokens[index]), DEPOSIT - 56);
+            let cu = env.close_portfolio_with_cu(owner, portfolios[index]);
+            assert_cu_within("redirect-policy portfolio close", cu, CUSTODY_CU_LIMIT);
+        }
+        let destination =
+            create_ata_for_test(&mut env.svm, &env.payer, env.admin.pubkey(), env.mint);
+        let mut recovered = 0;
+        for asset in 0..3 {
+            let amount = remaining_domains[2 * asset] + remaining_domains[2 * asset + 1];
+            let cu = env.withdraw_insurance_domain_to_admin_token_with_cu(
+                destination,
+                (2 * asset) as u16,
+                amount,
+            );
+            assert_cu_within("redirect-policy fee recovery", cu, CUSTODY_CU_LIMIT);
+            recovered += amount;
+            remaining_domains[2 * asset..2 * asset + 2].fill(0);
+            let group = env.market_state().1;
+            assert_eq!(&group.insurance_domain_budget[..], &remaining_domains);
+            assert_eq!(group.insurance, 112 - recovered);
+            assert_eq!(group.vault, 112 - recovered);
+            assert_eq!(u128::from(env.token_amount(destination)), recovered);
+            assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+            assert_eq!(group.c_tot, 0);
+            assert_eq!(group.materialized_portfolio_count, 0);
+            assert_eq!(group.mode, MarketModeV16::Live);
+            assert_domain_budget_remaining_total_consistent(&group, "live fee recovery");
+        }
+        assert_eq!(recovered, 112);
+        assert_eq!(
+            env.token_amount(tokens[0])
+                + env.token_amount(tokens[1])
+                + env.token_amount(destination),
+            2 * DEPOSIT
+        );
+        assert_eq!(
+            Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+                .unwrap()
+                .supply,
+            2 * DEPOSIT
+        );
+        eprintln!("redirect bundle batch={batch}: rejected={} CU, fresh={} CU, close={} CU; exact domains={:?}",
+            error.meta.compute_units_consumed, opened.compute_units_consumed, closed.compute_units_consumed,
+            std::array::from_fn::<_, 8, _>(|i| opening_domains[i] + closing_domains[i]));
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Inv036FeeClass {
     name: &'static str,
@@ -1516,7 +2000,7 @@ fn inv036_struct_fields(
 
 #[test]
 fn v16_program_fee_policy_and_destination_census_is_source_complete() {
-    const ENGINE_PIN: &str = "495a5590c97055bd71c6f94d849ff0298f243145";
+    const ENGINE_PIN: &str = "394fd0bf2cb7d73df425eb3754dc3be1a0c44336";
     const FEE_CLASSES: &[Inv036FeeClass] = &[
         Inv036FeeClass {
             name: "trade-base",
