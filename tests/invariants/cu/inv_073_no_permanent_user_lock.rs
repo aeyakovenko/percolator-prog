@@ -89,6 +89,12 @@ mod spent_insurance_terminal_exit;
 mod shared_holder_paid_reserves;
 
 #[test]
+fn v16_program_recovery_reserve_repair_crosses_last_portfolio_cleanup_without_beneficiary_signatures(
+) {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_recovery_reserve_cleanup();
+}
+
+#[test]
 fn v16_program_frozen_reserve_destinations_allow_public_replacement_without_thaw_or_beneficiary_signatures(
 ) {
     crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_frozen_reserve_replacement();

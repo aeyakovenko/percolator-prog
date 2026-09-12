@@ -65,6 +65,87 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-073 Recovery reserve repair across final portfolio cleanup (row 433, 2026-09-12)
+
+Owner: [cu/inv_073_recovery_reserve_cleanup.rs](cu/inv_073_recovery_reserve_cleanup.rs),
+sharing the public INV-024 earned-fee fixture and invoked by INV-073's
+`v16_program_recovery_reserve_repair_crosses_last_portfolio_cleanup_without_beneficiary_signatures`.
+Primary INV-073; related INV-018/021/024/027/067/069/070/071/078/081/082.
+
+Two whole-route LiteSVM histories reverse user payout and portfolio cleanup order.
+Public trading creates 875 earned-fee atoms and live 1,050-contract positions.
+Public SPL closure removes both reserve destinations; user, provider, insurance
+operator and terminal beneficiary keys are then dropped. Asset shutdown enters
+Recovery at slot 2. One keeper-only force-close at the exact slot-7 deadline
+removes both positions while preserving the input-derived claims. After signed
+market resolution, each user receives its exact 56,627/1,995,000 atoms in one
+unsigned CloseResolved at the slot-12 boundary. Reserve destinations remain absent.
+
+The market authority deletes the first empty portfolio. With exactly one still
+materialized, keeper-funded ATA reconstruction followed by each reserve route
+rejects EngineLockActive. Earlier versions of those same three bundles reject
+ExpectedSigner in asset Recovery, while market mode is still Live. Both stages
+verify the completed ATA prefix and exact full-Account rollback. These six probes
+run only in the first history. In both histories a deeper bundle deletes the last
+portfolio, reconstructs provider custody, pays the earned fees and initializes its
+ledger, reconstructs insurance custody, then rejects a wrong-role insurance
+destination. The exact failure index and successful wrapper/ATA prefix counts
+prove the final-cleanup boundary was crossed. Deletion, rent movement, both new
+accounts, payment and ledger initialization all roll back; only signature fees
+remain charged.
+
+After the identical last-deletion instruction commits separately, the unchanged
+repair/payout instructions pay all three claims with just the keeper signing.
+Principal-first and earnings-first orders return 100,000 principal plus 875 fees
+to the provider and 31 insurance atoms to its distinct beneficiary. Idempotent
+provider ATA reconstruction charges rent once. Each prefix checks reserve stock,
+source reservations, ledger attribution, usable beneficiary-owned SPL custody,
+wallet/profile frames, fixed mint supply and market/encumbrance censuses. Both
+histories close the empty vault and slab with exact refund and tombstone rent.
+
+The new relation is **funded Recovery plus absent reserve custody across the last
+materialized portfolio's deletion and rollback**. The nearest force-close/retirement
+control has no surviving reserves; existing replacement tests begin after user deletion.
+Standalone frozen replacement, generic six-order payout, provider expiry/reassigned
+custody, insurance exhaustion and row418 quote-variant probes were excluded during
+coverage review as duplicates; none were added and subsequently removed.
+
+**Row433 remains OPEN.** No production bug, wrapper/engine change or status promotion
+is claimed. Resolution and mechanical cleanup still require the market authority.
+This is finite classic-SPL/asset-0 evidence with integral matched PnL; global market
+Recovery, recredit, receipts, pending loss, native/dual rails, unavailable market
+authority and maximum shapes remain outside this increment.
+
+Worktree `/tmp/percolator-row433`, branch
+`codex/row433-terminal-reserve-coverage-20260912`, starts at requested origin base
+`5bbe2d72`. Private build cache: `/dev/shm/percolator-row433-target`. The default-feature
+SBF was rebuilt in this worktree with locked/offline dependencies and platform-tools
+v1.52; SHA-256 `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The new selector passes both histories with eight exact rollbacks and six unsigned
+reserve payments; peak **498,082 CU**, below the reused **1,200,000-CU** limit.
+The four adjacent exact controls and charter/index pass (4/4 and 1/1).
+Formatting and unstaged whitespace checks pass. Existing unused-support and
+Solana client future-compatibility warnings remain. Focused validation (no unfiltered suite):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row433-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_recovery_reserve_repair_crosses_last_portfolio_cleanup_without_beneficiary_signatures -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_recovery_force_close_reaches_zero_residue_and_close_slab \
+  inv_073_no_permanent_user_lock::v16_program_public_reserve_payments_wait_for_resolved_senior_disposition \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_reserve_destination_recovery::v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_value \
+  inv_073_no_permanent_user_lock::v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-070 native denomination after a terminal prefix (row 424, 2026-09-12)
 
 Owner: [cu/inv_070_terminal_native_reclassification.rs](cu/inv_070_terminal_native_reclassification.rs),
