@@ -58,6 +58,17 @@ git diff --check
 
 ## Other Recent Coverage
 
+The [prefunded quote custody audit](prefunded_quote_custody_audit_20260912.md)
+adds one INV-070 selector with sixteen public LiteSVM histories. Native wSOL and
+fixed-supply SPL principal exits cross pre-funding below/above token-account rent,
+claimant order, and separate/combined custody repair. Native ATA reconstruction
+wraps excess lamports without consuming either owner's market claim. Keeper-only
+payouts return exactly 101/307 atoms; premature close and missing-custody retries
+restore the complete repair/payment prefix. Both variants reach one successful
+slab close, exact rent refunds and owner-authorized SPL disposal. Row 418 remains
+OPEN; booked native residue retirement, reserve claims and arbitrary histories
+remain outside this matrix. No invariant verdict or production code changes.
+
 The [native insurance exit audit](native_insurance_exit_audit_20260912.md)
 adds one INV-077 selector with four public LiteSVM histories. A separate terminal
 beneficiary withdraws 106 native-quote insurance atoms in two payments, redeems
