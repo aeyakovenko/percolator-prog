@@ -987,6 +987,96 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-028 existing active-leg admission and owner exit (row 423, 2026-09-12)
+
+[`cu/inv_028_active_leg_admission.rs`](cu/inv_028_active_leg_admission.rs) adds
+`v16_program_active_leg_increases_preserve_latent_and_full_domain_owner_exit`, mounted
+under `inv_028_source_domain_realizability_cap::historical_latent_capacity::active_leg_admission`.
+Base: locally cached `2b1d025c004f92d3f89bac00113be90a0cbbcf63`; isolated worktree:
+`/tmp/percolator-astra-exit-resource-admission-row423-20260912`, branch
+`codex/astra-exit-resource-admission-row423-20260912`. Only public repository guidance,
+fixtures and histories informed this increment; no external PR/issue/branch or sealed
+holdout inspection was used.
+
+Sixteen public LiteSVM worlds cross all four single/batch CPI/no-CPI transports, both
+position signs and both settlement orders. Thirteen detached asset histories retain
+26 positive source records worth 50 atoms. A three-unit position on asset 13 earns three
+atoms, leaving 27 occupied domains and its opposite domain still latent. A same-sign
+increase to eight units preserves that resource union. A cross-zero resize keeps the
+leg active, and an opposite favorable mark materializes the last domain for eight atoms.
+At all 28 occupied domains, another same-sign increase to thirteen units admits and earns
+thirteen more atoms. Partial and final reductions preserve all historical claims until
+conversion. Both owners withdraw exactly **1,000,074 / 999,926 atoms** and separately sign
+deletion of their empty portfolios. There are 32 strict same-sign active-leg increases.
+
+The inherited input-history oracle checks exact per-domain claims and backing prefixes,
+credit caps, principal, PnL, positions/OI, SPL custody and fixed mint supply after every
+counted pre-conversion step. New assertions require the 28-domain historical/future union,
+one continuously active leg on each owner, no source growth during resizing, unchanged
+portfolio identity and exact input-derived claim increments. Each economic settlement
+crank decreases pending authenticated accrual plus unsettled economic value and finishes
+within four calls per owner per mark. Payout checks clear all claims, backing, OI, capital,
+insurance, custody and materialized portfolios. System/SPL/ATA/matcher/wrapper instructions
+construct all economic accounts; harness controls are signer SOL, Clock and blockhashes.
+
+This adds sampled INV-028/057/073/077 evidence for **existing active-leg risk increases**.
+The historical/latent parent opens new legs; retained-domain episodes reopen detached legs;
+concurrent cohorts admit all legs before source growth. None asserts these two same-sign
+increases at the 27/28 occupied-domain frontiers. The single-slot, Hybrid/carry and latent
+reset/exit candidates were excluded from this increment, as were INV-077 CU controls near
+the limit. No duplicate selectors were added or run.
+
+**Row 423 remains OPEN.** This is a finite positive conformance matrix, not a generic
+generator/oracle or an INV-082 state-indexed theorem. It assumes participating owners and
+available authenticated marks. Nonzero lien/insurance reservations and INV-031 double-use,
+fees/funding/fractional quantities, interleaved conversion, multiple active legs, absent
+signers, Recovery/terminal alternatives (INV-078), generation reuse (INV-089), maximum-N/feed
+composition and arbitrary histories remain outside this increment. Production, dependency
+pins, shared helpers and invariant verdicts are unchanged.
+
+The new exact selector passes **1/1: 16 worlds, 32 increases, 2,200 counted public calls**.
+Peak CU for trade / settlement crank / conversion / withdrawal / portfolio deletion is
+**961,768 / 525,915 / 712,276 / 47,954 / 26,540**. Trade/crank maxima include historical
+construction; bootstrap, mark writers and matcher reauthorization are not CU measurements
+in this helper (the latter two are included in its call count). Source routes enforce
+1,375,000 CU and custody/deletion enforce 300,000 CU. The adjacent retained-domain episode
+control passes **1/1: eight worlds**, peaking at 1,115,686 CU. No runtime probes were
+discarded, no failing public history was observed, and no production guard was changed.
+
+The required charter/index selector passes **1/1**; formatting and whitespace checks pass.
+The additional `v16_machine_invariant_status_is_authoritative_and_nonoverclaiming` check
+fails on the pre-existing **INV-058 / row 427** projection: recorded counterexamples `{}`
+versus expected `{427}`. At the base commit, row 427 is already `COVERED` and INV-058 has
+no counterexamples, while the unchanged checker includes covered rows in that projection.
+The checker and status TSV are byte-identical to the base, and this change adds only
+comments to the reopening TSV. This unrelated metadata failure is retained and reported;
+it is not a row-423 public conformance failure or a passing aggregate-status result.
+
+Both default-feature wrapper and authenticated matcher SBF artifacts were freshly rebuilt
+offline with platform-tools v1.52 and locked dependencies in private target directories.
+Engine pin: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Host binaries also compile in the private target. No broad suite or engine proofs were run;
+the existing `solana-client v1.18.26` future-incompatibility warning remains.
+
+Focused validation commands from this worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row423-20260912-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::active_leg_admission::v16_program_active_leg_increases_preserve_latent_and_full_domain_owner_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::retained_domain_episodes::v16_program_full_history_reused_episodes_preserve_claims_and_drain_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+# Additional check has the pre-existing INV-058 / row 427 failure described above.
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-024 terminal earned-fee succession (row 410, 2026-09-10)
 
 [`cu/inv_024_terminal_earnings_succession.rs`](cu/inv_024_terminal_earnings_succession.rs)
