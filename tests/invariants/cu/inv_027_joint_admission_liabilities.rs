@@ -2,7 +2,9 @@
 //! maintenance and rounded adverse nontraded-leg target lag, on either party.
 //! INV-060 owns fees alone; INV-053 owns lag after explicit fee collection. This
 //! matrix compares direct admission with public settlement while both are pending.
-//! Already-live portfolios only: flat first-risk ordering remains with #430/#413.
+//! A separate close/age/reopen history covers an explicit public fee/refresh
+//! prefix on previously exposed flat accounts, including rollback and exact IM.
+//! Standalone flat admission without that prefix remains outside this evidence.
 //! All economic state is constructed through System/SPL/ATA/wrapper instructions.
 
 use super::*;
@@ -79,6 +81,287 @@ fn public_deposit(env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey, amount
     )
     .expect("deposit publicly minted collateral");
     token
+}
+
+#[test]
+fn v16_program_flat_reopen_fee_history_precedes_new_exposure() {
+    use crate::support::fuzz_model::{
+        assert_market_stock_census, assert_reservation_encumbrance_census,
+    };
+
+    const CLOSE: u64 = 2;
+    const COLLECTED: u128 = FEE_RATE * (CLOSE - START) as u128;
+    const PENDING: u128 = FEE_RATE * (ADMISSION - CLOSE) as u128;
+    const DEPOSITS: [u128; 2] = [100 + FEE, 200 + FEE];
+    const OPEN_SIZE: i128 = POS_SCALE as i128 / 2;
+    const REOPEN_SIZE: i128 = POS_SCALE as i128;
+    const EXCESS: i128 = REOPEN_SIZE + (POS_SCALE / PRICE as u128) as i128;
+
+    let requirement = |size: i128| (size.unsigned_abs() * PRICE as u128).div_ceil(POS_SCALE);
+    assert_eq!((COLLECTED, PENDING, FEE), (7, 14, 21));
+    assert_eq!((requirement(REOPEN_SIZE), requirement(EXCESS)), (100, 101));
+    assert!(DEPOSITS[0] - COLLECTED >= requirement(EXCESS));
+    assert_eq!(DEPOSITS[0] - COLLECTED - PENDING, requirement(REOPEN_SIZE));
+
+    let mut env = inv018_public_spl_market_with_params(
+        0,
+        V16CuMarketParams {
+            maintenance_fee_per_slot: FEE_RATE,
+            maintenance_margin_bps: 5_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 500,
+            max_abs_funding_e9_per_slot: 0,
+            ..V16CuMarketParams::default()
+        },
+    );
+    env.svm.warp_to_slot(START);
+    env.configure_auth_mark_for_asset_as_admin(0, START, PRICE);
+    let owners = [Keypair::new(), Keypair::new()];
+    let portfolios = owners
+        .each_ref()
+        .map(|owner| public_portfolio(&mut env, owner));
+    let tokens = std::array::from_fn::<_, 2, _>(|party| {
+        public_deposit(&mut env, &owners[party], portfolios[party], DEPOSITS[party])
+    });
+    let keeper_owner = Keypair::new();
+    let keeper = public_portfolio(&mut env, &keeper_owner);
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        portfolios[0],
+        &owners[1],
+        portfolios[1],
+        OPEN_SIZE,
+        PRICE,
+        0,
+    );
+    for portfolio in portfolios {
+        let account = env.portfolio_state(portfolio);
+        assert_eq!(
+            active_leg_for_asset(&account, 0).basis_pos_q.unsigned_abs(),
+            OPEN_SIZE as u128
+        );
+        assert_eq!(account.last_fee_slot.get(), START);
+    }
+    env.svm.warp_to_slot(CLOSE);
+    env.crank(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: CLOSE,
+            observations: crank_observations(0),
+        },
+    );
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        portfolios[0],
+        &owners[1],
+        portfolios[1],
+        -OPEN_SIZE,
+        PRICE,
+        0,
+    );
+    for party in 0..2 {
+        let account = env.portfolio_state(portfolios[party]);
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(&account)));
+        assert_eq!(account.capital.get(), DEPOSITS[party] - COLLECTED);
+        assert_eq!(account.last_fee_slot.get(), CLOSE);
+        assert_eq!(account.fee_credits.get(), 0);
+        assert_eq!(account.pnl.get(), 0);
+    }
+    let closed = portfolios.map(|key| env.svm.get_account(&key));
+    for slot in CLOSE + 1..=ADMISSION {
+        env.svm.warp_to_slot(slot);
+        env.crank(
+            keeper,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert_eq!(
+        portfolios.map(|key| env.svm.get_account(&key)),
+        closed,
+        "aging the market must leave both closed accounts' local fee history untouched"
+    );
+    let group = env.market_state().1;
+    assert_eq!(group.current_slot, ADMISSION);
+    assert_eq!(group.assets[0].slot_last, ADMISSION);
+    assert_eq!(group.assets[0].effective_price, PRICE);
+    assert_eq!(group.assets[0].raw_oracle_target_price, PRICE);
+    assert_eq!(
+        (
+            group.assets[0].oi_eff_long_q,
+            group.assets[0].oi_eff_short_q
+        ),
+        (0, 0)
+    );
+    assert_eq!(group.c_tot, DEPOSITS.iter().sum::<u128>() - 2 * COLLECTED);
+    assert_eq!(group.insurance, 2 * COLLECTED);
+
+    let tracked = [
+        env.market,
+        portfolios[0],
+        portfolios[1],
+        keeper,
+        env.mint,
+        env.vault,
+        tokens[0],
+        tokens[1],
+        owners[0].pubkey(),
+        owners[1].pubkey(),
+        keeper_owner.pubkey(),
+        env.admin.pubkey(),
+        env.vault_authority,
+        env.program_id,
+        spl_token::ID,
+    ];
+    let snapshot = |env: &V16CuEnv| tracked.map(|key| env.svm.get_account(&key));
+    let before = snapshot(&env);
+    let mut prefix = Vec::new();
+    for portfolio in portfolios {
+        prefix.push(Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            data: ProgInstruction::SyncMaintenanceFee {
+                now_slot: ADMISSION,
+            }
+            .encode(),
+        });
+        prefix.push(Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(keeper_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            data: ProgInstruction::PermissionlessCrank {
+                now_slot: ADMISSION,
+                observations: crank_observations(0),
+            }
+            .encode(),
+        });
+    }
+    let submit = |env: &mut V16CuEnv, size| {
+        let mut instructions = vec![heap_ix(), cu_ix()];
+        instructions.extend_from_slice(&prefix);
+        instructions.push(Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(owners[0].pubkey(), true),
+                AccountMeta::new(owners[1].pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolios[0], false),
+                AccountMeta::new(portfolios[1], false),
+            ],
+            data: env
+                .trade_no_cpi_ix(portfolios[0], portfolios[1], 0, size, PRICE, 0)
+                .encode(),
+        });
+        env.svm.expire_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &instructions,
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &owners[0], &owners[1], &keeper_owner][..],
+            env.svm.latest_blockhash(),
+        );
+        tx.verify().expect("public reopen bundle signatures");
+        assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
+        env.svm.send_transaction(tx)
+    };
+    let failure = submit(&mut env, EXCESS).expect_err("new exposure must fit post-fee equity");
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(
+            6,
+            InstructionError::Custom(PercolatorError::EngineInvalidConfig as u32)
+        ),
+        "the fee/refresh prefix must succeed before margin rejects: {failure:?}"
+    );
+    assert_eq!(
+        snapshot(&env),
+        before,
+        "rejected reopen must restore the closed episode, fee cursors, insurance and custody"
+    );
+
+    let admitted = submit(&mut env, REOPEN_SIZE).expect("exact post-fee reopen succeeds");
+    let group = env.market_state().1;
+    let accounts = [portfolios[0], portfolios[1], keeper].map(|key| env.portfolio_state(key));
+    for party in 0..2 {
+        let account = &accounts[party];
+        let cert = health_cert(account);
+        assert_eq!(account.capital.get(), DEPOSITS[party] - COLLECTED - PENDING);
+        assert_eq!(account.last_fee_slot.get(), ADMISSION);
+        assert_eq!(account.fee_credits.get(), 0);
+        assert_eq!(account.pnl.get(), 0);
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(account)),
+            1
+        );
+        let leg = active_leg_for_asset(account, 0);
+        assert_eq!(leg.basis_pos_q.unsigned_abs(), REOPEN_SIZE as u128);
+        assert_eq!(
+            leg.side,
+            if party == 0 {
+                SideV16::Long
+            } else {
+                SideV16::Short
+            }
+        );
+        assert_eq!(cert.certified_equity, (DEPOSITS[party] - FEE) as i128);
+        assert_eq!(cert.certified_initial_req, requirement(REOPEN_SIZE));
+        assert!(assert_current_certificate_matches_independent(
+            "flat reopen after fee history",
+            &group,
+            account
+        )
+        .unwrap());
+    }
+    assert_eq!(
+        health_cert(&accounts[0]).certified_equity,
+        health_cert(&accounts[0]).certified_initial_req as i128
+    );
+    assert_eq!(group.insurance, 2 * (COLLECTED + PENDING));
+    assert_eq!(group.c_tot, DEPOSITS.iter().sum::<u128>() - group.insurance);
+    assert_eq!(group.vault, DEPOSITS.iter().sum::<u128>());
+    assert_eq!(
+        (
+            group.assets[0].oi_eff_long_q,
+            group.assets[0].oi_eff_short_q
+        ),
+        (REOPEN_SIZE as u128, REOPEN_SIZE as u128)
+    );
+    assert_eq!(group.pnl_pos_tot, 0);
+    assert_eq!(group.source_claim_bound_total_num, 0);
+    assert_market_stock_census(
+        "flat reopen after fee history",
+        &group,
+        &env.svm.get_account(&env.market).unwrap().data,
+        &accounts,
+        env.token_amount(env.vault).into(),
+    )
+    .unwrap();
+    assert_reservation_encumbrance_census("flat reopen after fee history", &group, &accounts)
+        .unwrap();
+    for (index, key) in tracked.iter().enumerate() {
+        if ![env.market, portfolios[0], portfolios[1]].contains(key) {
+            assert_eq!(
+                env.svm.get_account(key),
+                before[index],
+                "unrelated Account {key}"
+            );
+        }
+    }
+    let peak_cu = failure
+        .meta
+        .compute_units_consumed
+        .max(admitted.compute_units_consumed);
+    assert_cu_within("flat reopen fee/refresh bundle", peak_cu, 400_000);
+    eprintln!("INV-027 flat fee history: public open/close, 1 prefix rollback, 1 exact reopen; peak CU={peak_cu}");
 }
 
 #[test]
