@@ -346,6 +346,19 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # existing-wallet row410 recredit, row421 frozen custody and row420/433 repair.
 # No production violation or status promotion; generic progress remains OPEN.
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
+# Row 422 bounded policy-succession conformance (2026-09-12):
+# cu/inv_045_reward_policy_catchup.rs,
+# v16_program_reward_policy_succession_preserves_receipts_and_effective_price_catchup.
+# Two public paid-Hybrid/fresh-report histories retain a certified liquidation
+# instruction across a share-policy update during lag. An earlier earned reward
+# is withdrawn before the update or retained through full catchup. Both yield
+# exact effective-price fees, episode-local shares, old discovery exclusion from
+# domain budgets and the same 9439-atom keeper payout. Four positive liquidations,
+# six exact healthy rollbacks; complete owner/custody endpoints agree. No production
+# correction, generic provenance proof or status promotion. See README for exact
+# selectors, private rebuilt-SBF provenance, open-position residual and limits.
+# CPI/AuthMark, multiple assets/providers, exposed keepers and arbitrary histories
+# remain outside this finite family. Row 422 stays OPEN with partial evidence.
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN
 # 423 partial conformance (2026-09-10): cu/inv_028_single_slot_admission.rs::v16_program_batch_admission_cannot_share_last_future_domain_slot.
 # Two individually fitting old-asset legs jointly need 29 domains: both batch orders reject atomically;

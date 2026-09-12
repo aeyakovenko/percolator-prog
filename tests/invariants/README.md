@@ -1,5 +1,92 @@
 # Invariant-owned test coverage
 
+## INV-045 reward policy succession during catchup (row 422, 2026-09-12)
+
+Owner: [cu/inv_045_reward_policy_catchup.rs](cu/inv_045_reward_policy_catchup.rs),
+mounted under
+`inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_policy_catchup`.
+Selector:
+`v16_program_reward_policy_succession_preserves_receipts_and_effective_price_catchup`.
+
+Two public LiteSVM histories carry an earned reward through a liquidation-share
+policy update while a second liquidation is already certified and the accepted
+price still lags both the paid mark and the fresh report. One withdraws the first
+reward before the update; the other retains it until after full catchup. The exact
+same second liquidation instruction is constructed and used for refresh before
+the policy update, then retained unchanged for liquidation afterward.
+
+Paid Hybrid discovery charges 1,540,072 atoms and stages 992,320 from 1,000,000.
+Fresh reports at slots 6 and 7 produce effective prices 997,600 and 995,206; the
+second report targets 980,000. Independent cap arithmetic and two-stage fee
+rounding bind the effective price, with distinct results at the original price,
+paid mark, fresh target and trade prints. The two episodes close 12,001,223 and
+16,653,247 quantity units, charge 5,987 and 8,287 atoms, and pay 1,995 and 6,444
+atoms under the respective 3,333 and 7,777 bps policies. The update increments its
+control sequence and preserves complete portfolio Accounts, the oracle profile,
+OI, insurance and domain budgets. The old reward is neither repriced nor paid
+again. Only new fee remainders enter domains, totaling 2,917/2,918; discovery stock
+stays outside those entitlements. Full catchup at slot 14 pays no additional fee
+or reward. Each boundary has an exact healthy-retry rollback, six in total.
+
+Both withdrawal histories return precisely 9,439 SPL atoms, including keeper
+principal. Remaining owner values, insurance, budgets and vault balances agree.
+Stock/reservation/source-rate censuses and independently checked current health
+certificates accompany public settlement of the other exposed accounts. SPL
+custody and the mint are framed, and initial custody equals remaining custody plus
+keeper payouts. Still-open fractional positions leave the same four-atom residual
+in both histories; this test does not claim terminal redemption of those claims.
+An initial development assertion incorrectly required rounded open-position claims
+plus insurance to exhaust custody. It was corrected to retain the stock census,
+nonnegative residual and complete endpoint comparison. No reward-price or policy
+assertion failed, and no production correction was needed.
+
+The distinct obligation is earned-receipt persistence and execution-time policy
+selection across a certified liquidation during paid-mark/fresh-report catchup.
+The adjacent retained-penalty test has a constant policy and no earlier paid
+reward; authenticated-handoff coverage has only one liquidation episode per
+history; the INV-061 control checks a single fixed-share reward. This increment
+adds no fractional-carry, observation-completeness or mark-envelope matrix.
+**Row 422 remains OPEN with partial conformance evidence.** Generic provenance
+persistence, CPI/AuthMark handoffs, multiple assets/providers, exposed keepers,
+funding/maintenance, arbitrary policy histories and full owner exits remain
+outside this finite family. Current behavior did not violate the tested property.
+
+Base: `2e8c6c97126ac5dc354afc0b9c5fa5d95dd6529d`, the requested
+`origin/codex/astra-open-holdout-ledger-20260912`. Worktree:
+`/tmp/percolator-row422-20260912`; branch:
+`codex/row422-mark-reward-provenance-20260912`. A private copy of the
+`/dev/shm/percolator-row426-target` build cache seeded this worker's target;
+host tests and default-feature wrapper SBF were rebuilt locked/offline from this
+worktree. Platform-tools v1.52; engine pin
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The new selector passes both histories; peak crank/policy/payout CU are
+319,341/1,870/52,088, within the existing route limits. The four adjacent controls
+pass 4/4, including 96 actual-catchup histories and 16 authenticated-handoff
+histories. Charter/index and machine-status checks pass 2/2; formatting and Git
+whitespace checks pass. Existing unused-support and Solana future-compatibility
+warnings remain. Exact validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row422-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row422-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row422-tmp CARGO_BUILD_JOBS=4
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_policy_catchup::v16_program_reward_policy_succession_preserves_receipts_and_effective_price_catchup \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::retained_penalty_handoff::v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper_exit \
+  inv_045_no_free_mark_movement::accepted_price_reward::reward_catchup_order::v16_program_reward_price_tracks_actual_catchup_across_report_and_crank_orders \
+  inv_061_deterministic_bounded_liquidation::v16_program_liquidation_cranker_reward_bounded_by_fee
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-073 native provider redemption before unsigned remainder (row 420, 2026-09-12)
 
 Owner: [cu/inv_073_native_provider_redemption.rs](cu/inv_073_native_provider_redemption.rs),

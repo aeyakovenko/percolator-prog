@@ -12,6 +12,9 @@ use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::
 #[path = "inv_045_retained_penalty_handoff.rs"]
 mod retained_penalty_handoff;
 
+#[path = "inv_045_reward_policy_catchup.rs"]
+mod reward_policy_catchup;
+
 fn values(env: &V16CuEnv, portfolios: [Pubkey; 5]) -> [i128; 5] {
     portfolios.map(|key| {
         let account = env.portfolio_state(key);
