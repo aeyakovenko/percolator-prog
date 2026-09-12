@@ -47,6 +47,18 @@ preserves quantities, fee allocation and complete owner SPL endpoints. This adds
 INV-011/014/024/036/080 evidence. Single-CPI enforcement and general policy/quantity
 histories remain gaps; holdout labels 411/432 remain OPEN.
 
+The [retained reserve expiry-stock audit](retained_reserve_stock_audit_20260912.md)
+adds twelve public LiteSVM histories under
+`inv_063_backing_expiry_normalization::retained_reserve_stock`. Retained principal
+and earned-fee payouts cross both instruction orders and authenticated
+`expiry-1`/`expiry`/`expiry+1` with a nonzero backing lien. An expired principal
+suffix restores the fee transfer and ledger exactly; the original standalone fee
+payout remains usable, and exhausted fee stock cannot debit remaining principal.
+This adds INV-024/031/036/063/080 stock-accounting evidence. It does not establish
+standalone reserve-intent consumption across replenishment. Expiry normalization,
+impairment, shutdown/resolution, asset reuse, replenished earnings, and nonzero
+insurance encumbrance remain outside this increment. Labels **415/428 stay OPEN**.
+
 The [retained reserve replenishment audit](retained_reserve_replenishment_20260912.md)
 adds eight public LiteSVM histories under INV-008. A retained insurance payout,
 replenishment and operator A-to-B-to-A handoff preserve exact signed-amount and
