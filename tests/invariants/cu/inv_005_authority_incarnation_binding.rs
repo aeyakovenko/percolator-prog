@@ -31,6 +31,9 @@
 //! `cold_admin_earned_reserve` composes cold-admin succession with live liened backing,
 //! earned fees, policy renewal, and partial principal repayment. Correct current signers
 //! cannot substitute the funded holder or destination, or reclassify its earned stock.
+//! `consumed_backing_containment` instead repays all principal before management,
+//! preserving consumed receivables past expiry and Active/DrainOnly. Authenticated
+//! oracle renewal restores incumbent payouts; only incumbent consent moves the role.
 //!
 //! Guarantee boundary: authentication alone does not protect users from a compromised configured
 //! authority. The role matrix proves only the deployed protocol envelope stated for each role;
@@ -56,6 +59,9 @@ mod funded_insurer_stale_resolution;
 
 #[path = "inv_005_cold_admin_earned_reserve.rs"]
 mod cold_admin_earned_reserve;
+
+#[path = "inv_005_consumed_backing_containment.rs"]
+mod consumed_backing_containment;
 
 fn inv005_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source

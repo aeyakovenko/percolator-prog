@@ -16,7 +16,7 @@ const EARNINGS: u128 = (LIEN * RATE as u128).div_ceil(10_000);
 const PREFIX: u128 = 137;
 const SUPPLY: u128 = CAPITAL[0] + CAPITAL[1] + PRINCIPAL;
 
-fn wrap(env: &V16CuEnv, ix: ProgInstruction, accounts: Vec<AccountMeta>) -> Instruction {
+pub(super) fn wrap(env: &V16CuEnv, ix: ProgInstruction, accounts: Vec<AccountMeta>) -> Instruction {
     Instruction {
         program_id: env.program_id,
         accounts,
@@ -24,7 +24,7 @@ fn wrap(env: &V16CuEnv, ix: ProgInstruction, accounts: Vec<AccountMeta>) -> Inst
     }
 }
 
-fn land(
+pub(super) fn land(
     env: &mut V16CuEnv,
     instructions: &[Instruction],
     signers: &[&Keypair],

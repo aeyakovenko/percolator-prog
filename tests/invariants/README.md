@@ -1,5 +1,84 @@
 # Invariant-owned test coverage
 
+## INV-005 consumed backing after principal repayment (row 416, 2026-09-12)
+
+Owner: [cu/inv_005_consumed_backing_containment.rs](cu/inv_005_consumed_backing_containment.rs),
+mounted under `inv_005_authority_incarnation_binding::consumed_backing_containment`.
+Selector: `v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only`.
+Base: `575a6a0ee7f4992323facd8f3136203a9da7c029`, the requested origin branch at
+worktree creation. Worktree: `/tmp/percolator-row416-cold-admin-20260912`;
+branch: `codex/row416-cold-admin-containment`.
+
+Four public System/SPL/ATA/wrapper histories cross backing domains 0/1 with
+Active/DrainOnly. A 5,000-atom profitable episode earns 708/875 provider atoms.
+Both positions close, a permissionless crank releases their liens, the winner
+converts its PnL, and all 100,000 provider principal atoms are repaid. The bucket
+then has no fresh, valid-liened or impaired backing, but retains the conversion's
+5,000-atom consumed receivable and the provider's earnings.
+
+Past the recorded slot-100 expiry, a correctly signed cold-admin rotation and
+all-but-one-atom earnings payout both execute before funded-role replacement
+rejects. At authenticated slot 112, stale maturity independently rejects payout
+with OracleStale and rolls back the valid rotation. The unchanged oracle holder's
+fresh report uses Clock slot 112 despite caller slot MAX; the same rotation and
+payout then commit without renewing backing or altering other roles. Cold-admin
+replacement still rejects with one earned atom, and again after an executed
+last-atom SPL payout: the consumed receivable itself retains incumbent consent.
+The incumbent separately receives that last atom and authorizes the role transfer.
+Both users then withdraw their complete input-derived claims. Both administrators
+receive zero quote atoms; the vault and user capital finish at zero.
+
+The test checks complete Account rollback, exact signature fees, successful prefix
+counts, transaction size, complete market economics, provider ledger history,
+fixed SPL supply, oracle configuration, role profiles and control sequences.
+It reuses the existing cold-admin test's transaction/frame helper. Results:
+**4 histories, 16 exact rollbacks, 8 completed SPL-prefix rollbacks, 4 incumbent
+handoffs and 8 user exits**. Peak CU: rejection **224,577**, management/payout
+**228,526**, user exit **140,263**; existing limits are unchanged.
+
+**Row 416 remains OPEN.** This is bounded privileged INV-005/020/024/027/055
+coverage. No public-interface LoF/DoS was found in these histories; no production
+or engine change is made. Nonconsensual funded-oracle management, Recovery,
+Resolved, authority ABA and arbitrary role/history products remain outside this
+increment. The engine remains pinned to `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+
+Duplicate candidates discarded during review: ordinary empty-role management,
+live valid-lien/earned-reserve rotation, and unconsumed two-domain refilling are
+already owned by the nearby INV-005 selectors. No duplicate tests were retained.
+The preliminary `earnings_only_containment::v16_program_earnings_only_role_survives_expiry_stale_clock_and_drain_only`
+selector was run during fixture development and removed: conversion retains a
+consumed receivable, and the proposed refill/final-principal-withdrawal order with
+unpaid earnings is not admitted by the pinned engine's bucket-shape rules. It
+does not establish loss or permanent denial; the retained public history proves
+complete payouts and incumbent-consented succession with that receivable present.
+
+Default-feature SBF was rebuilt locally using platform-tools v1.52, locked/offline.
+Artifact SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The new selector and the existing earned-reserve/refunding controls pass. The
+additional funded-insurer stale-resolution control fails on its unsigned terminal
+insurance payout rejection expectation; the wrapper now permits a canonical
+beneficiary payout without that signature. The same exact selector fails in the
+detached original-base checkout `/tmp/percolator-row416-base-check-20260912`.
+Its test, production source, harness and Cargo inputs are unchanged by this patch.
+This pre-existing expectation is not counted as a new LoF/DoS or silently repaired.
+Focused validation commands (no broad-suite claim):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row416-cold-admin-20260912-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::consumed_backing_containment::v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_005_authority_incarnation_binding::cold_admin_earned_reserve::v16_program_cold_admin_rotation_preserves_earned_reserve_after_partial_principal_repayment \
+  inv_005_authority_incarnation_binding::backing_role_refunding::v16_program_backing_role_containment_tracks_both_domains_through_refunding
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::funded_insurer_stale_resolution::v16_program_funded_insurer_handoff_preserves_stale_deadline_and_permissionless_user_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-008 underfunded withdrawal rail and replenishment (row 415, 2026-09-12)
 
 Owner: [cu/inv_008_underfunded_rail_retry.rs](cu/inv_008_underfunded_rail_retry.rs),
