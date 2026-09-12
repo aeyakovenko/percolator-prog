@@ -368,6 +368,23 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # git diff --check
 # git diff --cached --check
 # git show --format= --check HEAD
+# 433 frozen-destination increment (2026-09-12): cu/inv_073_frozen_reserve_replacement.rs.
+# Public freeze of both empty reserve ATAs, then provider/beneficiary/operator/freeze
+# keys dropped. Keeper-created ordinary SPL custody accepts all three unsigned reserve
+# payouts: provider 100000+875, beneficiary 31, fixed supply 2152533. Original ATAs stay
+# frozen through exact admin-signed vault/slab close. Two invalid frozen-destination
+# suffixes restore System creation, SPL initialization, a completed payout, account
+# absence and rent exactly, except calculated signature fees. Full decoded market,
+# source/risk epochs, token/ledger attribution and stock/encumbrance censuses checked.
+# New selector: v16_program_frozen_reserve_destinations_allow_public_replacement_without_thaw_or_beneficiary_signatures.
+# New selector 1/1; CU maxima [freeze,rejected bundle,replacement payout,close] =
+# [4563,424835,443354,19242], asserted ceiling 600000 (helper transaction limit 1200000).
+# Adjacent exact controls 7/7; charter/index 1/1; formatting passes.
+# Exact focused commands and artifact provenance are in README's frozen-reserve section.
+# No production change. Duplicate payout permutations, signed ATA repair, thaw/retry,
+# cleanup attribution and depleted-reserve retirement omitted. OPEN: frozen vault,
+# active refreezing, arbitrary roles/rails/history, Recovery/recredit, receipts/pending
+# losses, max shape and absent market authority; mechanical close remains signed.
 433	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-024,INV-027,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-081,INV-082	terminal-reserve+x-missing-signer+x-public-payout	terminal-economic-progress-does-not-require-an-adversarial-reserve-beneficiary-signature	OPEN
 # Row 434 bounded extension (2026-09-12): cu/inv_027_flat_reopen_routes.rs,
 # v16_program_flat_reopen_route_switch_preserves_fee_history_and_senior_exit.

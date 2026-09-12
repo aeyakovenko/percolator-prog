@@ -33,6 +33,10 @@ pub(crate) use terminal_public_reserves::{
 mod terminal_reserve_close_retry;
 pub(crate) use terminal_reserve_close_retry::verify_terminal_reserve_close_retry;
 
+#[path = "inv_073_frozen_reserve_replacement.rs"]
+mod frozen_reserve_replacement;
+pub(crate) use frozen_reserve_replacement::verify_frozen_reserve_replacement;
+
 const CAPITAL: [u64; 2] = [52_502, 2_000_000];
 const BACKING: u64 = 100_000;
 const INSURANCE: u64 = 31;
@@ -58,9 +62,16 @@ fn terminal_earnings_world() -> TerminalEarningsWorld {
 }
 
 fn terminal_earnings_world_with_exit(terminal_exit: bool) -> TerminalEarningsWorld {
-    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+    terminal_earnings_world_with_freeze_authority(terminal_exit, None)
+}
 
-    let mut env = inv018_public_spl_market_with_params(
+fn terminal_earnings_world_with_freeze_authority(
+    terminal_exit: bool,
+    freeze_authority: Option<Pubkey>,
+) -> TerminalEarningsWorld {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_freeze_authority;
+
+    let mut env = inv018_public_spl_market_with_freeze_authority(
         0,
         V16CuMarketParams {
             max_portfolio_assets: 1,
@@ -69,6 +80,8 @@ fn terminal_earnings_world_with_exit(terminal_exit: bool) -> TerminalEarningsWor
             max_price_move_bps_per_slot: 500,
             ..V16CuMarketParams::default()
         },
+        1,
+        freeze_authority,
     );
     let admin = env.admin.insecure_clone();
     let incumbent = Keypair::new();

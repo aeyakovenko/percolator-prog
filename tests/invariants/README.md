@@ -498,6 +498,93 @@ cargo fmt --all -- --check
 git diff --check && git diff --cached --check && git show --format= --check HEAD
 ```
 
+## INV-073 frozen reserve destinations and public replacement (row 433, 2026-09-12)
+
+Owner: [cu/inv_073_frozen_reserve_replacement.rs](cu/inv_073_frozen_reserve_replacement.rs),
+mounted beside the public earned-fee fixture and invoked by the INV-073 selector
+`v16_program_frozen_reserve_destinations_allow_public_replacement_without_thaw_or_beneficiary_signatures`.
+The existing INV-018 public mint/market constructor and INV-024 earnings fixture
+gain an optional freeze authority; their existing callers continue to pass `None`.
+All economic state comes from System/SPL/ATA/wrapper instructions. Account packing
+builds expected host snapshots only; no initialized account bytes are installed.
+
+One public fixed-supply/classic-SPL/asset-0 history earns 875 provider-fee atoms,
+pays both users exactly 56,627/1,995,000 atoms and deletes their portfolios. The
+provider, insurance beneficiary, insurance operator, freeze authority, keeper and
+market authority are distinct. Public SPL instructions freeze both empty reserve
+ATAs; provider, beneficiary, operator and freeze-authority keys are then dropped.
+Mint authority was revoked at the input-derived 2,152,533-atom supply.
+
+The keeper funds and initializes two ordinary SPL token accounts owned by the
+absent beneficiaries. The only signatures on those transactions are the keeper
+and the new account being created. Every reserve instruction has unsigned metas.
+The new accounts receive exactly 100,000 principal plus 875 earnings atoms for
+the provider and 31 insurance atoms for the beneficiary, without a thaw, original
+destination repair or role succession during the continuation. The original ATAs
+remain byte-identical and frozen through administrative vault/slab closure.
+
+Each replacement first occurs in a rejected transaction: System creation, SPL
+initialization and one actual reserve payment succeed before a payout to a frozen
+original destination returns `InvalidTokenAccount` at instruction 5. Both complete
+Account rollbacks restore the absent replacement account, its creation rent, the
+completed payout and all tracked economic/control/ledger state, allowing only
+the exact two-signature fee. The retained valid prefix then commits. In the
+provider continuation a final unsigned earnings payment initializes the lazy
+ledger with the correct provider and cumulative 875-atom payment.
+
+Full decoded market/config comparisons check each committed and rejected prefix,
+including the source-credit/risk epoch increments at principal exhaustion. Stock
+and encumbrance censuses, fixed supply, complete mint/vault/original destination
+frames, exact replacement-account owner/delegate/close-authority fields, payer
+rent and administrator rent refund bind the accounting. Final closure leaves a
+typed tombstone at exact rent and no market vault. The keeper/admin/operator get
+no reserve tokens. The freeze authority remains recorded on the mint throughout.
+
+This extends the frozen-destination boundary to **fresh public custody with absent
+beneficiary and freeze signatures**. Discarded duplicates: ordinary unsigned payout
+orders and final-close replay (existing row433), signed ATA recreation (INV-024),
+thaw-and-retry (row418), last-portfolio submitter attribution (row410), and depleted
+provider/insurance retirement (rows420/421). **Row433 remains OPEN**: frozen vaults,
+an authority actively freezing each new destination, arbitrary role/quote/asset
+histories, native/dual rails, Recovery/recredit, pending-loss/receipt composition,
+maximum shapes and unavailable market authorities are outside this witness.
+Owner-signed portfolio deletion and administrator-signed slab closure remain
+fixture prerequisites. No production/dependency/pin or invariant-status change
+and no new production defect are claimed.
+
+The worker originally validated this in isolated worktree
+`/tmp/percolator-row433-coverage.ikLcJM/worktree`; coordinator integration reran
+the new selector, seven adjacent exact controls, charter/index, formatting and
+Git whitespace checks on the current invariant branch. No SBF rebuild or
+full-suite run is claimed. The new selector passes **1/1**, with two exact
+creation/payout rollbacks, two committed replacement accounts, three unsigned
+reserve payments and one closure. CU maxima `[freeze, rejected bundle,
+replacement payout, slab close]` are **[4,563, 424,835, 443,354, 19,242]**,
+below the asserted 600,000-CU ceiling; the reused transaction helper installs a
+1,200,000-CU limit. The initial run completed all public replacement payouts but
+caught omitted principal-exhaustion epoch increments in the expected host model;
+the corrected model passes.
+
+Exact focused commands, with no broad suite:
+
+```sh
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_frozen_reserve_destinations_allow_public_replacement_without_thaw_or_beneficiary_signatures -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry \
+  inv_073_no_permanent_user_lock::v16_program_terminal_public_reserve_disposition_preserves_value_across_orders \
+  inv_073_no_permanent_user_lock::v16_program_public_reserve_payments_wait_for_resolved_senior_disposition \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_reserve_destination_recovery::v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_value \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_cleanup_submitter::v16_program_last_portfolio_cleanup_cannot_confer_reserve_entitlement_on_submitter \
+  inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent \
+  inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_primary_mint_decimals_preserve_exact_raw_atom_accounting
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-073 absent reserve recipients and final-close retry (row 433, 2026-09-12)
 
 Owner: [cu/inv_073_terminal_reserve_close_retry.rs](cu/inv_073_terminal_reserve_close_retry.rs).
