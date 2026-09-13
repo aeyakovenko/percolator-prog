@@ -1,5 +1,88 @@
 # Invariant-owned test coverage
 
+## INV-024 expired principal through role succession (row 429, 2026-09-13)
+
+Owner: [cu/inv_024_expired_principal_role_succession.rs](cu/inv_024_expired_principal_role_succession.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::expired_principal_role_succession`.
+One new selector:
+`v16_program_expired_principal_stays_out_of_successor_fee_and_insurance_claims`.
+
+Four public LiteSVM histories cross fee-beneficiary succession before/after
+terminal principal normalization with both final fee/insurance payout orders.
+The shared fixture earns 875 utilization-fee atoms from signed live trades,
+resolves, pays both owners and closes their portfolios through public wrappers.
+After 101 principal atoms, 17 fee atoms and 11 insurance atoms are paid, expiry
+at slot 100 retires the remaining 99,899 principal atoms. A fee payout in the
+normalization transaction belongs to the current beneficiary: old/new fee
+ledgers finish at 18/857 if succession follows normalization, or 17/858 if it
+precedes normalization. Consensual insurance succession then gives the former
+provider the remaining 20 insurance atoms; its earlier fee history stays local.
+The former insurer becomes the fee beneficiary without acquiring retired principal.
+
+An input-derived attribution book tracks each role/holder payment and observation
+independently of wrapper classification helpers. Every committed step checks raw
+market stocks, exact authority profiles/epochs, untouched sibling domains, all
+four complete decoded ledger records, full SPL destination/vault Account images,
+fixed mint supply and conservation. Each history rejects three transactions:
+normalization plus a real fee payout followed by operator-for-provider substitution;
+a successor fee payout followed by substitution of the former insurer's ledger;
+and a new-insurer payout followed by a new-provider withdrawal of expired principal.
+Exact error/index and wrapper/SPL success logs establish each executed prefix.
+Every compiled/tracked Account rolls back, including lazy ledger initialization,
+normalization and custody; only the payer's exact signature fee remains. Each
+identical valid prefix is then retried successfully. Final closure burns exactly
+99,899, preserves recipient and ledger Account images, closes the vault, refunds
+exact market/vault rent and retains canonical tombstone rent. Thus the retired
+stock cannot be paid or relabeled as either successor's fee or insurance claim.
+All state construction and transitions use System/SPL/ATA/wrapper instructions;
+packing expected Account copies never installs bytes into the SVM.
+
+Net new: **earned-fee succession across terminal principal retirement, composed
+with exchange of the insurance beneficiary and role-specific paid histories**.
+The existing funded-role exchange keeps principal fresh and pays it to the
+successor; the existing earned-fee expiry witness keeps both holders fixed.
+This does not add terminal-submitter, receipt-late-fee, missing-signer progress or
+custody-program recreation evidence. Only row 429 gains bounded coverage.
+
+**Row 429 remains OPEN.** Four finite classic SPL, asset-zero/domain-one histories
+are not a generic generator/oracle. Arbitrary role histories, new live accrual
+during succession, depleted insurance recovery, other assets/quote rails, mature
+live shutdown fallback, absent signers and maximum account shapes remain outside
+this increment. No production change, observed public-route violation or status
+promotion. The new selector passed 1/1 in 2.37s, with four closures and twelve
+exact rollbacks; peak measured transaction cost was 450,366 CU under the inherited
+600,000-CU and 1,232-byte bounds. Fixture bootstrap CU is not included.
+
+Validation base: `416aeb07`, branch `codex/astra-row429-terminal-reserve-20260913`,
+worktree `/home/anatoly/percolator-row429-astra-20260913`. Private build caches were
+copied without hard links from `/dev/shm/row418-token-terminal-20260913-target`;
+default-feature wrapper and auth matcher were rebuilt here with locked/offline
+platform-tools v1.52. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The existing funded-role selector below passed 1/1 in 7.29s across twelve histories
+and 48 rollbacks, with peak 449,472 CU. Both required metadata gates passed 1/1;
+formatting and whitespace checks passed. Existing unused-support warnings and the
+`solana-client v1.18.26` future-incompatibility warning remain. No broad suite or
+engine proof was run. Exact build and validation commands from this worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row429-terminal-reserve-20260913-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/row429-terminal-reserve-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::expired_principal_role_succession::v16_program_expired_principal_stays_out_of_successor_fee_and_insurance_claims -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::terminal_role_exchange::v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-070 terminal custody program recreation (row 418, 2026-09-13)
 
 Owner: [cu/inv_070_terminal_custody_program_recreation.rs](cu/inv_070_terminal_custody_program_recreation.rs),

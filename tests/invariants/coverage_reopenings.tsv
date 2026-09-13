@@ -1351,6 +1351,25 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # nonconsensual transfer, live shutdown admin fallback, other assets/rails, absent
 # signers, arbitrary histories, ledger disposal or generic generator/oracle claim.
 # No production change or observed public-route violation; row remains OPEN.
+# Row 429 expired-principal succession increment (2026-09-13):
+# cu/inv_024_expired_principal_role_succession.rs; four public LiteSVM histories
+# cross fee succession before/after terminal normalization and final payout order.
+# Exactly 99899 expired principal atoms are burned, never inherited by either new
+# role. Old/new fees are 18/857 or 17/858 according to the normalization-time holder;
+# insurance paid history remains 11/20 as those same wallets exchange roles.
+# Input-derived role/holder accounting checks raw stocks, four typed ledgers and
+# complete SPL Account frames. Twelve exact prefix rollbacks cover normalization,
+# real payouts, operator substitution, former-beneficiary ledger substitution and
+# expired-principal rejection; identical valid prefixes retry, four rent-exact
+# closures preserve paid history. New selector 1/1, peak 450366 CU <= 600000.
+# Funded-role control 1/1 (12 histories), metadata gates 2/2, fmt/whitespace pass.
+# Command: cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::expired_principal_role_succession::v16_program_expired_principal_stays_out_of_successor_fee_and_insurance_claims -- --exact --nocapture --test-threads=1
+# README's expired principal through role succession entry records exact build,
+# funded-role control and metadata commands. Existing exchange keeps principal
+# fresh; existing expiry keeps holders fixed. Other assets/rails, arbitrary role
+# histories, new live accrual, insurance recovery and shutdown fallback remain open.
+# No out-of-band program state writes, production change or row/status promotion;
+# this is bounded row429-only evidence, not a generic generator/oracle.
 429	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-025,INV-027,INV-036,INV-070,INV-081	shutdown-reserve+x-beneficiary+x-attribution	terminal-reserve-value-remains-bound-to-the-beneficiary-and-role-that-earned-it	OPEN
 # 432 public red/green coverage (2026-09-12): cu/inv_014_delayed_policy_and_policy_epoch_safety.rs::v16_retained_single_cpi_taker_fee_cap_rejects_policy_increase.
 # Parent source accepted a retained TradeCpi after trade_fee_base_bps rose above the taker's signed fee_bps;

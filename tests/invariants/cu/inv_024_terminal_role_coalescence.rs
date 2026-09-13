@@ -15,6 +15,9 @@ mod live_earnings_terminal_exchange;
 #[path = "inv_024_terminal_fee_share_succession.rs"]
 mod terminal_fee_share_succession;
 
+#[path = "inv_024_expired_principal_role_succession.rs"]
+mod expired_principal_role_succession;
+
 const FEES: usize = 0;
 const INSURER: usize = 1;
 const PRINCIPAL: usize = 2;
