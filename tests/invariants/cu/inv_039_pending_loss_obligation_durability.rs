@@ -54,6 +54,9 @@ mod terminal_fees;
 #[path = "inv_039_pending_loss_shared_holder.rs"]
 mod shared_holder;
 
+#[path = "inv_039_pending_loss_owner_partition.rs"]
+mod owner_partition;
+
 #[path = "inv_039_pending_loss_backing_expiry.rs"]
 mod backing_expiry;
 
