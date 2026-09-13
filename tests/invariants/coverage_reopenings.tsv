@@ -988,6 +988,28 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Existing route rotation does not own a retained renewal/fill rollback at this bound.
 # One active asset, integral AuthMark, detached unliened claims, zero fees/funding and
 # cooperative live exit only; general resource/lifecycle closure remains OPEN. Tests only.
+# 423 partial conformance (2026-09-13): cu/inv_028_reserved_loss_exit.rs,
+# inv_028_source_domain_realizability_cap::historical_latent_capacity::exit_resource_reservation::reserved_loss_exit::v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit.
+# Two public histories admit 2500 lien-backed notional while preserving 500 unpledged
+# historical claim atoms. Provider surplus withdrawal and an unfunded six-lot increase
+# produce four exact full-Account rollbacks; later whole/split loss settlement consumes
+# 250 historical backing atoms, preserves the liens and independently exposes 250
+# residual vault atoms. Signed Resolved exits realize historical sources first, then
+# pay the residual-only peer claim: exact owner endpoints 1002750/997250, provider
+# 6400, empty vault and deleted portfolios. Loss plus final realization spends each
+# original historical claim exactly once. This is a resource-consumption/exit increment,
+# not another source-capacity, first-risk liability or missing-signer matrix.
+# Base c540acde; 145 suffix calls (6 settlement, 32 terminal), peak 997726 CU
+# (402274 headroom), measured packets <=587 bytes, <=13 cleanup calls. CU/call totals
+# exclude funding; packet measurements exclude mark/resolve helpers. README records exact
+# new/related selectors, environment/build commands, metadata gates and diff checks.
+# Command: cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::exit_resource_reservation::reserved_loss_exit::v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit -- --exact --nocapture --test-threads=1
+# Related: cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::exit_resource_reservation::v16_program_historical_liens_preserve_future_domains_and_owner_exit -- --exact --nocapture --test-threads=1
+# One long active asset, at most 18 prospective domains, integral fresh backing,
+# zero fees/funding, coupled single/batch route and settlement partition/order.
+# Fixed historical-first terminal order; reverse receipt/top-up schedules, spending
+# liened face, larger losses, CPI, expiry/Recovery and generic closure remain OPEN.
+# Test-only; production, machine status and the OPEN row are unchanged.
 423	DoS	BLOCKER	INV-028	INV-028,INV-031,INV-057,INV-073,INV-077,INV-078,INV-082,INV-089	historical-capacity+x-latent-domain+x-position-admission	risk-admission-reserves-every-future-settlement-resource-needed-for-exit	OPEN
 # 424 partial public coverage (2026-09-10): cu/inv_070_terminal_prefix_reuse.rs::v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback covers admin/permissionless reuse behind cursor 2, live success controls, exact terminal rejection/expiry-prefix rollback, and bounded close. General actionability invalidation remains OPEN; see README's retired-slot reuse entry.
 # 424 partial public coverage (2026-09-12): cu/inv_071_terminal_prefix_recredit.rs::v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement.

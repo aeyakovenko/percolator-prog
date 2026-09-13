@@ -3064,6 +3064,94 @@ rmdir "$TMPDIR"
 Default-feature SBF SHA-256:
 `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
 
+## INV-028 admission resources through loss and Resolved exit (row 423, 2026-09-13)
+
+Owner: [cu/inv_028_reserved_loss_exit.rs](cu/inv_028_reserved_loss_exit.rs), mounted
+under `inv_028_source_domain_realizability_cap::historical_latent_capacity::exit_resource_reservation::reserved_loss_exit`.
+Exact selector: `v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit`.
+Base: `c540acde`; isolated worktree
+`/home/anatoly/percolator-row423-astra-20260913`, branch
+`codex/astra-row423-exit-resources-20260913`. Test-only; no production/pin changes.
+
+Two public LiteSVM histories reuse the existing real System/SPL/ATA/matcher/wrapper
+funding fixture: 16 detached historical claims total 3,000 atoms, with 6,400 atoms
+of provider top-ups. After the risk owner withdraws all 1,000,000 senior atoms,
+admission of 25 lots at price 100 reserves exactly 2,500 historical backing atoms
+and preserves 500 unpledged claim atoms. The provider withdraws its 3,900-atom
+surplus. A further six-lot admission exceeds total claim support and rejects with
+`EngineLockActive`; the exact full-Account rollback includes message accounts,
+market/portfolios, matcher context, token custody, metadata and payer signature fees.
+The provider's surplus-plus-one rejection has the same exact rollback check.
+
+The new resource consumer is a later adverse public settlement, not another
+source-capacity boundary. A price decline of ten atoms, submitted either whole or
+as four then six, consumes exactly 250 unpledged historical backing atoms across
+at least two domains while preserving all 2,500 live lien atoms. The two schedules
+also exercise single/batch no-CPI routes and opposite settlement orders, coupled
+to the split flag. Input-derived per-domain claim burns equal spent backing and
+provider receivables; raw backing plus capital leaves exactly 250 atoms of residual
+vault custody. That value is not mislabeled as fresh backing for the peer's new
+250-atom source claim, whose live backing is zero. All settlement leaves every SPL
+Account unchanged, frames the absent portfolio, and strictly reduces mark/PnL debt.
+
+Bilateral flattening and bounded one-domain public lien cleanup release the
+remaining provider principal. After all 6,400 provider atoms return, public
+resolution and **signed** `CloseResolved` continuations realize historical sources
+first, then the peer's residual-only junior claim. Each terminal call decreases
+source/payment debt and binds its token payout to the vault debit. The exact owner
+endpoints are 1,002,750 / 997,250 atoms; both portfolio Accounts are deleted and
+vault, capital, insurance and materialized portfolio count are zero. Each historical
+domain's final spent/receivable labels equal its initial claim, counting loss and
+terminal realization once. These labels are accounted for, not claimed retired.
+The shared stock, encumbrance and source-rate censuses run after every suffix
+transaction. No program-owned bytes are injected or restored out of band.
+
+This differs from the related `v16_program_historical_liens_preserve_future_domains_and_owner_exit`,
+which grows favorable claims and returns unused reservations through live owner
+conversion. This increment composes admission, withdrawal of provider surplus,
+actual historical backing consumption, residual custody and complete Resolved
+payout. It does not add first-risk liability or absent-signer terminal coverage.
+
+**Row 423 remains OPEN.** This is two fixed histories using at most 18 prospective
+domains, one active asset, a long risk owner, integral marks, no fees/funding,
+fresh provider backing and cooperative flattening. Losses fit the 500-atom
+unpledged support; spending liened face itself is not claimed. Terminal payout
+order is historical owner first; reverse order requires receipt/top-up scheduling
+and is outside this witness. CPI, expiry, Recovery, fractional support, larger
+losses, maximum shapes and generic admission/resource/liveness closure remain open.
+Development corrected test expectations about liened face burns, residual versus
+new-source backing, and terminal receipt ordering; no production violation was proved.
+
+Validation uses private copied dependency artifacts followed by fresh default-feature
+wrapper and auth-matcher SBF builds with platform-tools v1.52. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The new selector passes two worlds, 145 suffix calls (including six settlement
+and 32 signed terminal calls) and four exact rollbacks. Peak 997,726 CU leaves
+402,274 CU below 1,400,000; measured packets are at most 587 bytes and cleanup
+takes at most 13 calls. CU/call totals exclude the reused funding history;
+packet measurements exclude the mark/resolution helper transactions. The related
+selector passes eight worlds and 32 rollbacks; both metadata gates, formatting
+and diff checks pass. Exact commands follow; logs reside in the private TMPDIR:
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/row423-exit-resources-20260913-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/row423-exit-resources-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+# From tests/fixtures/auth_matcher, with the same exports:
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir /home/anatoly/percolator-row423-astra-20260913/tests/fixtures/auth_matcher/target/deploy --offline -- --locked
+# From the worktree root:
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::exit_resource_reservation::reserved_loss_exit::v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::exit_resource_reservation::v16_program_historical_liens_preserve_future_domains_and_owner_exit -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-028 historical liens and future exit resources (row 423, 2026-09-13)
 
 Owner: [cu/inv_028_exit_resource_reservation.rs](cu/inv_028_exit_resource_reservation.rs),

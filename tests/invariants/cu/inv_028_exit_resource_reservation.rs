@@ -9,6 +9,9 @@ use crate::support::fuzz_model::{
 };
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_028_reserved_loss_exit.rs"]
+mod reserved_loss_exit;
+
 const LIVE: usize = 8;
 const USED_DOMAINS: usize = 2 * (LIVE + 1);
 const RETAINED_CAPITAL: u128 = 0;
@@ -469,6 +472,80 @@ impl ReservedExit {
     }
 }
 
+fn funded_history(order: [usize; 2]) -> ReservedExit {
+    let mut h = History::new();
+    for asset in 0..LIVE as u16 {
+        let q = 100 * (1 + i128::from(asset % 3)) * POS_SCALE as i128;
+        let route = AccountResidualCounterTradePath::TradeNoCpi;
+        h.trade(route, &[(asset, q, PRICE)]);
+        h.mark_and_settle(&[(asset, PRICE + 1)], order);
+        h.trade(route, &[(asset, -2 * q, PRICE + 1)]);
+        h.mark_and_settle(&[(asset, PRICE)], order);
+        h.trade(route, &[(asset, q, PRICE)]);
+    }
+    let historical = h.claims;
+    assert_eq!(
+        historical.iter().filter(|c| **c != 0).count(),
+        USED_DOMAINS - 2
+    );
+    assert_eq!(historical.iter().sum::<u128>(), 3_000);
+    let provider = create_ata_for_test(
+        &mut h.env.svm,
+        &h.env.payer,
+        h.env.admin.pubkey(),
+        h.env.mint,
+    );
+    send_raw_tx(
+        &mut h.env.svm,
+        &h.env.payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &h.env.mint,
+            &provider,
+            &h.env.admin.pubkey(),
+            &[],
+            PROVIDER_TOTAL as u64,
+        )
+        .unwrap(),
+        &[&h.env.admin],
+    )
+    .unwrap();
+    for domain in 0..2 * LIVE {
+        h.env.svm.expire_blockhash();
+        let expiry = h.env.market_state().1.source_backing_buckets[domain].expiry_slot;
+        assert!(expiry > h.slot);
+        h.env.top_up_backing_bucket_from_admin_token_with_cu(
+            provider,
+            domain as u16,
+            PROVIDER_PER_DOMAIN,
+            expiry,
+        );
+    }
+    let mint = h.env.svm.get_account(&h.env.mint).unwrap();
+    assert_eq!(
+        Mint::unpack(&mint.data).unwrap().supply as u128,
+        2 * CAPITAL + PROVIDER_TOTAL
+    );
+    ReservedExit {
+        h,
+        provider,
+        provider_remaining: std::array::from_fn(
+            |d| {
+                if d < 2 * LIVE {
+                    PROVIDER_PER_DOMAIN
+                } else {
+                    0
+                }
+            },
+        ),
+        mint,
+        calls: 0,
+        rejected: 0,
+        max_cu: 0,
+        max_packet: 0,
+    }
+}
+
 #[test]
 fn v16_program_historical_liens_preserve_future_domains_and_owner_exit() {
     let mut worlds = 0;
@@ -481,75 +558,8 @@ fn v16_program_historical_liens_preserve_future_domains_and_owner_exit() {
         for batch in [false, true] {
             for withdraw_early in [false, true] {
                 let order = if batch { [0, 1] } else { [1, 0] };
-                let mut h = History::new();
-                for asset in 0..LIVE as u16 {
-                    let q = 100 * (1 + i128::from(asset % 3)) * POS_SCALE as i128;
-                    let route = AccountResidualCounterTradePath::TradeNoCpi;
-                    h.trade(route, &[(asset, q, PRICE)]);
-                    h.mark_and_settle(&[(asset, PRICE + 1)], order);
-                    h.trade(route, &[(asset, -2 * q, PRICE + 1)]);
-                    h.mark_and_settle(&[(asset, PRICE)], order);
-                    h.trade(route, &[(asset, q, PRICE)]);
-                }
-                let historical = h.claims;
-                assert_eq!(
-                    historical.iter().filter(|c| **c != 0).count(),
-                    USED_DOMAINS - 2
-                );
-                assert_eq!(historical.iter().sum::<u128>(), 3_000);
-                let provider = create_ata_for_test(
-                    &mut h.env.svm,
-                    &h.env.payer,
-                    h.env.admin.pubkey(),
-                    h.env.mint,
-                );
-                send_raw_tx(
-                    &mut h.env.svm,
-                    &h.env.payer,
-                    spl_token::instruction::mint_to(
-                        &spl_token::ID,
-                        &h.env.mint,
-                        &provider,
-                        &h.env.admin.pubkey(),
-                        &[],
-                        PROVIDER_TOTAL as u64,
-                    )
-                    .unwrap(),
-                    &[&h.env.admin],
-                )
-                .unwrap();
-                for domain in 0..2 * LIVE {
-                    h.env.svm.expire_blockhash();
-                    let expiry = h.env.market_state().1.source_backing_buckets[domain].expiry_slot;
-                    assert!(expiry > h.slot);
-                    h.env.top_up_backing_bucket_from_admin_token_with_cu(
-                        provider,
-                        domain as u16,
-                        PROVIDER_PER_DOMAIN,
-                        expiry,
-                    );
-                }
-                let mint = h.env.svm.get_account(&h.env.mint).unwrap();
-                assert_eq!(
-                    Mint::unpack(&mint.data).unwrap().supply as u128,
-                    2 * CAPITAL + PROVIDER_TOTAL
-                );
-                let mut s = ReservedExit {
-                    h,
-                    provider,
-                    provider_remaining: std::array::from_fn(|d| {
-                        if d < 2 * LIVE {
-                            PROVIDER_PER_DOMAIN
-                        } else {
-                            0
-                        }
-                    }),
-                    mint,
-                    calls: 0,
-                    rejected: 0,
-                    max_cu: 0,
-                    max_packet: 0,
-                };
+                let mut s = funded_history(order);
+                let historical = s.h.claims;
                 s.submit(&[s.withdraw(0, CAPITAL - RETAINED_CAPITAL)], &[0], None);
                 for actor in [0, 1] {
                     s.submit(&[s.crank(actor)], &[], None);
