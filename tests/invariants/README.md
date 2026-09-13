@@ -1,5 +1,108 @@
 # Invariant-owned test coverage
 
+## INV-028 reserved domains through matcher renewal rollback (row 423, 2026-09-13)
+
+Owner: [cu/inv_028_reserved_domain_renewal.rs](cu/inv_028_reserved_domain_renewal.rs),
+mounted by `cu/inv_028_historical_latent_capacity.rs`. Exactly one new selector:
+`inv_028_source_domain_realizability_cap::historical_latent_capacity::reserved_domain_renewal::v16_program_reserved_domains_survive_revocation_and_renewed_cpi_rollback`.
+Requirement: `risk-admission-reserves-every-future-settlement-resource-needed-for-exit`.
+
+Eight public LiteSVM worlds cross single/one-leg-batch CPI, both position signs,
+and both settlement/payout orders. System/SPL/ATA/matcher/wrapper instructions
+construct all initialized economic state. Ordinary fixture airdrops, program
+loading and Clock movement are the only harness inputs; no program-owned bytes
+are injected, edited or restored. The existing INV-028 history helper retains
+26 detached fully backed claims worth 50 atoms before the new episode starts.
+
+CPI admission opens eight lots with both future domains absent. A bilateral
+three-lot reduction automatically revokes the LP matcher grant, clears expiry,
+and advances the position epoch without advancing the grant sequence. The
+remaining five lots settle five atoms into domain 27, leaving one reserved
+domain absent. The LP and taker then sign a renewal plus a nine-lot CPI fill
+that crosses zero to four lots on the opposite side. This exact prefix
+simulates successfully without changing any tracked Account.
+
+Appending a wrong-owner withdrawal rejects `Unauthorized` at transaction index
+4. Logs require two successful wrapper instructions and one successful matcher
+CPI before that rejection. Complete Accounts for every compiled key plus mint,
+both owner token accounts, admin and Clock must roll back, including portfolio
+epochs, disabled permission, unconsumed sequence, source attribution, matcher
+context and custody. Only the calculated fee leaves the separate payer.
+The previously signed prefix then commits with identical serialized bytes,
+signatures, guards and blockhash. It advances the renewal sequence once and
+changes both positions exactly as requested while retaining all 27 claims.
+
+A second bilateral partial reduction revokes the renewed grant. The remaining
+three lots still settle three atoms into slot 28, with every historical claim
+preserved and no prior claim conversion. Bilateral flattening, conversion and
+both owner withdrawals/deletions finish with exact SPL payouts of
+**1,000,058 / 999,942 atoms**, zero portfolio count, zero capital/insurance/vault,
+zero source claims/fresh backing and unchanged mint. The independent stock,
+reservation and source-rate censuses compose with the input-derived claim,
+position, OI and latent-domain union oracle. Every settlement crank strictly
+decreases pending accrual plus economic debt within the existing four-call
+bound per owner.
+
+This adds **reservation continuity across automatic revocation, rollback of a
+successful renewed CPI episode, unchanged consent retry, and later settlement
+after another revocation at the full domain budget**. The historical-capacity
+parent already rotates trade routes; active-leg admission already resizes risk.
+Neither owns this retained renewal/fill rollback with a disabled grant and one
+remaining future slot. Latent-pair reuse replaces an asset; Hybrid carry rolls
+back an observation prefix; historical liens use 18 domains and bilateral
+admission. The INV-012 mixed-renewal test has no claims and consumes another
+asset's grant. None supplies this composition's resource/permission endpoint.
+
+**Row 423 remains OPEN.** One active asset, 26 detached unliened claims, integral
+AuthMark settlement, zero fees/funding, one-leg batches and cooperative live
+exit are the limits. No general generator/oracle, maximum active-leg product,
+arbitrary history, provider/lien/expiry, Recovery/terminal, asset reactivation,
+native quote, missing-signer exit or status promotion is claimed. Production
+and engine pins are unchanged; this passing conformance test found no bug.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`80e3924cdb01a44c05492e775524dd63c8ab831d`. Branch:
+`codex/astra-row423-route-reservation-20260913`; isolated worktree:
+`/home/anatoly/percolator-row423-route-reservation-20260913`.
+Host build cache files were copied into a private target. Default-feature
+Anchor-v2 wrapper and auth matcher SBF were rebuilt locally, locked/offline,
+with platform-tools v1.52 and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SHA-256:
+
+- Wrapper: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+- Matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+The exact new selector passed on its first runtime run: **1/1 in 16.58s**, eight
+worlds, eight live simulations, eight exact rollbacks, eight unchanged retries
+and 1,072 successful transactions after funding (each renewal/fill bundle is
+one transaction). CU maxima `[trade-or-bundle, crank, convert, withdraw, close]`
+were **[942484, 525915, 712284, 49454, 26540]**; rejected bundles peaked at
+**963162 CU**, below 1,375,000. The largest rejected bundle was **932 bytes**;
+its successful prefix is smaller. Existing Solana future-incompatibility
+warnings remain. No full suite or Kani run is claimed.
+
+Exact build and required validation commands, from this worktree:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/astra-row423-route-reservation-20260913-target
+export TMPDIR=/run/user/1001/astra-row423-route-reservation-20260913-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -m 700 "$CARGO_TARGET_DIR" "$TMPDIR"
+cp -a /dev/shm/row416-cold-admin-20260912-target/. "$CARGO_TARGET_DIR/"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --manifest-path tests/fixtures/auth_matcher/Cargo.toml --sbf-out-dir "$PWD/tests/fixtures/auth_matcher/target/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::reserved_domain_renewal::v16_program_reserved_domains_survive_revocation_and_renewed_cpi_rollback -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD # post-commit
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+rmdir "$CARGO_TARGET_DIR" "$TMPDIR"
+```
+
 ## INV-005 zero-role suffix after funded handoff (row 416, 2026-09-13)
 
 Owner: [cu/inv_005_funded_role_zero_transition.rs](cu/inv_005_funded_role_zero_transition.rs),

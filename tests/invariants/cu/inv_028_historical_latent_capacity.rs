@@ -27,6 +27,9 @@ mod latent_reset_exit;
 #[path = "inv_028_active_leg_admission.rs"]
 mod active_leg_admission;
 
+#[path = "inv_028_reserved_domain_renewal.rs"]
+mod reserved_domain_renewal;
+
 #[path = "inv_028_exit_resource_reservation.rs"]
 mod exit_resource_reservation;
 

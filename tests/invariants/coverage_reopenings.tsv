@@ -834,6 +834,19 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # One active asset, integral fully backed claims, no-CPI, zero fees/provider funding.
 # Maximum active-leg products, liens, consumed-provider-label retirement, expiry/reset,
 # underfunded Recovery and generic resource/liveness closure remain OPEN. Tests only.
+# 423 partial conformance (2026-09-13): cu/inv_028_reserved_domain_renewal.rs,
+# inv_028_source_domain_realizability_cap::historical_latent_capacity::reserved_domain_renewal::v16_program_reserved_domains_survive_revocation_and_renewed_cpi_rollback.
+# Eight public single/batch-CPI sign/settlement-order worlds retain 26 historical
+# claims through admission and bilateral partial reduction that revokes the matcher.
+# At 27 occupied + one latent domain, a successful renewal/CPI cross-zero prefix
+# rolls back on a wrong-owner suffix; the exact signed prefix then commits unchanged.
+# Another bilateral reduction revokes the renewed grant, yet the last domain settles
+# and both owners receive exactly 1000058/999942 atoms with empty custody/portfolios.
+# 1072 successful post-funding transactions, eight full Account rollbacks/retries,
+# peak 963162 CU, rejected packet <=932 bytes. README records exact commands/provenance.
+# Existing route rotation does not own a retained renewal/fill rollback at this bound.
+# One active asset, integral AuthMark, detached unliened claims, zero fees/funding and
+# cooperative live exit only; general resource/lifecycle closure remains OPEN. Tests only.
 423	DoS	BLOCKER	INV-028	INV-028,INV-031,INV-057,INV-073,INV-077,INV-078,INV-082,INV-089	historical-capacity+x-latent-domain+x-position-admission	risk-admission-reserves-every-future-settlement-resource-needed-for-exit	OPEN
 # 424 partial public coverage (2026-09-10): cu/inv_070_terminal_prefix_reuse.rs::v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback covers admin/permissionless reuse behind cursor 2, live success controls, exact terminal rejection/expiry-prefix rollback, and bounded close. General actionability invalidation remains OPEN; see README's retired-slot reuse entry.
 # 424 partial public coverage (2026-09-12): cu/inv_071_terminal_prefix_recredit.rs::v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement.
