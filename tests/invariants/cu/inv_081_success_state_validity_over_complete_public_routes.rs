@@ -366,6 +366,13 @@ pub(super) fn inv081_public_native_market() -> super::V16CuEnv {
 }
 
 pub(super) fn inv081_public_native_market_with_capacity(capacity: usize) -> super::V16CuEnv {
+    inv081_public_native_market_with_params(capacity, super::V16CuMarketParams::default())
+}
+
+pub(super) fn inv081_public_native_market_with_params(
+    capacity: usize,
+    params: super::V16CuMarketParams,
+) -> super::V16CuEnv {
     use super::*;
 
     let mut svm = LiteSVM::new();
@@ -399,7 +406,6 @@ pub(super) fn inv081_public_native_market_with_capacity(capacity: usize) -> supe
         },
     )
     .unwrap();
-    let params = V16CuMarketParams::default();
     let market = Keypair::new();
     let market_len = state::market_account_len_for_capacity(capacity).unwrap();
     let market_rent = svm

@@ -95,6 +95,11 @@ mod spent_insurance_terminal_exit;
 mod shared_holder_paid_reserves;
 
 #[test]
+fn v16_program_generated_reserve_wallet_absence_preserves_fee_claims_across_expiry() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_generated_reserve_wallets();
+}
+
+#[test]
 fn v16_program_recovery_reserve_repair_crosses_last_portfolio_cleanup_without_beneficiary_signatures(
 ) {
     crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_recovery_reserve_cleanup();

@@ -1,5 +1,21 @@
 # Invariant-owned test coverage
 
+## PR135 Scope N generated reserve wallet availability (2026-09-13)
+
+Owner: [cu/inv_073_generated_reserve_wallets.rs](cu/inv_073_generated_reserve_wallets.rs),
+selected by `inv_073_no_permanent_user_lock::v16_program_generated_reserve_wallet_absence_preserves_fee_claims_across_expiry`.
+The public earnings fixture now also accepts native quote custody. Four generated
+fee allocations/payment words cross both quote types, four reserve-wallet
+availability masks and four expiry schedules. An input-derived claim book checks
+each payout, custody repair, exact rollback/retry, lazy earnings ledger and
+remaining principal separately from paid provider fees and insurance.
+
+Rows 420/421/433 remain OPEN; no invariant classification changes. This is a
+bounded reserve-payment increment after user settlement and portfolio deletion.
+Expired native principal remains exactly framed raw custody at the endpoint;
+its retirement is outside this increment. The [Scope N audit](pr135_scope_n_terminal_permissionless_payouts_20260913.md)
+records the distinct coverage, authority assumptions, commands and validation.
+
 ## PR135 Scope O current Hybrid recipient observations (2026-09-13)
 
 Owner: [cu/inv_020_generated_current_hybrid.rs](cu/inv_020_generated_current_hybrid.rs),

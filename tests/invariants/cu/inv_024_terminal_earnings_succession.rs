@@ -41,6 +41,10 @@ pub(crate) use terminal_public_reserves::{
     verify_terminal_public_reserve_disposition, verify_terminal_public_reserve_seniority,
 };
 
+#[path = "inv_073_generated_reserve_wallets.rs"]
+mod generated_reserve_wallets;
+pub(crate) use generated_reserve_wallets::verify_generated_reserve_wallets;
+
 #[path = "inv_073_terminal_reserve_close_retry.rs"]
 mod terminal_reserve_close_retry;
 pub(crate) use terminal_reserve_close_retry::verify_terminal_reserve_close_retry;
@@ -120,20 +124,31 @@ fn terminal_earnings_world_with_fee_share(
     freeze_authority: Option<Pubkey>,
     insurance_share_bps: u16,
 ) -> (TerminalEarningsWorld, [Keypair; 2]) {
-    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_freeze_authority;
+    terminal_earnings_world_with_quote(terminal_exit, freeze_authority, insurance_share_bps, false)
+}
 
-    let mut env = inv018_public_spl_market_with_freeze_authority(
-        0,
-        V16CuMarketParams {
-            max_portfolio_assets: 1,
-            initial_margin_bps: 5_000,
-            maintenance_margin_bps: 1_000,
-            max_price_move_bps_per_slot: 500,
-            ..V16CuMarketParams::default()
-        },
-        1,
-        freeze_authority,
-    );
+fn terminal_earnings_world_with_quote(
+    terminal_exit: bool,
+    freeze_authority: Option<Pubkey>,
+    insurance_share_bps: u16,
+    native: bool,
+) -> (TerminalEarningsWorld, [Keypair; 2]) {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_freeze_authority;
+    use inv_081_success_state_validity_over_complete_public_routes::inv081_public_native_market_with_params;
+
+    let params = V16CuMarketParams {
+        max_portfolio_assets: 1,
+        initial_margin_bps: 5_000,
+        maintenance_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        ..V16CuMarketParams::default()
+    };
+    let mut env = if native {
+        assert!(freeze_authority.is_none());
+        inv081_public_native_market_with_params(1, params)
+    } else {
+        inv018_public_spl_market_with_freeze_authority(0, params, 1, freeze_authority)
+    };
     let admin = env.admin.insecure_clone();
     let incumbent = Keypair::new();
     let successor = Keypair::new();
@@ -173,6 +188,19 @@ fn terminal_earnings_world_with_fee_share(
         .zip([CAPITAL[0], CAPITAL[1], BACKING, 0, INSURANCE])
     {
         if amount != 0 {
+            if native {
+                send_raw_ixs(
+                    &mut env.svm,
+                    &env.payer,
+                    vec![
+                        system_instruction::transfer(&admin.pubkey(), &token, amount),
+                        spl_token::instruction::sync_native(&spl_token::ID, &token).unwrap(),
+                    ],
+                    &[&admin],
+                )
+                .unwrap();
+                continue;
+            }
             send_raw_tx(
                 &mut env.svm,
                 &env.payer,
@@ -190,24 +218,28 @@ fn terminal_earnings_world_with_fee_share(
             .unwrap();
         }
     }
-    send_raw_tx(
-        &mut env.svm,
-        &env.payer,
-        spl_token::instruction::set_authority(
-            &spl_token::ID,
-            &env.mint,
-            None,
-            spl_token::instruction::AuthorityType::MintTokens,
-            &admin.pubkey(),
-            &[],
+    if !native {
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::set_authority(
+                &spl_token::ID,
+                &env.mint,
+                None,
+                spl_token::instruction::AuthorityType::MintTokens,
+                &admin.pubkey(),
+                &[],
+            )
+            .unwrap(),
+            &[&admin],
         )
-        .unwrap(),
-        &[&admin],
-    )
-    .unwrap();
+        .unwrap();
+    }
     let mint_frame = env.svm.get_account(&env.mint).unwrap();
     let mint = Mint::unpack(&mint_frame.data).unwrap();
-    assert_eq!((mint.supply, mint.mint_authority), (SUPPLY, COption::None));
+    if !native {
+        assert_eq!((mint.supply, mint.mint_authority), (SUPPLY, COption::None));
+    }
     let portfolios = users.each_ref().map(|owner| {
         let key = Keypair::new();
         system_create_account_for_test(
