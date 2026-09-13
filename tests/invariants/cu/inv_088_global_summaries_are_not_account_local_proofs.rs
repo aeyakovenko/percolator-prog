@@ -29,6 +29,9 @@ mod account_fee_cursors;
 #[path = "inv_088_liveness_read_contract.rs"]
 mod liveness_read_contract;
 
+#[path = "inv_088_resolved_actionability.rs"]
+mod resolved_actionability;
+
 fn inv_088_scan_asset(
     portfolios: &[PortfolioAccountV16],
     asset_index: usize,

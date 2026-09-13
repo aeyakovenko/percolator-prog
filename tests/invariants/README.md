@@ -1,5 +1,88 @@
 # Invariant-owned test coverage
 
+## INV-070/088 resolved claimant actionability after later cleanup (row 424, 2026-09-13)
+
+Owner: [cu/inv_088_resolved_actionability.rs](cu/inv_088_resolved_actionability.rs),
+mounted by INV-088. Exact selector:
+`inv_088_global_summaries_are_not_account_local_proofs::resolved_actionability::v16_program_last_later_asset_blocker_reclassifies_unchanged_earlier_claimant`.
+
+Four public LiteSVM histories cross both position directions with both cleanup
+orders for two accounts on asset 1. Four owners deposit 1,000 atoms each; asset 0
+moves from 100 to 120 or 80, giving its first claimant a 20-atom gain. Resolution
+at slot 10 and cleanup at fixed authenticated slot 13 pay the losing account 980
+and detach the earlier winner's leg. The winner retains 1,000 capital and 20 PnL,
+with no active leg, stale flag or pending fee synchronization. Its retained
+`PermissionlessCrank` (empty observations, caller slot 1) rejects with exact
+`EngineNonProgress` while the two later-asset accounts block positive payout.
+
+After the first later account closes, the same request still rejects. After the
+last later account closes, it succeeds and pays exactly 1,020; the winner's
+complete Account remains unchanged across both environmental transitions, and
+Clock remains 13. A further identical crank rejects without double payment.
+Before committing the last cleanup, a transaction executes that cleanup, its
+1,000-atom transfer, the newly enabled winner payout, and then a failing System
+suffix. Both transfers and the reclassification roll back; the winner again
+rejects until the last blocker is removed in a committed transaction.
+
+The oracle counts actual stored portfolio legs independently of the raw and
+decoded global blocker summaries, excludes stale counts and pending loss
+barriers, and checks the progression `2 -> 1 -> 0`. Input-derived payouts are
+`[1020, 980, 1000, 1000]`, conserving all 4,000 minted atoms. Stock and reservation
+censuses, complete fixture/compiled Account rollback (including exact payer fees),
+successful-transition peer frames, fixed Clock, absent mint/freeze authority,
+packet limits, and executed wrapper/SPL log counts constrain the result. The
+endpoint has four economically terminal portfolios and zero capital, positive
+PnL and vault balance. This selector does not delete portfolios or close the slab.
+
+The new dimension is **an earlier positive claimant's nonactionable observation
+invalidated solely by later-asset claimant cleanup**. The existing INV-088
+two-asset claimant-order census uses zero-PnL claimants; row424's source-deadline,
+retired-slot, native denomination and insurance withdrawal evidence does not
+exercise this positive-payout readiness transition. Standalone expiry and local
+insurance withdrawal variants were excluded as overlapping coverage. No shared
+helper changed, so no adjacent controls were required. All economic accounts
+are constructed through System/ATA/SPL/wrapper instructions; LiteSVM supplies
+programs, signer SOL and Clock. No initialized program account bytes are edited.
+
+**Row 424 remains OPEN.** This is finite actionability-summary conformance, not a
+generic generator/oracle or a terminal scan-cursor invalidation proof. Arbitrary
+claim populations and interleavings, successful earlier-slot scan restarts,
+scanner insurance-recredit rediscovery, backing/reserve reclassification,
+Recovery, receipts, underfunded/fractional claims, alternate quote rails and
+maximum shapes remain outside this increment. Production, dependency pins and
+machine invariant statuses are unchanged.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`f07a33b86ebf159f3007cef293df6e7f1ab6da7f`. Branch:
+`codex/row424-resolved-prefix-conformance-20260913`; isolated worktree:
+`/tmp/percolator-row424-resolved-prefix-20260913`. The coordinator checkout was
+not edited. Requested model/reasoning: `gpt-6-astra` / `ultra`; this session
+provides no model switch or independent verification of that setting.
+
+Environment: Linux `6.1.0-52-cloud-amd64`, x86_64; host Rust/Cargo 1.90.0;
+LiteSVM 0.1.0 with its bundled SPL Token 3.5.0 and ATA programs. The private
+default-feature SBF build uses platform-tools v1.52, Anchor v2 and locked engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact selector passes 1/1 across four histories: 20 committed terminal
+continuations, 16 exact NonProgress rejections and four aborted two-payment
+prefixes. Peak **288,437 CU**, below the 900,000-CU transaction limit. Validation
+commands from the isolated worktree:
+
+```bash
+export CARGO_TARGET_DIR=/run/user/1001/row424-resolved-prefix-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_088_global_summaries_are_not_account_local_proofs::resolved_actionability::v16_program_last_later_asset_blocker_reclassifies_unchanged_earlier_claimant -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-067 fractional conversion and same-source expiry (row 417, 2026-09-13)
 
 Owner: [cu/inv_067_receipt_fractional_source.rs](cu/inv_067_receipt_fractional_source.rs).
