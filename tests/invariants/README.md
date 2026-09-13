@@ -1,5 +1,80 @@
 # Invariant-owned test coverage
 
+## INV-024 atomic resolution and submitter reserves (row 410, 2026-09-13)
+
+Owner: [cu/inv_024_resolution_submitter_reserve.rs](cu/inv_024_resolution_submitter_reserve.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::resolution_submitter_reserve`.
+Primary INV-024; bounded INV-005/036/081 evidence for
+`terminal-submitters-cannot-receive-another-role-attributed-reserve`.
+
+Two public LiteSVM histories compose `ResolveMarket` or
+`ResolveStalePermissionless` with reserve payments in the same transaction.
+System/SPL/wrapper instructions create and fund separate provider and insurer
+ledgers with 79 backing atoms and 131 insurance atoms. There are no portfolios,
+capital or user claims to mask the role check with a wind-down lock. Provider,
+insurer, insurance operator, market authority and setup payer are distinct.
+The operator first pays for and receives a real 7-atom Live withdrawal; its
+insurance ledger remains attributed to the insurer.
+
+The retained operator request follows resolution, a 79-atom provider payout and
+a 17-atom insurer payout in one transaction. All three prefix instructions
+complete, including two SPL transfers and both ledger writes; the operator
+suffix rejects with `Unauthorized` at transaction instruction 5. Exact complete
+Account frames restore the **Live** mode, fresh backing, insurer reserve,
+ledgers, mint, destinations, wallets and every compiled transaction account,
+apart from the actual signature fee. The same three prefix instructions then
+commit, followed by the insurer's 107-atom tail. Both terminal beneficiaries
+are nonsigners; operator payer privilege supplies no terminal entitlement.
+
+An input-derived checker reads raw market, token and ledger accounts after
+each attempt. It reconciles the 210-atom fixed mint supply, backing and insurance
+stocks, beneficiary identities, deposited and withdrawn history, unchanged
+authority profiles/sequences and complete token/ledger Account frames, alongside
+the stock census and shape check. Final balances are provider 79, insurer 124,
+operator 7 (Live only), setup payer 0 and market authority 0. Both histories
+finish with an exact market tombstone and rent refund to the market authority;
+mint, paid ledgers and token accounts remain framed through closure. Mutable
+Account copies are expected results only and are never installed in LiteSVM.
+
+Net-new scope is **rollback across the resolution instruction itself plus two
+role-attributed payouts**, including permissionless resolution. The existing
+`terminal_insurance_lifecycle` compatibility selector tests a retained operator
+request after separately committed resolution, user settlement and deletion.
+`terminal_cleanup_submitter` starts Resolved and rolls back last-portfolio
+deletion. Neither owns this Live-to-Resolved transaction rollback. This adds no
+role succession, oracle replacement, earned-fee or receipt reclassification.
+**Row 410 remains OPEN:** two finite asset-zero/classic-SPL histories are not a
+generic generator/oracle. Populated portfolios, losses, receipts, earned fees,
+expiry/recredit, other assets/rails, arbitrary role histories and transaction
+compositions remain outside this increment. No production or status changes.
+
+Worktree: `/home/anatoly/percolator-row410-astra-20260913`; branch:
+`codex/astra-row410-terminal-submitter-reserve-20260913`; base:
+`8e5aa5074010cbe4b682006f3967c754d2663f44`. The private target was seeded by
+copying (not hard-linking) `/dev/shm/astra-terminal-public-disposition-target`;
+default-feature SBF was rebuilt offline from this worktree with platform-tools
+v1.52. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+New selector: PASS (1/1), two histories, two composed rollbacks, peak 65,237 CU.
+Compatibility selector: PASS (1/1), four existing histories. Both INV-079 metadata
+gates: PASS (1/1 each). Formatting and all three Git whitespace checks: PASS.
+
+```sh
+cd /home/anatoly/percolator-row410-astra-20260913
+export CARGO_TARGET_DIR=/dev/shm/row410-terminal-submitter-reserve-20260913-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/row410-terminal-submitter-reserve-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::resolution_submitter_reserve::v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authority -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_insurance_lifecycle::v16_program_terminal_insurance_lifecycle_preserves_fee_and_paid_prefix_attribution -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-005 cold-admin oracle replacement with funded coholder (row 416, 2026-09-13)
 
 Owner: [cu/inv_005_cold_oracle_funded_containment.rs](cu/inv_005_cold_oracle_funded_containment.rs),

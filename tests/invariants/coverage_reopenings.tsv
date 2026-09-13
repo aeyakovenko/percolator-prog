@@ -188,6 +188,24 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # change or status promotion. Other assets/rails, receipts, depletion/recredit, surplus,
 # arbitrary role/funding histories and transaction words remain open. Base, environment,
 # exact selectors/commands and results: README "INV-024 delayed terminal submitters".
+# Row 410 bounded atomic-resolution increment (2026-09-13): cu/inv_024_resolution_submitter_reserve.rs.
+# New exact command: cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::resolution_submitter_reserve::v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authority -- --exact --nocapture --test-threads=1
+# Two public histories compose authority/permissionless resolution, provider principal
+# payout and insurer prefix before a retained live-operator request rejects Unauthorized.
+# All three successful prefix instructions, two SPL transfers and both ledger writes
+# roll back to Live with exact full Account frames except signature fees. Unchanged
+# prefix retry and insurer tail yield provider=79, insurer=124, operator=7 Live only;
+# separate deposit/withdrawal ledgers, fixed 210-atom mint, raw-stock attribution and
+# exact rent/tombstone closure. No portfolio lock masks the beneficiary check.
+# Net-new: resolution itself is inside the rejected transaction, unlike separately
+# committed resolution/cleanup in terminal_insurance_lifecycle and terminal_cleanup_submitter.
+# Related exact command: cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_insurance_lifecycle::v16_program_terminal_insurance_lifecycle_preserves_fee_and_paid_prefix_attribution -- --exact --nocapture --test-threads=1
+# New/related selectors and both metadata gates PASS 1/1 each; fmt and Git whitespace
+# checks PASS. New peak 65237 CU. Base, isolated paths, SBF hash and all validation
+# commands: README "INV-024 atomic resolution and submitter reserves (row 410, 2026-09-13)".
+# OPEN: two finite asset-zero/classic-SPL histories, no generic generator/oracle.
+# Populated portfolios, losses, receipts, fees, expiry/recredit, other assets/rails and
+# arbitrary role histories/transaction compositions excluded. No production/status changes.
 410	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-036,INV-081	authority-role+x-lifecycle+x-attribution	terminal-submitters-cannot-receive-another-role-attributed-reserve	OPEN
 # 411 partial public coverage (2026-09-10): stateful/inv_014_retained_backing_fee_cap.rs::v16_program_retained_backing_fee_caps_follow_participant_and_route_consent retains nonzero backing caps across an owner-signed matcher cap change, both charged roles and CPI/no-CPI alternatives. Exact post-CPI rollback, participant-local consent, provider SPL fees and opposite-route close values compose. Single-source Live evidence only; see README. No row/status promotion.
 # 411/432 bounded conformance (2026-09-12): cu/inv_014_retained_redirect_entitlement.rs,

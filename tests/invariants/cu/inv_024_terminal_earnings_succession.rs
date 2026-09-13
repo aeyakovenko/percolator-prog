@@ -26,6 +26,9 @@ mod terminal_cleanup_submitter;
 #[path = "inv_024_delayed_terminal_submitter.rs"]
 mod delayed_terminal_submitter;
 
+#[path = "inv_024_resolution_submitter_reserve.rs"]
+mod resolution_submitter_reserve;
+
 #[path = "inv_024_terminal_recredit_surplus.rs"]
 mod terminal_recredit_surplus;
 
