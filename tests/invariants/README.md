@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## PR135 Scope G shared source capacity (2026-09-13)
+
+Owner: [cu/inv_028_shared_source_late_exit.rs](cu/inv_028_shared_source_late_exit.rs),
+mounted under `inv_028_source_domain_realizability_cap::historical_latent_capacity::shared_source_late_exit`.
+Four public LiteSVM histories give two unequal claimants 27 historical sources
+and one latent domain each against a shared funded debtor. Staggered terminal
+materialization fills both 28-source tables before cohort readiness, debtor
+payout and both claimant payout orders. An input-derived owner/domain ledger
+checks every post-funding transition, remaining shared backing and exact payouts;
+owner/domain observation mutations fail despite conserved aggregate totals.
+Every terminal step decreases a finite economic rank. Observed: 1128 checked
+calls, 236 terminal calls (59/history), peak 917414 CU and claimant packets
+at most 465 bytes. All three portfolios are then deleted by their owners.
+
+This adds bounded INV-028/031/057/073/077/078/082 evidence. Row 423 remains OPEN;
+machine classifications are unchanged and INV-089 receives no activation/reuse
+increment. No production changes. The [Scope G audit](pr135_scope_g_capacity_20260913.md)
+records the distinct composition, assumptions, validation and exact commands.
+
 ## PR135 Scope I generated grant bindings (2026-09-13)
 
 Owner: [cu/inv_012_generated_grant_bindings.rs](cu/inv_012_generated_grant_bindings.rs),

@@ -36,6 +36,9 @@ mod exit_resource_reservation;
 #[path = "inv_028_recovery_latent_capacity.rs"]
 mod recovery_latent_capacity;
 
+#[path = "inv_028_shared_source_late_exit.rs"]
+mod shared_source_late_exit;
+
 const ASSETS: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
 const DOMAINS: usize = percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS;
 const CAPITAL: u128 = 1_000_000;
