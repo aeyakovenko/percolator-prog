@@ -1,5 +1,94 @@
 # Invariant-owned test coverage
 
+## INV-070 native Recovery claim disposition (row 418, 2026-09-13)
+
+Owner: [cu/inv_070_native_recovery_disposition.rs](cu/inv_070_native_recovery_disposition.rs),
+mounted under `inv_070_zero_unattributed_terminal_residue_and_close_slab::native_recovery_disposition`.
+Exact selector:
+`inv_070_zero_unattributed_terminal_residue_and_close_slab::native_recovery_disposition::v16_program_native_recovery_claims_have_bounded_terminal_disposition`.
+
+Four public LiteSVM histories cross a native quote's 100->90/110 authenticated
+price move with one full or two half `ForceCloseAbandonedAsset` calls. Two owners
+deposit 1000/1300 atoms and open two lots. Cranking debits the loser's 20 atoms
+and leaves the winner's funded 20-atom source claim. A public 37-lamport vault
+donation remains unsynced before shutdown, during Recovery, through resolution
+and both user payments. The oracle derives the 980/1320 or 1020/1280 payouts
+from entry price, exit price and position size; it checks the source-claim bound,
+paired OI, engine stock/reservation censuses and complete native token Accounts.
+The native mint remains byte-identical throughout.
+
+Every force-close is first executed before an unfunded ordinary SPL transfer
+suffix. Six complete transaction-Account rollbacks preserve Recovery claims,
+positions, native token backing and unsynced lamports, except exact signature
+fees. Logs require the wrapper prefix to have succeeded. The identical force-close
+instruction then succeeds with only the payer signing and exact custody frames.
+After resolution and its timeout, two unsigned losing-first user payments exhaust
+all booked custody. Two owner-signed portfolio deletions and one `CloseSlab`
+complete each history. Each owner then publicly closes the funded wSOL account,
+receiving exactly the claim plus its token rent. Final slab disposition preserves
+canonical tombstone rent and gives the administrator only market excess, vault
+rent and the 37 unsynced lamports; its token destination receives zero atoms.
+Explicit test transactions are bounded at 500000 CU and 1232 bytes.
+
+The new relation is a nonzero native source claim crossing partitioned Recovery
+force-close and actual terminal redemption. The existing classic-SPL Recovery
+close selector has unchanged price and no PnL; the native PnL/sync and shared
+custody selectors resolve directly. The classic-SPL Recovery reserve cleanup
+selector does not exercise native backing, unsynced lamports or redemption.
+No shared helper changes or adjacent control runs are needed: only a new local
+module and its INV-070 registration are added. All account creation/funding and
+economic transitions use System/ATA/SPL/public wrapper instructions. The existing
+native helper supplies LiteSVM's omitted native-mint genesis fixture. Packed
+expected Account images are never installed into the VM; no initialized program
+account bytes are edited.
+
+**Row 418 stays OPEN; invariant_status.tsv is unchanged.** This finite family
+does not provide a generic generator/oracle. Native booked-residue retirement,
+fractional claims, unpaid/underfunded or bankrupt Recovery, backing/insurance/fee
+stocks, dual quotes, unavailable custody, unsupported token variants, arbitrary
+claimant order, maximum shapes and arbitrary histories remain open. Owners still
+sign portfolio deletion and redemption, and the administrator signs shutdown,
+resolution and slab closure. Production is unchanged.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`9653b677d23a10a2631011669d789b9e630da897`. Branch:
+`codex/astra-row418-native-recovery-20260913`; isolated worktree:
+`/home/anatoly/percolator-row418-native-residue-20260913`.
+Environment: Linux x86_64, Rust/Cargo 1.90.0, LiteSVM 0.1.0, default `anchor-v2`
+features, engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336` and platform-tools
+v1.52. A private, non-hardlinked copy of `/dev/shm/percolator-watch-test-target`
+seeded the build cache. The wrapper was freshly rebuilt from this worktree;
+SHA-256 `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+This bilateral fixture does not load a matcher. The initial host build was stopped
+to match the cache's no-debug settings. Development corrected census argument
+arity and expectations about already-debited losing PnL and the funded source
+claim; no production violation or correction is claimed.
+
+Validation: the new exact selector passed 1/1 in 1.80s, covering four histories,
+six exact rollbacks, four slab closures and eight owner redemptions. The peak was
+264974 CU (limit 500000). Both required INV-079 metadata selectors passed 1/1;
+formatting and Git whitespace checks passed. No adjacent selectors were run.
+The private build cache is cleaned after validation; all committed artifacts
+are source tests and audit documentation.
+
+Commands from the isolated worktree:
+
+```sh
+cp -a /dev/shm/percolator-watch-test-target /dev/shm/row418-native-recovery-20260913-target
+export CARGO_TARGET_DIR=/dev/shm/row418-native-recovery-20260913-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::native_recovery_disposition::v16_program_native_recovery_claims_have_bounded_terminal_disposition -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /dev/shm/row418-native-recovery-20260913-target
+```
+
 ## INV-024 depleted insurance beneficiary succession (row 429, 2026-09-13)
 
 Owner: [cu/inv_024_depleted_reserve_beneficiary_succession.rs](cu/inv_024_depleted_reserve_beneficiary_succession.rs),

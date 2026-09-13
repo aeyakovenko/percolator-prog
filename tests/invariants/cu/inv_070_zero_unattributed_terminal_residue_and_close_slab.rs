@@ -43,6 +43,9 @@ mod frozen_destination_exit;
 #[path = "inv_070_native_pnl_sync_retry.rs"]
 mod native_pnl_sync_retry;
 
+#[path = "inv_070_native_recovery_disposition.rs"]
+mod native_recovery_disposition;
+
 #[path = "inv_070_terminal_native_reclassification.rs"]
 mod terminal_native_reclassification;
 
