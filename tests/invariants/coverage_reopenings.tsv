@@ -279,6 +279,20 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # cargo clean --target-dir /tmp/percolator-row413-target
 # cargo clean --target-dir /tmp/percolator-row413-tmp
 # Private build directories cleaned immediately after validation; 1.6 GiB reclaimed.
+# Row 413 clipped-fee refill composition (2026-09-13):
+# cu/inv_027_refilled_first_admission.rs,
+# v16_program_refilled_flat_account_pays_new_interval_before_first_admission.
+# Four public histories cross either constrained owner and committed/atomic prefixes.
+# Clipped 8-atom collection retains a 2-atom self-reward; a later 112-atom SPL deposit
+# and 14-atom new interval leave exactly 100 first-admission IM. The 101-IM suffix
+# rejects; a late SPL suffix rolls back the successful exact open. Eight complete
+# Account rollbacks, independent certificates/stock/custody, same-slot fee retries
+# and eight owner payouts reconcile fixed supply 420 and final insurance 55 (27/28).
+# INV-040's clipped refill stays same-slot with no risk; existing row413 admission
+# boundaries fully fund maintenance. This adds clipped history plus a new fee interval
+# and first admission. Explicit fee sync only; standalone uncollected fees, CPI,
+# nonzero trading/funding fees and arbitrary histories remain open. README records
+# build, selector and metadata commands. No production change or status promotion.
 413	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-first-risk	all-accrued-liabilities-precede-every-risk-increasing-admission	OPEN
 # Row 414 bounded response conformance (2026-09-12): cu/inv_012_reused_asset_return_binding.rs,
 # v16_program_reused_asset_requires_current_generation_and_fresh_matcher_output.

@@ -1,5 +1,82 @@
 # Invariant-owned test coverage
 
+## INV-027 refilled first admission after clipped maintenance (row 413, 2026-09-13)
+
+Owner: [cu/inv_027_refilled_first_admission.rs](cu/inv_027_refilled_first_admission.rs),
+mounted under `inv_027_protected_principal_seniority::joint_admission_liabilities::refilled_first_admission`.
+One new selector:
+`v16_program_refilled_flat_account_pays_new_interval_before_first_admission`.
+
+Four public LiteSVM histories cross either constrained participant with committed
+versus atomic deposit/fee/refresh prefixes. Both accounts have never held a position.
+At slot 4, the constrained owner's 21-atom elapsed maintenance charge clips to its
+8-atom capital. A 3,333-bps self-reward returns two atoms, retaining six in canonical
+insurance and keeping the portfolio materialized. The uncollectible 13 atoms are
+forgiven, with zero fee debt and cursor 4. Public keeper cranks advance to slot 6
+without changing either trading account. All marks remain at 100.
+
+An SPL-backed 112-atom deposit replenishes that same portfolio. Explicit public
+synchronization collects the new 14-atom interval before refresh and first
+`TradeNoCpi`, leaving exactly 100 capital. Its independent peer pays 35 atoms from
+300, leaving 265. One extra position quantum raises IM to 101 and rejects. The
+exact 100-IM open succeeds: omitting the new fee would admit the larger request,
+while resurrecting the forgiven fee or losing the reward would reject the control.
+
+Eight rejected transactions restore all tracked and compiled non-payer Accounts
+exactly. Four margin failures include two real deposit/fee/refresh prefix rollbacks;
+four ordinary late SPL insufficient-funds suffixes additionally roll back successful
+first admissions. Exact error indices and wrapper/SPL success logs establish that
+the prefixes executed. The identical instruction prefix then commits, including
+the original deposit sequence. The separate payer loses exactly its signature fee.
+Both positions close at the same price, and SPL pays the owners exactly 100/265.
+
+Input-derived checks cover each owner's principal plus external tokens and net
+fees, fee cursors, zero debt/PnL, portfolio identities and owner sequences, exact
+OI/counts, independent current certificates and IM/MM, stock and encumbrance
+censuses, and complete unrelated-account frames. Mint authority is publicly revoked
+at 420 atoms. Final insurance and SPL vault stock are 55, split into canonical
+domain budgets 27/28; owner capital is zero. Same-slot fee retries cannot resurrect
+the clipped interval. System/SPL/ATA/wrapper instructions construct all economic
+state; program loading, signer SOL and authenticated Clock are harness inputs.
+
+Novelty: **clipped collection, retained self-reward, another elapsed interval,
+SPL replenishment and first-risk admission with joint custody rollback**.
+INV-040's `v16_program_clipped_maintenance_refill_retries_cannot_recharge_or_redirect`
+stays in the original collection slot and withdraws without admission. Row 413's
+fee-prefix, withdrawal-prefix, reward-mapping and batch-fee boundaries fully fund
+their elapsed charges. Its standalone first-open test uses ample capital. This
+adds the documented fee-exhaustion/history limit rather than another fee amount
+or reward ordering. **Row 413 remains OPEN; invariant statuses are unchanged.**
+Standalone uncollected fees, CPI, policy changes, nonzero trading/funding charges,
+nonflat history and general liability compositions remain outside this finite test.
+No production change or public-interface bug is claimed.
+
+Base: `8760bfd7df3cde88cc16a36c2f4f7f2b89620692` from
+`origin/codex/astra-open-holdout-ledger-20260912`.
+Worktree: `/home/anatoly/worktrees/astra-row413-fee-topup-20260913`;
+branch: `codex/astra-row413-fee-topup-20260913`. A private target copy was used,
+and default-feature SBF rebuilt locally locked/offline with platform-tools v1.52
+and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+SBF SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact selector passed 1/1 in 1.97s: four worlds, eight complete rollbacks,
+four exact admissions and eight owner payouts; peak CU 410,675 is below 600,000.
+Both required metadata gates passed 1/1, as did formatting and whitespace checks.
+The initial fixture was corrected to retain a self-reward because fee collection
+publicly closes an emptied portfolio; no failing or diagnostic-only probe remains.
+Validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/tmp/astra-row413-fee-topup-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::joint_admission_liabilities::refilled_first_admission::v16_program_refilled_flat_account_pays_new_interval_before_first_admission -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-008 reciprocal fee stock and retained withdrawal (row 415, 2026-09-13)
 
 Owner: [cu/inv_008_reciprocal_reward_stock.rs](cu/inv_008_reciprocal_reward_stock.rs),

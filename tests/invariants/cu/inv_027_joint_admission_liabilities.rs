@@ -41,6 +41,9 @@ mod flat_reopen_routes;
 #[path = "inv_027_first_batch_fee_boundary.rs"]
 mod first_batch_fee_boundary;
 
+#[path = "inv_027_refilled_first_admission.rs"]
+mod refilled_first_admission;
+
 const PRICE: u64 = 100;
 const START: u64 = 1;
 const ADMISSION: u64 = 4;
