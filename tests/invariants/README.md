@@ -1,5 +1,22 @@
 # Invariant-owned test coverage
 
+## Scope A retained capital/insurance exchange (2026-09-13)
+
+[cu/inv_008_capital_insurance_exchange.rs](cu/inv_008_capital_insurance_exchange.rs)
+adds eight public LiteSVM histories under INV-008. An owner exchanges capital and
+insurance through a common wallet in both orders, with optional insurance telemetry
+and atomic/split delivery. Two unequal exchanges leave custody unchanged while
+changing stock classes and consuming the portfolio, insurance-debit and funding
+lanes. A late external SPL failure restores all four completed transfers; a public
+one-token wallet repair permits the retained instruction payloads to commit.
+Input-derived typed stock, complete rollback, bystander capital and final owner
+payouts are checked. A conserved one-atom class misattribution fails the stock oracle.
+
+This is bounded INV-008/010/024/031/080/081 conformance. Rows **415/428 remain OPEN**;
+no production or invariant-status change is claimed. The
+[Scope A exchange audit](pr135_scope_a_capital_insurance_exchange_20260913.md)
+records the comparison with prior coverage, limits, artifact and exact validation.
+
 ## PR135 Scope W used-generation capacity admission (2026-09-13)
 
 Owner: [cu/inv_028_generation_capacity_admission.rs](cu/inv_028_generation_capacity_admission.rs),

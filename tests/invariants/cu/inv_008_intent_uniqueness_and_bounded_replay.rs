@@ -52,6 +52,9 @@ mod live_debit_consumption;
 #[path = "inv_008_generated_insurance_stock_epochs.rs"]
 mod generated_insurance_stock_epochs;
 
+#[path = "inv_008_capital_insurance_exchange.rs"]
+mod capital_insurance_exchange;
+
 #[path = "inv_008_insurance_destination_epoch_retry.rs"]
 mod insurance_destination_epoch_retry;
 
