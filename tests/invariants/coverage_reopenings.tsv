@@ -474,6 +474,29 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # git show --format= --check HEAD and private cargo-clean/rmdir commands.
 # Private /run/user/1001/row416-funded-zero-20260913-{target,tmp} removed after checks.
 # Row 416 remains OPEN; rows415/433, invariant verdicts and production are unchanged.
+# 416 cold-admin oracle replacement increment (2026-09-13):
+# cu/inv_005_cold_oracle_funded_containment.rs, mounted by funded_oracle_succession.
+# Two Live/Active asset-0/1 worlds: incumbent coholds oracle and 17/29-atom backing;
+# distinct cold admin/incoming oracle sign management without incumbent consent.
+# A 7-atom user SPL withdrawal, oracle replacement and authenticated observation
+# execute before current-epoch funded-role replacement rejects EngineLockActive.
+# Full compiled/tracked Account rollback includes role/observation state and SPL;
+# payer alone loses four signature fees. The identical instruction prefix then
+# succeeds, incumbent alone receives all 46 backing atoms, user receives 23 total,
+# authorities receive zero, and the frozen 69-atom supply is exactly conserved.
+# Net new: cold-admin oracle replacement over a funded coholder, not incumbent
+# oracle succession after admin burn, funded-zero/ABA, or terminal role succession.
+# Limits: fixed positive fresh backing, same-price AuthMark, flat portfolio; no
+# insurance roles, liens/earnings, price changes, other lifecycles or generic oracle.
+# New and related exact selectors pass 1/1 each (2/4 worlds, peak 56000/73856 CU).
+# Exact environment/build provenance and commands are in README's matching section.
+# cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::funded_oracle_succession::cold_oracle_funded_containment::v16_program_cold_oracle_replacement_preserves_funded_coholder_and_atomic_prefix -- --exact --nocapture --test-threads=1
+# Related: cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::funded_oracle_succession::v16_program_funded_oracle_succession_after_admin_burn_preserves_backing_exit -- --exact --nocapture --test-threads=1
+# cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+# cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+# cargo fmt --all -- --check
+# git diff --check && git diff --cached --check && git show --format= --check HEAD
+# Row 416 remains OPEN; no production changes or invariant status promotion.
 416	LoF	PRIVILEGED	INV-005	INV-005,INV-020,INV-024,INV-027,INV-055	cold-admin+x-funded-role+x-authority-containment	correctly-signed-role-management-cannot-seize-an-incumbent-funded-role	OPEN
 # 417 partial conformance (2026-09-10): cu/inv_067_receipt_source_realization.rs::v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry.
 # Partial source realization plus an older receipt payout rolls back; retained claims survive

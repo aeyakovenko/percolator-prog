@@ -1,6 +1,7 @@
 //! INV-005: funded oracle succession after the cold admin renounces its own role.
 //! Oracle consent transfers observation power, not the incumbent's backing principal.
-//! This does not certify nonconsensual cold-admin replacement of a funded oracle.
+//! The original selector does not certify cold-admin oracle replacement without
+//! incumbent consent; cold_oracle_funded_containment adds that bounded live case.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -8,6 +9,9 @@ use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::
 
 #[path = "inv_005_shutdown_reserve_aba.rs"]
 mod shutdown_reserve_aba;
+
+#[path = "inv_005_cold_oracle_funded_containment.rs"]
+mod cold_oracle_funded_containment;
 
 const PRINCIPAL: [u128; 2] = [17, 29];
 const PEER_BACKING: u128 = 31;

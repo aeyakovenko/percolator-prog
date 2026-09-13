@@ -1,5 +1,76 @@
 # Invariant-owned test coverage
 
+## INV-005 cold-admin oracle replacement with funded coholder (row 416, 2026-09-13)
+
+Owner: [cu/inv_005_cold_oracle_funded_containment.rs](cu/inv_005_cold_oracle_funded_containment.rs),
+mounted under `inv_005_authority_incarnation_binding::funded_oracle_succession::cold_oracle_funded_containment`.
+Requirement: `correctly-signed-role-management-cannot-seize-an-incumbent-funded-role`.
+
+Two public LiteSVM worlds place one incumbent's 17/29-atom backing buckets in
+asset 0/1. That incumbent also holds the oracle role, while the cold admin,
+incoming oracle, market admin and 23-atom portfolio owner are distinct keys.
+System/SPL/ATA/wrapper instructions construct every economic Account and revoke
+mint authority at 69 atoms. Program loading, SOL airdrops and Clock warps are
+the only harness setup; no program-owned state is injected or edited.
+
+With both buckets positive, the portfolio owner withdraws 7 atoms, the cold admin
+replaces the oracle, and the incoming oracle publishes a same-price authenticated
+observation. All three instructions complete, including real SPL transfer, before
+a correctly signed cold-admin backing-role replacement rejects `EngineLockActive`
+at transaction instruction 5. Its epoch is current after the oracle replacement;
+this is a funded-role boundary, not stale consent or a missing signature. Complete
+tracked and compiled Accounts, including metadata and absence, must roll back;
+the fee payer alone loses the exact four-signature network fee.
+
+Reusing the exact three-instruction prefix succeeds without the incumbent's
+signature. Only the oracle holder, subject authority epoch and observation
+sequence/slot change in the role/profile state. The observation records Clock
+slot 2 despite the payload's `u64::MAX`. Sibling asset/profile/control state is
+unchanged. The incumbent then withdraws both backing buckets without the new
+oracle or cold admin signing, and the user withdraws the remaining 16 atoms.
+The input-derived oracle checks every backing stock class, per-owner capital,
+wallet receipts, mint supply and engine/SPL vault conservation after each stage.
+The incumbent receives exactly 46 atoms, the user 23, and both authority keys
+receive zero; the vault ends empty while the market remains Live/Active.
+
+Net new: **cold-admin replacement of a funded backing holder's coheld oracle
+without incumbent consent**, composed with an authenticated observation and
+rollback of an unrelated owner's paid prefix. The related existing selector
+below requires incumbent oracle consent after cold-admin renunciation. Neither
+funded-role zeroing, cold-admin ABA, nor terminal beneficiary/submitter succession
+is exercised here. **Row 416 remains OPEN:** these are two bounded histories,
+not a generic generator/oracle. Nonzero positions, price changes, liened/impaired
+backing, earnings, insurance roles, other lifecycle states and arbitrary
+management histories remain outside this increment; invariant statuses stay put.
+
+Base: `1956232286aef7e651fe4e2e0d73321d169488a8`. Isolated worktree:
+`/home/anatoly/percolator-row416-astra-20260913`; branch:
+`codex/astra-row416-authority-containment-20260913`. Default-feature SBF rebuilt
+locally with platform-tools v1.52; SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+
+Behavioral validation: the new exact selector passed 1/1 (two worlds, 0.80s,
+peak 56,000 CU); the existing consented-oracle selector passed 1/1 (four worlds,
+1.61s, peak 73,856 CU). No production bug or fix was needed.
+
+Exact build and validation commands from that worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row416-authority-containment-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/dev/shm/row416-authority-containment-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::funded_oracle_succession::cold_oracle_funded_containment::v16_program_cold_oracle_replacement_preserves_funded_coholder_and_atomic_prefix -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::funded_oracle_succession::v16_program_funded_oracle_succession_after_admin_burn_preserves_backing_exit -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-020 sibling observations at risk admission (row 426, 2026-09-13)
 
 Owner: [cu/inv_020_partial_observation_routes.rs](cu/inv_020_partial_observation_routes.rs),
