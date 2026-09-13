@@ -1,5 +1,22 @@
 # PR410-434 are post-hoc holdout/conformance misses; rows left OPEN still affect invariant status.
 # This is a coverage-fidelity ledger, not independent-discovery or whole-invariant proof evidence.
+# Row 417 bounded conformance (2026-09-13): cu/inv_067_receipt_late_fee_reclassification.rs,
+# mounted as INV-067 receipt_late_fee_reclassification. One new public selector
+# crosses six claimant orders, exact/late expiry and explicit/close-collected fees.
+# Two paid receipt identities survive a 329-atom late backing release and a separate
+# seven-atom capital-to-insurance reclassification; residual is 480 -> 809, exact
+# face stays 3000, and all orders pay 1104/1185/1266 with exactly 294 insurance atoms.
+# 24 worlds, 24 exact Account rollbacks, 72 rolled-back SPL payouts; peak 615349 CU,
+# ceiling 700000. Retained instruction retry, fee cursor, receipt removal, portfolio
+# rent and final insurance withdrawal are checked; two rounding atoms remain.
+# Existing row417 receipt source histories use zero maintenance fees. This adds
+# a nonzero fee-stock/receipt composition, not a new source-expiry schedule.
+# Public System/SPL/ATA/wrapper construction, fixed 3852 supply, revoked mint;
+# no out-of-band program-byte mutation, production change or public bug claim.
+# Limits: fixed fee, one SPL rail, no rewards, insurance spend/recredit, live source
+# conversion, arbitrary histories, maximum shapes or slab burn/closure. Row 417 OPEN.
+# Commands, base/rebase, artifact and validation: README "INV-067 late fee
+# reclassification and retained receipts (row 417, 2026-09-13)". No status promotion.
 # Row 412 bounded conformance (2026-09-13): stateful/inv_012_mixed_episode_renewal.rs,
 # mounted by retained_grant_atomicity::mixed_episode_renewal. Sixteen public-route
 # histories compose committed bilateral/owner partial reductions with retained

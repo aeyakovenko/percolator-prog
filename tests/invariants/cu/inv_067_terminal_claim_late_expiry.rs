@@ -42,7 +42,17 @@ impl World {
     }
 
     pub(crate) fn before_receipts_with_claimant_owners(claimant_owners: [Keypair; 2]) -> Self {
-        Self::build_before_receipts(claimant_owners, None, BACKING, SourceShape::Single)
+        Self::build_before_receipts(claimant_owners, None, BACKING, SourceShape::Single, 0)
+    }
+
+    pub(super) fn before_receipts_with_maintenance_fee(rate: u128) -> Self {
+        Self::build_before_receipts(
+            [Keypair::new(), Keypair::new()],
+            None,
+            BACKING,
+            SourceShape::Single,
+            rate,
+        )
     }
 
     pub(super) fn before_receipts_with_backing(backing: u128) -> Self {
@@ -52,6 +62,7 @@ impl World {
             None,
             backing,
             SourceShape::Single,
+            0,
         )
     }
 
@@ -61,6 +72,7 @@ impl World {
             Some(setup),
             BACKING,
             SourceShape::Single,
+            0,
         )
     }
 
@@ -70,6 +82,7 @@ impl World {
             None,
             BACKING,
             SourceShape::Staggered,
+            0,
         )
     }
 
@@ -79,6 +92,7 @@ impl World {
             None,
             BACKING,
             SourceShape::SplitClaimants,
+            0,
         )
     }
 
@@ -87,6 +101,7 @@ impl World {
         setup: Option<fn(&mut V16CuEnv)>,
         backing: u128,
         source_shape: SourceShape,
+        maintenance_fee_per_slot: u128,
     ) -> Self {
         // Allocate and initialize through System/SPL/wrapper instructions, including the
         // initial collateral endowment. LiteSVM only supplies programs, clock and signer SOL.
@@ -113,6 +128,7 @@ impl World {
             vec![(0, 1, 0, 14), (4, 1, 0, 26), (2, 3, 1, 20)]
         };
         let params = V16CuMarketParams {
+            maintenance_fee_per_slot,
             max_portfolio_assets: asset_count,
             maintenance_margin_bps: 1_000,
             initial_margin_bps: 1_000,

@@ -1,5 +1,93 @@
 # Invariant-owned test coverage
 
+## INV-067 late fee reclassification and retained receipts (row 417, 2026-09-13)
+
+Owner: [cu/inv_067_receipt_late_fee_reclassification.rs](cu/inv_067_receipt_late_fee_reclassification.rs),
+mounted by INV-067 as `receipt_late_fee_reclassification`. One new selector covers
+`terminal-claim-identity-survives-every-later-stock-reclassification` in 24 public
+LiteSVM worlds: all six claimant orders, expiry at slot 13 or late at slot 17,
+and explicit `SyncMaintenanceFee` versus fee collection within `CloseResolved`.
+
+The existing public five-owner seed now accepts an initialization-time maintenance
+fee; all older callers retain zero. This case uses seven atoms per slot. System,
+SPL, ATA and wrapper instructions construct every economic account and stock.
+Program loading, signer SOL and authenticated Clock movement are harness inputs;
+there are no out-of-band program-byte writes. Mint authority is publicly revoked
+at exactly 3,852 atoms before creating the retained receipts.
+
+Two receipts freeze faces 700/1,300 and pay 112/208 junior atoms, alongside 916
+principal each. The remaining claimant retains 1,000 unreceipted face, 923
+capital and fee cursor 11. Expiry releases 329 backing atoms and raises the
+residual from 480 to 809. The remaining seven-atom fee moves capital to insurance
+(287 to 294), advances the cursor only to resolution slot 12, and does not add
+residual or change receipt face. Explicit collection preserves the complete
+payout ledger and credits the canonical insurance domains by exactly [3, 4].
+Close-collected fees converge to the same budgets and owner entitlements.
+
+Each world rejects an ordinary invalid System suffix after expiry, fee collection,
+exact-bound replacement and three real SPL payouts have executed. Complete tracked
+Account frames, including metadata and token custody, roll back exactly; only
+the separate payer's one-signature network fee is excluded and checked separately.
+The same retained instruction bytes then commit in the selected claimant order.
+Every prefix checks original receipts with only their paid counter advanced,
+the 3,000-face denominator, bound-to-exact replacement, source stock, insurance,
+capital, tokens and fixed supply. Final claimant payouts are [1,104, 1,185, 1,266].
+Zero-due fee and receipt retries, receipt removal, all five portfolio closes and
+exact rent return precede unsigned withdrawal of all 294 fee atoms. The exact
+3,000-face ledger remains unchanged across this later insurance withdrawal.
+Two independently calculated rounding atoms remain in custody; slab burn/closure
+is outside this increment.
+
+The new relation is receipt identity across a **nonzero capital-to-insurance
+reclassification composed with late source expiry and claimant order**. Existing
+row417 receipt source/expiry/rounding/repeated-stock/aborted/overdue histories use
+zero maintenance fees. Provider/insurance terminal retries establish distinct
+reserve payouts without this paid-receipt fee-cursor composition. This is not a
+new expiry schedule or another source conversion test.
+
+**Row 417 remains OPEN; INV-067 remains REFUTED_CURRENT.** This is finite positive
+conformance, not a generic oracle/proof or a vulnerable-pin experiment. Limits:
+one SPL rail, one fixed fee rate, no fee rewards, insurance spend/recredit, live
+source conversion, arbitrary histories, maximum shapes or slab retirement.
+Production is unchanged; no public-interface bug was observed.
+
+Original base: `97356d1a3d19fbceedb8f8c4a4bdcfbbd3e6d093`. Rebased onto supervisor
+head `57f1a6394c2643666c9cf94debe1366d6545a7cd` before final validation, preserving
+row423/426 notes. Worktree `/run/user/1001/percolator-row417-late-reclass-20260913`;
+branch `codex/astra-row417-late-reclass-20260913`. Private build cache files were
+copied from `/dev/shm/astra-row417-audit-20260912-target` and the default-feature
+Anchor-v2 SBF rebuilt locally with platform-tools v1.52, locked/offline. Engine
+pin: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The supervisor commits changed no production sources or dependency pins.
+
+The post-rebase exact run passed all 24 worlds in 32.25s, with 24 exact rollbacks,
+72 rolled-back SPL payouts and peak 615,349 CU (the rollback bundle), below the
+700,000-CU ceiling. The pre-rebase run also passed (33.43s, peak 624,349 CU).
+The initial 600,000 test ceiling was too small for a bundle
+containing five wrapper calls and three SPL CPIs; the runtime limit was not hit.
+Both INV-079 metadata gates passed (2/2), as did formatting and whitespace checks.
+No diagnostic-only probe remains; no full-suite or Kani run is claimed.
+Final validation uses these exact commands:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/row417-late-reclass-20260913-target
+export TMPDIR=/run/user/1001/row417-late-reclass-20260913-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_late_fee_reclassification::v16_program_late_fee_reclassification_preserves_receipt_faces_and_claimant_order -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD # after commit
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+rmdir "$TMPDIR"
+```
+
 ## INV-028 reserved domains through matcher renewal rollback (row 423, 2026-09-13)
 
 Owner: [cu/inv_028_reserved_domain_renewal.rs](cu/inv_028_reserved_domain_renewal.rs),
