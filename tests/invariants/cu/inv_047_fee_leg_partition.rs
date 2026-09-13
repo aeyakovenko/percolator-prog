@@ -1,6 +1,8 @@
 //! INV-047/052: two distinct fee-bearing legs, four transports, one normalized frame.
 //! Whole legs are partitioned, not quantities; each notional and fee ceiling is preserved.
 //! All fixture accounts are constructed through System/SPL/ATA/wrapper instructions.
+//! Signed bid/ask prints away from AuthMark additionally exercise exact slippage consent
+//! while fees, health, owner value, and the normalized route frame stay mark-based.
 
 use super::*;
 use percolator_prog::constants::{PORTFOLIO_MATCHER_EXPIRY_LEN, PORTFOLIO_MATCHER_EXPIRY_OFF};
@@ -289,6 +291,7 @@ impl Fixture {
         assets: &[usize],
         direction: i128,
         short_cap: bool,
+        quotes: [u64; 2],
     ) -> Transaction {
         let size = |asset| direction * if asset == 0 { 1 } else { -1 } * QUANTITIES[asset] as i128;
         let ix = match (cpi, batch) {
@@ -297,7 +300,7 @@ impl Fixture {
                 self.portfolios[1],
                 assets[0] as u16,
                 size(assets[0]),
-                PRICES[assets[0]],
+                quotes[assets[0]],
                 FEE_BPS,
             ),
             (true, false) => self.env.trade_cpi_ix(
@@ -306,7 +309,7 @@ impl Fixture {
                 assets[0] as u16,
                 size(assets[0]),
                 FEE_BPS,
-                PRICES[assets[0]],
+                quotes[assets[0]],
             ),
             (false, true) => self.env.batch_trade_no_cpi_ix(
                 self.portfolios[0],
@@ -317,7 +320,7 @@ impl Fixture {
                         asset_index: asset as u16,
                         market_id: self.env.asset_market_id(asset as u16),
                         size_q: size(asset),
-                        exec_price: PRICES[asset],
+                        exec_price: quotes[asset],
                         fee_bps: FEE_BPS,
                     })
                     .collect(),
@@ -331,11 +334,19 @@ impl Fixture {
                         asset_index: asset as u16,
                         market_id: self.env.asset_market_id(asset as u16),
                         size_q: size(asset),
-                        limit_price: PRICES[asset],
+                        limit_price: quotes[asset],
                         fee_bps: FEE_BPS,
                     })
                     .collect(),
-                0,
+                assets
+                    .iter()
+                    .map(|&asset| {
+                        ceil(
+                            QUANTITIES[asset] * u128::from(quotes[asset].abs_diff(PRICES[asset])),
+                            POS_SCALE,
+                        )
+                    })
+                    .sum(),
                 assets.iter().map(|&asset| fee(asset)).sum::<u128>() - u128::from(short_cap),
             ),
         };
@@ -489,8 +500,7 @@ impl Fixture {
     }
 }
 
-#[test]
-fn v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles() {
+fn check_nonintegral_fee_leg_routes(spreads: [u64; 2]) {
     assert_eq!([notional(0), notional(1)], [73, 217]);
     assert_eq!([fee(0), fee(1)], [2, 3]);
     for asset in 0..2 {
@@ -509,9 +519,52 @@ fn v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles(
     let mut peak = [0u64; 3]; // Batch, single, rejected.
     let mut route_peak = [0u64; 4]; // No-CPI batch, CPI batch, no-CPI singles, CPI singles.
     for direction in [-1, 1] {
+        let quotes = core::array::from_fn(|asset| {
+            let side = direction * if asset == 0 { 1 } else { -1 };
+            PRICES[asset]
+                * if side < 0 {
+                    10_000 - spreads[0]
+                } else {
+                    10_000 + spreads[1]
+                }
+                / 10_000
+        });
+        if spreads != [0; 2] {
+            for asset in 0..2 {
+                assert_ne!(quotes[asset], PRICES[asset]);
+            }
+            assert!(
+                (0..2).any(|asset| {
+                    ceil(
+                        ceil(QUANTITIES[asset] * u128::from(quotes[asset]), POS_SCALE)
+                            * u128::from(FEE_BPS),
+                        10_000,
+                    ) != fee(asset)
+                }),
+                "reported-price fee control must differ from the AuthMark fee"
+            );
+        }
         let mut expected: Option<Vec<(Pubkey, Option<Account>)>> = None;
         for (cpi, batch) in [(false, true), (true, true), (false, false), (true, false)] {
             let mut fixture = Fixture::new();
+            let mut data = vec![4];
+            for spread in spreads {
+                data.extend_from_slice(&spread.to_le_bytes());
+            }
+            send_raw_tx(
+                &mut fixture.env.svm,
+                &fixture.env.payer,
+                Instruction {
+                    program_id: fixture.matcher,
+                    accounts: vec![
+                        AccountMeta::new_readonly(fixture.owners[1].pubkey(), true),
+                        AccountMeta::new(fixture.context, false),
+                    ],
+                    data,
+                },
+                &[&fixture.owners[1]],
+            )
+            .expect("LP configures the same bid/ask quote in every public world");
             let initial_epochs = fixture
                 .portfolios
                 .map(|key| fixture.env.portfolio_position_epoch(key));
@@ -532,7 +585,7 @@ fn v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles(
             let context_before = fixture.env.svm.get_account(&fixture.context).unwrap();
             fixture.check(0, direction, 0, cpi, initial_epochs);
             if cpi && batch {
-                let tx = fixture.transaction(cpi, batch, &[0, 1], direction, true);
+                let tx = fixture.transaction(cpi, batch, &[0, 1], direction, true, quotes);
                 let mut tracked = keys.clone();
                 tracked.extend(&tx.message.account_keys);
                 tracked.sort_unstable();
@@ -571,7 +624,7 @@ fn v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles(
             let schedule: &[&[usize]] = if batch { &[&[0, 1]] } else { &[&[0], &[1]] };
             let mut filled = 0;
             for (step, assets) in schedule.iter().enumerate() {
-                let tx = fixture.transaction(cpi, batch, assets, direction, false);
+                let tx = fixture.transaction(cpi, batch, assets, direction, false, quotes);
                 let payer_before = fixture
                     .env
                     .svm
@@ -629,7 +682,7 @@ fn v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles(
                         assert_eq!(quoted.asset_index, asset as u64);
                         assert_eq!(
                             [quoted.exec_price_e6, quoted.oracle_price_e6],
-                            [PRICES[asset]; 2]
+                            [quotes[asset], PRICES[asset]]
                         );
                         assert_eq!(
                             quoted.exec_size,
@@ -655,7 +708,7 @@ fn v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles(
                     assert_eq!(key, expected_key);
                     assert_eq!(
                         actual, expected,
-                        "direction={direction}, cpi={cpi}, batch={batch}, key={key}"
+                        "spreads={spreads:?}, direction={direction}, cpi={cpi}, batch={batch}, key={key}"
                     );
                 }
             } else {
@@ -665,6 +718,16 @@ fn v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles(
         }
     }
     assert_eq!(counts, [8, 12, 2]);
-    println!("INV-047/052 two-asset fee partitions: counts={counts:?}, peak CU batch/single/rejected={peak:?}; notionals=[73,217], fees/owner=[2,3], domain credits=[2,2,3,3]");
+    println!("INV-047/052 two-asset fee partitions: spreads={spreads:?}, counts={counts:?}, peak CU batch/single/rejected={peak:?}; notionals=[73,217], fees/owner=[2,3], domain credits=[2,2,3,3]");
     println!("INV-047/052 route peak CU no-CPI batch/CPI batch/no-CPI singles/CPI singles={route_peak:?}; limit={TRADE_CU_LIMIT}");
+}
+
+#[test]
+fn v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles() {
+    check_nonintegral_fee_leg_routes([0, 0]);
+}
+
+#[test]
+fn v16_program_off_mark_quotes_preserve_fractional_fee_route_equivalence() {
+    check_nonintegral_fee_leg_routes([4_000, 2_500]);
 }

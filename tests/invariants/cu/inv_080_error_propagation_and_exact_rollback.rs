@@ -8,6 +8,10 @@
 //! realloc, terminal-top-up, and token-CPI error paths that would otherwise mutate persistent
 //! economic state. These tests exercise the deployed public wrapper with real SBF/LiteSVM account
 //! construction and assert exact rollback plus retry liveness.
+//! The insurance funding-prefix witness uses only System/SPL/wrapper construction: two completed
+//! top-ups and a newly created ledger roll back on a later engine error, then the identical prefix
+//! commits. Its three scopes cover base-market funding and both sides of a non-base asset; this
+//! is finite transaction-composition evidence, not coverage of arbitrary reserve histories.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -1674,6 +1678,326 @@ fn v16_bpf_failed_deposit_spl_transfer_rolls_back_engine_credit() {
     assert_eq!(group.vault, 0);
     assert_eq!(group.c_tot, 0);
     assert_eq!(account.capital.get(), 0);
+}
+
+#[test]
+fn v16_program_insurance_funding_prefix_rolls_back_created_ledger_on_engine_error() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const CAPITAL: u64 = 7;
+    const TOPUPS: [u64; 2] = [37, 86];
+    const INSURANCE: u64 = TOPUPS[0] + TOPUPS[1];
+
+    for domain in [None, Some(2u16), Some(3u16)] {
+        let mut env = inv018_public_spl_market_with_params(
+            0,
+            V16CuMarketParams {
+                max_portfolio_assets: 2,
+                ..V16CuMarketParams::default()
+            },
+        );
+        let owner = Keypair::new();
+        env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        let portfolio_key = Keypair::new();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &portfolio_key,
+            env.portfolio_account_len,
+            env.program_id,
+        );
+        let portfolio = portfolio_key.pubkey();
+        env.send(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[&owner],
+        )
+        .unwrap();
+        let user_token = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+        let insurance_source =
+            create_ata_for_test(&mut env.svm, &env.payer, env.admin.pubkey(), env.mint);
+        let mut mint_instructions = [(user_token, CAPITAL), (insurance_source, INSURANCE)]
+            .map(|(destination, amount)| {
+                spl_token::instruction::mint_to(
+                    &spl_token::ID,
+                    &env.mint,
+                    &destination,
+                    &env.admin.pubkey(),
+                    &[],
+                    amount,
+                )
+                .unwrap()
+            })
+            .to_vec();
+        mint_instructions.push(
+            spl_token::instruction::set_authority(
+                &spl_token::ID,
+                &env.mint,
+                None,
+                spl_token::instruction::AuthorityType::MintTokens,
+                &env.admin.pubkey(),
+                &[],
+            )
+            .unwrap(),
+        );
+        send_raw_ixs(&mut env.svm, &env.payer, mint_instructions, &[&env.admin]).unwrap();
+        env.send(
+            env.deposit_ix(portfolio, CAPITAL.into()),
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(user_token, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .unwrap();
+
+        let ledger = Keypair::new();
+        let ledger_len = state::insurance_ledger_account_len();
+        let ledger_rent = env.svm.minimum_balance_for_rent_exemption(ledger_len);
+        assert_eq!(env.svm.get_account(&ledger.pubkey()), None);
+        let asset = domain.map_or(0, |domain| domain / 2);
+        let sequences_before = env.control_sequences(asset as usize);
+        let mut funding_prefix = vec![
+            heap_ix(),
+            ComputeBudgetInstruction::set_compute_unit_limit(CUSTODY_CU_LIMIT as u32),
+            system_instruction::create_account(
+                &env.payer.pubkey(),
+                &ledger.pubkey(),
+                ledger_rent,
+                ledger_len as u64,
+                &env.program_id,
+            ),
+        ];
+        for (offset, amount) in TOPUPS.into_iter().enumerate() {
+            let intent_id = sequences_before.insurance_top_up + offset as u64 + 1;
+            let market_id = env.asset_market_id(asset);
+            let authority_epoch = sequences_before.authority_epoch;
+            let topup = match domain {
+                None => ProgInstruction::TopUpInsurance {
+                    market_id,
+                    authority_epoch,
+                    intent_id,
+                    amount: amount.into(),
+                },
+                Some(domain) => ProgInstruction::TopUpInsuranceDomain {
+                    domain,
+                    market_id,
+                    authority_epoch,
+                    intent_id,
+                    amount: amount.into(),
+                },
+            };
+            funding_prefix.push(Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(insurance_source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger.pubkey(), false),
+                ],
+                data: topup.encode(),
+            });
+        }
+        let withdrawal = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(user_token, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: env.withdraw_ix(portfolio, u128::from(CAPITAL + 1)).encode(),
+        };
+        let mut rejected_instructions = funding_prefix.clone();
+        rejected_instructions.push(withdrawal.clone());
+        let rejected_tx = Transaction::new_signed_with_payer(
+            &rejected_instructions,
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &env.admin, &ledger, &owner],
+            env.svm.latest_blockhash(),
+        );
+        let mut keys = rejected_tx.message.account_keys.clone();
+        keys.extend([env.mint, solana_sdk::sysvar::clock::id()]);
+        keys.sort_unstable();
+        keys.dedup();
+        let before = keys
+            .iter()
+            .map(|key| (*key, env.svm.get_account(key)))
+            .collect::<Vec<_>>();
+        let signature_fee = FeeStructure::default().lamports_per_signature;
+        let rejected_fee =
+            signature_fee * u64::from(rejected_tx.message.header.num_required_signatures);
+        let error = env.svm.send_transaction(rejected_tx).unwrap_err();
+        assert_eq!(
+            error.err,
+            TransactionError::InstructionError(
+                5,
+                InstructionError::Custom(PercolatorError::EngineLockActive as u32),
+            ),
+            "{domain:?}: the funded flat owner's over-withdraw must reach the engine"
+        );
+        for (program, successes) in [
+            (solana_sdk::system_program::ID, 1),
+            (env.program_id, 2),
+            (spl_token::ID, 2),
+        ] {
+            assert_eq!(
+                error
+                    .meta
+                    .logs
+                    .iter()
+                    .filter(|line| **line == format!("Program {program} success"))
+                    .count(),
+                successes,
+                "{domain:?}: ledger creation and both real funding transfers must complete"
+            );
+        }
+        assert_cu_within(
+            "insurance prefix rejection",
+            error.meta.compute_units_consumed,
+            CUSTODY_CU_LIMIT,
+        );
+        for (key, account) in &before {
+            let mut expected = account.clone();
+            if *key == env.payer.pubkey() {
+                expected.as_mut().unwrap().lamports -= rejected_fee;
+            }
+            assert_eq!(
+                env.svm.get_account(key),
+                expected,
+                "{domain:?}: rollback {key}"
+            );
+        }
+
+        // Reuse every prefix instruction, including the two original intent IDs and ledger key.
+        let retry = Transaction::new_signed_with_payer(
+            &funding_prefix,
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &env.admin, &ledger],
+            env.svm.latest_blockhash(),
+        );
+        let mut expected_payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        expected_payer.lamports -=
+            ledger_rent + signature_fee * u64::from(retry.message.header.num_required_signatures);
+        let meta = env
+            .svm
+            .send_transaction(retry)
+            .expect("unchanged funding prefix retries");
+        assert_cu_within(
+            "insurance prefix retry",
+            meta.compute_units_consumed,
+            CUSTODY_CU_LIMIT,
+        );
+        assert_eq!(
+            env.svm.get_account(&env.payer.pubkey()),
+            Some(expected_payer)
+        );
+        for (key, account) in &before {
+            if ![
+                env.payer.pubkey(),
+                env.market,
+                env.vault,
+                insurance_source,
+                ledger.pubkey(),
+            ]
+            .contains(key)
+            {
+                assert_eq!(
+                    env.svm.get_account(key),
+                    *account,
+                    "{domain:?}: retry frame {key}"
+                );
+            }
+        }
+        let ledger_account = env.svm.get_account(&ledger.pubkey()).unwrap();
+        assert_eq!(ledger_account.owner, env.program_id);
+        assert_eq!(ledger_account.lamports, ledger_rent);
+        assert_eq!(ledger_account.data.len(), ledger_len);
+        assert_eq!(
+            state::read_insurance_ledger(&ledger_account.data).unwrap(),
+            state::InsuranceLedgerAccountV16 {
+                market_group: env.market.to_bytes(),
+                authority: env.admin.pubkey().to_bytes(),
+                total_principal_atoms: INSURANCE.into(),
+                total_deposited_atoms: INSURANCE.into(),
+                total_withdrawn_atoms: 0,
+                cumulative_profit_atoms: 0,
+                cumulative_loss_atoms: 0,
+                last_observed_insurance_atoms: INSURANCE.into(),
+            }
+        );
+        let mut expected_sequences = sequences_before;
+        expected_sequences.insurance_top_up += 2;
+        assert_eq!(env.control_sequences(asset as usize), expected_sequences);
+        let group = env.market_state().1;
+        assert_eq!(
+            (group.insurance, group.c_tot, group.vault),
+            (
+                INSURANCE.into(),
+                CAPITAL.into(),
+                (INSURANCE + CAPITAL).into()
+            )
+        );
+        let mut expected_budgets = [0u128; 4];
+        match domain {
+            None => {
+                expected_budgets[0] = TOPUPS
+                    .into_iter()
+                    .map(|amount| u128::from(amount / 2))
+                    .sum();
+                expected_budgets[1] = u128::from(INSURANCE) - expected_budgets[0];
+            }
+            Some(domain) => expected_budgets[domain as usize] = INSURANCE.into(),
+        }
+        assert_eq!(&group.insurance_domain_budget[..4], &expected_budgets);
+        assert_eq!(
+            group.insurance_domain_budget_remaining_total,
+            INSURANCE.into()
+        );
+        assert_eq!(env.token_amount(insurance_source), 0);
+        assert_eq!(env.token_amount(env.vault), INSURANCE + CAPITAL);
+        assert_eq!(env.token_amount(user_token), 0);
+        let mint = Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data).unwrap();
+        assert_eq!(mint.supply, INSURANCE + CAPITAL);
+        assert_eq!(mint.mint_authority, COption::None);
+
+        let valid_withdrawal = Instruction {
+            data: env.withdraw_ix(portfolio, CAPITAL.into()).encode(),
+            ..withdrawal
+        };
+        send_raw_ixs(
+            &mut env.svm,
+            &env.payer,
+            vec![heap_ix(), cu_ix(), valid_withdrawal],
+            &[&owner],
+        )
+        .expect("the rejected owner's principal remains withdrawable");
+        assert_eq!(env.token_amount(user_token), CAPITAL);
+        assert_eq!(env.token_amount(env.vault), INSURANCE);
+        assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+        let group = env.market_state().1;
+        assert_eq!(
+            (group.insurance, group.c_tot, group.vault),
+            (INSURANCE.into(), 0, INSURANCE.into())
+        );
+        assert_eq!(env.svm.get_account(&ledger.pubkey()), Some(ledger_account));
+    }
 }
 
 #[test]
