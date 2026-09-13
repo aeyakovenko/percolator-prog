@@ -838,8 +838,10 @@ The code and test harnesses are the source of truth for counts and exact CU numb
 - engine arithmetic/accounting proofs in the pinned `percolator` crate
 
 The [row-432 retained single-CPI fee coverage](tests/invariants/README.md#inv-014-retained-single-cpi-fee-policy-detours-row-432-2026-09-12)
-records public policy-detour, exact deposit-rollback and fresh-consent controls.
-It is bounded base-fee conformance; the ledger documents remaining gaps and keeps row 432 open.
+started as bounded public policy-detour, exact deposit-rollback and fresh-consent controls.
+The invariant ledger now records row 432 as independently rediscovered by the generic INV-014
+fee-consent matrix, while the broader invariant remains sampled/conditional rather than globally
+proven.
 
 Before publishing a bounty, run the commands in [Build & test](#build--test) and record the exact output for the current commit.
 

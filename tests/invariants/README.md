@@ -26444,7 +26444,7 @@ Verdicts mean:
 
 ## Known-finding benchmark
 
-The current TSV has 165 rows: 127 `independent-discovery`, 17 `nonqualifying`, and 21 `missing`.
+The current TSV has 165 rows: 128 `independent-discovery`, 17 `nonqualifying`, and 20 `missing`.
 These are recorded evidence dispositions, not new impact or severity acceptance under
 `scripts/loop.md`. Historical severity strings, including `REAL`, are not current classification
 labels; this documentation audit does not reclassify or promote any finding.
@@ -26458,9 +26458,10 @@ the direct row415/428 regression and adjacent INV-064 insurance-policy selector.
 `open_findings.tsv` includes the historical 2026-08-03 snapshot of 143 open PRs whose titles identify
 a public-route LoF or DoS class. It maps every row to a primary invariant. That dated snapshot has 0
 **Direct regression** rows, 0 **Missing** rows, 126 **Independent discovery** rows, and seventeen
-**Nonqualifying** rows. PRs 410 through 426, 428, 429, 432, and 433 remain appended as 21
-**Missing** rows: post-hoc holdout misses, not independent discoveries. PR 434 is now covered by
-the independent INV-027 flat-reopen fee-history selector. The 127 independent
+**Nonqualifying** rows. PRs 410 through 426, 428, 429, and 433 remain appended as 20
+**Missing** rows: post-hoc holdout misses, not independent discoveries. PR 432 is now covered by
+the independent generic INV-014 fee-consent matrix through its retained single-CPI taker-base-fee
+case, and PR 434 is covered by the independent INV-027 flat-reopen fee-history selector. The 128 independent
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older
 `tests/support/open_lof_manifest.rs` retains the executable adapter mapping for its 99-LoF snapshot:

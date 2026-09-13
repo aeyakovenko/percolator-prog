@@ -1700,7 +1700,18 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # no generic oracle, dynamic/backing/partial/in-transaction policy/authority/expiry/
 # recipient/multi-asset/batch/terminal or insurance withdrawal claim. Production
 # and invariant_status.tsv unchanged; row 432 remains OPEN.
-432	LoF	PRIVILEGED	INV-014	INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-080,INV-081	retained-cpi-fee+x-taker-terms+x-single-route	retained-single-cpi-trades-cannot-charge-fee-terms-outside-signed-taker-consent	OPEN
+# 432 holdout red/green audit (2026-09-13): the generic INV-014
+# v16_program_fee_consent_operation_matrix_discovers_unsigned_debits matrix includes
+# FeeConsentKind::RetainedCpiTakerBaseFee and is not a row-specific regression. On
+# origin/main 2b1d025c it rediscovers the vulnerable public single-CPI path:
+# accepted_unconsented_terms=true, mutated_economic_state=true, authorized_debit=0,
+# observed_debit=100000, terminal_victim_loss_atoms=100000, CU 147282. Minimal seed:
+# [0,0,0,0,0,0,0,0,0,5,179,41,119,171,68,179,217,146,7,17,45,90,7,180,223,136,85,174,50,43,145,161].
+# On this coverage branch the same generic matrix passes with discoveries=[]; the
+# direct v16_retained_single_cpi_taker_fee_cap_rejects_policy_increase selector also
+# passes and the wrapper rejects before matcher CPI. This row is COVERED by invariant-
+# owned discovery evidence; INV-014 remains sampled/conditional in invariant_status.tsv.
+432	LoF	PRIVILEGED	INV-014	INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-080,INV-081	retained-cpi-fee+x-taker-terms+x-single-route	retained-single-cpi-trades-cannot-charge-fee-terms-outside-signed-taker-consent	COVERED
 # 433 bounded conformance (2026-09-12): cu/inv_073_terminal_reserve_close_retry.rs.
 # Two public classic-SPL/asset-0 histories retain keeper-paid principal/insurance and
 # lazy-or-17-atom-paid earnings ledgers with provider/beneficiary/operator keys dropped.
