@@ -24,6 +24,9 @@ mod reward_maintenance_catchup;
 #[path = "inv_045_reward_terminal_redemption.rs"]
 mod reward_terminal_redemption;
 
+#[path = "inv_045_hybrid_recipient_provenance.rs"]
+mod hybrid_recipient_provenance;
+
 fn values(env: &V16CuEnv, portfolios: [Pubkey; 5]) -> [i128; 5] {
     portfolios.map(|key| {
         let account = env.portfolio_state(key);

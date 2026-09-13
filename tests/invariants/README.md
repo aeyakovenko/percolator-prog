@@ -1,5 +1,22 @@
 # Invariant-owned test coverage
 
+## PR135 Scope V Hybrid recipient reward lineage (2026-09-13)
+
+Owner: [cu/inv_045_hybrid_recipient_provenance.rs](cu/inv_045_hybrid_recipient_provenance.rs),
+mounted under `inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::hybrid_recipient_provenance`.
+The public LiteSVM probe composes independently moving Hybrid target and recipient
+markets, base/non-base role exchange, both directions, fresh report/catchup and
+recipient settlement order, single/batch reductions, and exact reward payout
+rollback. Effective-price fees, receipt-only credit, recipient PnL and selected
+asset domain budgets have separate oracles through catchup.
+
+This is bounded INV-045 conformance with adjacent INV-020/024/036/041/061/062
+checks. Row 422 remains OPEN and all machine classifications are unchanged.
+Both price histories originate in authenticated reports; stale trade-origin to
+fresh-report reclassification remains outside this increment. The
+[Scope V audit](pr135_scope_v_hybrid_reward_provenance_20260913.md) records the
+coverage comparison, guarantee, limits and exact validation commands.
+
 ## PR135 Scope U terminal claim episodes (2026-09-13)
 
 Owner: [cu/inv_067_terminal_claim_episode_materialization.rs](cu/inv_067_terminal_claim_episode_materialization.rs),

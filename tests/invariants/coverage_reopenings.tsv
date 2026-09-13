@@ -1150,6 +1150,16 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # CPI/AuthMark origin, multiple providers/assets, external backing, arbitrary
 # histories, insurance withdrawal and slab retirement remain outside this family.
 # Row422 remains OPEN; earlier families' terminal limits describe their own scope.
+# Row 422 Scope V bounded conformance (2026-09-13):
+# cu/inv_045_hybrid_recipient_provenance.rs, selector
+# v16_program_dual_hybrid_reward_lineage_survives_recipient_routes_and_payout.
+# Two independently moving authenticated Hybrid markets exchange target/recipient
+# asset roles; report, settlement and single/batch route orders preserve exact
+# effective-price penalty, recipient reward/PnL and selected-asset domain budgets.
+# Real reward-credit and SPL-payout prefixes roll back on invalid observations.
+# See pr135_scope_v_hybrid_reward_provenance_20260913.md for commands and limits.
+# Authenticated-origin conformance only; no stale trade-origin reclassification
+# claim, production change, independent discovery or invariant-status promotion.
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN
 # 423 partial conformance (2026-09-10): cu/inv_028_single_slot_admission.rs::v16_program_batch_admission_cannot_share_last_future_domain_slot.
 # Two individually fitting old-asset legs jointly need 29 domains: both batch orders reject atomically;
