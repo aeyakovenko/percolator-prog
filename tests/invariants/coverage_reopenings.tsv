@@ -1,5 +1,23 @@
 # PR410-434 are post-hoc holdout/conformance misses; rows left OPEN still affect invariant status.
 # This is a coverage-fidelity ledger, not independent-discovery or whole-invariant proof evidence.
+# Row 412 bounded conformance (2026-09-13): cu/inv_012_revoked_renewal_payout.rs,
+# mounted by joint_incarnation_binding::revocation_atomicity::revoked_renewal_payout.
+# Four public System/ATA/SPL/wrapper histories cross both CPI routes and signs.
+# Committed bilateral partial reduction revokes the grant; a later owner renewal,
+# matcher exit and full SPL withdrawal roll back on an external insufficient-funds
+# transfer. Retained/current-episode old-grant consumers reject EngineStale/Unauthorized
+# with exact Account rollback and no matcher call. A public one-token SPL top-up
+# permits the identical bundle instructions with fresh blockhash/signatures; normal
+# transaction history stays enabled. Full owner payouts and supply reconcile exactly.
+# Net-new used-renewal/payout rollback after revocation, not grant-only atomicity,
+# grant/writer ordering, pre-revocation grant replay or row414 incarnation replacement.
+# 4 late SPL rollbacks, 8 old-consent rollbacks, 4 instruction retries, 8 payouts;
+# peak bundle/denied-consumer CU 595073/113556. Row 412 OPEN; statuses unchanged.
+# Limits: one Live leg, fixed price, zero fees; no generic oracle, other writers,
+# expiry, Recovery/terminal, max shapes, funding or replacement. Production unchanged.
+# Exact selector: cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::revocation_atomicity::revoked_renewal_payout::v16_program_failed_renewal_exit_payout_preserves_revocation_and_instruction_retry -- --exact --nocapture --test-threads=1
+# Full build/related/metadata/hygiene commands and artifact provenance: README
+# "INV-012 revoked renewal, exit and payout rollback (row 412, 2026-09-13)".
 # Row 417 bounded conformance (2026-09-13): cu/inv_067_receipt_late_fee_reclassification.rs,
 # mounted as INV-067 receipt_late_fee_reclassification. One new public selector
 # crosses six claimant orders, exact/late expiry and explicit/close-collected fees.

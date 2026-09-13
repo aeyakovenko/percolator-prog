@@ -6,6 +6,9 @@
 use super::*;
 use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_012_revoked_renewal_payout.rs"]
+mod revoked_renewal_payout;
+
 fn cpi(h: &History, ix: &ProgInstruction) -> Instruction {
     Instruction {
         program_id: h.env.program_id,

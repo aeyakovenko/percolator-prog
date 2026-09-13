@@ -83,6 +83,92 @@ cargo fmt --all -- --check
 git diff --check && git diff --cached --check && git show --format= --check HEAD
 ```
 
+## INV-012 revoked renewal, exit and payout rollback (row 412, 2026-09-13)
+
+Owner: [cu/inv_012_revoked_renewal_payout.rs](cu/inv_012_revoked_renewal_payout.rs),
+mounted under `inv_012_capability_and_delegate_scope::joint_incarnation_binding::revocation_atomicity::revoked_renewal_payout`.
+One new selector:
+`v16_program_failed_renewal_exit_payout_preserves_revocation_and_instruction_retry`.
+
+Four public LiteSVM histories cross single/one-leg batch CPI and both position
+directions. Each opens real exposure under the LP's standing grant and retains
+a signed, executable partial exit. An owner-signed bilateral partial reduction
+then consumes the position episode and automatically disables that grant while
+preserving its tuple, fee cap and sequence. Only after this transition do the
+owners sign a bundle containing a new grant, the remaining matcher exit, the
+taker's full collateral withdrawal and an explicitly authorized SPL transfer to
+another wallet. The final transfer lacks one token. Exact error index and success
+logs establish that renewal, matcher CPI and SPL withdrawal executed before SPL
+`InsufficientFunds`; the entire economic Account frame rolls back, including
+grant/expiry/sequence, position episodes, matcher context, custody, mint supply,
+recipient tokens and owner lamports. The independent payer loses exactly the
+normal signature fee.
+
+After that rollback, the original serialized exit rejects with `EngineStale`;
+a separately signed request with current position bindings but the old standing
+grant rejects with `Unauthorized`, before matcher CPI and with exact rollback.
+Thus restored revocation, not merely stale position binding, blocks further
+economic movement. A public one-token SPL mint changes no wrapper/context
+Account. The complete renewal/exit/payout/transfer instructions then succeed
+unchanged, using fresh signatures and a new blockhash because normal transaction
+history retains the landed failure. Message equality excludes only that blockhash;
+signature verification and duplicate-transaction protection remain enabled.
+Final checks attribute the authorized taker transfer and the LP's separate full
+withdrawal, with zero remaining positions/OI/capital/vault and total SPL balances
+equal to the two original deposits plus the explicit one-token top-up.
+
+Net-new scope: **rollback of an already used post-revocation renewal through
+an actual SPL payout, followed by unchanged-instruction economic retry**.
+The parent `revocation_atomicity` restores a live original grant after a
+revoking-writer/current-consumer failure. `grant_writer_order` covers the order
+of grants and writers with admission/rejection at the CPI consumer. Stateful
+`mixed_episode_renewal` rolls back grant-only updates after reduction. None
+composes a committed revocation with renewal, matcher use, full withdrawal and
+late external failure. Row414 incarnation/replacement histories are unchanged;
+this test replaces no asset, portfolio, matcher program or context.
+
+**Row412 remains OPEN; invariant statuses are unchanged.** This is four bounded
+Live, zero-fee, constant-price histories, not a generic generator/oracle. Other
+revoking writers, grant/writer orders, expiry, Recovery/terminal transitions,
+multiple legs/max shapes, fees/funding and incarnation replacement remain outside
+scope. It does not test pre-revocation grant delivery or reproduce an original
+finding, and adds no production change or engine proof.
+
+Worktree: `/home/anatoly/percolator-row412-astra-20260913`; branch:
+`codex/astra-row412-capability-episode-20260913`; base:
+`origin/codex/astra-open-holdout-ledger-20260912` at `e0719b67`.
+Wrapper and auth matcher were built fresh, locked/offline with platform-tools
+v1.52 in private target directories. All market, portfolio, matcher and token
+accounts use the reused System/ATA/SPL/public-wrapper helpers. No initialized
+program-owned bytes are installed or edited out of band.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+The new selector passes 1/1: four late SPL rollbacks, eight old-consent rollbacks,
+four instruction-preserving retries and eight full principal payouts. Peak bundle
+CU is 595073; denied-consumer CU is 113556, within the 1400000 transaction limit.
+Both exact related selectors pass (8 committed-revocation worlds and 32
+grant/writer-order worlds), as do both metadata gates, formatting and Git
+whitespace checks. No full-suite or vulnerable-pin run is claimed. Exact build,
+new/related selectors, metadata and hygiene commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row412-capability-episode-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/dev/shm/row412-capability-episode-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+CARGO_TARGET_DIR=/dev/shm/row412-capability-episode-20260913-matcher-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::revocation_atomicity::revoked_renewal_payout::v16_program_failed_renewal_exit_payout_preserves_revocation_and_instruction_retry -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::revocation_atomicity::v16_program_retained_capability_tracks_committed_revocation_after_bundle_rollback -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::matcher_program_generation::grant_writer_order::v16_program_grant_writer_order_binds_atomic_cpi_authority -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-014 retained trade beside counterparty maintenance rewards (row 411, 2026-09-13)
 
 Owner: [cu/inv_014_retained_maintenance_reward.rs](cu/inv_014_retained_maintenance_reward.rs),
