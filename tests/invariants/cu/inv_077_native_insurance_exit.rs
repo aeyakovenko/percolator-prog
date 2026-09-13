@@ -1,14 +1,30 @@
 //! Row 418 / INV-077: a signed native-insurance exit survives partial redemption
 //! and public custody recreation. Remaining insurance is the bounded payout rank.
+//! The multisig variant converts the funded beneficiary through System/SPL calls,
+//! then drops its key. Payer-only payouts survive quorum-controlled native
+//! redemption and ATA recreation without changing the insurance entitlement.
+//! Related INV-018/021/069/070/073: exact custody, rollback, rent and retirement.
+//! This finite asset-zero reserve cell does not establish maximum-shape coverage.
 
 use super::*;
 use crate::support::fuzz_model::{
     assert_market_stock_census, assert_reservation_encumbrance_census,
 };
+use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
+use spl_token::state::Multisig;
 
 const CU_LIMIT: u64 = 150_000;
 
 fn run(env: &mut V16CuEnv, instructions: Vec<Instruction>, signers: &[&Keypair]) -> u64 {
+    run_with_rent(env, instructions, signers, 0)
+}
+
+fn run_with_rent(
+    env: &mut V16CuEnv,
+    instructions: Vec<Instruction>,
+    signers: &[&Keypair],
+    rent_paid: u64,
+) -> u64 {
     env.svm.expire_blockhash();
     let mut ixs = vec![
         heap_ix(),
@@ -23,17 +39,110 @@ fn run(env: &mut V16CuEnv, instructions: Vec<Instruction>, signers: &[&Keypair])
         &signing,
         env.svm.latest_blockhash(),
     );
+    tx.verify().unwrap();
+    assert_eq!(
+        tx.message.header.num_required_signatures as usize,
+        signing.len()
+    );
     assert!(bincode::serialize(&tx).unwrap().len() <= 1_232);
+    let frames: Vec<_> = tx
+        .message
+        .account_keys
+        .iter()
+        .enumerate()
+        .filter(|(index, key)| **key == env.payer.pubkey() || !tx.message.is_writable(*index))
+        .map(|(_, key)| (*key, env.svm.get_account(key)))
+        .collect();
+    let fee = u64::from(tx.message.header.num_required_signatures)
+        * FeeStructure::default().lamports_per_signature;
     let meta = env
         .svm
         .send_transaction(tx)
         .expect("bounded native insurance step");
+    for (key, mut expected) in frames {
+        if key == env.payer.pubkey() {
+            expected.as_mut().unwrap().lamports -= fee + rent_paid;
+        }
+        assert_eq!(
+            env.svm.get_account(&key),
+            expected,
+            "native continuation frame: {key}"
+        );
+    }
     assert_cu_within(
         "native insurance exit",
         meta.compute_units_consumed,
         CU_LIMIT,
     );
     meta.compute_units_consumed
+}
+
+fn reject_incomplete_quorum(
+    env: &mut V16CuEnv,
+    payout: Instruction,
+    redemption: Instruction,
+    member: &Keypair,
+    tracked: &[Pubkey],
+) -> u64 {
+    env.svm.expire_blockhash();
+    let tx = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            ComputeBudgetInstruction::set_compute_unit_limit(CU_LIMIT as u32),
+            payout,
+            redemption,
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, member],
+        env.svm.latest_blockhash(),
+    );
+    tx.verify().unwrap();
+    assert_eq!(tx.message.header.num_required_signatures, 2);
+    assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
+    let mut keys = tx.message.account_keys.clone();
+    keys.extend_from_slice(tracked);
+    keys.sort_unstable();
+    keys.dedup();
+    let before: Vec<_> = keys.iter().map(|key| env.svm.get_account(key)).collect();
+    let failure = env
+        .svm
+        .send_transaction(tx)
+        .expect_err("redemption needs two members");
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(3, InstructionError::MissingRequiredSignature),
+        "logs={:?}",
+        failure.meta.logs
+    );
+    for program in [env.program_id, spl_token::ID] {
+        assert_eq!(
+            failure
+                .meta
+                .logs
+                .iter()
+                .filter(|line| **line == format!("Program {program} success"))
+                .count(),
+            1,
+            "the insurance payment and native transfer completed before the quorum check"
+        );
+    }
+    for (key, mut expected) in keys.iter().zip(before) {
+        if *key == env.payer.pubkey() {
+            expected.as_mut().unwrap().lamports -=
+                2 * FeeStructure::default().lamports_per_signature;
+        }
+        assert_eq!(
+            env.svm.get_account(key),
+            expected,
+            "complete rollback: {key}"
+        );
+    }
+    assert_cu_within(
+        "native insurance quorum rollback",
+        failure.meta.compute_units_consumed,
+        CU_LIMIT,
+    );
+    failure.meta.compute_units_consumed
 }
 
 fn recreate_custody(env: &mut V16CuEnv, owner: Pubkey, token: Pubkey) -> u64 {
@@ -50,7 +159,10 @@ fn recreate_custody(env: &mut V16CuEnv, owner: Pubkey, token: Pubkey) -> u64 {
         ],
         data: vec![],
     };
-    run(env, vec![ix], &[])
+    let rent = env
+        .svm
+        .minimum_balance_for_rent_exemption(TokenAccount::LEN);
+    run_with_rent(env, vec![ix], &[], rent)
 }
 
 fn assert_native(env: &V16CuEnv, key: Pubkey, initial: &Account, amount: u64, raw: u64) {
@@ -66,6 +178,17 @@ fn assert_native(env: &V16CuEnv, key: Pubkey, initial: &Account, amount: u64, ra
 
 #[test]
 fn v16_program_native_insurance_partial_redemption_reaches_bounded_terminal_exit() {
+    verify_native_insurance_exit(None);
+}
+
+#[test]
+fn v16_program_native_multisig_insurance_recreation_preserves_unsigned_retirement() {
+    for pair in [[0, 1], [0, 2], [1, 2]] {
+        verify_native_insurance_exit(Some(pair));
+    }
+}
+
+fn verify_native_insurance_exit(quorum_pair: Option<[usize; 2]>) {
     use inv_081_success_state_validity_over_complete_public_routes::inv081_public_native_market;
 
     const LONG: u64 = 47;
@@ -79,6 +202,7 @@ fn v16_program_native_insurance_partial_redemption_reaches_bounded_terminal_exit
             let mut env = inv081_public_native_market();
             let admin = env.admin.insecure_clone();
             let beneficiary = Keypair::new();
+            let beneficiary_key = beneficiary.pubkey();
             env.svm
                 .airdrop(&beneficiary.pubkey(), 1_000_000_000)
                 .unwrap();
@@ -133,18 +257,75 @@ fn v16_program_native_insurance_partial_redemption_reaches_bounded_terminal_exit
                 peak = peak.max(run(&mut env, vec![ix], &[&beneficiary]));
             }
             peak = peak.max(env.resolve());
+            let members: Vec<_> = (0..if quorum_pair.is_some() { 3 } else { 0 })
+                .map(|_| Keypair::new())
+                .collect();
+            let member_keys: Vec<_> = members.iter().map(Signer::pubkey).collect();
+            for key in &member_keys {
+                env.svm.airdrop(key, 1_000_000_000).unwrap();
+            }
+            if quorum_pair.is_some() {
+                let keys = [env.market, env.vault, destination, env.mint, admin_token];
+                let before = keys.map(|key| env.svm.get_account(&key));
+                peak = peak.max(run(
+                    &mut env,
+                    vec![
+                        system_instruction::allocate(&beneficiary_key, Multisig::LEN as u64),
+                        system_instruction::assign(&beneficiary_key, &spl_token::ID),
+                        spl_token::instruction::initialize_multisig2(
+                            &spl_token::ID,
+                            &beneficiary_key,
+                            &member_keys.iter().collect::<Vec<_>>(),
+                            2,
+                        )
+                        .unwrap(),
+                    ],
+                    &[&beneficiary],
+                ));
+                assert_eq!(keys.map(|key| env.svm.get_account(&key)), before);
+                let account = env.svm.get_account(&beneficiary_key).unwrap();
+                assert_eq!(account.owner, spl_token::ID);
+                let multisig = Multisig::unpack(&account.data).unwrap();
+                assert!(multisig.is_initialized);
+                assert_eq!((multisig.m, multisig.n), (2, 3));
+                assert_eq!(&multisig.signers[..3], &member_keys);
+            }
+            let beneficiary = if quorum_pair.is_some() {
+                drop(beneficiary);
+                None
+            } else {
+                Some(beneficiary)
+            };
+            let recipient = if quorum_pair.is_some() {
+                member_keys[0]
+            } else {
+                beneficiary_key
+            };
+            let recipient_before = env.svm.get_account(&recipient).unwrap();
+            let beneficiary_frame = env.svm.get_account(&beneficiary_key);
+            let member_frames: Vec<_> = member_keys
+                .iter()
+                .map(|key| env.svm.get_account(key))
+                .collect();
+            let quorum_keys: Vec<_> = quorum_pair
+                .map(|pair| pair.map(|i| member_keys[i]).to_vec())
+                .unwrap_or_default();
+            let redemption_signers: Vec<_> = if let Some(pair) = quorum_pair {
+                pair.into_iter().map(|i| &members[i]).collect()
+            } else {
+                beneficiary.iter().collect()
+            };
             let cfg = env.market_state().0;
             let profile = state::read_asset_oracle_profile(
                 &env.svm.get_account(&env.market).unwrap().data,
                 0,
             )
             .unwrap();
-            assert_eq!(profile.insurance_authority, beneficiary.pubkey().to_bytes());
+            assert_eq!(profile.insurance_authority, beneficiary_key.to_bytes());
             assert_eq!(profile.insurance_operator, admin.pubkey().to_bytes());
             let sequences = env.control_sequences(0);
             let market_lamports = env.svm.get_account(&env.market).unwrap().lamports;
             let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
-            let beneficiary_before = env.svm.get_account(&beneficiary.pubkey()).unwrap();
 
             let check = |env: &V16CuEnv, paid: u64, custody_amount: u64| {
                 let market = env.svm.get_account(&env.market).unwrap();
@@ -153,6 +334,11 @@ fn v16_program_native_insurance_partial_redemption_reaches_bounded_terminal_exit
                 assert_eq!(current_cfg, cfg);
                 assert_eq!(group.mode, MarketModeV16::Resolved);
                 assert_eq!(group.materialized_portfolio_count, 0);
+                assert_eq!(group.pnl_pos_tot, 0);
+                assert_eq!(
+                    group.insurance_domain_budget_remaining_total,
+                    remaining.into()
+                );
                 assert_eq!(
                     (group.c_tot, group.vault, group.insurance),
                     (0, remaining.into(), remaining.into())
@@ -171,6 +357,9 @@ fn v16_program_native_insurance_partial_redemption_reaches_bounded_terminal_exit
                     profile
                 );
                 assert_eq!(env.control_sequences(0), sequences);
+                if quorum_pair.is_some() {
+                    assert_eq!(env.svm.get_account(&beneficiary_key), beneficiary_frame);
+                }
                 assert_eq!(market.lamports, market_lamports);
                 assert_native(env, env.vault, &empty_vault, remaining + SURPLUS, RAW);
                 assert_native(env, destination, &empty_destination, custody_amount, 0);
@@ -206,7 +395,7 @@ fn v16_program_native_insurance_partial_redemption_reaches_bounded_terminal_exit
                 let ix = Instruction {
                     program_id: env.program_id,
                     accounts: vec![
-                        AccountMeta::new(beneficiary.pubkey(), true),
+                        AccountMeta::new_readonly(beneficiary_key, beneficiary.is_some()),
                         AccountMeta::new(env.market, false),
                         AccountMeta::new(destination, false),
                         AccountMeta::new(env.vault, false),
@@ -214,14 +403,43 @@ fn v16_program_native_insurance_partial_redemption_reaches_bounded_terminal_exit
                         AccountMeta::new_readonly(spl_token::ID, false),
                     ],
                     data: env
-                        .withdraw_insurance_asset_instruction(
-                            beneficiary.pubkey(),
-                            0,
-                            amount.into(),
-                        )
+                        .withdraw_insurance_asset_instruction(beneficiary_key, 0, amount.into())
                         .encode(),
                 };
-                peak = peak.max(run(&mut env, vec![ix], &[&beneficiary]));
+                if let Some(pair) = quorum_pair {
+                    let incomplete = spl_token::instruction::close_account(
+                        &spl_token::ID,
+                        &destination,
+                        &recipient,
+                        &beneficiary_key,
+                        &[&member_keys[pair[0]]],
+                    )
+                    .unwrap();
+                    let mut tracked = vec![
+                        env.market,
+                        env.vault,
+                        env.mint,
+                        env.vault_authority,
+                        destination,
+                        admin_token,
+                        admin.pubkey(),
+                        beneficiary_key,
+                    ];
+                    tracked.extend_from_slice(&member_keys);
+                    peak = peak.max(reject_incomplete_quorum(
+                        &mut env,
+                        ix.clone(),
+                        incomplete,
+                        &members[pair[0]],
+                        &tracked,
+                    ));
+                    check(&env, paid, 0);
+                }
+                peak = peak.max(run(
+                    &mut env,
+                    vec![ix],
+                    &beneficiary.iter().collect::<Vec<_>>(),
+                ));
                 paid += amount;
                 let rank_after = env.market_state().1.insurance;
                 assert_eq!(rank_before - rank_after, amount.into());
@@ -240,27 +458,31 @@ fn v16_program_native_insurance_partial_redemption_reaches_bounded_terminal_exit
                 let redeem = spl_token::instruction::close_account(
                     &spl_token::ID,
                     &destination,
-                    &beneficiary.pubkey(),
-                    &beneficiary.pubkey(),
-                    &[],
+                    &recipient,
+                    &beneficiary_key,
+                    &quorum_keys.iter().collect::<Vec<_>>(),
                 )
                 .unwrap();
-                peak = peak.max(run(&mut env, vec![redeem], &[&beneficiary]));
+                peak = peak.max(run(&mut env, vec![redeem], &redemption_signers));
                 assert!(env
                     .svm
                     .get_account(&destination)
                     .is_none_or(|account| account.lamports == 0
                         && account.data.iter().all(|byte| *byte == 0)));
-                let mut expected = beneficiary_before.clone();
+                let mut expected = recipient_before.clone();
                 expected.lamports += paid + (index as u64 + 1) * rent;
-                assert_eq!(env.svm.get_account(&beneficiary.pubkey()), Some(expected));
+                assert_eq!(env.svm.get_account(&recipient), Some(expected));
+                if quorum_pair.is_some() {
+                    assert_eq!(env.svm.get_account(&beneficiary_key), beneficiary_frame);
+                    for (key, frame) in member_keys.iter().zip(&member_frames) {
+                        if *key != recipient {
+                            assert_eq!(&env.svm.get_account(key), frame);
+                        }
+                    }
+                }
                 assert_eq!(frame_keys.map(|key| env.svm.get_account(&key)), frame);
                 if index == 0 {
-                    peak = peak.max(recreate_custody(
-                        &mut env,
-                        beneficiary.pubkey(),
-                        destination,
-                    ));
+                    peak = peak.max(recreate_custody(&mut env, beneficiary_key, destination));
                     check(&env, paid, 0);
                     assert_eq!(frame_keys.map(|key| env.svm.get_account(&key)), frame);
                 }
@@ -277,7 +499,8 @@ fn v16_program_native_insurance_partial_redemption_reaches_bounded_terminal_exit
                 (SURPLUS, RAW)
             };
             assert_native(&env, env.vault, &empty_vault, sweep, raw);
-            let beneficiary_final = env.svm.get_account(&beneficiary.pubkey());
+            let beneficiary_final = env.svm.get_account(&beneficiary_key);
+            let recipient_final = env.svm.get_account(&recipient);
             let close = Instruction {
                 program_id: env.program_id,
                 accounts: vec![
@@ -327,14 +550,12 @@ fn v16_program_native_insurance_partial_redemption_reaches_bounded_terminal_exit
                 |account| account.lamports == 0 && account.data.iter().all(|byte| *byte == 0)
             ));
             assert_eq!(env.svm.get_account(&env.market), Some(tombstone));
-            assert_eq!(
-                env.svm.get_account(&beneficiary.pubkey()),
-                beneficiary_final
-            );
+            assert_eq!(env.svm.get_account(&beneficiary_key), beneficiary_final);
+            assert_eq!(env.svm.get_account(&recipient), recipient_final);
             assert_eq!(env.svm.get_account(&env.mint), mint);
             assert_eq!(env.svm.get_account(&env.vault_authority), authority);
             assert_cu_within("native insurance history peak", peak, CU_LIMIT);
-            println!("INV-077 native insurance: first={first}, sync_surplus={sync_surplus}, paid={paid}, payouts=2, slab_calls=1, peak_CU={peak}");
+            println!("INV-077 native insurance: quorum={quorum_pair:?}, first={first}, sync_surplus={sync_surplus}, paid={paid}, payouts=2, slab_calls=1, peak_CU={peak}");
         }
     }
 }
