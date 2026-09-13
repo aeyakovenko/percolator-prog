@@ -1,5 +1,100 @@
 # Invariant-owned test coverage
 
+## INV-045/038/085 retained funding-checkpoint retry (row 425, 2026-09-13)
+
+Owner: [cu/inv_045_retained_funding_retry.rs](cu/inv_045_retained_funding_retry.rs),
+mounted by `cu/inv_045_funding_carry_entitlement.rs`. Exact selector:
+`inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::retained_funding_retry::v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpoint`.
+
+Eight public LiteSVM histories cross both premium directions, forward/reversed
+asset and payout order, and failed-attempt/no-failure controls. Four owners hold
+unequal integral positions on two assets and deposit a fixed 1,000,066 SPL atoms.
+At accrual slot 2, price-cap carries are `[4800, 6000]` and funding is nonzero.
+Both owners pre-sign a two-asset, two-lot reduction before the authenticated
+Clock advances to 5 and `PushAuthMark` reverses both targets. The target change
+resets carry at the still-lagging accrual frontier 2 and stores a real pending
+funding checkpoint at slot 5. Funding must retain the old premium through that
+boundary; the new premium applies from slot 6.
+
+Each failure history rejects the retained economic instruction with exact
+`EngineStale` both before catch-up and after one public crank. That partial crank
+rebuilds carries `[2400, 3000]`; rejection must roll back all attempted inline
+funding, settlement and position changes. Further bounded public cranks at fixed
+Clock 5 activate the checkpoint and leave carries `[7200, 9000]`. The signed
+owners' complete Accounts remain unchanged throughout target replacement and
+catch-up. A pre-signed transaction then executes the reduction successfully before
+an invalid suffix forces full rollback; wrapper success logs establish that the
+economic prefix ran. The retained reduction subsequently commits, preserving
+complete oracle profiles and absent-owner Accounts.
+
+All delivery variants are signed at slot 2 with identical economic instruction
+bytes and account metas. Distinct CU limits avoid LiteSVM's failed-signature
+cache; the test checks serialized transactions stay byte-identical across the
+history. It does not expire blockhashes or refresh generation/position guards
+between signing and delivery, and signature/packet checks remain enabled.
+These are retained signed alternatives, not a claim that an already-recorded
+Solana transaction signature can execute again.
+
+The local oracle derives carry quotients/remainders, K, signed-floor funding and
+each owner's settled-plus-latent entitlement from input anchors, premiums,
+elapsed slots and signed quantities. Existing owner-ledger and payout helpers
+check decoded snapshots, matched OI, capital/PnL totals, fixed mint supply and
+SPL custody. Further public cranks through slot 9 cross integer price boundaries
+and leave carries `[6800, 1000]`. Signed bilateral flattening, account cranks,
+released-PnL conversion and withdrawals pay 32 exact owner entitlements, leaving
+zero vault, capital and positive PnL. Failure/control histories and both orderings
+agree on K/F, carry and every payout. Mint authority is revoked through SPL.
+System/ATA/SPL/wrapper instructions construct all economic accounts; no initialized
+program account bytes are edited.
+
+Overlap review discarded funding plus CPI/no-CPI switching and split-fill
+coverage because `generated_fractional_routes` already covers it. The existing
+`funding_carry_entitlement` reversal updates a caught-up market and explicitly
+asserts no pending funding checkpoint. This increment adds **retained reduction
+rejection and recovery across a pending funding checkpoint with nonzero carry**.
+No shared helper implementation changed; the parent module only registers the
+new child, so adjacent controls were not required.
+
+**Row 425 remains OPEN.** This is bounded INV-045/038/085 conformance, not a generic
+generator/oracle or an invariant-status promotion. It covers AuthMark, two assets,
+integral lots, unit ADL, zero fees, solvent bilateral batches and public catch-up
+before reduction. Arbitrary checkpoint replacement chains, retained CPI/single
+routes, successful inline accrual carry, fractional K/F position settlement,
+nonzero fees/ADL, other oracle/quote modes, bankruptcy/Recovery, resolved/terminal
+transitions and arbitrary settlement cadence remain outside this increment.
+No implementation mismatch was observed; production and dependency pins are unchanged.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`d451d68ad01932cb364b432d0e58389df667da75`. Branch:
+`codex/row425-funding-retained-retry-20260913`; isolated worktree:
+`/tmp/percolator-row425-funding-retained-retry-20260913`. The coordinator checkout
+was not edited. Requested model/reasoning: `gpt-6-astra` / `ultra`; the session
+provides no model switch or independent verification of that setting.
+
+Environment: Linux `6.1.0-52-cloud-amd64`, x86_64; host Rust/Cargo 1.90.0;
+LiteSVM 0.1.0 with bundled SPL Token/ATA programs. The private default-feature
+SBF build uses platform-tools v1.52, Anchor v2 and locked engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact selector passes 1/1 across eight histories, with eight stale rejections,
+four successful-prefix rollbacks and 32 exact payouts; peak **364,049 CU** is
+below the 600,000-CU bound. Both metadata selectors, formatting and whitespace
+checks pass. Validation commands from the isolated worktree:
+
+```bash
+export CARGO_TARGET_DIR=/run/user/1001/row425-funding-retry-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::retained_funding_retry::v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpoint -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-070/088 resolved claimant actionability after later cleanup (row 424, 2026-09-13)
 
 Owner: [cu/inv_088_resolved_actionability.rs](cu/inv_088_resolved_actionability.rs),

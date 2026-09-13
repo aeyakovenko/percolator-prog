@@ -803,6 +803,20 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # replacement, trade-driven discovery, fees/ADL, other modes and arbitrary cadence
 # remain open. No production change or status promotion. Exact commands and limits:
 # README.md#inv-045-generated-fractional-kf-routes-row-425-2026-09-12.
+# Row 425 bounded retained funding-checkpoint retry (2026-09-13):
+# cu/inv_045_retained_funding_retry.rs; exact selector
+# inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::retained_funding_retry::v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpoint.
+# Eight public two-asset histories pair failed-attempt/no-failure controls across
+# premium reversal and a pending funding checkpoint. Retained signed bilateral
+# reductions reject before/after partial public catch-up; carry, K/F and owner
+# value survive eight stale and four successful-prefix complete Account rollbacks
+# apart from exact payer signature fees. Checkpoint activation leaves nonzero carry;
+# unchanged pre-signed alternatives execute and 32 exact SPL payouts agree with the
+# input-derived ledger and controls. AuthMark, integral lots, unit ADL, zero fees,
+# solvent batches only; arbitrary checkpoints/cadence, retained CPI, successful
+# inline carry and other modes remain outside this increment. No production or
+# status change; row remains OPEN. Scope, base, environment and exact commands:
+# README.md#inv-045038085-retained-funding-checkpoint-retry-row-425-2026-09-13.
 425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	OPEN
 # Row 426 partial conformance (2026-09-12): cu/inv_020_interrupted_refresh_fees.rs,
 # v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements.

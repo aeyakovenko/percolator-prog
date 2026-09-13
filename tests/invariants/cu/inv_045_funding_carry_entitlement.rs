@@ -5,6 +5,9 @@
 
 use super::*;
 
+#[path = "inv_045_retained_funding_retry.rs"]
+mod retained_funding_retry;
+
 const RATE: i128 = 10_000;
 const REVERSAL_SLOT: u64 = 3;
 const END_SLOT: u64 = 8;
