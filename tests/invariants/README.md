@@ -4889,6 +4889,94 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-014 retained underfunded single-CPI close (row 432, 2026-09-13)
+
+Owner: [cu/inv_014_retained_underfunded_close.rs](cu/inv_014_retained_underfunded_close.rs).
+Exact selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_underfunded_close::v16_retained_single_cpi_underfunded_close_preserves_consent_and_actual_fee_budget`.
+The existing row432 fixture now accepts public market-init parameters; its existing
+constructors retain their original parameters. No production code changed.
+
+Eight LiteSVM histories cross both signed directions, an underfunded taker or LP,
+and two positive residual balances. System/SPL/ATA/wrapper/authenticated-matcher
+instructions construct every economic account. A flat owner's public withdrawal
+leaves enough principal to open at 19 bps and meet 10-bps margin with a 1-bps/slot
+price cap. Opening the position charges 49 atoms per owner and leaves the chosen
+role with 31 or 139 capital atoms. No initialized account bytes are edited.
+
+Three independently signed close envelopes, with a 99-bps taker cap and permissive
+137-bps LP grant, predate the policy history. Each includes a real 113-atom taker
+deposit. Initially successful simulations preserve complete Accounts. A 100-bps
+policy rejects the retained close before matcher invocation and restores the SPL
+deposit, even though one participant cannot pay the full quoted fee. At restored
+99 bps, a second envelope successfully deposits and closes before an obsolete
+policy suffix rejects; complete Account rollback includes matcher output and both
+portfolios. An unchanged pre-signed alternative then commits the full close.
+
+The input-priced oracle requires `ceil(ceil(abs(q)*100/POS_SCALE)*bps/10000)`:
+49 atoms to open and 253 quoted atoms to close. The underfunded taker actually
+pays 144 or 252 closing atoms; the underfunded LP pays 31 or 139. The other role
+pays exactly 253. Only these collected amounts reach insurance and its signed
+trade-side budgets; the unpaid portion produces no extra insurance or user debit.
+After every public transition, capital, zero PnL/fee credits, positions/OI, SPL
+balances, market stock and reservation censuses agree. Both owners' final SPL
+entitlements equal their minted allocation minus their own collected fees; the
+only remaining custody is insurance. Mint authority is revoked and supply fixed.
+
+**Nonduplicate:** the first proposed expiry dimension was discarded because
+`stateful/inv_014_retained_fee_expiry.rs` already covers retained grant expiry.
+Existing row432 policy/ABA/route histories and INV-014 partial-fill/payout tests
+use funded fee collection. INV-040's uncollectible CPI exit test has no retained
+policy-change consent or input-exact per-role payout oracle. This increment
+composes underfunded collection with both early consent rejection and rollback
+after successful collection, including a one-atom taker collection shortfall.
+
+**Row 432 remains OPEN.** This is bounded Live, constant-price, single-asset,
+full-close/base-fee conformance, not a generic generator/oracle. Dynamic/backing
+fees, zero collectible capital, simultaneously underfunded roles, partial fills,
+expiry/authority composition with underfunding, terminal payout, insurance
+withdrawal and arbitrary histories remain outside this selector. Machine invariant
+verdicts are unchanged. No public-route invariant violation or production fix was
+found. Initial setup attempts rejected an incompatible margin/price envelope and
+withdrawal from an exposed portfolio; the final construction withdraws while flat.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`9653b677d23a10a2631011669d789b9e630da897`. Worktree:
+`/home/anatoly/percolator-row432-underfunded-20260913`; local, unpushed branch
+`codex/astra-row432-underfunded-consent-20260913`. The original worktree was not
+edited. Environment: Linux x86_64, host rustc 1.90.0, LiteSVM 0.1.0,
+default Anchor-v2 features, locked/offline SBF platform-tools v1.52, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Private build caches were copied
+from existing caches, then wrapper and matcher rebuilt from this worktree.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+Validation: new selector 1/1, 8 worlds, 32 simulations, 16 rollbacks, 8 committed
+closes and 8 final withdrawals. Peak simulation/control/rejection/close-or-payout
+CU: 283,451 / 179,072 / 283,250 / 270,475, all within 500,000 CU. Two adjacent
+controls exercise the extended shared constructor, and both required metadata
+selectors pass. Formatting and all pre/post-commit whitespace checks pass.
+Only the existing Solana future-compatibility and unused-support warnings remain;
+no full-suite result is claimed. Exact commands from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/percolator-row432-underfunded-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/run/user/1001/percolator-row432-underfunded-tmp
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+CARGO_TARGET_DIR=/run/user/1001/percolator-row432-underfunded-matcher-target cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_underfunded_close::v16_retained_single_cpi_underfunded_close_preserves_consent_and_actual_fee_budget -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --quiet --test-threads=1 inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollback inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_cpi_and_direct_policy_histories_differ_only_by_explicit_route_fees
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+# After the local commit:
+git show --format= --check HEAD
+```
+
 ## INV-014 retained single-CPI fee policy detours (row 432, 2026-09-12)
 
 Owner: [cu/inv_014_retained_single_cpi_policy_history.rs](cu/inv_014_retained_single_cpi_policy_history.rs).

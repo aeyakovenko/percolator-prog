@@ -963,6 +963,20 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # slippage/partials/multi-asset/aggregate batches, expiry/underfunding/terminal payout
 # remain gaps. No generic oracle, route-comparison increment or status promotion;
 # invariant_status.tsv is unchanged and row 432 remains OPEN.
+# 432 bounded underfunded-close conformance (2026-09-13): cu/inv_014_retained_underfunded_close.rs,
+# retained_single_cpi_policy_history::retained_underfunded_close::v16_retained_single_cpi_underfunded_close_preserves_consent_and_actual_fee_budget.
+# Eight public worlds cross direction, underfunded role and two positive balances;
+# retained 99-bps closes reject a 100-bps policy despite low collectible capital.
+# Sixteen full-Account rollbacks restore SPL deposits and, at permitted 99 bps,
+# successful underfunded closes before a stale policy suffix. Eight unchanged
+# pre-signed alternatives close fully. Input-derived actual fees (taker 144/252,
+# LP 31/139, funded peer 253 atoms) reconcile side budgets, owner SPL endpoints,
+# fixed supply, zero PnL/fee credits/OI and remaining insurance custody.
+# See README for exact selectors, base 9653b677, environment, builds and checks.
+# Bounded Live/single-asset/full-close/base-fee evidence only: no generic oracle,
+# dynamic/backing fees, zero/two-role underfunding, partials, expiry/authority
+# composition, terminal payout or insurance withdrawal. No production change or
+# invariant-status promotion; row 432 remains OPEN.
 432	LoF	PRIVILEGED	INV-014	INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-080,INV-081	retained-cpi-fee+x-taker-terms+x-single-route	retained-single-cpi-trades-cannot-charge-fee-terms-outside-signed-taker-consent	OPEN
 # 433 bounded conformance (2026-09-12): cu/inv_073_terminal_reserve_close_retry.rs.
 # Two public classic-SPL/asset-0 histories retain keeper-paid principal/insurance and
