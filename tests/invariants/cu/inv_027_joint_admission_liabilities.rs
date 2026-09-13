@@ -47,6 +47,9 @@ mod refilled_first_admission;
 #[path = "inv_027_generated_flat_fee_entitlement.rs"]
 mod generated_flat_fee_entitlement;
 
+#[path = "inv_027_generated_first_risk_liabilities.rs"]
+mod generated_first_risk_liabilities;
+
 const PRICE: u64 = 100;
 const START: u64 = 1;
 const ADMISSION: u64 = 4;

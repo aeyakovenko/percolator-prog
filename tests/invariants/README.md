@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## PR135 Scope P generated first-risk liabilities (2026-09-13)
+
+Owner: [cu/inv_027_generated_first_risk_liabilities.rs](cu/inv_027_generated_first_risk_liabilities.rs),
+mounted under `inv_027_protected_principal_seniority::joint_admission_liabilities::generated_first_risk_liabilities`.
+Four seeded cases cross flat/reopened history, four first-open transports and
+automatic versus explicit recertification in 64 public LiteSVM worlds. An owner
+ledger continues across first admission, another fee interval, adverse nontraded
+asset lag, opposite-transport admission and full principal exits. A senior payout
+prefix rolls back with every rejected excessive admission. The oracle checks
+owner/domain entitlement and every current certificate against input-derived
+liabilities, independent raw-state math and snapshot full refresh.
+
+This adds bounded INV-027 evidence with related INV-010/024/044/053/060/062/081
+checks. First opens explicitly settle flat fees; automatic settlement is tested
+on the subsequent first open of another asset. Funding, trading fees and junior
+claims are zero. Row 413 remains OPEN, row 434 remains COVERED, and all invariant
+statuses are unchanged. The [Scope P audit](pr135_scope_p_first_risk_liability_conformance_20260913.md)
+records prior coverage, the distinct composition, limits, results and commands.
+
 ## PR135 Scope N generated reserve wallet availability (2026-09-13)
 
 Owner: [cu/inv_073_generated_reserve_wallets.rs](cu/inv_073_generated_reserve_wallets.rs),
