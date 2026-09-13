@@ -118,6 +118,113 @@ cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir 
 rmdir /run/user/1001/row412-mixed-renewal-20260913-tmp
 ```
 
+## INV-058 fee-bearing existing-pair cap competition (row 427, 2026-09-13)
+
+Owner: [cu/inv_058_existing_leg_fee_competition.rs](cu/inv_058_existing_leg_fee_competition.rs),
+mounted by `cu/inv_058_multi_asset_oi_fee_handoff.rs`. Exact selector:
+`inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset::existing_leg_fee_competition::v16_existing_pairs_compete_for_fee_bearing_side_headroom_across_pair_order`.
+Requirement: `side-oi-cap-enforcement-must-compose-across-distinct-owner-pairs`.
+
+Sixteen public LiteSVM histories cross both position signs, both execution orders
+of two disjoint owner pairs, and four route assignments: single bilateral/batch
+CPI, batch CPI/single bilateral, single CPI/batch bilateral, and batch
+bilateral/single CPI. Both pairs already have a nonzero leg on asset 0. Asset 1
+and the fixture's third pair stay flat, providing untouched-account controls.
+With `H = MAX_OI_SIDE_Q / 2`, the initial magnitudes are `H - q0` and `H - q1`,
+where `q0 = 72 * POS_SCALE / 100 + 1` and `q1 = q0 - 2`. Their aggregate side OI
+is exactly `MAX_OI_SIDE_Q - q0 - q1`; both stored side counts remain two throughout
+the increases. The mark stays 100 and public policy sets the growth fee to
+137 bps. The independent two-ceiling calculation yields notionals 73/72 and
+fees 2/1 per owner; omitting the notional ceiling incorrectly yields one for q0.
+
+An atomic bundle first increases one existing pair and charges its fee, then
+asks the other existing pair for its allocation plus one quantity atom. The
+second application instruction rejects with exact `EngineInvalidLeg` at
+transaction index 3, after the two compute-budget instructions. Wrapper/CPI
+success-log counts prove the first fill and the expected matcher calls executed.
+The complete Account frame rolls back market/portfolio data, matcher contexts,
+SPL mint/vault/wallets, economic lamports, metadata and account absence. It
+includes all tracked accounts and compiled transaction keys; only the payer's
+exact network signature fee is deducted. No fee or position epoch survives.
+
+The same first instruction then commits separately. Its sibling's unchanged
+over-cap instruction still rejects with full rollback at index 2, preserving
+the first pair's committed fee and OI. The already-built exact sibling fill
+commits, reaching precisely the shared cap. Both pairs independently reject one
+more atom, through their assigned routes, with complete rollback. Every proposal
+stays strictly below account position/notional caps and has sufficient capital
+including its fee, isolating the aggregate side bound. Retries reuse instruction
+bytes/metas, with fresh enclosing signatures/blockhashes; retained serialized
+transactions or duplicate-signature replay are not claimed.
+
+Input-derived positions, epochs, health notional, capital, zero PnL, OI, stored
+counts, insurance domains, fixed mint supply and SPL custody reconcile after each
+trade or rollback. Final fees are exactly `[2, 2, 1, 1, 0, 0]`, the active asset's
+insurance budgets are `[3, 3]`, total capital is `120000000000 - 6`, and both
+active pairs have magnitude H. Public zero-fee closes and six full withdrawals
+pay `[19999999998, 19999999998, 19999999999, 19999999999, 20000000000, 20000000000]`.
+Capital/OI end at zero; accounting and SPL vaults retain exactly six insurance
+atoms. Successful fills preserve complete unmentioned Accounts; payout frames
+also preserve unrelated Accounts and all economic lamports.
+
+This is **fee-bearing admission into two existing pairs without releasing OI**.
+At base, the atomic and multi-asset fee handoff owners refill a fresh third pair;
+the generated existing-leg owner has zero fees. None owns this unequal-fee,
+existing-pair admission and pair-order relation. The existing public System,
+ATA, SPL and wrapper fixture constructs all accounts, funds six distinct owners
+with 20000000000 atoms each and revokes mint authority. No initialized program
+bytes are injected, edited or restored.
+
+**Row 427 remains OPEN.** This is a fixed conformance schedule, not a generic
+generator/oracle. Other route products, multiple simultaneously active assets,
+arbitrary pair counts/histories, nonunit ADL, PnL/funding, elapsed liabilities or
+rate limits, partial matcher fills, other fee destinations, mixed lifecycle
+states and maximum shapes remain outside this increment. Production code,
+dependency pins and invariant status rows are unchanged; no current
+public-interface property violation was observed.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at exactly
+`4886d7bdae8a48ebb2f0e9bcd7702e7980f0a289`. Branch:
+`codex/row427-existing-leg-cap-20260913`; isolated worktree:
+`/run/user/1001/percolator-row427-existing-leg-20260913`. Main checkout untouched.
+Host Rust/Cargo 1.90.0, LiteSVM 0.1.0; private locked/offline default-feature
+wrapper and authenticated matcher rebuilds use platform-tools v1.52, Anchor v2
+and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The private target starts from a copy of an existing cache; shared targets are
+not written. The new selector passes 1/1 on its first run: **16 worlds, 64 exact
+rollbacks, 96 payouts**. Peak CU rejection/trade/custody is
+**316317 / 177878 / 46382**. Assertions bound trades and rejections by
+`345000 * instruction_count` (690000 for the two-trade rejection), and custody
+by 300000, within the harness's 1400000-CU transaction envelope.
+
+Both required metadata selectors pass (2/2), as do repository formatting and
+working/staged whitespace checks; the resulting local commit is checked too.
+Exact commands follow. No broad behavioral suite is claimed.
+After validation, private Cargo and fixture targets are cleaned; the worktree
+and one unpushed local commit are retained.
+
+```bash
+cp -a --reflink=auto /dev/shm/percolator-row427-f6c2-target /run/user/1001/row427-existing-leg-20260913-target
+export CARGO_TARGET_DIR=/run/user/1001/row427-existing-leg-20260913-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /run/user/1001/percolator-row427-existing-leg-20260913/tests/fixtures/auth_matcher/target/deploy -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+rustfmt --edition 2021 tests/invariants/cu/inv_058_existing_leg_fee_competition.rs
+cargo test --locked --offline --test v16_cu inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset::existing_leg_fee_competition::v16_existing_pairs_compete_for_fee_bearing_side_headroom_across_pair_order -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /run/user/1001/percolator-row427-existing-leg-20260913/tests/fixtures/auth_matcher/target
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+```
+
 ## INV-008 co-owned withdrawal stock and sibling retry (row 415, 2026-09-13)
 
 Owner: [cu/inv_008_coowned_withdrawal_stock.rs](cu/inv_008_coowned_withdrawal_stock.rs),

@@ -980,6 +980,25 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # histories remain open. Existing notes retained; no other row disposition changed.
 # Rebased onto 5f3e33b9 including row426. README records exact commands, SBF hashes,
 # pre-fix failure and passing behavioral/metadata/format/diff verification.
+# Row 427 fee-bearing existing-pair competition (2026-09-13):
+# cu/inv_058_existing_leg_fee_competition.rs, mounted under
+# inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset::existing_leg_fee_competition;
+# v16_existing_pairs_compete_for_fee_bearing_side_headroom_across_pair_order.
+# Sixteen public worlds cross mirrored signs, both pair orders and four mixed
+# single/batch CPI/bilateral assignments. Two existing pairs increase into one
+# shared cap without an OI release. Unequal nonintegral fills charge exactly 2/1
+# atoms per owner; earlier fee-bearing existing-leg admission rolls back on the
+# sibling's max-plus-one suffix, then exact requests commit in separate transactions.
+# Both pairs reject further growth at cap. Input OI/count/capital/fee/epoch/health
+# and custody ledgers reconcile 64 complete Account rollbacks and 96 SPL payouts;
+# final capital/OI are zero and vault/insurance are exactly six atoms (3 per side).
+# Nonduplicate: prior fee handoffs refill fresh legs; generated existing-leg
+# histories have zero fees. Public setup only; no initialized program-byte edits.
+# Base 4886d7bdae8a48ebb2f0e9bcd7702e7980f0a289; peak reject/trade/custody CU
+# 316317/177878/46382. README records exact commands, limits, build hashes and cleanup.
+# Row stays OPEN: bounded schedule, no generic generator/oracle or production change.
+# Arbitrary histories/routes, multi-asset growth, nonunit ADL, PnL/funding, elapsed
+# liabilities/rates, partial fills, other fee destinations and maximum shapes remain open.
 427	Conformance	LIMIT	INV-058	INV-058	disjoint-portfolios+x-side-oi-cap+x-public-trades	side-oi-cap-enforcement-must-compose-across-distinct-owner-pairs	OPEN
 # 428 bounded public conformance (2026-09-12): stateful/inv_008_retained_reserve_replenishment.rs,
 # v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession.

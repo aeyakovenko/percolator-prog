@@ -13,6 +13,9 @@ use super::*;
 #[path = "inv_058_generated_side_oi_composition.rs"]
 mod generated_side_oi_composition;
 
+#[path = "inv_058_existing_leg_fee_competition.rs"]
+mod existing_leg_fee_competition;
+
 const ASSETS: usize = 2;
 const HANDOFF_FEE_BPS: u64 = 100;
 type Legs = Vec<(u16, i128)>;
