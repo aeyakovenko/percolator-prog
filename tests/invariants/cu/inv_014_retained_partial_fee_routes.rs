@@ -16,6 +16,9 @@ use std::collections::BTreeMap;
 #[path = "inv_014_retained_maintenance_reward.rs"]
 mod retained_maintenance_reward;
 
+#[path = "inv_014_generated_partial_policy_words.rs"]
+mod generated_partial_policy_words;
+
 const PRINCIPAL: [u64; 2] = [100_003, 200_007];
 const DEPOSIT: u64 = 113;
 const PRICE: u64 = 100;
