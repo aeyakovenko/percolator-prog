@@ -12,6 +12,9 @@ use proptest::{
 };
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_008_reciprocal_reward_stock.rs"]
+mod reciprocal_reward_stock;
+
 const SLOT: u64 = 8;
 const RATE: u64 = 11;
 const WALLET: u64 = 4_096;

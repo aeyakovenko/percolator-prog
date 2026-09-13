@@ -346,6 +346,20 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # and sibling retry" includes the new --exact selector, both INV-079 metadata
 # selectors, cargo fmt --all -- --check, git diff --check && git diff --cached
 # --check, git show --format= --check HEAD and cargo clean --target-dir.
+# 415 reciprocal fee stock and retained retry (2026-09-13):
+# cu/inv_008_reciprocal_reward_stock.rs, mounted under INV-008 withdrawal_stock_history.
+# v16_consumed_withdrawal_survives_reciprocal_fee_stock_and_atomic_retry adds four
+# public SBF histories: the emptied withdrawal recipient earns new fee stock, then
+# pays its own fee back to that source. Independent owner books, insurance splits,
+# fixed supply and stock/encumbrance censuses track both legs and their fresh exits.
+# Retained stale and late SPL suffixes restore both fee legs and fresh payouts;
+# 56 transactions, 34 complete Account rollbacks, 16 rolled-back SPL payments,
+# 12 committed payouts, peak 283727 CU. Transactions retained before first payment.
+# Distinct from separate-source row415 rewards and rollback-free INV-024 reward cycles.
+# Finite portfolio conformance only; insurance/backing binding and arbitrary histories
+# remain OPEN, with no production change, bug claim or invariant status promotion.
+# Base b7ccff2a; exact selector, private build and required gates in README section
+# "INV-008 reciprocal fee stock and retained withdrawal".
 415	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-011,INV-024,INV-031,INV-064	retained-withdrawal+x-stock-replenishment+x-retry	a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution	OPEN
 # 416/429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_coalescence.rs,
 # v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements.

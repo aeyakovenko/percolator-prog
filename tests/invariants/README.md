@@ -1,5 +1,73 @@
 # Invariant-owned test coverage
 
+## INV-008 reciprocal fee stock and retained withdrawal (row 415, 2026-09-13)
+
+Owner: [cu/inv_008_reciprocal_reward_stock.rs](cu/inv_008_reciprocal_reward_stock.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::withdrawal_stock_history::reciprocal_reward_stock`.
+One new selector: `v16_consumed_withdrawal_survives_reciprocal_fee_stock_and_atomic_retry`.
+
+Four public LiteSVM histories cross 50%/100% maintenance reward shares with
+separate/bundled fee collection. A 37-atom withdrawal exhausts its original
+portfolio at slot 3. At slot 4, a distinct 503-atom source pays 164 fee atoms,
+crediting 82/164 atoms to the emptied portfolio. That recipient then pays its
+own 41-atom fee back to the first source, returning a 20/41-atom reward. This
+leaves 41/123 new recipient atoms, 359/380 source atoms and 103/0 insurance atoms.
+The original 37-atom request remains stale despite sufficient new capital.
+
+All delivery alternatives are signed before the first payment, retaining exact
+serialized transaction bytes and distinct CU envelopes across one Clock advance.
+`EngineStale` suffixes roll back both reciprocal fees, or both fees plus a real
+fresh SPL payout. A separate late SPL `InsufficientFunds` suffix rolls back the
+same fresh payout and fee cursors. Exact instruction indices and completed
+wrapper/SPL logs prove the prefixes executed. Complete tracked and compiled
+non-payer Accounts roll back; the payer loses exactly its signature fee.
+Unchanged fresh consent then pays the recipient's remaining stock, and the
+source's separate owner receives its full remaining entitlement. Same-slot fee
+retries create no additional reward. Both subject capitals end at zero, leaving
+only the untouched 103-atom peer and independently calculated insurance in custody.
+
+The input-derived book checks both owners' capital plus SPL payments against
+their initial deposits, gross fees and incoming rewards at every step, alongside
+fee cursors, IDs, owner sequences, position epochs, exact insurance-domain splits,
+fixed 643-atom mint supply, accounting/SPL vaults, stock and encumbrance censuses,
+control sequences and untouched accounts. Fee-only steps preserve complete SPL
+custody Accounts and require only the payer signature. All economic accounts use
+System/ATA/SPL/wrapper construction; no initialized program bytes are mutated.
+
+Novelty: **a paid withdrawal recipient becomes a fee source returning stock to
+its replenisher, with joint fee/payout rollback and retained retry**. Existing
+INV-008 passive, generated and co-owned histories use separate fee sources;
+INV-024's recycled-reward terminal history has no retained withdrawal or rollback;
+INV-027's reciprocal reward mapping owns first-risk admission. This selector
+adds their missing consent/reciprocal-stock composition, not another reward order.
+**Row 415 remains OPEN; invariant statuses are unchanged.** This is finite flat
+portfolio conformance, not insurance/backing withdrawal binding, a generic stock
+oracle, arbitrary-history coverage or a vulnerable/fixed-pin result. No production
+change or public-interface bug is claimed.
+
+Worktree: `/home/anatoly/worktrees/astra-row415-withdrawal-atomic-retry-20260913`;
+branch: `codex/astra-row415-withdrawal-atomic-retry-20260913`; base:
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`b7ccff2a9c7c3631518749c6b8fd7fde1da0cd08`. A private copy of the existing row415
+target cache was used; default-feature SBF was rebuilt locked/offline with
+platform-tools v1.52 and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+SBF SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact selector passed 1/1 in 2.00s: 56 transactions, 34 complete rollbacks,
+16 rolled-back SPL payouts and 12 committed payouts; peak 283,727 CU is below
+the existing 300,000 custody ceiling. Exact verification commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row415-reciprocal-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::withdrawal_stock_history::reciprocal_reward_stock::v16_consumed_withdrawal_survives_reciprocal_fee_stock_and_atomic_retry -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-073 native insurance redemption rollback (row 421, 2026-09-13)
 
 Owner: [cu/inv_073_native_insurance_ledger_progress.rs](cu/inv_073_native_insurance_ledger_progress.rs).
