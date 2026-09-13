@@ -71,6 +71,82 @@ cargo fmt --all -- --check
 git diff --check && git diff --cached --check && git show --format= --check HEAD
 ```
 
+## INV-012 repriced generation consent (row 414, 2026-09-13)
+
+Owner: [cu/inv_012_repriced_generation_consent.rs](cu/inv_012_repriced_generation_consent.rs),
+mounted under `inv_012_capability_and_delegate_scope::joint_incarnation_binding::repriced_generation_consent`.
+Selector: `v16_program_repriced_asset_reuse_requires_generation_and_fee_consent`.
+Base: `19562322`, branch `codex/astra-row414-capability-incarnation-20260913`,
+worktree `/home/anatoly/percolator-row414-astra-20260913`.
+
+Four public LiteSVM histories cross both position signs and two-leg request order.
+Real authenticated matcher CPI first opens and closes asset 1. A fixed 37-bps
+policy precedes retained consent for 100 units of asset 1 and two opposite units
+of sibling asset 2. Both prices are 100: independently rounded fees are 37 and
+1 atoms per owner, and the retained signed batch with a 38-atom cap simulates
+successfully. Public retirement/cooldown/reactivation replaces asset 1 generation
+2 with generation 4 at price 201. Owner portfolios, episodes, matcher tuple,
+grant sequence/expiry, external close response and transaction blockhash survive.
+
+The original signed request and a fee-cap-only update reject with
+`AssetGenerationMismatch` before CPI. Updating only the generation reaches real
+matcher CPI but rejects with `InvalidInstruction` at the retained 38-atom cap;
+75 atoms also reject, while the exact current 76-atom cap succeeds. The fully
+repaired request changes only generation and atom cap. Four rejections per world
+compare complete transaction and protected Accounts, including both owner
+wallets, mint, vault and external context, with the payer charged only the exact
+signature fee. Failed attempts preserve fee stock, OI, episodes and request ID.
+
+Fresh consent admits the replacement and sibling together, debiting 75 and 1
+atoms per owner into their respective long/short insurance domains. Single-CPI
+exits pay the same fees; each owner then withdraws exactly 999848 SPL atoms,
+leaving 304 insurance atoms in custody. Input-derived checks reconcile capital,
+zero PnL, signed legs/current generations, both OI sides, every insurance-domain
+budget, request/episode counters, mint supply and owner payouts after each fill
+and withdrawal, including the LP withdrawal's shared sequence increment.
+All economic accounts use System/SPL/ATA and public wrapper
+initialization; no program-owned bytes are injected or edited out of band.
+
+Net new: changed-price used-slot replacement composes generation-bound retained
+authority with a nonzero two-leg fee ceiling and exact per-domain value movement.
+`reused_asset_return_binding` holds prices fixed with zero fees and tests response
+freshness; `used_generation_lifecycle` explicitly regrants and checks zero-fee
+positive reuse with live siblings. This does not repeat revoked renewal/payout
+rollback, retired-scope rejection or grant-writer ordering.
+
+**Row 414 remains OPEN; no invariant status changes.** This bounded example tests
+signed consumption requests under an unchanged standing LP grant. It does not
+prove standing-grant generation confinement, arbitrary capability histories,
+context/program/portfolio replacement, nonzero funding/PnL, backing fees, partial
+fills, alternate oracle providers, quote rails or maximum shapes. No production
+change or public LoF/DoS finding is claimed.
+
+Fresh locked/offline default-feature SBF uses platform-tools v1.52. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+auth matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Validation: new selector passed (1/1, four worlds, 16 exact rollbacks, peak
+461710 CU, 2.35s); related used-generation selector passed (1/1, 16 worlds,
+32 replacements, 112 fills, 9.49s). Both metadata gates passed (1/1 each),
+as did formatting and worktree/staged/HEAD whitespace checks. Development
+corrected test expectations for the packed position epoch and withdrawal's
+shared sequence; no production behavior was changed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row414-capability-incarnation-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/dev/shm/row414-capability-incarnation-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+CARGO_TARGET_DIR=/dev/shm/row414-capability-incarnation-20260913-matcher-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::repriced_generation_consent::v16_program_repriced_asset_reuse_requires_generation_and_fee_consent -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::used_generation_lifecycle::v16_program_used_asset_reuse_with_live_sibling_preserves_authorized_exit -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-020 sibling observations at risk admission (row 426, 2026-09-13)
 
 Owner: [cu/inv_020_partial_observation_routes.rs](cu/inv_020_partial_observation_routes.rs),

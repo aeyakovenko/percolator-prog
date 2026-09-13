@@ -46,6 +46,9 @@ mod shared_owner_succession;
 #[path = "inv_012_reused_asset_return_binding.rs"]
 mod reused_asset_return_binding;
 
+#[path = "inv_012_repriced_generation_consent.rs"]
+mod repriced_generation_consent;
+
 const CAPITAL: u128 = 1_000_000;
 const PRICE: u64 = 100;
 const SLOT: u64 = 1;
