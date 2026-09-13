@@ -3,10 +3,18 @@
 //! Normative obligation: Time and oracle observations are authenticated, coherent, and cannot be caller-rewound.
 //!
 //! Evidence in this file (F over public I routes):
-//! `v16_program_composite_timestamp_coherence_rejects_cross_epoch_liquidation` keeps a two-leg
-//! cross-rate mathematically constant and covers numerator-only, denominator-only, and two-fresh-
-//! but-different-epoch reports. Each rejects with exact rollback; a coherent report then lands,
-//! preserves health and OI, and leaves a complete owner exit and withdrawal.
+//! `v16_program_composite_timestamp_coherence_rejects_cross_epoch_liquidation` starts from a
+//! constant two-leg cross-rate and covers numerator-only, denominator-only, and two-fresh-
+//! but-different-epoch reports. Each rejects as OracleStale with exact rollback. A coherent
+//! control then changes the cross-rate by 20,000/40,000/60,000, preserving healthy positions
+//! and OI, and leaves a complete owner exit and input-priced withdrawal.
+//! Its live current-evidence control varies the authenticated slot backlog from 68 to
+//! 124 slots. Partial cranks must advance accrual without rewriting the funded account;
+//! its initially current certificate must become stale. Completion requires current
+//! epochs/bitmap, changed account bytes, exact input-priced equity and margin, and both
+//! authenticated component prices/timestamps. A zero deficit alone is
+//! not a current-health witness. This tightens the partial-to-current control cell for
+//! row 426; it does not close row 426 or add authority/reward evidence for rows 416/422.
 //! `v16_program_hybrid_terminal_snapshot_requires_coherent_leg_epochs` rejects mixed-time initial
 //! configuration with exact rollback and prevents a mixed-time crank hint from changing oracle or
 //! user value state. A coherent control reaches the current cross-rate, resolves, and pays both

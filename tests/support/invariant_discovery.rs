@@ -2335,9 +2335,13 @@ pub struct CompositeTimeCoherenceEvidence {
     pub rejected_skew_words: u8,
     pub exact_rollback_words: u8,
     pub coherent_update_landed: bool,
+    pub partial_refreshes: u8,
+    pub authenticated_slot: u64,
+    pub current_health_certified: bool,
     pub target_after: u64,
     pub mark_after: u64,
     pub victim_capital_loss: u128,
+    pub expected_capital_loss: u128,
     pub oi_reduction_q: u128,
     pub cranker_reward: u128,
     pub owner_exit_landed: bool,
@@ -3101,9 +3105,11 @@ impl CompositeTimeCoherenceEvidence {
         self.rejected_skew_words == 3
             && self.exact_rollback_words == self.rejected_skew_words
             && self.coherent_update_landed
+            && self.partial_refreshes > 0
+            && self.current_health_certified
             && self.target_after == self.coherent_price
             && self.mark_after == self.coherent_price
-            && self.victim_capital_loss == 0
+            && self.victim_capital_loss == self.expected_capital_loss
             && self.oi_reduction_q == 0
             && self.cranker_reward == 0
             && self.owner_exit_landed
@@ -16341,6 +16347,9 @@ pub fn verify_composite_time_coherence(
     const FRESH_B: i64 = 4_000_000;
 
     seed[0] ^= 0x7b;
+    let slot_stride = 17 + u64::from(seed[2] % 15);
+    let control_price = COHERENT_PRICE + 20_000 * (1 + u64::from(seed[3] % 3));
+    let control_a = control_price * 4;
     let coherent_initial = i128::from(INITIAL_A)
         .checked_mul(1_000_000)
         .and_then(|value| value.checked_div(i128::from(INITIAL_B)))
@@ -16368,7 +16377,7 @@ pub fn verify_composite_time_coherence(
             liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
             max_price_move_bps_per_slot: 24,
             max_accrual_dt_slots: 20,
-            max_abs_funding_e9_per_slot: 1_000,
+            max_abs_funding_e9_per_slot: 0,
             min_funding_lifetime_slots: 10_000_000,
             actor_deposits: [540_000, 540_000, 1_000, USER_DEPOSIT, 1],
             ..MarketConfig::default()
@@ -16401,6 +16410,10 @@ pub fn verify_composite_time_coherence(
         .ok_or_else(|| "composite-time victim size overflow".to_string())?;
     env.trade_no_cpi(1, 0, 0, size_q, COHERENT_PRICE, 0)
         .map_err(|error| format!("open coherent-price victim short: {error}"))?;
+    if !discovery_certificate_is_current(&env.primary_market_state().1, &env.primary_portfolio(0))?
+    {
+        return Err("funded composite-time account must start with current health".into());
+    }
     let victim_capital_before = env.primary_portfolio(0).capital.get();
     let oi_before = env.primary_market_state().1.assets[0].oi_eff_short_q;
     let cranker_capital_before = env.primary_portfolio(2).capital.get();
@@ -16408,7 +16421,7 @@ pub fn verify_composite_time_coherence(
 
     let fresh_a_101 = env.set_pyth_price(&feeds[0], FRESH_A, -6, 0, 101);
     let fresh_b_101 = env.set_pyth_price(&feeds[1], FRESH_B, -6, 0, 101);
-    let fresh_a_102 = env.set_pyth_price(&feeds[0], FRESH_A, -6, 0, 102);
+    let fresh_a_102 = env.set_pyth_price(&feeds[0], control_a as i64, -6, 0, 102);
     let fresh_b_102 = env.set_pyth_price(&feeds[1], FRESH_B, -6, 0, 102);
     let observations = || {
         vec![CrankObservationHint {
@@ -16426,14 +16439,14 @@ pub fn verify_composite_time_coherence(
     let mut slot = 1u64;
     for (word, now_unix_ts) in skew_words {
         slot = slot
-            .checked_add(20)
+            .checked_add(slot_stride)
             .ok_or_else(|| "composite-time rejection slot overflow".to_string())?;
         env.set_clock(slot, now_unix_ts);
         let before = fingerprint(&env);
-        if env
-            .crank_with_oracles(2, slot, observations(), &word)
-            .is_err()
-        {
+        if let Err(error) = env.crank_with_oracles(2, slot, observations(), &word) {
+            if !error.contains(&format!("Custom({})", PercolatorError::OracleStale as u32)) {
+                return Err(format!("unexpected composite-time rejection: {error}"));
+            }
             rejected_skew_words = rejected_skew_words.saturating_add(1);
         }
         if fingerprint(&env) == before {
@@ -16448,24 +16461,94 @@ pub fn verify_composite_time_coherence(
     }
 
     slot = slot
-        .checked_add(20)
+        .checked_add(slot_stride)
         .ok_or_else(|| "composite-time control slot overflow".to_string())?;
     env.set_clock(slot, 102);
+    let victim_key = env.actors[0].portfolio;
+    let unrefreshed = env.svm.get_account(&victim_key);
+    let initial_slot = env.primary_market_state().1.assets[0].slot_last;
     let coherent_update = env
         .crank_with_oracles(2, slot, observations(), &[fresh_a_102, fresh_b_102])
         .map_err(|error| format!("coherent composite update rejected: {error}"))?;
-    let refresh = env
-        .crank_with_oracles(0, slot, observations(), &[fresh_a_102, fresh_b_102])
-        .map_err(|error| format!("refresh coherent-price victim: {error}"))?;
+    let prefix_slot = env.primary_market_state().1.assets[0].slot_last;
+    if prefix_slot <= initial_slot
+        || prefix_slot >= slot
+        || env.svm.get_account(&victim_key) != unrefreshed
+        || discovery_certificate_is_current(
+            &env.primary_market_state().1,
+            &env.primary_portfolio(0),
+        )?
+    {
+        return Err("coherent prefix must make only partial market progress".into());
+    }
+
+    // A successful crank can stop at market-only accrual. Require both that branch and
+    // a later full account refresh while retaining exactly the same authenticated reports.
+    let mut partial_refreshes = 0;
+    let mut refresh_max_cu = 0;
+    for _ in 0..8 {
+        let before_slot = env.primary_market_state().1.assets[0].slot_last;
+        let before_account = env.svm.get_account(&victim_key);
+        let refresh = env
+            .crank_with_oracles(0, slot, observations(), &[fresh_a_102, fresh_b_102])
+            .map_err(|error| format!("refresh coherent-price victim: {error}"))?;
+        refresh_max_cu = refresh_max_cu.max(refresh.compute_units);
+        let after_slot = env.primary_market_state().1.assets[0].slot_last;
+        if after_slot == slot {
+            break;
+        }
+        if after_slot <= before_slot
+            || after_slot > slot
+            || env.svm.get_account(&victim_key) != before_account
+            || discovery_certificate_is_current(
+                &env.primary_market_state().1,
+                &env.primary_portfolio(0),
+            )?
+        {
+            return Err("partial refresh must advance accrual without changing the account".into());
+        }
+        partial_refreshes += 1;
+    }
+    let current_group = env.primary_market_state().1;
+    let current_profile = env.primary_profile(0);
+    let current_health_certified = current_group.assets[0].slot_last == slot
+        && discovery_certificate_is_current(&current_group, &env.primary_portfolio(0))?
+        && current_profile.last_good_oracle_slot == slot
+        && current_profile.oracle_target_publish_time == 102
+        && current_profile.oracle_leg_publish_times == [102, 102, 0]
+        && current_profile.oracle_leg_prices_e6 == [control_a, FRESH_B as u64, 0];
+    if partial_refreshes == 0
+        || !current_health_certified
+        || env.svm.get_account(&victim_key) == unrefreshed
+    {
+        return Err(format!(
+            "coherent control did not reach current account health evidence: partial={partial_refreshes}, slot={slot}, asset_slot={}, certificate_current={}, oracle_slot={}, publish_time={}, leg_times={:?}, leg_prices={:?}, account_changed={}",
+            current_group.assets[0].slot_last,
+            discovery_certificate_is_current(&current_group, &env.primary_portfolio(0))?,
+            current_profile.last_good_oracle_slot,
+            current_profile.oracle_target_publish_time,
+            current_profile.oracle_leg_publish_times,
+            current_profile.oracle_leg_prices_e6,
+            env.svm.get_account(&victim_key) != unrefreshed,
+        ));
+    }
     let victim_cert = env
         .primary_portfolio(0)
         .health_cert
         .try_to_runtime()
         .map_err(|error| format!("decode coherent victim certificate: {error:?}"))?;
-    if victim_cert.certified_liq_deficit != 0 {
+    let expected_capital_loss =
+        size_q.unsigned_abs() * u128::from(control_price - COHERENT_PRICE) / POS_SCALE;
+    let expected_capital = victim_capital_before - expected_capital_loss;
+    let notional = (size_q.unsigned_abs() * u128::from(control_price)).div_ceil(POS_SCALE);
+    let margin = (notional * 500).div_ceil(10_000);
+    if victim_cert.certified_liq_deficit != 0
+        || victim_cert.certified_equity != expected_capital as i128
+        || victim_cert.certified_initial_req != margin
+        || victim_cert.certified_maintenance_req != margin
+    {
         return Err(format!(
-            "coherent cross-rate certified a false liquidation deficit: {}",
-            victim_cert.certified_liq_deficit
+            "coherent cross-rate health differs from input-priced equity and margin: {victim_cert:?}"
         ));
     }
     let (wrapper_after, group_after) = env.primary_market_state();
@@ -16481,20 +16564,23 @@ pub fn verify_composite_time_coherence(
         .get()
         .checked_sub(cranker_capital_before)
         .ok_or_else(|| "coherent refresh reduced cranker capital".to_string())?;
-    if wrapper_after.oracle_target_price_e6 != COHERENT_PRICE
-        || group_after.assets[0].effective_price != COHERENT_PRICE
-        || victim_capital_loss != 0
+    if wrapper_after.oracle_target_price_e6 != control_price
+        || group_after.assets[0].effective_price != control_price
+        || victim_capital_loss != expected_capital_loss
         || oi_reduction_q != 0
         || cranker_reward != 0
     {
         return Err(format!(
-            "composite-time control changed economics: target={}, mark={}, victim_loss={victim_capital_loss}, oi_reduction={oi_reduction_q}, reward={cranker_reward}",
+            "composite-time control differs from input-priced economics: target={}, mark={}, victim_loss={victim_capital_loss}, oi_reduction={oi_reduction_q}, reward={cranker_reward}",
             wrapper_after.oracle_target_price_e6, group_after.assets[0].effective_price
         ));
     }
 
+    let counterparty_refresh = env
+        .crank_with_oracles(1, slot, observations(), &[fresh_a_102, fresh_b_102])
+        .map_err(|error| format!("refresh coherent-price counterparty: {error}"))?;
     let close = env
-        .trade_no_cpi(1, 0, 0, -size_q, COHERENT_PRICE, 0)
+        .trade_no_cpi(1, 0, 0, -size_q, control_price, 0)
         .map_err(|error| format!("coherent owner exit rejected: {error}"))?;
     let owner_exit_landed = discovery_position(&env.primary_portfolio(0), 0)? == 0
         && discovery_position(&env.primary_portfolio(1), 0)? == 0
@@ -16508,24 +16594,29 @@ pub fn verify_composite_time_coherence(
         .withdraw_primary(0, withdrawable)
         .map_err(|error| format!("coherent victim withdrawal rejected: {error}"))?;
     let victim_withdrawn = u128::from(env.token_amount(env.actors[0].destination_token));
-    if env.token_supply_observed() != supply_before {
-        return Err("composite-time world changed SPL supply".into());
+    if env.token_supply_observed() != supply_before || victim_withdrawn != expected_capital {
+        return Err("composite-time world differs from input-priced SPL value".into());
     }
     Ok(CompositeTimeCoherenceEvidence {
-        coherent_price: COHERENT_PRICE,
+        coherent_price: control_price,
         rejected_skew_words,
         exact_rollback_words,
         coherent_update_landed: true,
+        partial_refreshes,
+        authenticated_slot: slot,
+        current_health_certified,
         target_after: wrapper_after.oracle_target_price_e6,
         mark_after: group_after.assets[0].effective_price,
         victim_capital_loss,
+        expected_capital_loss,
         oi_reduction_q,
         cranker_reward,
         owner_exit_landed,
         victim_withdrawn,
         max_cu: coherent_update
             .compute_units
-            .max(refresh.compute_units)
+            .max(refresh_max_cu)
+            .max(counterparty_refresh.compute_units)
             .max(close.compute_units)
             .max(withdraw.compute_units),
     })
