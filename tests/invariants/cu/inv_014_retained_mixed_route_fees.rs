@@ -1,5 +1,6 @@
 //! INV-014 / row 411: retained CPI -> bilateral -> renewed CPI fee consent.
 //! One shared pair changes transport and grant sequence across policy writes.
+//! Retained renewal consent binds the LP epoch after both preceding fills.
 //! Public System/SPL/ATA/wrapper setup, complete rollback, and input-only fees.
 
 use super::*;
@@ -321,7 +322,7 @@ fn v16_retained_mixed_route_fee_budgets_survive_bilateral_revocation_and_renewal
                         data: ProgInstruction::SetMatcherConfig {
                             portfolio_id: w.env.portfolio_id(w.portfolios[1]),
                             expected_sequence: sequence,
-                            position_epoch: w.env.portfolio_position_epoch(w.portfolios[1]),
+                            position_epoch: epochs[1] + 2,
                             asset_generation_frontier: w.env.market_state().1.next_market_id,
                             enabled: 1,
                             trade_fee_cap_bps: LP_CAP_BPS,
