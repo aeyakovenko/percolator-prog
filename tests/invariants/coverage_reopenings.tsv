@@ -531,6 +531,18 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # production violation, production correction or invariant-status promotion.
 # Scope, base 9653b677, private environment and exact validation commands:
 # README "INV-070 native Recovery claim disposition". Row remains OPEN.
+# Row 418 bounded multisig custody conformance (2026-09-13):
+# cu/inv_070_multisig_terminal_custody.rs, mounted as multisig_terminal_custody.
+# Six public worlds: both payout aliases x all three 2-of-3 SPL member pairs.
+# A funded owner publicly becomes an SPL multisig, then its empty ATA closes.
+# Keeper reconstruction/payout preserves 307 principal without owner/member signatures;
+# missing-quorum SPL transfer rolls back that completed prefix and ATA rent exactly.
+# Valid quorum redemption and slab disposal preserve fixed supply and exact rent.
+# 24 complete Account rollbacks, six payouts/redemptions/slab closes; peak 121919 CU
+# under 300000. INV-018 only rejects multisig deposits; existing terminal custody
+# histories do not cross funded owner conversion with multisig quorum disposal.
+# README "INV-070 multisig terminal custody" records exact selectors and limits.
+# No production change, implementation violation or generic coverage/status promotion.
 418	DoS	BLOCKER	INV-070	INV-018,INV-021,INV-025,INV-069,INV-070,INV-073,INV-077,INV-078,INV-081	token-variant+x-terminal-stock+x-close	all-supported-quote-token-variants-have-a-bounded-terminal-disposition	OPEN
 # Row 419 bounded public conformance (2026-09-12): cu/inv_039_pending_loss_funded_resolution.rs,
 # v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders.

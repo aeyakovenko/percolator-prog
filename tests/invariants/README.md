@@ -121,6 +121,78 @@ rmdir "$TMPDIR"
 Private target and temporary directories were removed after validation. One
 local commit is retained on the isolated branch; nothing was pushed.
 
+## INV-070 multisig terminal custody (row 418, 2026-09-13)
+
+Owner: [cu/inv_070_multisig_terminal_custody.rs](cu/inv_070_multisig_terminal_custody.rs),
+mounted by INV-070 as `multisig_terminal_custody`. One new selector crosses both
+terminal payout aliases with all three member pairs of real 2-of-3 SPL custody.
+Each of the six worlds deposits 307 classic-SPL atoms before public System
+allocation/assignment and SPL initialization convert the funded owner address
+into a multisig. Conversion preserves every tracked economic Account. The
+original owner keypair is dropped, and a valid quorum closes the empty ATA.
+
+An unrelated keeper resolves the market at slot 100. At slot 104, public ATA
+reconstruction followed by unsigned payout rejects `ExpectedSigner`. At the
+five-slot deadline, reconstruction and payout complete before a downstream SPL
+transfer with only one member rejects `MissingRequiredSignature`. This restores
+the 307-atom claim, vault, absent ATA and reconstruction rent exactly. The same
+reconstruction/payout prefix then commits with only the keeper signature, paying
+307 atoms into the multisig's custody. Repeating payout rejects
+`EngineNonProgress`. A valid member pair transfers exactly 307 to its selected
+recipient and closes the ATA, refunding exactly token-account rent.
+
+Administrative portfolio/slab closure also completes before an insufficient
+SPL transfer rejects, restoring the tombstone, vault closure and rent effects.
+The unchanged two-instruction cleanup prefix then commits: the vault and
+portfolio close, the market retains canonical tombstone rent, and the admin
+receives `market_lamports + portfolio_lamports + vault_rent - tombstone_rent`.
+The sink retains all 307 atoms, matching the fixed mint supply; the multisig
+Account stays byte-for-byte unchanged. This includes 24 full Account rollbacks,
+six unsigned payouts, six quorum redemptions and six final slab closures.
+Rollback comparisons include every compiled transaction Account plus tracked
+economic Accounts, with signature fees independently charged to the payer.
+Successful stock/reservation censuses, exact token Account frames, portfolio
+identity and terminal predicates establish progress. All measured transactions
+fit 1,232 bytes and 300,000 CU; the passing run peaked at 121,919 CU.
+
+This differs from INV-018's multisig deposit rejection: that test never funds
+the multisig-owned portfolio or reaches terminal payout. Existing prefunded and
+shared-custody terminal histories retain ordinary wallet owners and have no
+multisig quorum boundary. Delegated/close-authority destination variants do not
+convert a funded portfolio owner to an SPL-owned multisig. Administrative cleanup
+is supporting disposition evidence, not the new coverage relation.
+
+All state construction uses System, SPL, ATA and wrapper instructions; wallet
+airdrops and Clock advancement are environment fixtures. No program-owned bytes
+are injected. Host token packing constructs expected snapshots only. Row 418
+remains OPEN: this finite witness does not cover multisig deposit support, PnL,
+receipts, backing/insurance/fees, native/secondary rails, other quorum sizes,
+unavailable quorums for subsequent spending, arbitrary histories or maximum
+shapes. Administrator availability is assumed for mechanical cleanup. No
+production defect, correction or invariant-status promotion is claimed.
+
+Base: `160dc00d89e769692c96acac47613115b8db5df6`, from the requested origin branch.
+Worktree: `/run/user/1001/percolator-row418-custody-20260913`; branch:
+`codex/astra-row418-custody-composition-20260913`. The unchanged production SBF
+was rebuilt here with locked/offline dependencies and platform-tools v1.52;
+SHA-256 `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The private cache was copied from a local build, then rebuilt in this worktree.
+Exact validation commands (logs retained in the private TMPDIR):
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/row418-custody-20260913-target
+export TMPDIR=/run/user/1001/row418-custody-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::multisig_terminal_custody::v16_program_multisig_owner_conversion_preserves_unsigned_terminal_payout_and_quorum_disposal -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+```
+
 ## INV-012 retained mixed renewals after reduction (row 412, 2026-09-13)
 
 Owner: [stateful/inv_012_mixed_episode_renewal.rs](stateful/inv_012_mixed_episode_renewal.rs),
