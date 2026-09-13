@@ -808,6 +808,25 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # composition, not top-up/ledger/rail duplication. Bound authority epochs only;
 # intrinsic withdrawal stock binding remains absent. No violation observed in these
 # bounded cases, production correction or status promotion. See README; row OPEN.
+# 428 destination/oracle-epoch conformance (2026-09-13):
+# cu/inv_008_insurance_destination_epoch_retry.rs, mounted under
+# inv_008_intent_uniqueness_and_bounded_replay::insurance_destination_epoch_retry;
+# v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch.
+# Eight asset-0/1 x Live/Resolved x optional-ledger histories retain signed envelopes
+# before SPL destination-owner changes and an ORACLE-role authority epoch update.
+# Late SPL and stale-withdrawal suffixes restore payout, destination repair, oracle
+# handoff and lazy ledgers; unchanged peer consent and fresh target consent exit
+# exact independent 114/82-atom stocks. Insurer and operator identities stay fixed.
+# Selector PASS: 40 exact rollbacks, 24 rolled-back insurance payout CPIs and 48
+# successful continuations; peak 80136 CU under 300000. Full stock/role/ledger frames.
+# Exact command (README environment): cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::insurance_destination_epoch_retry::v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch -- --exact --nocapture --test-threads=1
+# Both requested INV-079 metadata selectors and format/whitespace checks PASS.
+# Bound shared authority epoch only, not intrinsic withdrawal-stock consumption:
+# fixed-epoch replenishment, policy/fee histories, other rails and arbitrary words
+# remain unproven. No production change or public-route violation found. Row OPEN.
+# README records exact selector/build/metadata/format/diff commands and SBF provenance
+# (private default-feature platform-tools v1.52 build at c4da24a2; wrapper SHA-256
+# dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52).
 428	LoF	REAL	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	OPEN
 # Row 429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_exchange.rs,
 # v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders.

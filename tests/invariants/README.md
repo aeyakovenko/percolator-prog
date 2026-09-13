@@ -163,6 +163,101 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-008 insurance destination repair and oracle-role epoch (row 428, 2026-09-13)
+
+Owner: [cu/inv_008_insurance_destination_epoch_retry.rs](cu/inv_008_insurance_destination_epoch_retry.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::insurance_destination_epoch_retry`.
+Exact selector:
+`v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch`.
+
+Eight public LiteSVM histories cross target asset 0/1, Live execution versus
+resolution after signing in Live, and omitted/lazy insurance ledgers. Public
+System/SPL instructions create the accounts and mint a fixed 196-atom supply;
+mint authority is revoked before four `TopUpInsuranceDomain` calls attribute
+73/41 long/short atoms to the target and 59/23 to its peer. The established
+`inv018_public_spl_market_with_params` fixture initializes the market and canonical
+vault publicly. No account data is repaired or restored by the test.
+
+The retained target and peer envelopes are signed before destination or epoch
+changes. A transaction pays 37 target atoms, transfers the destination's SPL
+ownership, and hands off the target's **oracle** authority, then fails on an
+unfunded SPL transfer. All three successful operations roll back, and the
+unchanged retained target envelope pays 37. A committed destination-owner change
+then rejects another original envelope at `InvalidTokenAccount`. A repair/peer
+payout/oracle-handoff prefix reaches `EngineStale` at the retained target suffix,
+restoring foreign destination ownership, peer stock, both ledgers and the epoch.
+
+After repair and oracle handoff commit, an original signed envelope still rejects
+at `EngineStale`, although 77 target atoms remain and the insurance holder,
+operator, mint, destination address and repaired owner all match the original
+request. Another stale suffix rolls back a completed peer payout. The unchanged
+signed peer envelope pays 11 at its untouched epoch, and fresh target consent
+pays 37 at the new epoch. Final exact drains pay the target's remaining 40 and
+peer's remaining 71; the Resolved worlds use unsigned terminal withdrawals for
+this final step. Custody ends at zero with exact 114/82 recipient attribution.
+
+The oracle-role handoff and external destination-owner repair are the added
+composition dimensions. There is no insurance operator ABA, insurer succession,
+amount-only test, or replenishment-order matrix in this increment. Every stage
+checks all four domain budgets, spent counters, aggregate insurance/vault,
+generation IDs, full control sequences and oracle profiles, all ledger fields,
+complete SPL accounts and fixed mint supply. Each rejection compares every
+transaction account and all watched accounts exactly, except for the explicitly
+calculated signature fee at the separate payer. Program-success logs require
+the asserted wrapper and SPL prefixes to have completed.
+
+**Row 428 remains OPEN; invariant statuses are unchanged.** This is bounded
+INV-008/010/024/031/064/080/081 conformance at a shared per-asset authority epoch.
+`WithdrawInsuranceAsset` has no independent stock-sequence field, and the test
+does not establish consumption of a successful withdrawal at an unchanged epoch
+or binding across independently replenished stock. Fee-created stock, policy
+updates, liabilities, native/secondary collateral, destination close/recreation,
+durable nonces and arbitrary histories remain outside this evidence. SVM rollback
+and the bundled classic SPL programs remain platform assumptions. Production and
+dependency pins are unchanged; no public-route implementation violation was found
+in these histories.
+
+Base: `c4da24a211722bcb1cd32d18781217850034210e`, the requested
+`origin/codex/astra-open-holdout-ledger-20260912` tip at worktree creation.
+Branch: `codex/astra-row428-insurance-stock-20260913`.
+Worktree: `/tmp/percolator-astra-row428-insurance-stock-20260913`.
+All SBF/host artifacts were built in its private `target`; the parent checkout
+was not edited. The default-feature wrapper was built locked/offline with
+`cargo-build-sbf 2.3.13`, platform-tools v1.52. Host rustc: 1.90.0.
+No matcher is used. SHA-256 provenance:
+
+- Wrapper `target/deploy/percolator_prog.so`: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+- `Cargo.lock`: `c9edf71dafda5e617f5b3e6f5c19cb6c8585551b2cb426b4ca8bc7b3a7e4e6a0`.
+- LiteSVM 0.1.0 bundled `spl_token-3.5.0.so`: `18264f491c7e0ad056dd36f42f8de6d1fedf9f044d1f521e714b4dc6b61594b6`.
+- LiteSVM 0.1.0 bundled `spl_associated_token_account-1.1.1.so`: `e5e7aed11ad3969eea2aa76c8b4d2e73ea25be7e6b5cce989b7710cf5452496e`.
+
+The new selector passed **1/1 in 3.21s**: eight histories, 40 exact rollbacks and
+48 successful continuations, peaking at **80,136 CU** under the existing
+300,000-CU custody bound. Success logs establish 24 rolled-back insurance payout
+CPIs across the matrix. Development corrected a missing Rust `u32` annotation
+and an initial test expectation that lazy telemetry backfills principal from
+unattached deposits; recorded principal correctly starts and remains zero here.
+Neither correction changed production or discarded a history. Both requested
+metadata selectors passed (2/2), along with formatting and all three whitespace
+checks; the HEAD whitespace check also covers the final commit. Existing unused
+support warnings and the `solana-client v1.18.26` future-incompatibility warning
+remain. No broad suite,
+matcher execution, Kani run or whole-invariant closure is claimed.
+
+Exact build and validation commands, run from this worktree:
+
+```sh
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo build-sbf --tools-version v1.52 --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::insurance_destination_epoch_retry::v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-012 interleaved revocation words (row 412, 2026-09-13)
 
 Owner: [stateful/inv_012_revocation_words.rs](stateful/inv_012_revocation_words.rs),

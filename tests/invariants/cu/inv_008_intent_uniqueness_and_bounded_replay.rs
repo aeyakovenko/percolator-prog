@@ -45,6 +45,9 @@ mod underfunded_rail_retry;
 #[path = "inv_008_insurance_round_trip_retry.rs"]
 mod insurance_round_trip_retry;
 
+#[path = "inv_008_insurance_destination_epoch_retry.rs"]
+mod insurance_destination_epoch_retry;
+
 #[path = "inv_008_recreated_withdrawal_stock.rs"]
 mod recreated_withdrawal_stock;
 
