@@ -1,5 +1,97 @@
 # Invariant-owned test coverage
 
+## INV-014 retained policy and route budgets (row 411, 2026-09-13)
+
+Owner: [cu/inv_014_retained_policy_route_budgets.rs](cu/inv_014_retained_policy_route_budgets.rs).
+Exact selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_policy_route_budgets::v16_retained_policy_route_budgets_bound_each_committed_prefix`.
+The parent module supplies its public System/SPL/ATA funding, signing and complete
+Account rollback helpers, with an optional asset count preserving its old default.
+
+The bounded generator crosses four transports (single/batch, CPI/bilateral), two
+position signs, both suffix asset orders and quantities `POS_SCALE + 1` and
+`100 * POS_SCALE + 1`: **32 worlds, 80 committed prefixes, 96 executed legs and
+120 exact rollbacks**. Three unequal signed legs share the same two owners. The
+first leg permits 37 bps; the remaining opposite-direction legs permit 99 bps.
+All transactions, future position epochs, funded deposit sequences, rejection
+alternatives and consumed-consent checks are signed before the first policy write
+or fill. Accepted transactions retain byte-identical messages and signatures.
+The policy history is `19 -> 101 -> 37 -> 101 -> 99`, with the first fill landing
+at 37 and the suffix at 99. Original first-fill consent is simulated at 19.
+
+The new composition is an already charged, differently priced prefix followed
+by retained multi-asset fee **and** slippage bounds across policy detours. The
+existing `retained_partial_fee_routes` matrix compares one executed quantity and
+fee rate. INV-011's `v16_program_funded_signed_leg_prefixes_preserve_original_aggregate_limits`
+checks aggregate prefixes at fixed policy. Neither supplies this combined
+retained-policy, heterogeneous-budget and multi-leg route relation.
+
+The independent oracle uses integer buy-quote ceilings, sell-quote floors,
+per-leg adverse-slippage ceilings and two-stage base-fee ceilings. CPI prints
+come from matcher context/return data; bilateral prices are explicit signed
+instruction fields. The two-leg slippage sum exceeds rounding the combined
+numerator once by exactly one atom, in both asset orders. At every committed
+prefix and policy step, assertions reconcile cumulative signed consumption,
+each owner's capital and zero PnL, all three positions and both OI sides, exact
+per-asset/per-side insurance fee attribution, total capital, fixed mint supply,
+source ATAs and vault custody. Full stock and reservation censuses run too.
+Instruction-local fees are bounded separately from previously paid fees; the
+cumulative bound is the sum of the separately signed authorizations, not a new
+protocol-level multi-transaction allowance. Every executed leg's quote equals
+its signed boundary, including the sell proceeds floor.
+
+The 120 failures comprise 64 above-consent policy deliveries, eight batch atom
+caps short by one, sixteen CPI slippage/price bounds short by one atom/tick, and
+32 consumed-position-epoch submissions. All 88 economic-bound failures execute
+and roll back a real SPL deposit prefix (43 or 70 atoms). Batch cap failures
+also complete matcher CPI; batch slippage and fee caps are each tested with the
+other bound sufficient. The remaining 32 replay checks submit the consumed trade
+without an exhausted deposit source, proving the position binding supplies the
+rejection. Complete Accounts, matcher state and sequence counters roll back,
+with only the exact network-signature charge allowed on the external payer.
+Successful routes preserve passive Accounts and allow data-only writes to their
+declared participants. Raw economic endpoints agree across routes and asset
+orders; route-specific position and matcher-request counts are checked separately.
+
+**Row 411 remains OPEN.** This covers Live, fully funded, fixed manual marks,
+constant authenticated matcher spreads and base fees. Print slippage is checked
+as signed execution consent; it is not represented as PnL under this manual-mark
+fixture. Dynamic/mark/backing fees, partial fills, underfunded collection,
+recipient changes, authority succession, terminal settlement, arbitrary history
+lengths and changing transport within a history remain outside this increment.
+Rows 415/416/417/419/423/424/425/426/427/433 are unchanged. No implementation
+violation was found and production code is unchanged.
+
+Validation worktree: `/tmp/percolator-row411-policy-routes-20260912`; branch:
+`codex/row411-retained-trade-policy-routes-20260912`; fetched base `3496acf0` from
+`origin/codex/astra-open-holdout-ledger-20260912`. Both default-feature wrapper
+and authenticated matcher SBFs were built from this checkout. SHA-256:
+wrapper `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The new selector passed with peak CU **330,609**. Its first run stopped at a
+test-only matcher configuration opcode error; correcting the fixture call made
+the selector pass without a production change. Only the new exact selector and
+the two required metadata selectors are used in this increment.
+
+Exact commands (from this worktree; the fixture output is also private):
+
+```sh
+export CARGO_TARGET_DIR=/tmp/row411-policy-routes-target
+export TMPDIR=/tmp/row411-policy-routes-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/row411-policy-routes-target/deploy -- --locked
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/percolator-row411-policy-routes-20260912/tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_policy_route_budgets::v16_retained_policy_route_budgets_bound_each_committed_prefix -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /tmp/row411-policy-routes-target
+cargo clean --target-dir /tmp/percolator-row411-policy-routes-20260912/tests/fixtures/auth_matcher/target
+```
+
 ## INV-058 generated existing-pair side OI (row 427, 2026-09-12)
 
 Owner: [cu/inv_058_generated_side_oi_composition.rs](cu/inv_058_generated_side_oi_composition.rs),

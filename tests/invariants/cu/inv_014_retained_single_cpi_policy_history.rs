@@ -16,6 +16,9 @@ use std::collections::BTreeMap;
 #[path = "inv_014_retained_fee_authority_epoch.rs"]
 mod retained_fee_authority_epoch;
 
+#[path = "inv_014_retained_policy_route_budgets.rs"]
+mod retained_policy_route_budgets;
+
 const DEPOSITS: [u64; 2] = [100_003, 200_007];
 const PREFIX: u64 = 113;
 const PRICE: u64 = 100;
@@ -41,9 +44,14 @@ struct World {
 
 impl World {
     fn new(matcher_bytes: &[u8]) -> Self {
+        Self::with_assets(matcher_bytes, 1)
+    }
+
+    fn with_assets(matcher_bytes: &[u8], assets: u16) -> Self {
         let mut env = inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params(
             6,
             V16CuMarketParams {
+                max_portfolio_assets: assets,
                 trade_fee_base_bps: OLD_BPS,
                 ..V16CuMarketParams::default()
             },
