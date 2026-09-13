@@ -2213,6 +2213,84 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-008 native recipient recreation and retained insurance epoch (row 428, 2026-09-13)
+
+Owner: [cu/inv_008_insurance_native_recreation.rs](cu/inv_008_insurance_native_recreation.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::insurance_native_recreation`.
+Exactly one new selector:
+`v16_retained_insurance_epoch_survives_native_redemption_and_recipient_recreation`.
+
+One public LiteSVM/SBF Live history funds 37 long-domain insurance atoms and
+retains a withdrawal against the current asset authority epoch. A signed prefix
+pays those atoms into a native token recipient, redeems its SOL and rent through
+SPL `CloseAccount`, recreates the same address through System
+`CreateAccountWithSeed` and SPL `InitializeAccount3`, changes the oracle authority,
+then deposits 83 independent short-domain insurance atoms at the new epoch.
+The insurance beneficiary/operator, recipient address/owner, mint and market
+generation stay the same. Public construction owns both recipient lifetimes;
+only the existing native-mint genesis fixture and signer funding are harness inputs.
+
+Appending the retained withdrawal rejects exactly at instruction 8 with
+`EngineStale`, after all six prefix instructions complete. Every compiled and
+tracked Account is restored, including the SOL payout, rent, native token bytes,
+recipient recreation, role epoch, insurance funding sequence and full ledger.
+Only the separate payer's exact three-signature network fee remains charged.
+The valid prefix was signed and successfully simulated before rejection and
+then commits byte-for-byte unchanged. The original signed withdrawal envelope
+still rejects with all 83 replacement atoms available.
+
+A second prefix pays 37 atoms using fresh consent and again redeems/recreates
+the recipient. A retained suffix rejects exactly at instruction 6 while 46 atoms
+still cover its entire request, restoring that payout, rent and account lifetime.
+The separately pre-signed valid prefix commits unchanged; a second original
+envelope remains stale against the recreated account and fully funded stock.
+Fresh consent drains the final 46 atoms and closes the recipient. Exactly 120
+insurance atoms reach the holder's System wallet, plus the original recipient
+rent. All native token amounts and insurance budgets reach zero. Input-derived
+checks cover full decoded market state, complete native Accounts, all ledger
+fields, authority/control frames, fixed mint and stock/encumbrance censuses.
+
+The increment is **retained epoch binding across native redemption, recipient
+account recreation and independently replenished stock in the same transaction**.
+Row428's destination-owner repair keeps its token account alive; fee-stock
+coverage deletes a portfolio; the round-trip owner consumes a top-up intent.
+Row421's native redemption retry uses separate recipients without recreation,
+epoch succession or replacement insurance stock. Their existing standalone
+rejection, ledger, payout-order and funding cases were not added here.
+
+**Row 428 remains OPEN; invariant statuses are unchanged.** This is bounded
+authority-epoch conformance, not intrinsic withdrawal-stock consumption at a
+fixed epoch. Production carries no independent withdrawal stock-sequence field.
+Arbitrary histories, independent victim loss, active liabilities, fee-created
+stock, terminal recredit, other assets/rails and durable nonces remain unproven.
+No production change, held-out patch import or public-interface bug is claimed.
+SVM rollback and the bundled native SPL implementation remain platform assumptions.
+
+Base: `273c0535`, the latest requested origin branch at worktree creation.
+Worktree: `/home/anatoly/percolator-astra-row428-epoch-invariant-20260913`;
+branch: `codex/astra-row428-epoch-invariant-20260913`. A private target was copied
+from the existing native-redemption build cache, then default-feature SBF was
+rebuilt locally, locked/offline with platform-tools v1.52. Engine pin:
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact selector passed 1/1 in 0.41s: four exact rollbacks, three committed
+continuations and peak 60,141 CU under 200,000. No diagnostic probe remains;
+no broad suite or Kani run is claimed. Exact build and validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row428-epoch-invariant-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::insurance_native_recreation::v16_retained_insurance_epoch_survives_native_redemption_and_recipient_recreation -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-008 insurance destination repair and oracle-role epoch (row 428, 2026-09-13)
 
 Owner: [cu/inv_008_insurance_destination_epoch_retry.rs](cu/inv_008_insurance_destination_epoch_retry.rs),

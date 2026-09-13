@@ -1180,6 +1180,22 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # README records exact selector/build/metadata/format/diff commands and SBF provenance
 # (private default-feature platform-tools v1.52 build at c4da24a2; wrapper SHA-256
 # dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52).
+# 428 native recipient recreation conformance (2026-09-13):
+# cu/inv_008_insurance_native_recreation.rs, mounted under
+# inv_008_intent_uniqueness_and_bounded_replay::insurance_native_recreation;
+# v16_retained_insurance_epoch_survives_native_redemption_and_recipient_recreation.
+# One public Live history restores a 37-atom native redemption, returned rent,
+# same-address System/SPL recipient recreation, oracle-role epoch change and
+# independent 83-atom refill after an EngineStale withdrawal suffix. The pre-signed
+# valid prefix commits unchanged. Another stale suffix restores fresh payout and
+# recreation; unchanged fresh consent retries, and fully funded old envelopes
+# remain stale. Four exact complete-Account rollbacks, three continuations, exact
+# 120-atom SOL redemption plus rent; peak 60141 CU <= 200000. Nonduplicate account
+# lifetime/native settlement/new-stock composition, beyond destination-owner repair
+# and row421's separate-recipient redemption. See README for commands/provenance.
+# Shared authority epoch only, not intrinsic fixed-epoch withdrawal consumption;
+# arbitrary histories, liabilities, terminal recredit and other rails remain open.
+# No production change, held-out import, bug claim or invariant-status promotion.
 428	LoF	REAL	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	OPEN
 # Row 429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_exchange.rs,
 # v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders.
