@@ -255,6 +255,96 @@ git diff --check && git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-039 pending debt across restarted-peer trading (row 419, 2026-09-13)
+
+Owner: [cu/inv_039_pending_loss_restart_trading.rs](cu/inv_039_pending_loss_restart_trading.rs),
+mounted by `cu/inv_039_pending_loss_resolved_histories.rs`. Exact selector:
+`inv_039_pending_loss_obligation_durability::resolved_histories::restart_trading::v16_program_peer_restart_preserves_pending_debt_through_fresh_trade_and_resolution`.
+
+Eight public LiteSVM histories cross mirrored sides, which of two debtors settles
+first, and forward/reverse terminal payout order. Integral price moves create
+independent debts of 30,000 and 40,000 atoms. Both claimants retain zero-basis,
+nonzero-loss-weight obligations after asset shutdown. The selected debtor pays
+through `ForfeitRecoveryLeg`; its holder releases through `PermissionlessCrank`.
+Restart attempts reject with exactly `EngineLockActive` before payment, after
+payment with retained weight, and after release with a historical source claim.
+A transaction stages a successful debtor forfeit before the rejected restart;
+the suffix error restores the payment, obligation, control sequences, complete
+economic Accounts and lamports. The distinct network fee payer is excluded.
+
+The unused base asset then shuts down and restarts at 700,000 with a new market
+generation and the restart-installed manual oracle profile. The paid debtor and
+its historical claimant open and close an unchanged-price position on that new
+generation. Each trade checks signed positions, OI, loss weights, stored counts,
+generation binding, unchanged original capital/PnL/source records, and complete
+Accounts outside its market/portfolio write set. Both old engine slots remain
+byte-identical across peer restart and each trade. The other cohort's original
+debtor Account is untouched and its obligation remains attributed to its holder.
+Restart of that occupied asset still rejects after the peer round trip.
+
+Global resolution starts with the second debtor's debt unbooked. Its holder can
+detach the pending leg but cannot receive a receipt or payout; a waiting retry
+returns `EngineNonProgress` with exact rollback. Bounded public closes settle the
+original debtor and reconcile all five entitlements to
+`[230000, 150000, 340000, 210000, 777]`, with zero vault, capital, OI and pending
+counts. Final receipt retries are exact no-ops and all five portfolios close.
+The existing input-derived attribution model and leg/count/weight/SPL census are
+reused unchanged. Supply remains 930,777 atoms throughout.
+
+Duplicate review: while this worker ran, origin advanced to `fe1cc012`, adding
+`v16_program_pending_debt_survives_sibling_restart_and_delayed_resolution`.
+That test explicitly excludes fresh trading after restart and resolves only
+after both debts settle. This increment covers **fresh-generation open/close
+with historical claims, followed by resolution with one debt still unbooked**;
+it also stages a debtor payment before a rejected restart. Restart-only gates
+are controls, not an additional novelty claim. Existing INV-073 restart/live-leg
+coverage has zero pending economic loss. The new file/module is distinct from
+the concurrent sibling-restart owner. Successful restart of an indebted asset
+after source-credit/provider-receivable retirement remains outside this selector.
+
+**Row 419 remains OPEN; invariant verdicts are unchanged.** This is a finite
+integral, solvent, single no-CPI trade family, with zero fees/funding, no external
+backing or insurance, one peer restart, two old cohorts and two payout orders.
+Restart of the indebted asset after all value retirement, fractional/ADL loss,
+underfunding, repeated restarts, CPI/batch transport, nonzero new-generation PnL,
+maximum shapes and arbitrary histories remain open. No generic generator/oracle,
+production correction or implementation-violation claim is added. System/SPL/ATA
+and wrapper calls construct all economic state; no initialized program Account
+bytes are edited or restored. The parent module gains only a mount, so shared
+helper implementations are unchanged and no adjacent behavioral controls are rerun.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`8b82465a9b95f80a0b35b27451feeba7b6733916`. Branch:
+`codex/row419-pending-recovery-20260913`; isolated worktree:
+`/home/anatoly/percolator-row419-pending-recovery-20260913`.
+Environment: Linux x86_64, host Rust/Cargo 1.90.0, LiteSVM 0.1.0, default
+`anchor-v2` features, engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+The private target was copied from `/dev/shm/percolator-row426-target`; Cargo
+rebuilt this worktree's host tests and SBF wrapper. SBF used
+`solana-cargo-build-sbf` 2.3.13, platform-tools v1.52 / Rust 1.89.0-dev.
+Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+SPL Token and ATA programs come from the cached LiteSVM package; no matcher is used.
+The selector passes 8 worlds, 40 restart rollbacks (8 staged debtor payments),
+8 peer restarts, 16 trades, 8 waiting rollbacks, and 40 exact payouts, receipt
+retries and portfolio deletions. Peak restart transaction: 98,842 CU.
+
+Exact validation/reproduction commands from the isolated worktree:
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/row419-pending-recovery-20260913-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::resolved_histories::restart_trading::v16_program_peer_restart_preserves_pending_debt_through_fresh_trade_and_resolution -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-028 last latent domain through Recovery (row 423, 2026-09-13)
 
 Owner: [cu/inv_028_recovery_latent_capacity.rs](cu/inv_028_recovery_latent_capacity.rs),

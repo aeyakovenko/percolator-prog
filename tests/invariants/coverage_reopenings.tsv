@@ -482,6 +482,23 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # No successful indebted-slot restart, renewed trading, backing/insurance, fees/funding,
 # global Recovery, fractional/ADL/B-drift, maximum-shape or arbitrary-history coverage.
 # Finite evidence only; no generic oracle, production change or status promotion.
+# Row 419 bounded restarted-peer trading conformance (2026-09-13):
+# cu/inv_039_pending_loss_restart_trading.rs; exact v16_cu selector:
+# inv_039_pending_loss_obligation_durability::resolved_histories::restart_trading::v16_program_peer_restart_preserves_pending_debt_through_fresh_trade_and_resolution
+# Eight mirrored side/early-debtor/payout-order histories preserve original
+# 30000/40000-atom debts through an empty peer's restart and fresh trade/close.
+# Old cohort slots and absent debtor Accounts remain exact; occupied restarts
+# reject before/after payment and release. Forty restart rollbacks include eight
+# staged payments; eight waiting rollbacks precede 40 exact payouts and deletions.
+# New relative to concurrently landed fe1cc012: actual fresh-generation trading
+# with historical claims, then resolution with an original debtor still unbooked.
+# Restart-only gates are controls; no duplicate sibling-restart coverage claim.
+# Only tests/local mount/docs change; no generic generator/oracle or status promotion.
+# OPEN: indebted-asset restart after value retirement, fractional/ADL/underfunded
+# debt, fees/funding, external backing/insurance, CPI/batch, repeated restart,
+# nonzero fresh-generation PnL, maximum shapes and arbitrary histories.
+# README "INV-039 pending debt across restarted-peer trading" records base 8b82465a,
+# exact scope, private environment, commands and limits. Row remains OPEN.
 419	LoF	BLOCKER	INV-039	INV-024,INV-037,INV-039,INV-041,INV-048,INV-066,INV-067,INV-073,INV-076,INV-081,INV-086	pending-obligation+x-resolution+x-close-order	obligation-attribution-persists-until-the-opposing-economic-debt-settles	OPEN
 # Rows 420/421 partial conformance (2026-09-10): cu/inv_073_absent_insurer_spent_retirement.rs,
 # v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion.
