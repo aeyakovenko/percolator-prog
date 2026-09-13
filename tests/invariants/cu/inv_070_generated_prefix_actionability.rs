@@ -460,17 +460,25 @@ fn drive(
             rejected.push(close.clone());
             InstructionError::Custom(PercolatorError::EngineLockActive as u32)
         } else {
-            rejected.push(Instruction {
-                program_id: solana_sdk::system_program::ID,
-                accounts: vec![],
-                data: vec![],
-            });
-            InstructionError::InvalidInstructionData
+            // The donor owns at most the original surplus, including before donation.
+            // Keep the suffix valid even after CloseSlab has deleted the vault.
+            rejected.push(
+                spl_token::instruction::transfer(
+                    &spl_token::ID,
+                    &world.donor_token,
+                    &world.destination,
+                    &world.donor.pubkey(),
+                    &[],
+                    history.surplus + 1,
+                )
+                .unwrap(),
+            );
+            InstructionError::Custom(spl_token::error::TokenError::InsufficientFunds as u32)
         };
         let spl = if next.closed { 3 } else { 0 };
         world.land(
             &rejected,
-            false,
+            !waits,
             &[],
             Some((2 + count, error)),
             (count, spl),
