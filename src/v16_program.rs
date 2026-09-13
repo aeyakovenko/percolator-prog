@@ -11139,9 +11139,9 @@ pub mod processor {
                     state::write_wrapper_config(&mut market_data, &cfg)?;
                     return Ok(());
                 }
-                TerminalSlabOutcomeV16::BackingExpired { domain } => {
-                    cfg.terminal_slab_scan_progress =
-                        encode_terminal_slab_scan_progress(domain / 2, configured_assets)?;
+                TerminalSlabOutcomeV16::BackingExpired { .. } => {
+                    // Released residual can make spent insurance in an earlier slot actionable.
+                    cfg.terminal_slab_scan_progress = 0;
                     drop(group);
                     state::write_wrapper_config(&mut market_data, &cfg)?;
                     return Ok(());
