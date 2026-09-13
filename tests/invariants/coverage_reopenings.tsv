@@ -1,5 +1,13 @@
 # PR410-434 are post-hoc holdout/conformance misses; rows left OPEN still affect invariant status.
 # This is a coverage-fidelity ledger, not independent-discovery or whole-invariant proof evidence.
+# Scope S bounded INV-024 conformance for labels 410/429 (2026-09-13):
+# cu/inv_024_generated_expiring_roles.rs composes generated backing/beneficiary/
+# operator handoff-and-return orders with principal expiry and cleanup placement.
+# The input-derived owner/class journal preserves paid history, forfeits expired
+# principal only once and checks typed ledgers, exact rollback/retry and disposal.
+# Both rows remain OPEN; no production or invariant-status change. Guarantee,
+# prior-family comparison, limits and exact commands/results are recorded in
+# pr135_scope_s_reserve_beneficiary_attribution_20260913.md.
 # Scope U bounded conformance for row 417 (2026-09-13):
 # cu/inv_067_terminal_claim_episode_materialization.rs composes two co-owned,
 # unequal claim episodes with deferred receipt creation, two backing expiries,

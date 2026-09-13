@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## PR135 Scope S generated expiring reserve roles (2026-09-13)
+
+Owner: [cu/inv_024_generated_expiring_roles.rs](cu/inv_024_generated_expiring_roles.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::generated_expiring_roles`.
+Seventy-two public LiteSVM worlds combine all six orders of backing, beneficiary
+and operator handoff with their returns, three principal-expiry positions, two
+quantity seeds and paired cleanup/payout/submitter schedules. An input-derived
+owner/class book separates expired principal from payable reserves even before
+stock normalization, and checks lazy holder ledgers, exact rollback/retry and
+final residue burn/rent closure. Conserved wrong-owner, wrong-class and wrong-role
+observations must fail the payout oracle.
+
+This extends the fresh generated reserve and fixed expired-principal succession
+families with repeated role returns across expiry and operator succession.
+INV-024 owns the guarantee; related INV-005/025/036/070/081 checks are bounded,
+and INV-027 receives only a settled-user principal frame. Rows 410/429 stay OPEN,
+with no machine-classification change. The [Scope S audit](pr135_scope_s_reserve_beneficiary_attribution_20260913.md)
+records prior families, guarantee, limits, exact commands and validation results.
+
 ## PR135 Scope V Hybrid recipient reward lineage (2026-09-13)
 
 Owner: [cu/inv_045_hybrid_recipient_provenance.rs](cu/inv_045_hybrid_recipient_provenance.rs),
