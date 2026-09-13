@@ -26449,6 +26449,12 @@ These are recorded evidence dispositions, not new impact or severity acceptance 
 `scripts/loop.md`. Historical severity strings, including `REAL`, are not current classification
 labels; this documentation audit does not reclassify or promote any finding.
 
+Row 428's live GitHub title is normalized to `[BLOCKER LoF] Consume insurance withdrawal epoch on
+retained debit`. The coverage branch still records it as `missing`/`OPEN` because the production
+fix remains held out, but the generic INV-008 retry-operation matrix now rediscovers the vulnerable
+insurance-withdrawal retry on this pin and passes on PR #428 fixed head `a05ef7d3` together with
+the direct row415/428 regression and adjacent INV-064 insurance-policy selector.
+
 `open_findings.tsv` includes the historical 2026-08-03 snapshot of 143 open PRs whose titles identify
 a public-route LoF or DoS class. It maps every row to a primary invariant. That dated snapshot has 0
 **Direct regression** rows, 0 **Missing** rows, 126 **Independent discovery** rows, and seventeen

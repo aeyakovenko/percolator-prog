@@ -1538,7 +1538,13 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Shared authority epoch only, not intrinsic fixed-epoch withdrawal consumption;
 # arbitrary histories, liabilities, terminal recredit and other rails remain open.
 # No production change, held-out import, bug claim or invariant-status promotion.
-428	LoF	REAL	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	OPEN
+# 2026-09-13 holdout audit: the generic INV-008 retry-operation matrix rediscovers
+# this row on the vulnerable watcher pin as InsuranceWithdrawal, with seed
+# [0,0,0,0,0,0,0,0,3,134,33,124,226,210,23,56,241,32,167,93,170,111,129,32,27,238,174,122,27,131,120,198].
+# The same matrix, the direct row415/428 regression, and the adjacent INV-064
+# insurance-policy selector pass on PR #428 fixed head a05ef7d3. Row remains OPEN
+# here because the production fix is still held out of this coverage branch.
+428	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	OPEN
 # Row 429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_exchange.rs,
 # v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders.
 # Twelve public resolved histories exchange funded backing/insurance holders across
