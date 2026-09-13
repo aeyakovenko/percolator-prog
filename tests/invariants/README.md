@@ -95,6 +95,98 @@ git diff --check && git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-073 unsigned dual-quote reserve progress (row 433, 2026-09-13)
+
+Owner: [cu/inv_073_dual_quote_reserve_progress.rs](cu/inv_073_dual_quote_reserve_progress.rs),
+mounted by INV-073. Exact selector:
+`inv_073_no_permanent_user_lock::dual_quote_reserve_progress::v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_surplus`.
+Primary INV-073; the assertions join INV-070 terminal disposition and INV-024
+beneficiary attribution. PR135 row433 retains its existing related-invariant list.
+
+Four fixed public LiteSVM histories cross native quote in the primary/secondary
+position with forward/reverse reserve payout order. One asset has two fresh
+backing domains funded with 401 and 307 atoms and a distinct insurance beneficiary
+funded with 67 atoms. The primary vault holds all 775 claim atoms; a separate
+997-atom secondary-vault donation is raw custody, with no engine claim. The
+provider, insurance beneficiary and insurance operator keys are dropped before
+resolution. A distinct keeper then makes six unsigned payments per history:
+prefixes `[101,59,17]` on rails `[0,1,0]` followed by remainders `[300,248,50]`
+on the opposite rails. Both beneficiaries receive value on both rails.
+
+The oracle derives every claim and payout from those inputs. Every payment
+strictly decreases logical vault stock by its amount, preserves each other
+domain's remaining claim, and updates only the selected beneficiary's custody.
+Per-domain backing/status/expiry and insurance budgets, raw/decoded stock and
+encumbrance censuses, market shape, authority profiles and control sequences are
+checked after every payment. Complete Account frames cover all other transaction
+and fixture accounts, including the unused rail, recipients, reserve-role wallets,
+administrator, mints and vault authority. Signed transactions verify with exactly
+one keeper signature for every economic payout; only its calculated signature
+fee leaves the keeper wallet.
+
+The independent custody equations require primary physical stock to equal
+outstanding claims plus cumulative secondary payouts. The stock census receives
+logical custody after explicitly classifying this raw surplus. Exact SPL Account
+images also bind native token atoms to lamports above rent, while nonnative mint
+supply stays fixed with no mint/freeze authority. At the endpoint, backing and
+insurance claims are zero; the two raw vault surpluses are `[409,588]`. A single
+administrator-signed dual-vault `CloseSlab` transfers those amounts to the admin's
+respective token accounts, preserves the beneficiaries' paid custody, reclaims
+both vaults and leaves the typed market tombstone. The admin's wallet receives
+exactly market rent minus tombstone rent plus both empty-vault rents, excluding
+native token principal.
+
+Novelty is **unsigned reserve claim continuity across different quote rails and
+the resulting raw-surplus disposition**, beyond row418's dual-quote user payout
+and signed insurance withdrawal. Single-native provider-principal redemption and
+native insurance-ledger/donation candidates were discarded as existing coverage.
+Existing row433 payout orders, missing/frozen custody, repair and close retries
+do not exercise this cross-rail reserve accounting. Shared helper implementations
+are unchanged, so no adjacent controls are required. System/ATA/SPL/wrapper
+instructions construct all economic accounts and transitions. The existing native
+fixture supplies only the missing native-mint genesis account; there are no edits
+to initialized program account bytes. Expected Account images are never installed.
+
+**Row 433 remains OPEN.** This is a four-history conformance increment, not a
+generic generator/oracle or status promotion. Earned-fee/ledger composition,
+receipts/pending losses, Recovery/recredit, expiry races, custody disruption,
+multiple assets, arbitrary amounts/orders/quote variants, maximum shapes and
+absent-market-authority retirement remain open. No production change is made.
+
+Base: `c3a0ecedc915c1a4eb7e81ea062e3bfcaab71689`, exactly the requested
+`origin/codex/astra-open-holdout-ledger-20260912` ref at worktree creation.
+Branch: `codex/row433-native-reserve-verification-20260913`; worktree:
+`/home/anatoly/percolator-row433-native-reserve-20260913`. The parent checkout was
+not edited. Environment: Linux `6.1.0-52-cloud-amd64` x86_64, rustc/cargo 1.90.0,
+default `anchor-v2` features, LiteSVM 0.1.0, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, SBF platform-tools v1.52.
+Dependency artifacts were copied with `cp -a --reflink=auto` from
+`/tmp/percolator-astra-row421-operator-progress-20260913/target` to this worktree's
+private `target`. The default-feature SBF wrapper was freshly rebuilt here with
+locked/offline dependencies. SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+No matcher is used. The exact new selector passes **1/1 in 1.64s**, completing
+four histories, 24 keeper-only reserve payments and four slab closures. Observed
+peak CU is **35,469 for payment / 44,549 for closure**, each below the asserted
+150,000-CU limit. The initial development run hit LiteSVM `AlreadyProcessed` when
+setup repeated creation of the bootstrap native vault; the fixture now reuses
+that existing public ATA. No economic assertion failed or was removed. The
+existing `solana-client v1.18.26` future-incompatibility warning remains.
+Exact build and validation commands, run from this worktree:
+
+```sh
+export CARGO_TARGET_DIR=/home/anatoly/percolator-row433-native-reserve-20260913/target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::dual_quote_reserve_progress::v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_surplus -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-070/088 resolved claimant actionability after later cleanup (row 424, 2026-09-13)
 
 Owner: [cu/inv_088_resolved_actionability.rs](cu/inv_088_resolved_actionability.rs),

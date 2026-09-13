@@ -1152,6 +1152,23 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # expiry races, repeated disruption, max shape and absent market authority. Earlier
 # owner-signed deletion and admin-signed slab closure remain prerequisites; no change
 # to production or invariant_status.tsv, and no machine-status promotion.
+# 433 dual-quote reserve increment (2026-09-13): cu/inv_073_dual_quote_reserve_progress.rs.
+# Four fixed public histories cross native primary/secondary custody with both reserve
+# orders. Two backing domains (401/307) and distinct-beneficiary insurance (67) receive
+# unsigned prefixes and remainders on opposite rails after all reserve keys are dropped.
+# Input-derived domain claims, exact SPL/native Account images and lamports, peer frames,
+# keeper-only signatures/fees and stock/encumbrance censuses bind 24 payments. Secondary
+# payouts displace primary backing into raw surplus; claims reach zero and dual-vault
+# CloseSlab allocates [409,588] surplus plus exact rent to the administrator, preserving
+# paid beneficiary custody. Distinct from signed row418 dual-quote insurance and existing
+# single-native provider redemption/insurance ledgers; no custody-repair novelty claim.
+# README section "INV-073 unsigned dual-quote reserve progress" records the exact selector,
+# base c3a0ecedc915c1a4eb7e81ea062e3bfcaab71689, environment, SBF hash and commands.
+# New selector passes 1/1 in 1.64s: four histories/closures, 24 unsigned payments;
+# peak payment/closure CU [35469,44549], each bounded at 150000.
+# No shared-helper or production changes. OPEN: generic histories/oracle, earned fees,
+# receipts/pending losses, Recovery/recredit, expiry/custody disruption, multiple assets,
+# maxima and absent administrator. Four bounded histories do not promote row433/status.
 433	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-024,INV-027,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-081,INV-082	terminal-reserve+x-missing-signer+x-public-payout	terminal-economic-progress-does-not-require-an-adversarial-reserve-beneficiary-signature	OPEN
 # Row 434 bounded extension (2026-09-12): cu/inv_027_flat_reopen_routes.rs,
 # v16_program_flat_reopen_route_switch_preserves_fee_history_and_senior_exit.
