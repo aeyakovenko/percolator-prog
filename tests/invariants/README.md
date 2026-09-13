@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## PR135 Scope Q retained insurance stock epochs (2026-09-13)
+
+Owner: [cu/inv_008_generated_insurance_stock_epochs.rs](cu/inv_008_generated_insurance_stock_epochs.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::generated_insurance_stock_epochs`.
+Four seeded quantity cases cross both assets and all six orders of target refill,
+sibling debit and secondary-rail donation. Forty-eight public LiteSVM histories
+retain every signed envelope before execution, alternate partial/full stock
+depletion and quote rails, and check input-derived per-intent consumed domain
+stock, entitlement, destination Accounts, optional ledgers and exact rollback.
+A conserved destination-misattribution control must fail the same payout oracle.
+
+This extends Scope E's Live debit consumption with generated stock/rail/order
+composition: 2,208 checked transactions, 1,776 exact rollbacks and 1,392 completed
+SPL transfers restored. Rows 415/428 remain OPEN; classifications are unchanged.
+The bounded INV-008/010/011/024/031/064/080/081 evidence does not certify arbitrary
+stock histories or the full INV-064 policy statement. No production change.
+See the [Scope Q audit](pr135_scope_q_retained_insurance_stock_epochs_20260913.md)
+for the gap analysis, exact commands, artifact provenance and limits.
+
 ## PR135 Scope G shared source capacity (2026-09-13)
 
 Owner: [cu/inv_028_shared_source_late_exit.rs](cu/inv_028_shared_source_late_exit.rs),

@@ -49,6 +49,9 @@ mod insurance_round_trip_retry;
 #[path = "inv_008_live_debit_consumption.rs"]
 mod live_debit_consumption;
 
+#[path = "inv_008_generated_insurance_stock_epochs.rs"]
+mod generated_insurance_stock_epochs;
+
 #[path = "inv_008_insurance_destination_epoch_retry.rs"]
 mod insurance_destination_epoch_retry;
 
