@@ -1,5 +1,91 @@
 # Invariant-owned test coverage
 
+## INV-073 unsigned native insurance ledger progress (row 421, 2026-09-13)
+
+Owner: [cu/inv_073_native_insurance_ledger_progress.rs](cu/inv_073_native_insurance_ledger_progress.rs),
+mounted under `inv_073_no_permanent_user_lock::native_insurance_ledger_progress`.
+Selector: `v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close`.
+Primary INV-073; related INV-017/018/021/027/064/067/069/070/071/078/082.
+
+Four public LiteSVM histories cross a ledger initialized by the beneficiary's
+`SyncInsuranceLedger` after funding with a fresh ledger created by a keeper after
+resolution, and native synchronization before versus between two unsigned
+payments. The two insurance roles are distinct, voluntarily drain their System
+wallets, and drop both signing keys before resolution. LiteSVM retains the empty,
+zero-lamport wallet Accounts; every measured step preserves those exact images.
+The existing public native fixture supplies the native mint's genesis account.
+All other setup and transitions use System, ATA, SPL and wrapper instructions;
+no program-owned bytes or snapshots are injected into the VM.
+
+Public funding contributes 37 long-domain and 61 short-domain atoms. After
+resolution, the keeper donates 17 raw lamports to the vault and 19 to beneficiary
+custody. `SyncNative` turns those donations into SPL stock without changing
+economic budgets or the optional ledger. Both 41/57-atom payments have exactly
+one signature, the keeper's; the operator is omitted from their account lists.
+The first payment crosses the long/short budget boundary. Each payment reduces
+the remaining claim by its exact amount and records only actual insurance paid.
+The independently expected ledger contains the market/beneficiary binding,
+98 cumulative withdrawn atoms, zero final observation, and no profit/loss from
+donations. Principal and deposit counters stay zero because these ledgers begin
+observing after funding, without a recorded deposit history.
+
+After every step, assertions reconcile full native token Account images, raw and
+synchronized lamports, exact payer fees/outflows, market stock and encumbrance
+censuses, role/control frames and the remaining budget. Four administrator-signed
+`CloseSlab` calls then close the actual vault and market with exact rent refunds.
+The administrator receives only the 17 donated vault atoms; beneficiary custody
+retains 98 insurance plus 19 donated atoms, and the paid ledger keeps its own rent
+and complete Account image. Native redemption is a separate beneficiary action.
+
+The new relation is keeper-only optional-ledger initialization/update composed
+with native custody synchronization and completed insurance disposition. Existing
+row421 frozen/recredited SPL custody, row420 provider exits and row433 reserve
+repair do not own this relation. INV-077's native insurance witness uses signed
+payments and redemption without an optional ledger. No adjacent row is changed.
+**Row 421 remains OPEN; invariant statuses are unchanged.** This finite family
+does not cover active user liabilities, insurance consumption/recredit, authority
+succession, other assets or quote rails, arbitrary histories, maximum shapes,
+transaction rollback, recipient redemption, ledger disposal or absent-admin
+retirement. No production change or public-route implementation violation is
+claimed.
+
+Base: `c4da24a211722bcb1cd32d18781217850034210e` from the requested origin branch.
+Worktree: `/tmp/percolator-astra-row421-operator-progress-20260913`; branch:
+`codex/astra-row421-operator-progress-20260913`. The parent checkout was not edited.
+Dependency artifacts were copied into this worktree's private `target` from
+`/dev/shm/astra-terminal-public-disposition-target`. The default-feature wrapper
+was freshly rebuilt from this worktree using locked/offline platform-tools v1.52;
+engine pin: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+No matcher artifact, old-wrapper comparison, broad suite or Kani run is used.
+
+Development corrected two fixture assumptions: LiteSVM preserves drained wallet
+Accounts, and a ledger passed through separate domain top-ups observes individual
+domain stock. The final preinitialized case uses the public asset-level
+`SyncInsuranceLedger` after funding. No failing terminal-progress assertion was
+removed; the final oracle still requires the full funded payout and exact ledger.
+
+The new exact selector passed **1/1 in 1.52s**: four histories, eight unsigned
+payments and four completed slab closures. Observed peak CU for lazy ledger
+creation, donation/sync, payment and closure was **450 / 6,438 / 36,278 / 28,568**,
+each below the asserted 150,000-CU limit. The existing `solana-client v1.18.26`
+future-incompatibility warning remains. Exact build and validation commands
+(run from the worktree):
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-row421-operator-progress-20260913/target
+export PERCOLATOR_FUZZ_SBF=/tmp/percolator-astra-row421-operator-progress-20260913/target/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/percolator-astra-row421-operator-progress-20260913/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::native_insurance_ledger_progress::v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-012 interleaved revocation words (row 412, 2026-09-13)
 
 Owner: [stateful/inv_012_revocation_words.rs](stateful/inv_012_revocation_words.rs),

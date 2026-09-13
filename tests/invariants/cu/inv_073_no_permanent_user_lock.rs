@@ -79,6 +79,9 @@ mod frozen_insurance_remainder;
 #[path = "inv_073_mixed_backing_expiry_exit.rs"]
 mod mixed_backing_expiry_exit;
 
+#[path = "inv_073_native_insurance_ledger_progress.rs"]
+mod native_insurance_ledger_progress;
+
 #[path = "inv_073_recovery_claim_liability_exit.rs"]
 mod recovery_claim_liability_exit;
 

@@ -523,6 +523,30 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Signed final close burns 207 unallocated atoms with exact rent. Distinct from
 # existing-wallet row410 recredit, row421 frozen custody and row420/433 repair.
 # No production violation or status promotion; generic progress remains OPEN.
+# Row 421 bounded conformance (2026-09-13): cu/inv_073_native_insurance_ledger_progress.rs.
+# Four native histories cross preinitialized/lazy optional ledgers and SyncNative
+# before/between 41/57-atom payments. Both role keys are dropped before resolution;
+# their drained wallet Accounts remain exact. Keeper-created ledger initialization
+# and eight unsigned payments exclude 17 vault/19 recipient donation atoms from
+# insurance budgets and ledger profit/loss. Four admin-signed slab closures preserve
+# 98 paid insurance atoms, recipient donations and ledger rent with exact native
+# custody/lamport accounting. No production changes or status promotion.
+# Selector passes 1/1 (four histories); payment peak 36278 CU, closure peak 28568 CU,
+# both below the asserted 150000-CU limit.
+# OPEN limits: active liabilities, consumption/recredit, succession, other assets/
+# quote rails, arbitrary histories, maximum shapes, rollback, redemption, ledger
+# disposal and absent-admin retirement. Existing row420/433 claims are unchanged.
+# Fresh default-feature SBF from c4da24a211722bcb1cd32d18781217850034210e,
+# platform-tools v1.52, engine 394fd0bf2cb7d73df425eb3754dc3be1a0c44336;
+# SHA-256 dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52.
+# README section "INV-073 unsigned native insurance ledger progress" records full
+# provenance, build environment, exact commands and fixture corrections. Commands:
+# export CARGO_TARGET_DIR=/tmp/percolator-astra-row421-operator-progress-20260913/target
+# export PERCOLATOR_FUZZ_SBF=/tmp/percolator-astra-row421-operator-progress-20260913/target/deploy/percolator_prog.so
+# export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+# cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::native_insurance_ledger_progress::v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close -- --exact --nocapture --test-threads=1
+# cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+# cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
 # Row 422 bounded policy-succession conformance (2026-09-12):
 # cu/inv_045_reward_policy_catchup.rs,
