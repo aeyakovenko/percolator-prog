@@ -8,6 +8,9 @@
 use super::*;
 use solana_sdk::fee::FeeStructure;
 
+#[path = "inv_039_pending_reserve_role_recredit.rs"]
+mod reserve_role_recredit;
+
 const DONOR_DEPOSIT: u128 = 20_001;
 
 struct InsuredDebtBook {

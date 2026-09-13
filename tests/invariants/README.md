@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## Astra Scope D pending claimant reserve roles (2026-09-13)
+
+Owner: [cu/inv_039_pending_reserve_role_recredit.rs](cu/inv_039_pending_reserve_role_recredit.rs),
+mounted under INV-039's `close_reopen::two_domain_resolution::insured_resolution::reserve_role_recredit`.
+Twenty-four public LiteSVM histories combine two insured pending cohorts with
+claimant/provider/beneficiary coholding or split holding, opposite settlement and
+deletion schedules, exact/late backing expiry, and partial/full insurance recredit.
+An input-derived debt book precedes exact user/provider/insurance SPL attribution;
+aggregate-preserving wrong-owner and wrong-class observations fail the oracles.
+Final deletion/provider payout and expiry/recredit/payout prefixes roll back in
+full before successful retries and zero-vault slab retirement.
+
+This is bounded INV-039/024 evidence with adjacent residual, order, OI, payout and
+atomicity checks. Scope J retains the same-portfolio creditor/debtor cell: this
+increment adds reserve roles and the terminal recredit suffix. Rows 419/435 stay
+OPEN, and no machine status or production source changes. The
+[Scope D audit](astra_scope_d_pending_reserve_roles_20260913.md) records the exact
+inputs, guarantee, exclusions, fixed artifact and validation commands.
+
 ## Astra Scope F capped PnL terminal composition (2026-09-13)
 
 Owner: [cu/inv_058_pnl_terminal_handoff.rs](cu/inv_058_pnl_terminal_handoff.rs),

@@ -884,6 +884,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # nonzero fresh-generation PnL, maximum shapes and arbitrary histories.
 # README "INV-039 pending debt across restarted-peer trading" records base 8b82465a,
 # exact scope, private environment, commands and limits. Row remains OPEN.
+# Astra Scope D pending reserve roles (2026-09-13):
+# cu/inv_039_pending_reserve_role_recredit.rs adds 24 public histories carrying
+# insured pending debt through claimant/provider/beneficiary coholding or split
+# holding, both close/deletion schedules, exact/late expiry and bounded recredit.
+# Input-derived debt and reserve books check exact owner SPL entitlements, 168
+# complete rollback frames and zero-vault slab retirement. Scope J's simultaneous
+# creditor/debtor portfolio remains a separate control. No fractional/ADL,
+# generic histories, status promotion or production change; row remains OPEN.
+# Exact commands and limitations: astra_scope_d_pending_reserve_roles_20260913.md.
 419	LoF	BLOCKER	INV-039	INV-024,INV-037,INV-039,INV-041,INV-048,INV-066,INV-067,INV-073,INV-076,INV-081,INV-086	pending-obligation+x-resolution+x-close-order	obligation-attribution-persists-until-the-opposing-economic-debt-settles	OPEN
 # Rows 420/421 partial conformance (2026-09-10): cu/inv_073_absent_insurer_spent_retirement.rs,
 # v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion.
@@ -2017,4 +2026,10 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # This is a roster fix only: no selector, status promotion, production change or
 # closure claim is added. The row remains OPEN until a public invariant probe covers
 # the same-portfolio mixed-role cell.
+# Astra Scope D (2026-09-13) adds claimant/provider/insurance role overlap through
+# recredit to the adjacent mixed-role coverage. It does not repeat or generalize
+# Scope J's sampled same-portfolio creditor/debtor selector. The new reserve book
+# checks coheld ATA totals AND separate remaining principal/insurance classes;
+# conserved owner/class reassignments fail. No generic mixed-role closure is
+# claimed, and the same-portfolio/fractional/ADL/recredit product stays OPEN.
 435	LoF	BLOCKER	INV-039	INV-039	pending-obligation+x-resolution+x-mixed-role-attribution	mixed-role-resolved-debt-attribution-preserves-owner-obligation-through-resolution	OPEN
