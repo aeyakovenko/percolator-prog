@@ -2909,6 +2909,7 @@ impl V16CuEnv {
     ) -> Result<Pubkey, String> {
         let portfolio_id = self.portfolio_id(maker_account);
         let expected_sequence = self.portfolio_matcher_sequence(maker_account);
+        let position_epoch = self.portfolio_position_epoch(maker_account);
         self.svm.expire_blockhash();
         let mut accounts = vec![
             AccountMeta::new(maker_owner.pubkey(), true),
@@ -2926,6 +2927,7 @@ impl V16CuEnv {
             ProgInstruction::SetMatcherConfig {
                 portfolio_id,
                 expected_sequence,
+                position_epoch,
                 enabled,
                 trade_fee_cap_bps,
                 expiry_slot,

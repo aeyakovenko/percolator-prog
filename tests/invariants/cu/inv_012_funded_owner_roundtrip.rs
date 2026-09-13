@@ -112,6 +112,7 @@ fn grant(h: &History, id: u64, sequence: u64) -> Instruction {
         data: ProgInstruction::SetMatcherConfig {
             portfolio_id: id,
             expected_sequence: sequence,
+            position_epoch: h.env.portfolio_position_epoch(h.portfolios[1]),
             enabled: 1,
             trade_fee_cap_bps: FEE_CAP,
             expiry_slot: EXPIRY,

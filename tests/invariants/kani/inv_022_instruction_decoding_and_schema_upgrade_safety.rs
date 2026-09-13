@@ -406,28 +406,31 @@ fn kani_v16_cure_and_cancel_close_rejects_incarnationless_legacy_payload() {
 fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
     let portfolio_id: u64 = kani::any();
     let expected_sequence: u64 = kani::any();
+    let position_epoch: u64 = kani::any();
     let enabled: u8 = kani::any();
     let trade_fee_cap_bps: u16 = kani::any();
     let expiry_slot: u64 = kani::any();
-    let data = Instruction::SetMatcherConfig {
-        portfolio_id,
-        expected_sequence,
-        enabled,
-        trade_fee_cap_bps,
-        expiry_slot,
-    }
-    .encode();
 
-    match Instruction::decode(&data).unwrap() {
+    let mut body = [0u8; 35];
+    body[0..8].copy_from_slice(&portfolio_id.to_le_bytes());
+    body[8..16].copy_from_slice(&expected_sequence.to_le_bytes());
+    body[16..24].copy_from_slice(&position_epoch.to_le_bytes());
+    body[24] = enabled;
+    body[25..27].copy_from_slice(&trade_fee_cap_bps.to_le_bytes());
+    body[27..35].copy_from_slice(&expiry_slot.to_le_bytes());
+
+    match Instruction::decode_body_for_proof(68, &body).unwrap() {
         Instruction::SetMatcherConfig {
             portfolio_id: decoded_portfolio_id,
             expected_sequence: decoded_sequence,
+            position_epoch: decoded_position_epoch,
             enabled: decoded_enabled,
             trade_fee_cap_bps: decoded_cap,
             expiry_slot: decoded_expiry,
         } => {
             assert_eq!(decoded_portfolio_id, portfolio_id);
             assert_eq!(decoded_sequence, expected_sequence);
+            assert_eq!(decoded_position_epoch, position_epoch);
             assert_eq!(decoded_enabled, enabled);
             assert_eq!(decoded_cap, trade_fee_cap_bps);
             assert_eq!(decoded_expiry, expiry_slot);
@@ -438,9 +441,18 @@ fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
     let legacy = [68, enabled];
     assert!(Instruction::decode(&legacy).is_err());
 
-    let mut trailing = data.clone();
-    trailing.push(0);
-    assert!(Instruction::decode(&trailing).is_err());
+    let mut prior_schema_body = [0u8; 27];
+    prior_schema_body[0..8].copy_from_slice(&portfolio_id.to_le_bytes());
+    prior_schema_body[8..16].copy_from_slice(&expected_sequence.to_le_bytes());
+    prior_schema_body[16] = enabled;
+    prior_schema_body[17..19].copy_from_slice(&trade_fee_cap_bps.to_le_bytes());
+    prior_schema_body[19..27].copy_from_slice(&expiry_slot.to_le_bytes());
+    assert!(Instruction::decode_body_for_proof(68, &prior_schema_body).is_err());
+
+    let mut trailing_body = [0u8; 36];
+    trailing_body[..35].copy_from_slice(&body);
+    trailing_body[35] = 0;
+    assert!(Instruction::decode_body_for_proof(68, &trailing_body).is_err());
 }
 
 #[kani::proof]

@@ -513,6 +513,7 @@ fn grant_capability_with_scope(
         data: ProgInstruction::SetMatcherConfig {
             portfolio_id: grant.portfolio_id,
             expected_sequence: grant.sequence,
+            position_epoch: grant.epoch,
             enabled: u8::from(cap.is_some()),
             trade_fee_cap_bps: cap.unwrap_or(0),
             expiry_slot: expiry,
@@ -865,6 +866,78 @@ fn v16_program_retained_taker_writers_preserve_untouched_lp_capability() {
         }
     }
     assert_eq!(histories, 32);
+}
+
+#[test]
+fn v16_program_position_mutation_invalidates_retained_matcher_enable() {
+    const TAKER: usize = 0;
+    const LP: usize = 1;
+    const PRICE: u64 = 100;
+    const SIZE_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        [0x92; 32],
+        MarketConfig {
+            initial_price: PRICE,
+            actor_deposits: [1_000_000; 5],
+            actor_token_balances: [2_000_000; 5],
+            ..MarketConfig::default()
+        },
+    );
+    env.configure_auth_mark(false, 0, 1, PRICE)
+        .expect("configure authenticated mark");
+
+    let retained_enable = env.build_retained_matcher_config(LP, 1);
+    let signed_sequence = env.primary_portfolio_matcher_sequence(LP);
+    let signed_epoch = env.primary_portfolio_position_epoch(LP);
+    let signed_cfg = state::read_portfolio_matcher_config(&env.primary_portfolio_data(LP))
+        .expect("decode signed matcher config");
+    assert_eq!(signed_cfg.enabled(), 1);
+
+    env.trade_no_cpi(TAKER, LP, 0, SIZE_Q, PRICE, 0)
+        .expect("public bilateral open changes both position episodes");
+    env.trade_no_cpi(TAKER, LP, 0, -SIZE_Q, PRICE, 0)
+        .expect("public bilateral close changes both position episodes again");
+    assert_eq!(
+        env.primary_portfolio_matcher_sequence(LP),
+        signed_sequence,
+        "position changes must not consume the independent matcher-control sequence"
+    );
+    assert!(
+        env.primary_portfolio_position_epoch(LP) > signed_epoch,
+        "position changes must advance the LP episode"
+    );
+    let revoked = state::read_portfolio_matcher_config(&env.primary_portfolio_data(LP))
+        .expect("decode revoked matcher config");
+    assert_eq!(
+        revoked.enabled(),
+        0,
+        "out-of-matcher position mutation must revoke matcher authority"
+    );
+
+    let before = env.primary_portfolio_data(LP);
+    let error = env
+        .land_retained(retained_enable)
+        .expect_err("retained matcher enable from the old position episode must reject");
+    assert!(
+        error.contains(&format!("Custom({})", PercolatorError::EngineStale as u32)),
+        "stale retained matcher enable rejected with wrong error: {error}"
+    );
+    assert_eq!(
+        env.primary_portfolio_data(LP),
+        before,
+        "stale retained matcher enable must roll back exactly"
+    );
+
+    env.set_matcher_config(LP, 1)
+        .expect("fresh current-episode matcher grant remains live");
+    let fresh_cfg = state::read_portfolio_matcher_config(&env.primary_portfolio_data(LP))
+        .expect("decode fresh matcher config");
+    assert_eq!(fresh_cfg.enabled(), 1);
+    assert_eq!(
+        fresh_cfg.position_epoch(),
+        env.primary_portfolio_position_epoch(LP)
+    );
 }
 
 #[test]
@@ -1322,6 +1395,7 @@ fn v16_program_ordered_grant_histories_bind_retained_cpi_disposition() {
                     data: ProgInstruction::SetMatcherConfig {
                         portfolio_id: grant.portfolio_id,
                         expected_sequence: grant.sequence,
+                        position_epoch: grant.epoch,
                         enabled: u8::from(cap.is_some()),
                         trade_fee_cap_bps: cap.unwrap_or(0),
                         expiry_slot: expiry,

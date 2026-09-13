@@ -149,7 +149,7 @@
 393	LoF	REAL	INV-010	independent-discovery	[REAL LoF] Order matcher config mutations
 410	LoF	PRIVILEGED	INV-024	missing	[PRIVILEGED LoF] Escheat abandoned shutdown reserves
 411	LoF	PRIVILEGED	INV-014	missing	[PRIVILEGED LoF] Bind retained single-CPI taker fee consent
-412	LoF	BLOCKER	INV-012	missing	[BLOCKER LoF] Bind matcher grants to position episodes
+412	LoF	BLOCKER	INV-012	independent-discovery	[BLOCKER LoF] Bind matcher grants to position episodes
 413	LoF	BLOCKER	INV-027	missing	[BLOCKER LoF] Crystallize flat fees before first open
 414	LoF	PRIVILEGED	INV-012	missing	[PRIVILEGED LoF] Bind matcher grants to asset generations
 415	LoF	BLOCKER	INV-008	missing	[BLOCKER LoF] Bind retained insurance withdrawals to stock sequence

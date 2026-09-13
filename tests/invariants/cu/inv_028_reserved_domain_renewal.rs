@@ -66,6 +66,7 @@ fn renew_flip_rollback_retry(h: &mut History, batch: bool, asset: u16, size_q: i
         data: ProgInstruction::SetMatcherConfig {
             portfolio_id: h.env.portfolio_id(h.portfolios[1]),
             expected_sequence: sequence,
+            position_epoch: h.env.portfolio_position_epoch(h.portfolios[1]),
             enabled: 1,
             trade_fee_cap_bps: 0,
             expiry_slot: u64::MAX,

@@ -38,6 +38,7 @@ fn v16_program_failed_portfolio_reincarnation_preserves_retained_owner_grant() {
                 data: ProgInstruction::SetMatcherConfig {
                     portfolio_id,
                     expected_sequence,
+                    position_epoch: h.env.portfolio_position_epoch(portfolio),
                     enabled: 1,
                     trade_fee_cap_bps: FEE_CAP,
                     expiry_slot: EXPIRY,

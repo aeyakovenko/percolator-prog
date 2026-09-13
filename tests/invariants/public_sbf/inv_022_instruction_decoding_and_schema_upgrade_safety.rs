@@ -130,6 +130,7 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
         ProgInstruction::SetMatcherConfig {
             portfolio_id: 1,
             expected_sequence: 1,
+            position_epoch: 0,
             enabled: 1,
             trade_fee_cap_bps: 25,
             expiry_slot: u64::MAX,

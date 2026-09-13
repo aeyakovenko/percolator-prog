@@ -382,6 +382,7 @@ impl History {
                     ProgInstruction::SetMatcherConfig {
                         portfolio_id: self.env.portfolio_id(self.portfolios[1]),
                         expected_sequence: self.grant_sequence,
+                        position_epoch: self.env.portfolio_position_epoch(self.portfolios[1]),
                         enabled: 1,
                         trade_fee_cap_bps: FEE_CAP,
                         expiry_slot: EXPIRY,

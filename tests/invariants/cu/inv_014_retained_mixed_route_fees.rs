@@ -321,6 +321,7 @@ fn v16_retained_mixed_route_fee_budgets_survive_bilateral_revocation_and_renewal
                         data: ProgInstruction::SetMatcherConfig {
                             portfolio_id: w.env.portfolio_id(w.portfolios[1]),
                             expected_sequence: sequence,
+                            position_epoch: w.env.portfolio_position_epoch(w.portfolios[1]),
                             enabled: 1,
                             trade_fee_cap_bps: LP_CAP_BPS,
                             expiry_slot: expiry,

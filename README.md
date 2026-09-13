@@ -843,6 +843,12 @@ The invariant ledger now records row 432 as independently rediscovered by the ge
 fee-consent matrix, while the broader invariant remains sampled/conditional rather than globally
 proven.
 
+The [row-412 retained matcher-grant coverage](tests/invariants/README.md#inv-012-capability-and-delegate-scope)
+is now an independent INV-012 red/green case: a public position mutation revokes matcher authority,
+stale retained enable bytes fail on the vulnerable pin, and the fixed wrapper signs/checks
+`position_epoch` before mutating the matcher configuration. INV-012 still has broader sampled
+writer/domain coverage rather than a full arbitrary-history theorem.
+
 Before publishing a bounty, run the commands in [Build & test](#build--test) and record the exact output for the current commit.
 
 ---

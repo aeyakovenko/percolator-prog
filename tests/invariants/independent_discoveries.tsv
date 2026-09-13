@@ -122,5 +122,6 @@ INV-001	terminal-generation/resolve-policy	v16_program_market_incarnation_operat
 INV-002	terminal-generation/asset-resolve-policy	v16_program_asset_generation_terminal_policy_rejects_before_replacement_value_transfer	old-generation-terminal-capability-cannot-crystallize-replacement-value	312
 INV-004	position-episode/rebalance-reduce	v16_program_position_episode_matrix_rejects_stale_consent_atomically	stale-position-episode-consent-cannot-transfer-or-orphan-value	316
 INV-004	position-episode/recovery-forfeit	v16_program_position_episode_matrix_rejects_stale_consent_atomically	stale-position-episode-consent-cannot-transfer-or-orphan-value	354
+INV-012	position-episode/matcher-grant-writer	v16_program_position_mutation_invalidates_retained_matcher_enable	retained-capability-cannot-cross-any-authority-revoking-state-transition	412
 INV-010	matcher-mutation/revoke-order	v16_program_matcher_mutation_order_rejects_revoked_capability	stale-matcher-enable-cannot-revive-revoked-value-authority	393
 INV-027	flat-reopen/fee-history	v16_program_flat_reopen_fee_history_precedes_new_exposure	all-accrued-liabilities-precede-every-risk-increasing-admission-even-after-flat-account-history	434

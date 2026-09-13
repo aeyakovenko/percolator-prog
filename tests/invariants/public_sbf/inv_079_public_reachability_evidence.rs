@@ -773,11 +773,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
     assert_eq!(rows, 165, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(
-        missing, 20,
+        missing, 19,
         "post-PR135 counterexamples remain missing generic invariant-owned discovery coverage"
     );
     assert_eq!(
-        independent, 128,
+        independent, 129,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
@@ -817,6 +817,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             10,
             &[10],
             include_str!("../stateful/inv_010_out_of_order_safety.rs"),
+        ),
+        (
+            12,
+            &[12],
+            include_str!("../stateful/inv_012_capability_and_delegate_scope.rs"),
         ),
         (
             14,
@@ -1037,6 +1042,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "max-source-liquidatable-account-must-have-a-bounded-public-reduction"
                     | "old-generation-terminal-capability-cannot-crystallize-replacement-value"
                     | "stale-position-episode-consent-cannot-transfer-or-orphan-value"
+                    | "retained-capability-cannot-cross-any-authority-revoking-state-transition"
                     | "stale-matcher-enable-cannot-revive-revoked-value-authority"
                     | "funded-role-principal-cannot-be-redirected-without-incumbent-consent"
                     | "committed-funding-must-accrue-before-lifecycle-terminalization"

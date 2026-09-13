@@ -30,6 +30,7 @@ fn retained_grant(env: &V16Svm, grant: GrantOracle, expiry: u64, transport: u64)
                 data: ProgInstruction::SetMatcherConfig {
                     portfolio_id: grant.portfolio_id,
                     expected_sequence: grant.sequence,
+                    position_epoch: grant.epoch,
                     enabled: 1,
                     trade_fee_cap_bps: 1,
                     expiry_slot: expiry,

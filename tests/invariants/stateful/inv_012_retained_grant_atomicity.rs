@@ -37,6 +37,7 @@ fn grant_ix(env: &V16Svm, grant: GrantOracle, cap: Option<u16>, expiry: u64) -> 
         data: ProgInstruction::SetMatcherConfig {
             portfolio_id: grant.portfolio_id,
             expected_sequence: grant.sequence,
+            position_epoch: grant.epoch,
             enabled: u8::from(cap.is_some()),
             trade_fee_cap_bps: cap.unwrap_or(0),
             expiry_slot: expiry,
