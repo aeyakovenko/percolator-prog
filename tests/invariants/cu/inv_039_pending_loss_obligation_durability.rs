@@ -57,6 +57,9 @@ mod shared_holder;
 #[path = "inv_039_pending_loss_owner_partition.rs"]
 mod owner_partition;
 
+#[path = "inv_039_fractional_residual_resolution.rs"]
+mod fractional_residual_resolution;
+
 #[path = "inv_039_pending_loss_backing_expiry.rs"]
 mod backing_expiry;
 
