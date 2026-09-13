@@ -33,6 +33,9 @@ mod terminal_prefix_recredit;
 #[path = "inv_071_generated_terminal_actionability.rs"]
 mod generated_terminal_actionability;
 
+#[path = "inv_071_dense_terminal_claimants.rs"]
+mod dense_terminal_claimants;
+
 #[path = "inv_071_recovery_obligation_finalization.rs"]
 mod recovery_obligation_finalization;
 
