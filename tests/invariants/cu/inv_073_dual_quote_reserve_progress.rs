@@ -17,6 +17,9 @@ const FUNDED: u64 = CLAIMS[0] + CLAIMS[1] + CLAIMS[2];
 const SECONDARY: u64 = 997;
 const CU_LIMIT: u64 = 150_000;
 
+#[path = "inv_070_native_residue_disposition.rs"]
+mod native_residue_disposition;
+
 struct Rail {
     mint: Pubkey,
     vault: Pubkey,
@@ -103,222 +106,227 @@ fn token_image(empty: &Account, amount: u64) -> Account {
     expected
 }
 
-#[test]
-fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_surplus() {
+fn reserve_world(native_rail: usize) -> (V16CuEnv, Keypair, [Keypair; 3], [Rail; 2]) {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_create_public_spl_mint;
     use inv_081_success_state_validity_over_complete_public_routes::inv081_public_native_market;
 
-    let mut worlds = 0;
-    let mut payments = 0;
-    let mut peak = [0u64; 2];
-    for native_rail in 0..2 {
-        for reverse in [false, true] {
-            let mut env = inv081_public_native_market();
-            let admin = env.admin.insecure_clone();
-            let added_mint = inv018_create_public_spl_mint(
-                &mut env.svm,
-                &env.payer,
-                admin.pubkey(),
-                spl_token::native_mint::DECIMALS,
-            );
-            let mints = if native_rail == 0 {
-                [env.mint, added_mint]
+    let mut env = inv081_public_native_market();
+    let admin = env.admin.insecure_clone();
+    let added_mint = inv018_create_public_spl_mint(
+        &mut env.svm,
+        &env.payer,
+        admin.pubkey(),
+        spl_token::native_mint::DECIMALS,
+    );
+    let mints = if native_rail == 0 {
+        [env.mint, added_mint]
+    } else {
+        [added_mint, env.mint]
+    };
+    env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: mints[0].to_bytes(),
+            secondary_mint: mints[1].to_bytes(),
+            authority_epoch: env.control_sequences(0).authority_epoch,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(mints[0], false),
+            AccountMeta::new_readonly(mints[1], false),
+            AccountMeta::new_readonly(env.vault, false),
+        ],
+        &[&admin],
+    )
+    .unwrap();
+    // Only host handles change after the public mint configuration succeeds.
+    env.mint = mints[0];
+    let native_vault = env.vault;
+    let provider = Keypair::new();
+    let beneficiary = Keypair::new();
+    let operator = Keypair::new();
+    let wallets = [provider.pubkey(), beneficiary.pubkey(), operator.pubkey()];
+    assert!(!wallets.contains(&env.payer.pubkey()));
+    assert!(!wallets.contains(&admin.pubkey()));
+    for (role, holder) in [
+        (processor::ASSET_AUTH_BACKING_BUCKET, &provider),
+        (processor::ASSET_AUTH_INSURANCE, &beneficiary),
+        (processor::ASSET_AUTH_INSURANCE_OPERATOR, &operator),
+    ] {
+        env.svm.airdrop(&holder.pubkey(), 1_000_000_000).unwrap();
+        env.try_update_per_asset_authority_with_cu(
+            &admin,
+            Some(holder),
+            0,
+            role,
+            holder.pubkey().to_bytes(),
+        )
+        .unwrap();
+    }
+    let rails = mints.map(|mint| {
+        let vault = if mint == spl_token::native_mint::ID {
+            native_vault
+        } else {
+            create_ata_for_test(&mut env.svm, &env.payer, env.vault_authority, mint)
+        };
+        let recipients = [wallets[0], wallets[1]]
+            .map(|owner| create_ata_for_test(&mut env.svm, &env.payer, owner, mint));
+        let admin_token = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), mint);
+        let empty = [vault, recipients[0], recipients[1], admin_token]
+            .map(|key| env.svm.get_account(&key).unwrap());
+        for (account, owner) in
+            empty
+                .iter()
+                .zip([env.vault_authority, wallets[0], wallets[1], admin.pubkey()])
+        {
+            let token = TokenAccount::unpack(&account.data).unwrap();
+            assert_eq!(account.owner, spl_token::ID);
+            assert_eq!((token.mint, token.owner, token.amount), (mint, owner, 0));
+        }
+        Rail {
+            mint,
+            vault,
+            recipients,
+            admin_token,
+            empty,
+            mint_frame: env.svm.get_account(&mint).unwrap(),
+        }
+    });
+    env.vault = rails[0].vault;
+    let mut rails = rails;
+    for (rail, custody) in rails.iter_mut().enumerate() {
+        let funding = if rail == 0 {
+            vec![
+                (custody.recipients[0], CLAIMS[0] + CLAIMS[1]),
+                (custody.recipients[1], CLAIMS[2]),
+            ]
+        } else {
+            vec![(custody.admin_token, SECONDARY)]
+        };
+        for (destination, amount) in funding {
+            let ixs = if rail == native_rail {
+                vec![
+                    system_instruction::transfer(&admin.pubkey(), &destination, amount),
+                    spl_token::instruction::sync_native(&spl_token::ID, &destination).unwrap(),
+                ]
             } else {
-                [added_mint, env.mint]
+                vec![spl_token::instruction::mint_to(
+                    &spl_token::ID,
+                    &custody.mint,
+                    &destination,
+                    &admin.pubkey(),
+                    &[],
+                    amount,
+                )
+                .unwrap()]
             };
-            env.send(
-                ProgInstruction::UpdateBaseUnitMints {
-                    primary_mint: mints[0].to_bytes(),
-                    secondary_mint: mints[1].to_bytes(),
-                    authority_epoch: env.control_sequences(0).authority_epoch,
-                },
-                vec![
-                    AccountMeta::new(admin.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new_readonly(mints[0], false),
-                    AccountMeta::new_readonly(mints[1], false),
-                    AccountMeta::new_readonly(env.vault, false),
-                ],
-                &[&admin],
-            )
-            .unwrap();
-            // Only host handles change after the public mint configuration succeeds.
-            env.mint = mints[0];
-            let native_vault = env.vault;
-            let provider = Keypair::new();
-            let beneficiary = Keypair::new();
-            let operator = Keypair::new();
-            let wallets = [provider.pubkey(), beneficiary.pubkey(), operator.pubkey()];
-            assert!(!wallets.contains(&env.payer.pubkey()));
-            assert!(!wallets.contains(&admin.pubkey()));
-            for (role, holder) in [
-                (processor::ASSET_AUTH_BACKING_BUCKET, &provider),
-                (processor::ASSET_AUTH_INSURANCE, &beneficiary),
-                (processor::ASSET_AUTH_INSURANCE_OPERATOR, &operator),
-            ] {
-                env.svm.airdrop(&holder.pubkey(), 1_000_000_000).unwrap();
-                env.try_update_per_asset_authority_with_cu(
-                    &admin,
-                    Some(holder),
-                    0,
-                    role,
-                    holder.pubkey().to_bytes(),
-                )
-                .unwrap();
-            }
-            let rails = mints.map(|mint| {
-                let vault = if mint == spl_token::native_mint::ID {
-                    native_vault
-                } else {
-                    create_ata_for_test(&mut env.svm, &env.payer, env.vault_authority, mint)
-                };
-                let recipients = [wallets[0], wallets[1]]
-                    .map(|owner| create_ata_for_test(&mut env.svm, &env.payer, owner, mint));
-                let admin_token =
-                    create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), mint);
-                let empty = [vault, recipients[0], recipients[1], admin_token]
-                    .map(|key| env.svm.get_account(&key).unwrap());
-                for (account, owner) in
-                    empty
-                        .iter()
-                        .zip([env.vault_authority, wallets[0], wallets[1], admin.pubkey()])
-                {
-                    let token = TokenAccount::unpack(&account.data).unwrap();
-                    assert_eq!(account.owner, spl_token::ID);
-                    assert_eq!((token.mint, token.owner, token.amount), (mint, owner, 0));
-                }
-                Rail {
-                    mint,
-                    vault,
-                    recipients,
-                    admin_token,
-                    empty,
-                    mint_frame: env.svm.get_account(&mint).unwrap(),
-                }
-            });
-            env.vault = rails[0].vault;
-            let mut rails = rails;
-            for (rail, custody) in rails.iter_mut().enumerate() {
-                let funding = if rail == 0 {
-                    vec![
-                        (custody.recipients[0], CLAIMS[0] + CLAIMS[1]),
-                        (custody.recipients[1], CLAIMS[2]),
-                    ]
-                } else {
-                    vec![(custody.admin_token, SECONDARY)]
-                };
-                for (destination, amount) in funding {
-                    let ixs = if rail == native_rail {
-                        vec![
-                            system_instruction::transfer(&admin.pubkey(), &destination, amount),
-                            spl_token::instruction::sync_native(&spl_token::ID, &destination)
-                                .unwrap(),
-                        ]
-                    } else {
-                        vec![spl_token::instruction::mint_to(
-                            &spl_token::ID,
-                            &custody.mint,
-                            &destination,
-                            &admin.pubkey(),
-                            &[],
-                            amount,
-                        )
-                        .unwrap()]
-                    };
-                    send_raw_ixs(&mut env.svm, &env.payer, ixs, &[&admin]).unwrap();
-                }
-                if rail != native_rail {
-                    send_raw_tx(
-                        &mut env.svm,
-                        &env.payer,
-                        spl_token::instruction::set_authority(
-                            &spl_token::ID,
-                            &custody.mint,
-                            None,
-                            spl_token::instruction::AuthorityType::MintTokens,
-                            &admin.pubkey(),
-                            &[],
-                        )
-                        .unwrap(),
-                        &[&admin],
-                    )
-                    .unwrap();
-                }
-                custody.mint_frame = env.svm.get_account(&custody.mint).unwrap();
-                let mint = Mint::unpack(&custody.mint_frame.data).unwrap();
-                assert_eq!(
-                    mint.supply,
-                    if rail == native_rail {
-                        0
-                    } else if rail == 0 {
-                        FUNDED
-                    } else {
-                        SECONDARY
-                    }
-                );
-                assert_eq!(
-                    (mint.mint_authority, mint.freeze_authority),
-                    (COption::None, COption::None)
-                );
-            }
-            env.svm.warp_to_slot(1);
-            for (domain, amount) in CLAIMS[..2].iter().copied().enumerate() {
-                env.send(
-                    ProgInstruction::TopUpBackingBucket {
-                        domain: domain as u16,
-                        market_id: env.asset_market_id(0),
-                        authority_epoch: env.control_sequences(0).authority_epoch,
-                        intent_id: 0,
-                        backing_fee_bps: 0,
-                        insurance_share_bps: 0,
-                        amount: amount.into(),
-                        expiry_slot: 100,
-                    },
-                    vec![
-                        AccountMeta::new(wallets[0], true),
-                        AccountMeta::new(env.market, false),
-                        AccountMeta::new(rails[0].recipients[0], false),
-                        AccountMeta::new(rails[0].vault, false),
-                        AccountMeta::new_readonly(spl_token::ID, false),
-                    ],
-                    &[&provider],
-                )
-                .unwrap();
-            }
-            env.send(
-                ProgInstruction::TopUpInsuranceDomain {
-                    domain: 0,
-                    market_id: env.asset_market_id(0),
-                    authority_epoch: env.control_sequences(0).authority_epoch,
-                    intent_id: 0,
-                    amount: CLAIMS[2].into(),
-                },
-                vec![
-                    AccountMeta::new(wallets[1], true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(rails[0].recipients[1], false),
-                    AccountMeta::new(rails[0].vault, false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
-                ],
-                &[&beneficiary],
-            )
-            .unwrap();
+            send_raw_ixs(&mut env.svm, &env.payer, ixs, &[&admin]).unwrap();
+        }
+        if rail != native_rail {
             send_raw_tx(
                 &mut env.svm,
                 &env.payer,
-                spl_token::instruction::transfer(
+                spl_token::instruction::set_authority(
                     &spl_token::ID,
-                    &rails[1].admin_token,
-                    &rails[1].vault,
+                    &custody.mint,
+                    None,
+                    spl_token::instruction::AuthorityType::MintTokens,
                     &admin.pubkey(),
                     &[],
-                    SECONDARY,
                 )
                 .unwrap(),
                 &[&admin],
             )
             .unwrap();
-            drop((provider, beneficiary, operator));
+        }
+        custody.mint_frame = env.svm.get_account(&custody.mint).unwrap();
+        let mint = Mint::unpack(&custody.mint_frame.data).unwrap();
+        assert_eq!(
+            mint.supply,
+            if rail == native_rail {
+                0
+            } else if rail == 0 {
+                FUNDED
+            } else {
+                SECONDARY
+            }
+        );
+        assert_eq!(
+            (mint.mint_authority, mint.freeze_authority),
+            (COption::None, COption::None)
+        );
+    }
+    env.svm.warp_to_slot(1);
+    for (domain, amount) in CLAIMS[..2].iter().copied().enumerate() {
+        env.send(
+            ProgInstruction::TopUpBackingBucket {
+                domain: domain as u16,
+                market_id: env.asset_market_id(0),
+                authority_epoch: env.control_sequences(0).authority_epoch,
+                intent_id: 0,
+                backing_fee_bps: 0,
+                insurance_share_bps: 0,
+                amount: amount.into(),
+                expiry_slot: 100,
+            },
+            vec![
+                AccountMeta::new(wallets[0], true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(rails[0].recipients[0], false),
+                AccountMeta::new(rails[0].vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&provider],
+        )
+        .unwrap();
+    }
+    env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            market_id: env.asset_market_id(0),
+            authority_epoch: env.control_sequences(0).authority_epoch,
+            intent_id: 0,
+            amount: CLAIMS[2].into(),
+        },
+        vec![
+            AccountMeta::new(wallets[1], true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(rails[0].recipients[1], false),
+            AccountMeta::new(rails[0].vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&beneficiary],
+    )
+    .unwrap();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::transfer(
+            &spl_token::ID,
+            &rails[1].admin_token,
+            &rails[1].vault,
+            &admin.pubkey(),
+            &[],
+            SECONDARY,
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .unwrap();
+    (env, admin, [provider, beneficiary, operator], rails)
+}
+
+#[test]
+fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_surplus() {
+    let mut worlds = 0;
+    let mut payments = 0;
+    let mut peak = [0u64; 2];
+    for native_rail in 0..2 {
+        for reverse in [false, true] {
+            let (mut env, admin, holders, rails) = reserve_world(native_rail);
+            let wallets = holders.each_ref().map(|holder| holder.pubkey());
+            let mints = rails.each_ref().map(|rail| rail.mint);
+            drop(holders);
             env.resolve();
             let sequences = env.control_sequences(0);
             let resolved_market = env.svm.get_account(&env.market).unwrap();

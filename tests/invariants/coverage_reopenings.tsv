@@ -778,6 +778,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # "INV-070 terminal custody program recreation". Exact new and related selectors:
 # cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_custody_program_recreation::v16_program_terminal_custody_program_recreation_preserves_funded_retirement -- --exact --nocapture --test-threads=1
 # cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::terminal_destination_variants::v16_program_terminal_sweep_preserves_destination_authorities_and_exact_disposal -- --exact --nocapture --test-threads=1
+# Scope X bounded conformance (2026-09-13), labels 418/420/421/433:
+# cu/inv_070_native_residue_disposition.rs composes dual-quote reserve payouts,
+# native raw donations/SyncNative, redeemed custody and missing-wallet recreation.
+# 36 public histories, 204 unsigned payments, 36 repairs, 96 complete rollbacks,
+# 12 SPL-primary expiries and 36 rent-exact dual-vault/tombstone dispositions.
+# Native-primary expired booked principal, generic disposition, fees/recredit,
+# arbitrary histories and maximum shapes remain OPEN. No status promotion.
+# Exact selector, independent oracle and authority/rent limits are recorded in
+# pr135_scope_x_native_terminal_residue_disposition_20260913.md.
 418	DoS	BLOCKER	INV-070	INV-018,INV-021,INV-025,INV-069,INV-070,INV-073,INV-077,INV-078,INV-081	token-variant+x-terminal-stock+x-close	all-supported-quote-token-variants-have-a-bounded-terminal-disposition	OPEN
 # Row 419 bounded public conformance (2026-09-12): cu/inv_039_pending_loss_funded_resolution.rs,
 # v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders.

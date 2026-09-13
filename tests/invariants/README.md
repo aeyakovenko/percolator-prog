@@ -1,5 +1,22 @@
 # Invariant-owned test coverage
 
+## PR135 Scope X native residue disposition (2026-09-13)
+
+[Scope X](pr135_scope_x_native_terminal_residue_disposition_20260913.md) adds one
+INV-070/073 public LiteSVM selector in `cu/inv_070_native_residue_disposition.rs`,
+mounted beside the existing dual-quote reserve fixture. Thirty-six histories
+combine native primary/secondary placement, 0/19 raw vault lamports, three
+SyncNative schedules, present/missing reserve wallets, native prefix redemption,
+keeper-funded ATA recreation and unsigned reserve payouts. Twelve SPL-primary
+histories expire 248 principal atoms before exact burn and dual-vault retirement.
+The oracle separates claims, expired booked residue, displaced primary stock,
+wrapped/unsynced donations, redeemed value, all custody rent and exact tombstones.
+
+Rows 418/420/421/433 remain OPEN and their inventory entries remain `missing`.
+Native-primary expired principal and generic terminal disposition remain open;
+this is finite evidence under the retained administrator and rent assumptions.
+The linked note records exact selectors, limits, row impact and validation.
+
 ## PR135 Scope R terminal scan rediscovery (2026-09-13)
 
 Owner: [cu/inv_070_terminal_scan_recredit.rs](cu/inv_070_terminal_scan_recredit.rs),
