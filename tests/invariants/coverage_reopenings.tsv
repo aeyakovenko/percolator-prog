@@ -997,6 +997,20 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # inline carry and other modes remain outside this increment. No production or
 # status change; row remains OPEN. Scope, base, environment and exact commands:
 # README.md#inv-045038085-retained-funding-checkpoint-retry-row-425-2026-09-13.
+# Row 425 bounded fractional-owner cadence conformance (2026-09-13):
+# cu/inv_045_generated_fractional_routes.rs; exact selector
+# inv_045_no_free_mark_movement::public_carry_order::generated_fractional_routes::v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjusted_entitlement.
+# Four public histories hold market accrual/trades fixed and add fractional-owner
+# cranks at slots 2/6/10. Each owner's payout difference equals its independently
+# derived K/F floor residue and obeys the per-added-frontier bound; unchanged
+# integral owners keep exact payouts. Six versus nine terminal custody atoms
+# reconcile 16 exact SPL payouts; 20 economic-prefix suffix failures roll back
+# complete Accounts apart from exact payer signature fees. Unlike prior generated
+# routes, fractional-owner settlement frontiers differ. Fixed-target, two-slot,
+# solvent bilateral family only; arbitrary cadence/source-credit consumption,
+# target/checkpoint replacement, CPI, fees/ADL and other modes remain outside it.
+# No production or status change. README section "INV-045 fractional owner
+# settlement cadence" records the independent oracle, limits and exact commands.
 425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	OPEN
 # Row 426 partial conformance (2026-09-12): cu/inv_020_interrupted_refresh_fees.rs,
 # v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements.

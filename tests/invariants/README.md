@@ -3071,6 +3071,86 @@ git show --format= --check HEAD
 cargo clean --target-dir "$CARGO_TARGET_DIR"
 ```
 
+## INV-045 fractional owner settlement cadence (row 425, 2026-09-13)
+
+Owner: [cu/inv_045_generated_fractional_routes.rs](cu/inv_045_generated_fractional_routes.rs).
+One new exact selector:
+`inv_045_no_free_mark_movement::public_carry_order::generated_fractional_routes::v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjusted_entitlement`.
+
+Four public LiteSVM/SBF histories cross both AuthMark premium directions with
+deferred and eager fractional-owner settlement. All worlds have identical market
+cranks at slots 1 through 12 and identical bilateral two-asset reductions at
+slots 4, 8 and 12. The eager variant additionally settles the two fractional
+owners at slots 2, 6 and 10. Integral passive owners keep the same schedule.
+System/SPL/ATA/wrapper instructions construct every economic account; mint
+authority is revoked at exactly 1,000,066 atoms. Only program loading, signer
+funding, Clock and blockhashes are harness inputs; program-owned bytes are never
+patched.
+
+The existing independent signed-numerator ledger derives cap carry, K/F indices,
+owner checkpoints, separate K/F floors, rational entitlement and gross funding
+flows from public input anchors, rates, quantities and elapsed slots. Every
+public prefix checks that ledger against owner value, snapshots, OI, custody,
+fixed supply and capital/PnL totals. Absent portfolios remain complete-Account
+equal. Extra owner cranks preserve complete oracle profiles. Both schedules end
+with identical market accrual and carries `[8800, 6000]`.
+
+The new relation compares **different fractional-owner settlement frontiers**:
+each owner's payout difference must equal its additional K/F rounding residue,
+and each inserted frontier can cost at most one atom per asset and K/F lane.
+The unchanged integral owners must receive identical payouts. In both directions,
+the fractional owners receive respectively one and two fewer atoms under eager
+settlement, exactly matching the increase from six to nine terminal custody
+residue atoms. Rational owner entitlement is identical. Sixteen resolved SPL
+payouts reconcile to the ledger; no capital, positive PnL, insurance, recoverable
+backing lien, fresh backing or provider earnings remains.
+
+Eight account-crank suffix failures attempt real fractional settlement at slots
+3/7, and twelve trade suffix failures precede the successful reductions. All
+twenty roll back complete tracked and compiled Accounts, including metadata and
+custody, apart from the independently calculated payer signature fee. Wrapper
+success logs establish that each economic prefix ran. The later scheduled
+settlement and identical trade-instruction retries still match the input ledger.
+
+Novelty: the existing generated fractional-route selector explicitly preserves
+fractional-owner settlement frontiers, while INV-052's funding-cadence controls
+use integral positions. This selector checks exact owner-local conservative
+differences and custody residue when those fractional frontiers change. Existing
+helper implementations and selectors are unchanged; one new selector is added.
+
+**Row 425 remains OPEN; invariant dispositions are unchanged.** This is a finite
+two-asset, fixed-target, zero-fee, unit-ADL, solvent bilateral family. Two-slot
+settlements assert consistent per-actor/per-asset signs, keeping consumption of
+earlier positive source claims outside the K/F floor oracle. A preliminary
+one-slot candidate mixed that additional source-credit rounding into the oracle
+and was dropped. Arbitrary cadence, source-credit haircuts, target/checkpoint
+replacement, CPI, fees/ADL and other oracle modes remain outside this increment.
+No production bug or generic closure is claimed.
+
+Worktree: `/home/anatoly/percolator-astra-row425-carry-interleaving-20260913`;
+branch: `codex/astra-row425-carry-interleaving-20260913`; rebased onto supervisor
+`e9a2133e`. Default-feature wrapper SBF was rebuilt locked/offline with
+platform-tools v1.52 in a private target copied from an existing dependency cache.
+Production source and dependency pins are identical before/after the rebase.
+Engine: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact selector passes 1/1; peak success/rejection CU is 423,442/423,654,
+below 1,400,000. Validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row425-cadence-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::generated_fractional_routes::v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjusted_entitlement -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-045 generated fractional K/F routes (row 425, 2026-09-12)
 
 Owner: [cu/inv_045_generated_fractional_routes.rs](cu/inv_045_generated_fractional_routes.rs),

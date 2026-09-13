@@ -653,3 +653,221 @@ fn v16_program_generated_fractional_kf_routes_preserve_carry_owner_value_and_res
     assert_cu_within("generated fractional K/F rollback", rejection_cu, 1_400_000);
     eprintln!("row425: {worlds} worlds, 96 economic-prefix rollbacks, 64 exact owner payouts, residues={residues:?}, separate-floor witnesses={separate_floors}, success CU={peak_cu}, rejection CU={rejection_cu}");
 }
+
+#[test]
+fn v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjusted_entitlement() {
+    let mut peak_cu = 0;
+    let mut rejection_cu = 0;
+    let mut rollbacks = 0;
+    let mut cadence_differences = 0;
+    for direction in [-1, 1] {
+        let mut deferred: Option<(Ledger, [u64; 4], u128)> = None;
+        for eager in [false, true] {
+            let history = History {
+                direction,
+                batch: true,
+                split: false,
+                placement: 0,
+                reverse: false,
+            };
+            let mut world = World::with_funding(history, 10_000);
+            world
+                .trace
+                .push(format!("fractional owner cadence: eager={eager}"));
+            send_raw_tx(
+                &mut world.env.svm,
+                &world.env.payer,
+                spl_token::instruction::set_authority(
+                    &spl_token::ID,
+                    &world.env.mint,
+                    None,
+                    spl_token::instruction::AuthorityType::MintTokens,
+                    &world.env.admin.pubkey(),
+                    &[],
+                )
+                .unwrap(),
+                &[&world.env.admin],
+            )
+            .unwrap();
+            let mut ledger = Ledger::new(direction, 10_000);
+            ledger.check(&world);
+            reduce(
+                &mut world,
+                &mut ledger,
+                0,
+                [SCALE / 4, SCALE / 2],
+                true,
+                false,
+                None,
+                false,
+            );
+            let mut extra_frontiers = 0;
+            for slot in 1..=12 {
+                world.env.svm.warp_to_slot(slot);
+                ledger.advance(slot);
+                // Market accrual and signed quantities are identical in both worlds.
+                crank(&mut world, &mut ledger, 2, false);
+                if slot == 3 || slot == 7 {
+                    let actor = usize::from(slot == 7);
+                    let pending = [0, 1].map(|asset| ledger.pending(actor, asset));
+                    assert!(pending.iter().flatten().any(|n| n.rem_euclid(SCALE) != 0));
+                    assert_ne!(
+                        pending
+                            .iter()
+                            .flatten()
+                            .map(|n| n.div_euclid(SCALE))
+                            .sum::<i128>(),
+                        0,
+                        "the rejected prefix must settle a real fractional obligation"
+                    );
+                    let ix = Instruction {
+                        program_id: world.env.program_id,
+                        accounts: vec![
+                            AccountMeta::new(world.env.payer.pubkey(), true),
+                            AccountMeta::new(world.env.market, false),
+                            AccountMeta::new(world.portfolios[actor], false),
+                        ],
+                        data: ProgInstruction::PermissionlessCrank {
+                            now_slot: slot,
+                            observations: crank_observations_for_assets(&[0, 1]),
+                        }
+                        .encode(),
+                    };
+                    rejection_cu = rejection_cu.max(reject_suffix(&mut world, ix, &[]));
+                    rollbacks += 1;
+                    ledger.check(&world);
+                }
+                if slot % 2 == 0 {
+                    // Keep source-credit consumption outside this K/F floor oracle.
+                    for actor in [0, 1] {
+                        for asset in [0, 1] {
+                            let net = ledger.pending(actor, asset).map(|n| n.div_euclid(SCALE));
+                            assert!(
+                                net.iter().sum::<i128>() * if actor == 0 { 1 } else { -1 } >= 0
+                            );
+                        }
+                    }
+                }
+                if slot % 4 == 0 {
+                    rejection_cu = rejection_cu.max(reduce(
+                        &mut world,
+                        &mut ledger,
+                        0,
+                        [SCALE / 8, 3 * SCALE / 8],
+                        true,
+                        false,
+                        None,
+                        true,
+                    ));
+                    rollbacks += 1;
+                } else if eager && slot % 2 == 0 {
+                    let profiles = carry_transport_exit::profiles(&world);
+                    for actor in [0, 1] {
+                        crank(&mut world, &mut ledger, actor, false);
+                    }
+                    assert_eq!(carry_transport_exit::profiles(&world), profiles);
+                    extra_frontiers += 1;
+                }
+            }
+            for actor in [0, 2] {
+                let quantities = ledger.q[actor];
+                reduce(
+                    &mut world,
+                    &mut ledger,
+                    actor,
+                    quantities,
+                    true,
+                    false,
+                    None,
+                    false,
+                );
+            }
+            let residue_num = ledger.residue_num.iter().flatten().sum::<i128>();
+            assert_eq!(residue_num % SCALE, 0);
+            let residue = u128::try_from(residue_num / SCALE).unwrap();
+            assert!(residue > 0);
+            assert!(ledger.latent_checks > 0);
+            assert!(ledger.separate_floor_checks > 0);
+            let endpoint = Economics {
+                price: ledger.price,
+                carry: ledger.carry(),
+                lots: [[0; 2]; 4],
+                entitlement: ledger.value,
+                vault: PRINCIPAL.map(u128::from).iter().sum(),
+            };
+            assert!(endpoint.carry.iter().all(|carry| *carry != 0));
+            let paid = carry_transport_exit::pay_resolved_with_residue(
+                &mut world,
+                &endpoint,
+                false,
+                113,
+                residue,
+                |_, _, _| {},
+            );
+            let group = world.env.market_state().1;
+            assert_eq!(
+                (group.insurance, group.backing_provider_earnings_total),
+                (0, 0)
+            );
+            for bucket in &group.source_backing_buckets {
+                assert!(
+                    bucket.status != percolator::BackingBucketStatusV16::Fresh
+                        || bucket.fresh_unliened_backing_num == 0
+                );
+                assert_eq!(
+                    (
+                        bucket.valid_liened_backing_num,
+                        bucket.impaired_liened_backing_num,
+                        bucket.utilization_fee_earnings,
+                    ),
+                    (0, 0, 0)
+                );
+            }
+            let result = (
+                endpoint.price,
+                endpoint.carry,
+                ledger.funding,
+                ledger.ideal_num,
+            );
+            if let Some((baseline, baseline_paid, baseline_vault)) = &deferred {
+                assert_eq!(
+                    result,
+                    (
+                        baseline.price,
+                        baseline.carry(),
+                        baseline.funding,
+                        baseline.ideal_num
+                    ),
+                    "cadence preserves canonical accrual and rational value"
+                );
+                assert_eq!(extra_frontiers, 3);
+                let mut payout_difference = 0;
+                for actor in 0..4 {
+                    let delta = i128::from(baseline_paid[actor]) - i128::from(paid[actor]);
+                    let lost_fraction = ledger.residue_num[actor].iter().sum::<i128>()
+                        - baseline.residue_num[actor].iter().sum::<i128>();
+                    assert_eq!(delta * SCALE, lost_fraction, "owner={actor}");
+                    // Each inserted frontier can add at most one floor atom per K/F lane/asset.
+                    let bound = if actor < 2 { 4 * extra_frontiers } else { 0 };
+                    assert!((0..=bound).contains(&delta), "owner={actor}, delta={delta}");
+                    payout_difference += delta;
+                }
+                assert!(
+                    payout_difference > 0,
+                    "the changed owner cadence must be nonvacuous"
+                );
+                assert_eq!(residue - *baseline_vault, payout_difference as u128);
+                cadence_differences += 1;
+            } else {
+                deferred = Some((ledger, paid, residue));
+            }
+            peak_cu = peak_cu.max(world.max_cu);
+            eprintln!("row425 cadence: direction={direction}, eager={eager}, paid={paid:?}, residue={residue}");
+        }
+    }
+    assert_eq!(cadence_differences, 2);
+    assert_eq!(rollbacks, 20);
+    assert_cu_within("fractional owner cadence", peak_cu, 1_400_000);
+    assert_cu_within("fractional owner cadence rollback", rejection_cu, 1_400_000);
+    eprintln!("row425 cadence: 4 worlds, 20 full Account rollbacks, 16 exact owner payouts, success CU={peak_cu}, rejection CU={rejection_cu}");
+}
