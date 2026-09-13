@@ -822,6 +822,23 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Finite two-asset evidence only: CPI, underwater/shared-owner keepers, additional
 # providers, funding/maintenance, arbitrary histories and terminal exits remain
 # unproven. Prior flat-keeper limits above describe their own families. OPEN.
+# Row 422 keeper-maintenance conformance (2026-09-13):
+# cu/inv_045_reward_maintenance_catchup.rs, selector
+# inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_maintenance_catchup::v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchup.
+# Two public histories collect keeper maintenance before/after fresh-report
+# liquidation on Hybrid asset 1; the latter defers its last fee to withdrawal.
+# Through lag and full catchup, maintenance belongs only to canonical domains 0/1,
+# liquidation remainders only to 2/3, and old paid discovery stays unbudgeted.
+# Two liquidations per history earn 4759 atoms; 2080 keeper fees consume 1080
+# earned atoms beyond original principal, leaving an exact 3679-atom SPL payout.
+# Six healthy retries and two payout suffixes roll back complete Account frames;
+# one payout also rolls back 1120 newly collected maintenance atoms. Unchanged
+# retries and complete owner/stock/budget endpoints agree. README records the
+# exact selector, validation commands, rebuilt SBF provenance and overlap analysis.
+# New obligation is recipient maintenance reclassification across distinct assets,
+# not another stale/fresh report ordering or one-asset net payout. No production
+# change or status promotion. CPI, clipping/rewarded fees, funding, exposed keepers,
+# extra providers, arbitrary histories and full terminal redemption remain OPEN.
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN
 # 423 partial conformance (2026-09-10): cu/inv_028_single_slot_admission.rs::v16_program_batch_admission_cannot_share_last_future_domain_slot.
 # Two individually fitting old-asset legs jointly need 29 domains: both batch orders reject atomically;

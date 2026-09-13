@@ -18,6 +18,9 @@ mod reward_policy_catchup;
 #[path = "inv_045_exposed_keeper_provenance.rs"]
 mod exposed_keeper_provenance;
 
+#[path = "inv_045_reward_maintenance_catchup.rs"]
+mod reward_maintenance_catchup;
+
 fn values(env: &V16CuEnv, portfolios: [Pubkey; 5]) -> [i128; 5] {
     portfolios.map(|key| {
         let account = env.portfolio_state(key);

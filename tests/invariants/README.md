@@ -3737,6 +3737,86 @@ cargo clean --target-dir /dev/shm/percolator-row433b-target
 git show --format= --check HEAD # post-commit
 ```
 
+## INV-045 keeper maintenance across reward catchup (row 422, 2026-09-13)
+
+Owner: [cu/inv_045_reward_maintenance_catchup.rs](cu/inv_045_reward_maintenance_catchup.rs),
+mounted under `inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_maintenance_catchup`.
+Exactly one new selector:
+`v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchup`.
+
+Two public LiteSVM histories compose a keeper's own collectible maintenance with
+paid Hybrid discovery on asset 1, fresh reports during lag, two liquidations and
+full catchup. One collects the keeper's fees before the target cranks at slots
+6/7/14. The other collects after reward credit at 6/7 and leaves the final fee to
+`Withdraw` after catchup. The selected Hybrid liquidation's remaining fees belong
+to domains 2/3; maintenance belongs exclusively to canonical asset-0 domains 0/1.
+The 160-atom rate makes this collection-order comparison exact without introducing
+a separate fee-fragment rounding question. All accounts are constructed with
+System/SPL/ATA/wrapper instructions. Clock, external Pyth reports, signer SOL and
+program loading are harness inputs; no initialized protocol bytes are installed.
+
+Independent elapsed-cap and two-stage fee arithmetic bind effective prices
+997600/995206/980000, distinguishing the fee from the initial price, paid mark,
+raw/accepted prints and fresh target. Reward credit changes only recipient capital
+and certificate validity, preserving its own fee cursor. Explicit collection
+frames foreign portfolios, Hybrid state/profile and SPL custody. Treasury and
+source/stock/reservation censuses check each prefix; all five fee cursors reach
+the prescribed checkpoints, with only the deliberately deferred final keeper fee
+remaining unpaid before withdrawal. No refresh or final catchup awards a bonus.
+
+Both histories earn 4759 atoms and collect 2080 keeper maintenance atoms, consuming
+1080 atoms beyond its original 1000-atom principal. Each pays exactly 3679 SPL
+atoms. Canonical budgets finish at 5200/5200, selected liquidation budgets at
+4760/4762, and all 1540072 discovery atoms remain outside domain budgets. Owner
+capital, PnL, fee cursors and legs, all domain budgets, custody and the three-atom
+open-position residual agree across histories. Six healthy retries reject exactly.
+Two rejected System suffixes follow independently simulated successful withdrawals;
+the deferred case collects 1120 maintenance atoms and pays SPL before rejection.
+Complete tracked and compiled Account frames roll back, including fee and reward
+accounting, except the separately checked exact network fee. Unchanged withdrawal
+instructions then commit.
+
+This adds **recipient maintenance reclassification across distinct canonical and
+selected-asset budgets**, including an atomic fee-collection/payout retry. The
+existing authenticated/retained-penalty tests already own stale/fresh observation
+and equivocal-suffix relations. Policy succession and exposed-keeper catchup use
+zero maintenance; `interleaved_cap_carry` includes one asset-0 reward and a net
+maintenance payout without full catchup or a separate selected-asset budget.
+INV-027's reward-recipient admission uses maintenance rewards and first risk,
+not paid-Hybrid liquidation receipts. Those existing relations are not new claims.
+
+**Row 422 remains OPEN; invariant statuses are unchanged.** This is finite positive
+conformance only. Limits include CPI, additional providers, fee rewards/clipping,
+nonzero funding, exposed or shared-owner keepers, arbitrary histories and full
+terminal redemption. No production change, bug finding or vulnerable-pin experiment.
+
+Base: `c8b6483f65cd7e3d44925eef3beb4a7d4d3baa27`, latest requested origin branch
+when this worktree was created and rechecked. Worktree:
+`/home/anatoly/percolator-astra-row422-reward-20260913`; branch:
+`codex/astra-row422-reward-invariant-20260913`. A private copy of the existing
+row426 build cache seeded the target. Default-feature wrapper SBF was rebuilt
+locally, locked/offline with platform-tools v1.52; engine pin `394fd0bf`.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+No matcher artifact is used. The exact selector passed 1/1 in 1.34s with two
+histories, four liquidations, eight exact rollbacks and peak 322069 CU, below the
+500000-CU per-instruction allowance. Both metadata gates passed 1/1; formatting
+and whitespace checks passed. The first host compilation required correcting
+three test-harness type/API references; no economic assertion failed. No full
+suite or Kani run is claimed. Exact validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/astra-row422-reward-20260913-target
+export TMPDIR=/run/user/1001/astra-row422-reward-20260913-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_maintenance_catchup::v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchup -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-045 reward policy succession during catchup (row 422, 2026-09-12)
 
 Owner: [cu/inv_045_reward_policy_catchup.rs](cu/inv_045_reward_policy_catchup.rs),
