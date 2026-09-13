@@ -811,6 +811,11 @@ coverage and explicit gaps are indexed in
 [`tests/invariants/README.md`](tests/invariants/README.md). Passing a finding-specific regression is
 not treated as independent bug discovery or full invariant certification.
 
+Row 434's [flat-reopen route coverage](tests/invariants/README.md#inv-027-flat-reopen-route-switch-and-senior-exit-row-434-2026-09-12)
+composes elapsed-fee settlement, transaction rollback, CPI/batch route switching,
+health certificates and full senior-principal exit through public LiteSVM routes.
+It covers explicit fee/refresh prefixes; standalone admission with deferred fees remains outside scope.
+
 ### Wrapper-level properties (Kani-proven)
 The current Kani suite is in `kani/v16_kani.rs`. It proves wrapper ABI and local validation properties:
 
@@ -831,6 +836,10 @@ The code and test harnesses are the source of truth for counts and exact CU numb
 - SBF-backed alignment/CU tests in `tests/v16_cu.rs`
 - wrapper Kani proofs in `kani/v16_kani.rs`
 - engine arithmetic/accounting proofs in the pinned `percolator` crate
+
+The [row-432 retained single-CPI fee coverage](tests/invariants/README.md#inv-014-retained-single-cpi-fee-policy-detours-row-432-2026-09-12)
+records public policy-detour, exact deposit-rollback and fresh-consent controls.
+It is bounded base-fee conformance; the ledger documents remaining gaps and keeps row 432 open.
 
 Before publishing a bounty, run the commands in [Build & test](#build--test) and record the exact output for the current commit.
 

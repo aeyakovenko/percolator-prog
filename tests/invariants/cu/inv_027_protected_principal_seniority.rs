@@ -25,7 +25,9 @@
 //! all four transports and either constrained party. It does not cover flat first-risk fees.
 //! The flat first-admission transaction below covers explicit public fee synchronization and
 //! refresh, including rollback of that prefix and exact owner payouts after admission. It does
-//! not certify a standalone first open with uncollected fees (reopening 413 remains open).
+//! not certify a standalone first open at the uncollected-fee margin boundary.
+//! The joint-admission owner's standalone sibling covers sufficiently funded first
+//! opens and their deferred-fee owner exits (reopening 413 remains open).
 //! The withdrawal-prefix first-admission test instead realizes flat fees implicitly while SPL
 //! pays both owners: a later margin rejection must undo those transfers and fee debits together.
 //!

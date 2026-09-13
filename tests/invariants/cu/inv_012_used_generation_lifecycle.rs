@@ -8,6 +8,9 @@
 use super::*;
 use percolator_prog::matcher_abi::{read_matcher_return, MatcherReturn};
 
+#[path = "inv_012_used_scope_succession.rs"]
+mod used_scope_succession;
+
 fn commit(
     history: &mut History,
     route: Route,

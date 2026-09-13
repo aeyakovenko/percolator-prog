@@ -10,6 +10,9 @@ use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_capacity;
 use std::collections::BTreeSet;
 
+#[path = "inv_028_latent_capacity_reuse.rs"]
+mod latent_capacity_reuse;
+
 const CAPACITY: usize = percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS;
 const ASSETS: usize = CAPACITY;
 const HISTORY: usize = CAPACITY - 1;

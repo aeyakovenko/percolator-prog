@@ -25,6 +25,8 @@
 //! The `close_reopen` sibling instead creates a bankruptcy residual by matched reduction and
 //! deletes/recreates the debtor before the flat holder settles B. A composed bystander payout
 //! must roll back before booking; recreation after booking preserves the holder's exact debit.
+//! The `terminal_fees` sibling carries nonzero maintenance through pending resolved cohorts,
+//! fee/payout rollback, delayed keeper settlement and insurance extraction before slab close.
 
 #[test]
 fn v16_program_pending_obligation_blocks_close_then_releases() {
@@ -46,6 +48,18 @@ mod cohort_reduction;
 #[path = "inv_039_pending_loss_resolved_histories.rs"]
 mod resolved_histories;
 
+#[path = "inv_039_pending_loss_terminal_fees.rs"]
+mod terminal_fees;
+
+#[path = "inv_039_pending_loss_shared_holder.rs"]
+mod shared_holder;
+
+#[path = "inv_039_pending_loss_backing_expiry.rs"]
+mod backing_expiry;
+
+#[path = "inv_039_pending_loss_restart.rs"]
+mod restart;
+
 const ATTRIBUTION_DEPOSITS: [u128; 5] = [200_000, 180_000, 300_000, 250_000, 777];
 const ATTRIBUTION_PRICE_MOVES: [i128; 2] = [30_000, 20_000];
 
@@ -59,6 +73,7 @@ struct AttributionWorld {
     env: V16CuEnv,
     actors: Vec<AttributionActor>,
     quantities: [i128; 4],
+    deposits: [u128; 5],
 }
 
 impl AttributionWorld {
@@ -73,6 +88,14 @@ impl AttributionWorld {
     }
 
     fn new_with_params(reverse_sides: bool, params: V16CuMarketParams) -> Self {
+        Self::new_with_deposits(reverse_sides, params, ATTRIBUTION_DEPOSITS)
+    }
+
+    fn new_with_deposits(
+        reverse_sides: bool,
+        params: V16CuMarketParams,
+        deposits: [u128; 5],
+    ) -> Self {
         let mut svm = LiteSVM::new();
         let program_id = percolator_prog::id();
         for (id, path) in [
@@ -143,7 +166,7 @@ impl AttributionWorld {
             portfolios: Vec::new(),
         };
         let mut actors = Vec::new();
-        for deposit in ATTRIBUTION_DEPOSITS {
+        for deposit in deposits {
             let owner = Keypair::new();
             env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
             let portfolio = Keypair::new();
@@ -210,6 +233,7 @@ impl AttributionWorld {
             env,
             actors,
             quantities: [q, -q, -2 * q, 2 * q],
+            deposits,
         }
     }
 
@@ -335,7 +359,7 @@ impl AttributionWorld {
                 .iter()
                 .map(|actor| self.env.token_amount(actor.token) as u128)
                 .sum::<u128>();
-        assert_eq!(total, ATTRIBUTION_DEPOSITS.iter().sum::<u128>());
+        assert_eq!(total, self.deposits.iter().sum::<u128>());
         let mint = Mint::unpack(&self.env.svm.get_account(&self.env.mint).unwrap().data).unwrap();
         assert_eq!(mint.supply as u128, total);
     }

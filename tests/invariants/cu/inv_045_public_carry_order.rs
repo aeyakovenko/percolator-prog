@@ -1,10 +1,27 @@
 //! Row425: account-settlement order and signed fill partition at a committed cap frontier.
 //! INV-024/025/038/041/045/052/071/085/086/088, bounded public SBF evidence only.
 //! Integral position lots isolate fractional price-cap carry from settlement rounding.
-//! No pending cohorts, resolution, backing expiry, or residual partition is constructed.
+//! The primary selector constructs no pending cohorts, resolution, backing expiry,
+//! or residual partition. The carry_transport_exit child adds resolved owner payouts.
+//! The funding_carry_entitlement child adds nonzero funding and premium reversal.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+
+#[path = "inv_045_precrank_carry.rs"]
+mod precrank_carry;
+
+#[path = "inv_045_carry_transport_exit.rs"]
+mod carry_transport_exit;
+
+#[path = "inv_045_fractional_position_residue.rs"]
+mod fractional_position_residue;
+
+#[path = "inv_045_funding_carry_entitlement.rs"]
+mod funding_carry_entitlement;
+
+#[path = "inv_045_generated_fractional_routes.rs"]
+mod generated_fractional_routes;
 
 const ANCHORS: [u64; 2] = [100, 125];
 const CAP_BPS: u64 = 24;
@@ -55,13 +72,27 @@ impl Drop for World {
 
 impl World {
     fn new(history: History) -> Self {
+        Self::with_funding(history, 0)
+    }
+
+    fn with_funding(history: History, max_abs_funding_e9_per_slot: u64) -> Self {
+        Self::with_funding_and_accrual_limit(history, max_abs_funding_e9_per_slot, 1)
+    }
+
+    fn with_funding_and_accrual_limit(
+        history: History,
+        max_abs_funding_e9_per_slot: u64,
+        max_accrual_dt_slots: u64,
+    ) -> Self {
         let mut env = inv018_public_spl_market_with_params(
             6,
             V16CuMarketParams {
                 max_portfolio_assets: 2,
                 initial_price: ANCHORS[0],
                 max_price_move_bps_per_slot: CAP_BPS,
-                max_abs_funding_e9_per_slot: 0,
+                max_abs_funding_e9_per_slot,
+                max_accrual_dt_slots,
+                min_funding_lifetime_slots: max_accrual_dt_slots,
                 ..V16CuMarketParams::default()
             },
         );
@@ -365,7 +396,8 @@ impl World {
             let passive_before =
                 [2, 3].map(|actor| self.env.svm.get_account(&self.portfolios[actor]));
             self.trace.push(format!(
-                "slot={slot}: {}(actors=0/1, legs={legs:?})",
+                "Clock.slot={}; frontier={slot}: {}(actors=0/1, legs={legs:?})",
+                self.env.svm.get_sysvar::<Clock>().slot,
                 if history.batch {
                     "BatchTradeNoCpi"
                 } else {

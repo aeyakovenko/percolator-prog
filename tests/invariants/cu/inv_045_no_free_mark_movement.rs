@@ -34,12 +34,17 @@
 //! then freezes the remaining fraction through resolution and exact owner SPL payouts.
 //! The `trade_origin_catchup` child prices liquidation of a paid pending Hybrid mark
 //! across stale-report substitutions and catchup order, preserving zero keeper entitlement.
+//! The `rebalance_cap_carry` child carries a pending fractional price cap through
+//! unilateral ADL reduction, canonical catchup, rollback and exact terminal SPL payouts.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[path = "inv_045_complete_observation_entitlement.rs"]
+mod complete_observation_entitlement;
 
 #[path = "inv_045_accepted_price_reward.rs"]
 mod accepted_price_reward;
@@ -55,6 +60,9 @@ mod late_stale_crank_rollback;
 
 #[path = "inv_045_custody_cap_carry.rs"]
 mod custody_cap_carry;
+
+#[path = "inv_045_rebalance_cap_carry.rs"]
+mod rebalance_cap_carry;
 
 #[path = "inv_045_public_carry_order.rs"]
 mod public_carry_order;

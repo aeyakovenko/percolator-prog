@@ -12,6 +12,15 @@
 use super::*;
 use proptest::prelude::*;
 
+#[path = "inv_039_pending_destination_recovery.rs"]
+mod pending_destination_recovery;
+
+#[path = "inv_039_pending_loss_funded_resolution.rs"]
+mod funded_resolution;
+
+#[path = "inv_039_pending_loss_restart_trading.rs"]
+mod restart_trading;
+
 #[derive(Clone, Debug)]
 struct History {
     reverse_sides: bool,

@@ -5,21 +5,121 @@
 use super::*;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
-#[test]
-fn v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance() {
-    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+#[path = "inv_024_terminal_reserve_destination_recovery.rs"]
+mod terminal_reserve_destination_recovery;
 
-    const CAPITAL: [u64; 2] = [52_502, 2_000_000];
-    const BACKING: u64 = 100_000;
-    const INSURANCE: u64 = 31;
-    const RATE: u16 = 3_333;
-    const PROFIT: u64 = 1_000 * (105 - 100);
-    const EARNINGS: u64 = ((1_050 * 105 / 2 - CAPITAL[0]) * RATE as u64).div_ceil(10_000);
-    const PREFIX: u64 = 17;
-    const SUPPLY: u64 = CAPITAL[0] + CAPITAL[1] + BACKING + INSURANCE;
-    const PAYOUTS: [u64; 2] = [CAPITAL[0] + PROFIT - EARNINGS, CAPITAL[1] - PROFIT];
+#[path = "inv_024_terminal_earnings_expiry.rs"]
+mod terminal_earnings_expiry;
 
-    let mut env = inv018_public_spl_market_with_params(
+#[path = "inv_024_terminal_earnings_roundtrip.rs"]
+mod terminal_earnings_roundtrip;
+
+#[path = "inv_024_terminal_role_coalescence.rs"]
+mod terminal_role_coalescence;
+
+#[path = "inv_024_terminal_role_partition.rs"]
+mod terminal_role_partition;
+
+#[path = "inv_024_terminal_cleanup_submitter.rs"]
+mod terminal_cleanup_submitter;
+
+#[path = "inv_024_delayed_terminal_submitter.rs"]
+mod delayed_terminal_submitter;
+
+#[path = "inv_024_terminal_recredit_surplus.rs"]
+mod terminal_recredit_surplus;
+
+#[path = "inv_024_terminal_recredit_fee_partition.rs"]
+mod terminal_recredit_fee_partition;
+
+#[path = "inv_073_terminal_public_reserves.rs"]
+mod terminal_public_reserves;
+pub(crate) use terminal_public_reserves::{
+    verify_terminal_public_reserve_disposition, verify_terminal_public_reserve_seniority,
+};
+
+#[path = "inv_073_terminal_reserve_close_retry.rs"]
+mod terminal_reserve_close_retry;
+pub(crate) use terminal_reserve_close_retry::verify_terminal_reserve_close_retry;
+
+#[path = "inv_073_recreated_reserve_close.rs"]
+mod recreated_reserve_close;
+pub(crate) use recreated_reserve_close::verify_recreated_reserve_close;
+
+#[path = "inv_073_frozen_reserve_replacement.rs"]
+mod frozen_reserve_replacement;
+pub(crate) use frozen_reserve_replacement::verify_frozen_reserve_replacement;
+
+#[path = "inv_073_provider_custody_replacement.rs"]
+mod provider_custody_replacement;
+pub(crate) use provider_custody_replacement::verify_provider_custody_replacement;
+
+#[path = "inv_073_provider_keeper_ledger_handoff.rs"]
+mod provider_keeper_ledger_handoff;
+pub(crate) use provider_keeper_ledger_handoff::verify_provider_keeper_ledger_handoff;
+
+#[path = "inv_073_distinct_provider_disposition.rs"]
+mod distinct_provider_disposition;
+pub(crate) use distinct_provider_disposition::verify_distinct_provider_disposition;
+
+#[path = "inv_073_native_provider_redemption.rs"]
+mod native_provider_redemption;
+pub(crate) use native_provider_redemption::verify_native_provider_redemption;
+
+#[path = "inv_073_recovery_reserve_cleanup.rs"]
+mod recovery_reserve_cleanup;
+pub(crate) use recovery_reserve_cleanup::verify_recovery_reserve_cleanup;
+
+const CAPITAL: [u64; 2] = [52_502, 2_000_000];
+const BACKING: u64 = 100_000;
+const INSURANCE: u64 = 31;
+const RATE: u16 = 3_333;
+const PROFIT: u64 = 1_000 * (105 - 100);
+const EARNINGS: u64 = ((1_050 * 105 / 2 - CAPITAL[0]) * RATE as u64).div_ceil(10_000);
+const SUPPLY: u64 = CAPITAL[0] + CAPITAL[1] + BACKING + INSURANCE;
+const PAYOUTS: [u64; 2] = [CAPITAL[0] + PROFIT - EARNINGS, CAPITAL[1] - PROFIT];
+
+struct TerminalEarningsWorld {
+    env: V16CuEnv,
+    admin: Keypair,
+    incumbent: Keypair,
+    successor: Keypair,
+    wallets: [Pubkey; 5],
+    tokens: [Pubkey; 5],
+    portfolios: [Pubkey; 2],
+    mint_frame: solana_sdk::account::Account,
+}
+
+fn terminal_earnings_world() -> TerminalEarningsWorld {
+    terminal_earnings_world_with_exit(true)
+}
+
+fn terminal_earnings_world_with_exit(terminal_exit: bool) -> TerminalEarningsWorld {
+    terminal_earnings_world_with_freeze_authority(terminal_exit, None)
+}
+
+fn terminal_earnings_world_with_freeze_authority(
+    terminal_exit: bool,
+    freeze_authority: Option<Pubkey>,
+) -> TerminalEarningsWorld {
+    terminal_earnings_world_with_user_signers(terminal_exit, freeze_authority).0
+}
+
+fn terminal_earnings_world_with_user_signers(
+    terminal_exit: bool,
+    freeze_authority: Option<Pubkey>,
+) -> (TerminalEarningsWorld, [Keypair; 2]) {
+    terminal_earnings_world_with_fee_share(terminal_exit, freeze_authority, 0)
+}
+
+fn terminal_earnings_world_with_fee_share(
+    terminal_exit: bool,
+    freeze_authority: Option<Pubkey>,
+    insurance_share_bps: u16,
+) -> (TerminalEarningsWorld, [Keypair; 2]) {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_freeze_authority;
+
+    let mut env = inv018_public_spl_market_with_freeze_authority(
         0,
         V16CuMarketParams {
             max_portfolio_assets: 1,
@@ -28,6 +128,8 @@ fn v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insuranc
             max_price_move_bps_per_slot: 500,
             ..V16CuMarketParams::default()
         },
+        1,
+        freeze_authority,
     );
     let admin = env.admin.insecure_clone();
     let incumbent = Keypair::new();
@@ -52,7 +154,7 @@ fn v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insuranc
     env.svm.warp_to_slot(1);
     env.configure_permissionless_resolve_with_cu(100, 5);
     env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
-    env.update_backing_fee_policy_with_cu(1, RATE, 0);
+    env.update_backing_fee_policy_with_cu(1, RATE, insurance_share_bps);
 
     let wallets = [
         users[0].pubkey(),
@@ -149,7 +251,7 @@ fn v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insuranc
                 authority_epoch: env.control_sequences(0).authority_epoch,
                 intent_id: 0,
                 backing_fee_bps: RATE,
-                insurance_share_bps: 0,
+                insurance_share_bps,
                 amount: BACKING.into(),
                 expiry_slot: 100,
             },
@@ -216,12 +318,27 @@ fn v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insuranc
     assert_eq!(EARNINGS, 875);
     assert_eq!(
         env.market_state().1.backing_provider_earnings_total,
-        EARNINGS.into()
+        u128::from(EARNINGS - EARNINGS * u64::from(insurance_share_bps) / 10_000)
     );
     assert_eq!(
         env.portfolio_state(portfolios[0]).capital.get(),
         u128::from(CAPITAL[0] - EARNINGS)
     );
+    if !terminal_exit {
+        return (
+            TerminalEarningsWorld {
+                env,
+                admin,
+                incumbent,
+                successor,
+                wallets,
+                tokens,
+                portfolios,
+                mint_frame,
+            },
+            users,
+        );
+    }
     env.resolve();
     env.svm.warp_to_slot(7);
     for _ in 0..8 {
@@ -256,8 +373,47 @@ fn v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insuranc
     for i in 0..2 {
         assert!(resolved_portfolio_is_terminal(&env, portfolios[i]));
         assert_eq!(env.token_amount(tokens[i]), PAYOUTS[i]);
+        let owner = env.svm.get_account(&wallets[i]).unwrap();
+        let slab_lamports = env.svm.get_account(&env.market).unwrap().lamports
+            + env.svm.get_account(&portfolios[i]).unwrap().lamports;
+        let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        payer.lamports -= 2 * FeeStructure::default().lamports_per_signature;
         env.close_portfolio_with_cu(&users[i], portfolios[i]);
+        assert_eq!(env.svm.get_account(&wallets[i]), Some(owner));
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap().lamports,
+            slab_lamports
+        );
+        assert_eq!(env.svm.get_account(&env.payer.pubkey()), Some(payer));
     }
+    (
+        TerminalEarningsWorld {
+            env,
+            admin,
+            incumbent,
+            successor,
+            wallets,
+            tokens,
+            portfolios,
+            mint_frame,
+        },
+        users,
+    )
+}
+
+#[test]
+fn v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance() {
+    const PREFIX: u64 = 17;
+    let TerminalEarningsWorld {
+        mut env,
+        admin,
+        incumbent,
+        successor,
+        wallets,
+        tokens,
+        portfolios,
+        mint_frame,
+    } = terminal_earnings_world();
     let ledgers = [Keypair::new(), Keypair::new()].map(|key| {
         system_create_account_for_test(
             &mut env.svm,

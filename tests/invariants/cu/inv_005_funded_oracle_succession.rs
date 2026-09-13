@@ -6,6 +6,9 @@ use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_005_shutdown_reserve_aba.rs"]
+mod shutdown_reserve_aba;
+
 const PRINCIPAL: [u128; 2] = [17, 29];
 const PEER_BACKING: u128 = 31;
 const CAPITAL: u128 = 23;

@@ -1,7 +1,9316 @@
 # Invariant-owned test coverage
 
+## INV-039 mixed creditor/debtor close order (row 419, 2026-09-13)
+
+Owner: [cu/inv_039_pending_loss_mixed_roles.rs](cu/inv_039_pending_loss_mixed_roles.rs),
+mounted under `inv_039_pending_loss_obligation_durability::shared_holder::mixed_roles`.
+Exact selector:
+`v16_program_mixed_creditor_debtor_preserves_pending_attribution_through_resolved_close_order`.
+
+This public-route TDD regression now passes with the production correction below.
+A portfolio holds a pending credit in one domain and owes a larger loss in another.
+Both pending cohorts cross resolution. The test compares settlement of the original
+payer before versus after the mixed account's settlement and mechanical deletion.
+An independent input ledger checks every owner's capital, PnL, outstanding receipt
+face and prior payout, alongside domain ownership, basis, OI, loss weights/counts,
+market stock census, custody and fixed mint supply. Three rejected System suffixes
+restore complete Accounts, including earlier successful closes, except exact payer
+signature fees. All economic state comes from public System/SPL/ATA/wrapper routes;
+mint authority is publicly revoked and no program-owned bytes are directly mutated.
+
+On wrapper base `b7ccff2a9c7c3631518749c6b8fd7fde1da0cd08` with engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, the unchanged selector reproduced the
+original-payer-last failure: the downstream owner received 310,000 atoms against
+340,000 expected, with no remaining capital, PnL or receipt. The payer-first control
+completed. No assertion, test action, ignore or expected-failure annotation changed.
+
+Engine commit `0b861efbdc5b613c300344dc1d73cd5c2622464f` corrects
+`reserve_new_capital_backed_loss_for_source_domain_not_atomic`: in Resolved mode,
+if the source claim bound is zero and the creditor side has no stored or stale
+legs, newly crystallized debt enters terminal junior residual through the existing
+residual-credit helper. Previously it recreated fresh source backing after that
+source's credit had been consumed, withholding the late payer's 30,000 atoms from
+the downstream claim. Existing impaired-bucket handling remains in place; Live
+settlement, domains with claims or creditor legs, and existing backing are unchanged.
+There is no account-layout change or new engine proof suite. Both Cargo dependency
+entries and the lockfile pin this engine correction; wrapper settlement still uses
+the same public engine API.
+
+The corrected default-feature SBF selector passed: two close orders, three exact
+suffix rollbacks, ten exact owner payouts and deletions, and zero terminal vault.
+The downstream owner receives all 340,000 atoms in both orders. Peak suffix CU:
+286,404 across the exact runs (limit 500,000). Wrapper SBF SHA-256:
+`7d72ae5fcfe147bcde8616cf463f159d9caa778d25df7909e7a4c11a06ca9cac`.
+
+The surrounding INV-039 run passed 20 selectors; its two restart selectors stopped
+at the old exact-pin assertion and then passed exact reruns after the harness pin
+was updated. Both required INV-079 metadata gates and formatting/whitespace checks
+passed. This is validation of those 22 selectors, not the full wrapper test suite.
+
+**Row 419 remains OPEN and all invariant dispositions are unchanged.** This covers
+one solvent, integral, two-domain mixed-role fixture with zero funding, fees,
+external reserves and ADL. It adds the mixed creditor/debtor consumption case to
+the existing separate-owner and two-credit shared-holder coverage; it does not
+establish arbitrary-history, fractional, bankruptcy or generic proof coverage.
+
+Wrapper worktree: `/home/anatoly/worktrees/astra-row419-attribution-fix-20260913`;
+branch: `codex/astra-row419-attribution-fix-20260913`. Engine worktree:
+`/home/anatoly/worktrees/astra-row419-attribution-engine-fix-20260913`; branch:
+`codex/astra-row419-attribution-engine-fix-20260913`. The engine commit is local and
+unpublished, imported into the local Cargo Git cache for locked/offline validation.
+It must be available upstream before the wrapper pin is merged. No push was made.
+Validation uses a private copied build cache and platform-tools v1.52:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::shared_holder::mixed_roles::v16_program_mixed_creditor_debtor_preserves_pending_attribution_through_resolved_close_order -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability:: -- --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+```
+
+## INV-073 native insurance redemption rollback (row 421, 2026-09-13)
+
+Owner: [cu/inv_073_native_insurance_ledger_progress.rs](cu/inv_073_native_insurance_ledger_progress.rs).
+One new selector:
+`inv_073_no_permanent_user_lock::native_insurance_ledger_progress::v16_program_native_insurance_paid_prefix_survives_operator_free_redemption_retry`.
+
+Two public LiteSVM histories cross a ledger initialized by `TopUpInsurance` with
+98 recorded principal/deposit atoms and a blank optional ledger initialized on
+terminal payout. Both fund long/short budgets of 49/49. A distinct insurance
+operator's key is dropped before resolution. The first payout commits 41 atoms
+with only the keeper signing, leaving 57 owed and the corresponding ledger record.
+Two unencumbered native token accounts each also hold 19 unsynchronized donation
+lamports that never enter the insurance claim.
+
+The beneficiary then signs a public bundle that redeems the already paid native
+prefix to SOL, withdraws the remaining 57 insurance atoms into the second account,
+and redeems that account. An ordinary insufficient-funds System suffix rejects
+after all three SPL calls and the wrapper withdrawal have succeeded. Every tracked
+and compiled Account rolls back exactly, including native token bytes, wallet and
+custody lamports, market budgets, telemetry and the prior committed 41-atom prefix.
+The separate payer loses exactly its two-signature network fee. The identical
+three-instruction prefix commits on a fresh blockhash without the operator.
+
+Complete market state, native vault images, both domain budgets, ledger principal/
+deposit/withdrawal/profit/loss fields, authority/control frames and stock/encumbrance
+censuses are checked after each payment. Both histories converge to 98 insurance
+atoms redeemed into the beneficiary's System wallet, plus exactly the two custody
+rents and 38 independently donated lamports. Insurance, logical/native vault stock
+and both allowances reach zero. A third, administrator-signed public transaction
+closes the empty vault and leaves the rent-exact slab tombstone while preserving
+the final ledger and beneficiary SOL.
+
+Novelty: **a retained unsigned insurance payment and ledger principal across
+redemption to SOL, rollback of the remaining payout, and exact retry**. Existing
+row421 native-ledger coverage retains wrapped custody and has no redemption or
+rejected transaction. INV-077's signed native-insurance redemption test has no
+insurance ledger or redemption rollback. Row420's native provider test checks
+principal custody recreation without this insurance ledger boundary. Exactly one
+selector is added, not another donation or payout-order matrix.
+
+**Row421 remains OPEN; invariant dispositions are unchanged.** This finite
+conformance requires the beneficiary for SPL redemption and the administrator for
+resolution/mechanical close. It proves operator absence through the full path and
+beneficiary absence from the first payment's signers, not beneficiary-independent
+SOL redemption. Active liabilities, spend/recredit, arbitrary histories, other
+assets/quote rails, ledger disposal and maximum shapes remain outside this slice.
+No production change or bug is claimed. System/SPL/ATA/wrapper instructions
+construct all economic state; only the existing native-mint genesis fixture,
+signer funding and Clock are harness inputs.
+
+Worktree: `/home/anatoly/percolator-astra-row421-public-progress-20260913`;
+branch: `codex/astra-row421-public-progress-20260913`. Rebased from `2df9d824` onto
+supervisor `c8b6483f` before the passing selector run. The private target was copied
+from the previous native-ledger target and default-feature SBF rebuilt locally
+with platform-tools v1.52, locked/offline. Supervisor advancement changed no
+production source or pin. Engine: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`;
+SBF SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact selector passed 1/1 in 0.76s; peak rejection, payment/redemption and
+slab-close CU was `[42298,42148,21846]`, below 150,000. Initial fixture assumptions
+were corrected: native custody uses actual rent funding, and terminal payout
+custody has no external close authority. No diagnostic-only probe remains.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row421-redemption-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::native_insurance_ledger_progress::v16_program_native_insurance_paid_prefix_survives_operator_free_redemption_retry -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+```
+
+## INV-067 late fee reclassification and retained receipts (row 417, 2026-09-13)
+
+Owner: [cu/inv_067_receipt_late_fee_reclassification.rs](cu/inv_067_receipt_late_fee_reclassification.rs),
+mounted by INV-067 as `receipt_late_fee_reclassification`. One new selector covers
+`terminal-claim-identity-survives-every-later-stock-reclassification` in 24 public
+LiteSVM worlds: all six claimant orders, expiry at slot 13 or late at slot 17,
+and explicit `SyncMaintenanceFee` versus fee collection within `CloseResolved`.
+
+The existing public five-owner seed now accepts an initialization-time maintenance
+fee; all older callers retain zero. This case uses seven atoms per slot. System,
+SPL, ATA and wrapper instructions construct every economic account and stock.
+Program loading, signer SOL and authenticated Clock movement are harness inputs;
+there are no out-of-band program-byte writes. Mint authority is publicly revoked
+at exactly 3,852 atoms before creating the retained receipts.
+
+Two receipts freeze faces 700/1,300 and pay 112/208 junior atoms, alongside 916
+principal each. The remaining claimant retains 1,000 unreceipted face, 923
+capital and fee cursor 11. Expiry releases 329 backing atoms and raises the
+residual from 480 to 809. The remaining seven-atom fee moves capital to insurance
+(287 to 294), advances the cursor only to resolution slot 12, and does not add
+residual or change receipt face. Explicit collection preserves the complete
+payout ledger and credits the canonical insurance domains by exactly [3, 4].
+Close-collected fees converge to the same budgets and owner entitlements.
+
+Each world rejects an ordinary invalid System suffix after expiry, fee collection,
+exact-bound replacement and three real SPL payouts have executed. Complete tracked
+Account frames, including metadata and token custody, roll back exactly; only
+the separate payer's one-signature network fee is excluded and checked separately.
+The same retained instruction bytes then commit in the selected claimant order.
+Every prefix checks original receipts with only their paid counter advanced,
+the 3,000-face denominator, bound-to-exact replacement, source stock, insurance,
+capital, tokens and fixed supply. Final claimant payouts are [1,104, 1,185, 1,266].
+Zero-due fee and receipt retries, receipt removal, all five portfolio closes and
+exact rent return precede unsigned withdrawal of all 294 fee atoms. The exact
+3,000-face ledger remains unchanged across this later insurance withdrawal.
+Two independently calculated rounding atoms remain in custody; slab burn/closure
+is outside this increment.
+
+The new relation is receipt identity across a **nonzero capital-to-insurance
+reclassification composed with late source expiry and claimant order**. Existing
+row417 receipt source/expiry/rounding/repeated-stock/aborted/overdue histories use
+zero maintenance fees. Provider/insurance terminal retries establish distinct
+reserve payouts without this paid-receipt fee-cursor composition. This is not a
+new expiry schedule or another source conversion test.
+
+**Row 417 remains OPEN; INV-067 remains REFUTED_CURRENT.** This is finite positive
+conformance, not a generic oracle/proof or a vulnerable-pin experiment. Limits:
+one SPL rail, one fixed fee rate, no fee rewards, insurance spend/recredit, live
+source conversion, arbitrary histories, maximum shapes or slab retirement.
+Production is unchanged; no public-interface bug was observed.
+
+Original base: `97356d1a3d19fbceedb8f8c4a4bdcfbbd3e6d093`. Rebased onto supervisor
+head `57f1a6394c2643666c9cf94debe1366d6545a7cd` before final validation, preserving
+row423/426 notes. Worktree `/run/user/1001/percolator-row417-late-reclass-20260913`;
+branch `codex/astra-row417-late-reclass-20260913`. Private build cache files were
+copied from `/dev/shm/astra-row417-audit-20260912-target` and the default-feature
+Anchor-v2 SBF rebuilt locally with platform-tools v1.52, locked/offline. Engine
+pin: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The supervisor commits changed no production sources or dependency pins.
+
+The post-rebase exact run passed all 24 worlds in 32.25s, with 24 exact rollbacks,
+72 rolled-back SPL payouts and peak 615,349 CU (the rollback bundle), below the
+700,000-CU ceiling. The pre-rebase run also passed (33.43s, peak 624,349 CU).
+The initial 600,000 test ceiling was too small for a bundle
+containing five wrapper calls and three SPL CPIs; the runtime limit was not hit.
+Both INV-079 metadata gates passed (2/2), as did formatting and whitespace checks.
+No diagnostic-only probe remains; no full-suite or Kani run is claimed.
+Final validation uses these exact commands:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/row417-late-reclass-20260913-target
+export TMPDIR=/run/user/1001/row417-late-reclass-20260913-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_late_fee_reclassification::v16_program_late_fee_reclassification_preserves_receipt_faces_and_claimant_order -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD # after commit
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+rmdir "$TMPDIR"
+```
+
+## INV-073 distinct absent provider claims (row 420, 2026-09-13)
+
+Owner: [cu/inv_073_distinct_provider_disposition.rs](cu/inv_073_distinct_provider_disposition.rs).
+Exactly one INV-073 selector:
+`inv_073_no_permanent_user_lock::v16_program_distinct_absent_providers_preserve_each_others_terminal_fee_claims`.
+The implementation is mounted beside the shared INV-024 terminal transaction
+checker. Requirement:
+`terminal-economic-progress-does-not-require-an-adversarial-provider-signature`.
+
+Two public LiteSVM worlds reverse the payout order of two independent provider
+authorities on assets 0 and 1, domains 1 and 3, sharing one canonical SPL vault.
+Each deposits 100,000 atoms before both provider keys are dropped. Separate
+public trade cohorts then earn unequal, independently calculated 875/1,749 fee
+atoms. Four unsigned user exits and owner-signed portfolio deletion leave the
+two provider claims as the only economic stocks. Each user receives its exact
+capital plus PnL minus its own domain's fee; fixed mint supply is 4,305,004 atoms.
+
+A separate keeper pays both principal claims and all of the first provider's
+fees, lazily initializing that provider's ledger. Paying all but one atom of the
+second provider's fees followed by administrator-signed slab closure rejects
+`EngineLockActive` after the successful payment. Complete Accounts for every
+compiled key and all tracked economic accounts roll back, including SPL custody,
+market bytes, the second ledger's first initialization and lamports; only the
+calculated network fee leaves the keeper. The same partial payment then commits
+with only the keeper signature, followed by the exact last atom. Each ledger
+binds its own market, domain, authority, observed earnings and paid total. Both
+domain stocks, global earnings, full SPL images, mint, authority profiles and
+control sequences are checked after each transition with independent stock and
+reservation censuses. Final administrative closure preserves all payouts and
+both ledgers, closes the empty vault and refunds exact rent into a canonical
+market tombstone. Final provider custody is 100,875/101,749 atoms in both orders.
+
+The new relation is **simultaneous terminal claims held by distinct absent
+providers across asset domains**, including the last remaining provider's
+one-atom claim after the other domain is fully paid. Existing row420 custody,
+native redemption and keeper/ledger handoff use one provider. INV-088's
+two-domain earnings summary test pays a signing admin in Live mode, uses host
+economic fixtures, and does not test independent absent recipients or terminal
+closure. Row433 dual-quote reserve progress shares one provider and has no earned
+fees. Neither authority nor ledger handoff is part of this increment.
+
+**Row 420 remains OPEN; no invariant status changes.** This finite family covers
+one classic SPL quote, two assets with fresh principal, fixed positive earnings,
+two payout orders and an available administrator and portfolio owners for
+mechanical cleanup. It does not establish arbitrary histories, absent cleanup
+authorities, expiry/recredit/loss products, Recovery or other quote rails. All
+initialized economic state comes from System/SPL/ATA/wrapper instructions;
+airdrop, Clock and program loading are environment fixtures. Host image edits
+only construct expected snapshots. No production or engine changes are made.
+
+Base: `57f1a6394c2643666c9cf94debe1366d6545a7cd` on
+`origin/codex/astra-open-holdout-ledger-20260912`. Worktree:
+`/home/anatoly/percolator-row420-invariants`; branch:
+`codex/row420-provider-independent-disposition`. The default-feature wrapper and
+auth matcher were rebuilt locally, locked/offline, with platform-tools v1.52;
+private build caches were copied from `/tmp/percolator-astra-row429-target-20260912`.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+Validation: exact new selector **1/1 in 1.30s**, ten unsigned user settlement
+calls, ten keeper-only reserve payments, two exact rejected-bundle rollbacks
+and two slab closures. Peak measured CU: **255,716 <= 600,000**. Both required
+INV-079 metadata selectors pass 1/1; formatting and whitespace checks pass.
+Development corrected two fixture assumptions: settlement needs round-robin
+cohort scheduling, and a fully withdrawn bucket becomes `Expired` before its
+time expiry. No implementation violation was observed. Existing dead-code and
+Solana future-compatibility warnings remain; no full suite or Kani run is claimed.
+
+Commands, from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target/build" TMPDIR="$PWD/target/tmp"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir target/build/deploy -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_distinct_absent_providers_preserve_each_others_terminal_fee_claims -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+```
+
+## INV-028 reserved domains through matcher renewal rollback (row 423, 2026-09-13)
+
+Owner: [cu/inv_028_reserved_domain_renewal.rs](cu/inv_028_reserved_domain_renewal.rs),
+mounted by `cu/inv_028_historical_latent_capacity.rs`. Exactly one new selector:
+`inv_028_source_domain_realizability_cap::historical_latent_capacity::reserved_domain_renewal::v16_program_reserved_domains_survive_revocation_and_renewed_cpi_rollback`.
+Requirement: `risk-admission-reserves-every-future-settlement-resource-needed-for-exit`.
+
+Eight public LiteSVM worlds cross single/one-leg-batch CPI, both position signs,
+and both settlement/payout orders. System/SPL/ATA/matcher/wrapper instructions
+construct all initialized economic state. Ordinary fixture airdrops, program
+loading and Clock movement are the only harness inputs; no program-owned bytes
+are injected, edited or restored. The existing INV-028 history helper retains
+26 detached fully backed claims worth 50 atoms before the new episode starts.
+
+CPI admission opens eight lots with both future domains absent. A bilateral
+three-lot reduction automatically revokes the LP matcher grant, clears expiry,
+and advances the position epoch without advancing the grant sequence. The
+remaining five lots settle five atoms into domain 27, leaving one reserved
+domain absent. The LP and taker then sign a renewal plus a nine-lot CPI fill
+that crosses zero to four lots on the opposite side. This exact prefix
+simulates successfully without changing any tracked Account.
+
+Appending a wrong-owner withdrawal rejects `Unauthorized` at transaction index
+4. Logs require two successful wrapper instructions and one successful matcher
+CPI before that rejection. Complete Accounts for every compiled key plus mint,
+both owner token accounts, admin and Clock must roll back, including portfolio
+epochs, disabled permission, unconsumed sequence, source attribution, matcher
+context and custody. Only the calculated fee leaves the separate payer.
+The previously signed prefix then commits with identical serialized bytes,
+signatures, guards and blockhash. It advances the renewal sequence once and
+changes both positions exactly as requested while retaining all 27 claims.
+
+A second bilateral partial reduction revokes the renewed grant. The remaining
+three lots still settle three atoms into slot 28, with every historical claim
+preserved and no prior claim conversion. Bilateral flattening, conversion and
+both owner withdrawals/deletions finish with exact SPL payouts of
+**1,000,058 / 999,942 atoms**, zero portfolio count, zero capital/insurance/vault,
+zero source claims/fresh backing and unchanged mint. The independent stock,
+reservation and source-rate censuses compose with the input-derived claim,
+position, OI and latent-domain union oracle. Every settlement crank strictly
+decreases pending accrual plus economic debt within the existing four-call
+bound per owner.
+
+This adds **reservation continuity across automatic revocation, rollback of a
+successful renewed CPI episode, unchanged consent retry, and later settlement
+after another revocation at the full domain budget**. The historical-capacity
+parent already rotates trade routes; active-leg admission already resizes risk.
+Neither owns this retained renewal/fill rollback with a disabled grant and one
+remaining future slot. Latent-pair reuse replaces an asset; Hybrid carry rolls
+back an observation prefix; historical liens use 18 domains and bilateral
+admission. The INV-012 mixed-renewal test has no claims and consumes another
+asset's grant. None supplies this composition's resource/permission endpoint.
+
+**Row 423 remains OPEN.** One active asset, 26 detached unliened claims, integral
+AuthMark settlement, zero fees/funding, one-leg batches and cooperative live
+exit are the limits. No general generator/oracle, maximum active-leg product,
+arbitrary history, provider/lien/expiry, Recovery/terminal, asset reactivation,
+native quote, missing-signer exit or status promotion is claimed. Production
+and engine pins are unchanged; this passing conformance test found no bug.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`80e3924cdb01a44c05492e775524dd63c8ab831d`. Branch:
+`codex/astra-row423-route-reservation-20260913`; isolated worktree:
+`/home/anatoly/percolator-row423-route-reservation-20260913`.
+Host build cache files were copied into a private target. Default-feature
+Anchor-v2 wrapper and auth matcher SBF were rebuilt locally, locked/offline,
+with platform-tools v1.52 and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SHA-256:
+
+- Wrapper: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+- Matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+The exact new selector passed on its first runtime run: **1/1 in 16.58s**, eight
+worlds, eight live simulations, eight exact rollbacks, eight unchanged retries
+and 1,072 successful transactions after funding (each renewal/fill bundle is
+one transaction). CU maxima `[trade-or-bundle, crank, convert, withdraw, close]`
+were **[942484, 525915, 712284, 49454, 26540]**; rejected bundles peaked at
+**963162 CU**, below 1,375,000. The largest rejected bundle was **932 bytes**;
+its successful prefix is smaller. Existing Solana future-incompatibility
+warnings remain. No full suite or Kani run is claimed.
+
+Exact build and required validation commands, from this worktree:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/astra-row423-route-reservation-20260913-target
+export TMPDIR=/run/user/1001/astra-row423-route-reservation-20260913-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -m 700 "$CARGO_TARGET_DIR" "$TMPDIR"
+cp -a /dev/shm/row416-cold-admin-20260912-target/. "$CARGO_TARGET_DIR/"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --manifest-path tests/fixtures/auth_matcher/Cargo.toml --sbf-out-dir "$PWD/tests/fixtures/auth_matcher/target/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::reserved_domain_renewal::v16_program_reserved_domains_survive_revocation_and_renewed_cpi_rollback -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD # post-commit
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+rmdir "$CARGO_TARGET_DIR" "$TMPDIR"
+```
+
+## INV-020 observation abort after reward payout (row 426, 2026-09-13)
+
+Owner: [cu/inv_020_reward_payout_rollback.rs](cu/inv_020_reward_payout_rollback.rs),
+mounted by `cu/inv_020_renewed_liquidation.rs`. Exact selector:
+`inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::renewed_liquidation::reward_payout_rollback::v16_program_observation_abort_restores_liquidation_reward_payout_and_intent`.
+Requirement: `favorable-account-actions-require-complete-current-authenticated-observations`.
+
+Four independent public LiteSVM worlds cross forward/reverse observation order
+and separate/interrupted transaction schedules. A two-leg Hybrid/AuthMark short
+starts healthy. Authenticated price changes and slot-64 catchup first advance
+both assets only to slot 32, leaving portfolio Accounts unchanged and the target
+without current health. Complete catchup then certifies equity 130000 against
+maintenance 209000, authorizing one liquidation. Its 8778-atom penalty creates
+4389 atoms of keeper reward and 4389 atoms of insurance. The flat keeper can
+withdraw its 1000-atom deposit plus that reward: exactly 5389 SPL atoms.
+
+The interrupted worlds prepare the withdrawal instruction before reward creation.
+At the partial-refresh boundary, a transaction completes observation catchup,
+liquidates with empty hints, withdraws the reward, then rejects the original Pyth
+report as `OracleStale` at instruction index 5. A second transaction after public
+recertification executes the same liquidation and withdrawal, then rejects the
+same report at index 4. Logs require all expected wrapper successes and one SPL
+success before each error. Both attempts restore every tracked and compiled
+Account, including metadata/absence, market provenance, target certificate and
+position epoch, keeper capital/sequence, vault and token destination. The separate
+payer loses exactly its signature fees. Rejected transactions fit the 1232-byte
+packet limit; peak observed cost is 742586 CU, under the local 900000-CU ceiling.
+
+Recovery commits complete observations separately, then the unchanged no-tail
+liquidation and retained withdrawal together. The keeper sequence advances once;
+the consumed withdrawal rejects `EngineStale` with exact rollback. The clean and
+interrupted worlds match at partial catchup, complete certification and paid exit:
+asset state, certificates, owner capital/PnL/tokens and market stock. Detached
+full-refresh checks, reservation and stock censuses, matched OI reduction, penalty
+partition and physical/internal vault reconciliation supplement that comparison.
+
+This adds **rollback of an already executed observation-derived reward payout**.
+Existing renewed-liquidation tests abort liquidation prefixes and pay later;
+active/CPI-recipient tests abort liquidation/admission or owner-exit prefixes and
+also withdraw later. None includes the reward's actual SPL withdrawal and intent
+consumption before the stale-observation suffix. Passive-reward stock tests abort
+a stale withdrawal before SPL, using maintenance rewards without this observation
+renewal/liquidation history. This increment reuses parent helpers, not snapshots.
+System/SPL/ATA/wrapper instructions construct every economic Account; the mint
+authority is revoked after deposits. Only Clock/Pyth fixtures, loading programs
+and ordinary SOL airdrops use the harness. No initialized program bytes are set
+or replayed, and no production source or dependency pin changes.
+
+**Row 426 remains OPEN.** This finite case does not cover active recipients, CPI
+trades, nonzero funding/maintenance/trade fees, repeated liquidation episodes,
+omitted-Hybrid certification, provider/authority changes, arbitrary histories or
+maximum account shapes. No generic completeness claim or status promotion is made.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at `97356d1a`.
+Branch: `codex/astra-row426-observation-rollback-20260913`.
+Worktree: `/home/anatoly/percolator-row426-observation-rollback-20260913`.
+Private cache files were copied without hardlinks from `/dev/shm/percolator-row426-target`;
+default-feature wrapper SBF was rebuilt from this worktree with platform-tools
+v1.52, locked/offline. Its SHA-256 is
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact new selector passed 1/1 in 1.96s: four worlds, four post-SPL aborts,
+eight exact rollbacks and eight current-certificate/full-refresh comparisons.
+No production violation was observed. Validation commands from this worktree:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/astra-row426-observation-rollback-20260913/target
+export TMPDIR=/run/user/1001/astra-row426-observation-rollback-20260913/tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::renewed_liquidation::reward_payout_rollback::v16_program_observation_abort_restores_liquidation_reward_payout_and_intent -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --quiet --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD # after the single local commit
+```
+
+## INV-005 zero-role suffix after funded handoff (row 416, 2026-09-13)
+
+Owner: [cu/inv_005_funded_role_zero_transition.rs](cu/inv_005_funded_role_zero_transition.rs),
+mounted by `cu/inv_005_cold_admin_handoff_scope.rs`. Exact selector:
+`inv_005_authority_incarnation_binding::cold_admin_handoff_scope::funded_role_zero_transition::v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_consent`.
+Requirement: `correctly-signed-role-management-cannot-seize-an-incumbent-funded-role`.
+
+Eight public LiteSVM worlds cross insurance/backing operator, asset 0/1, and
+cold-admin/successor signing a zero-role suffix. Distinct insurer, insurance
+operator, backing operator, successor, cold admin and user keys have separate
+SPL destinations. Public System/SPL/ATA/wrapper instructions construct both
+assets' backing `[31, 43, 59, 71]`, insurance `[17, 23, 29, 37]` and the user's
+flat 101-atom portfolio. Mint authority is revoked at exactly 411 atoms. Only
+ordinary fixture airdrops and program loading use the harness; no initialized
+program bytes are injected, changed or restored.
+
+Each world retains two signed transactions: the incumbent's 3-atom payout, and
+its co-signed funded handoff followed by a 5-atom successor payout at the next
+epoch. Both simulate successfully with complete Account frames unchanged.
+Appending a correctly signed zero-authority instruction at that next epoch
+rejects `InvalidInstruction` at transaction index 4. Logs prove that both the
+handoff and real SPL payout completed before the rejection. Complete Account
+rollback restores the incumbent, shared authority epoch, reserve stock and token
+destinations. The exact original transactions then commit without changing
+their bytes, metas, signatures or blockhash: first the incumbent payout, then
+the handoff and successor payout.
+
+After the committed handoff, an independently retained sibling payout is the
+successful prefix of two cold-admin bundles. Zeroing rejects
+`InvalidInstruction`; replacement with the cold key (including its incoming
+signature) rejects `EngineLockActive`. Both use the current subject epoch and
+roll back the sibling's real 7-atom SPL payout. The previous incumbent's subject
+payout, also using the current epoch, rejects `Unauthorized`. The original
+sibling transaction still commits, and the successor withdraws the remaining
+subject insurance or long backing principal. The transferred backing role's
+short-domain principal stays funded and attributed to that successor.
+
+An input-derived book checks every domain's stock, all six SPL balances and
+owners, physical/internal vault equality, zero liens/impairments/earnings, fixed
+mint supply and conservation after every delivery. Both complete role profiles
+and control-sequence records are exact: only the committed subject handoff
+advances an authority epoch. Wrapper configuration, both asset states and the
+complete user portfolio Account stay unchanged. The shared `land` helper checks
+all compiled and tracked Accounts, including metadata and absence, with only
+the calculated signature fee leaving the separate payer; successful writes
+are restricted to the named market/vault/destination accounts.
+
+Final amounts, identical for either zero-signing variant:
+
+| Transferred role | Asset | Successor SPL | Incumbent SPL (subject + sibling) | Vault | Transferred short backing retained |
+| --- | --- | --- | --- | --- | --- |
+| Insurance operator | 0 | 37 | 10 | 364 | n/a |
+| Insurance operator | 1 | 63 | 10 | 338 | n/a |
+| Backing operator | 0 | 28 | 10 | 373 | 43 |
+| Backing operator | 1 | 56 | 10 | 345 | 71 |
+
+The cold admin receives zero atoms; the user's 101 atoms remain protected.
+The new relation is **atomic zero-role rejection after a funded succession and
+successor payout, followed by delivery of retained incumbent consent and
+containment of later cold-admin actions**. The older standalone zero-role test
+uses coalesced roles and terminal payout, without a handoff/payout prefix or
+retained consent. Cold-admin ABA/burn coverage does not roll back a newly funded
+successor's payout on zeroing. Funded-oracle and role-observation tests exercise
+observation authority and epoch changes; this slice has no oracle operations.
+The parent module contributes transaction/frame builders, not fixture state.
+
+**Row 416 remains OPEN.** This is finite conformance, not a generic generator or
+oracle. It does not certify arbitrary histories, funded-oracle replacement,
+insurance-policy succession, cold-admin burn/ABA, telemetry ledgers, nonzero
+positions/claims/fees/funding, earned or impaired backing, time/expiry changes,
+Recovery/terminal lifecycles, native/dual quote, reincarnation or withdrawal
+replenishment. Rows 415/433 and invariant verdicts receive no new claims.
+Production is unchanged; no current public-interface bug was observed.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`160dc00d89e769692c96acac47613115b8db5df6`. Branch:
+`codex/row416-funded-role-disabled-20260913`; isolated worktree:
+`/tmp/percolator-row416-funded-role-disabled-20260913`. The main checkout was
+not edited. Host Rust 1.90.0, LiteSVM 0.1.0 and locked engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Existing build cache files were copied
+into a private target; the default-feature Anchor-v2 SBF was rebuilt locally
+with platform-tools v1.52, locked/offline. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+
+Validation: exact new selector **1/1 passed in 3.49s**, eight worlds, 16 live
+simulations, 64 transactions after fixture setup, 32 exact rejections, eight
+rolled-back handoffs, 24 rolled-back SPL payouts, eight committed handoffs and
+32 committed payouts. Peak CU `[zero rollback, cold/old-role rejection, payout]`
+was **[41,506, 39,659, 44,037]**, each under the shared 600,000-CU ceiling.
+Both required metadata selectors and all formatting/whitespace checks below
+pass. The first runtime run passed; no production changes were required.
+Existing Solana future-incompatibility and unused-support warnings remain.
+No full suite, additional behavioral selector or Kani run is claimed.
+
+Exact build, validation and cleanup commands, run in the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/row416-funded-zero-20260913-target
+export TMPDIR=/run/user/1001/row416-funded-zero-20260913-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -m 700 "$CARGO_TARGET_DIR" "$TMPDIR"
+cp -a /dev/shm/row416-cold-admin-20260912-target/. "$CARGO_TARGET_DIR/"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::cold_admin_handoff_scope::funded_role_zero_transition::v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_consent -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD # post-commit
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+rmdir "$CARGO_TARGET_DIR"
+cargo clean --target-dir "$TMPDIR"
+rmdir "$TMPDIR"
+```
+
+Private target and temporary directories were removed after validation. One
+local commit is retained on the isolated branch; nothing was pushed.
+
+## INV-070 multisig terminal custody (row 418, 2026-09-13)
+
+Owner: [cu/inv_070_multisig_terminal_custody.rs](cu/inv_070_multisig_terminal_custody.rs),
+mounted by INV-070 as `multisig_terminal_custody`. One new selector crosses both
+terminal payout aliases with all three member pairs of real 2-of-3 SPL custody.
+Each of the six worlds deposits 307 classic-SPL atoms before public System
+allocation/assignment and SPL initialization convert the funded owner address
+into a multisig. Conversion preserves every tracked economic Account. The
+original owner keypair is dropped, and a valid quorum closes the empty ATA.
+
+An unrelated keeper resolves the market at slot 100. At slot 104, public ATA
+reconstruction followed by unsigned payout rejects `ExpectedSigner`. At the
+five-slot deadline, reconstruction and payout complete before a downstream SPL
+transfer with only one member rejects `MissingRequiredSignature`. This restores
+the 307-atom claim, vault, absent ATA and reconstruction rent exactly. The same
+reconstruction/payout prefix then commits with only the keeper signature, paying
+307 atoms into the multisig's custody. Repeating payout rejects
+`EngineNonProgress`. A valid member pair transfers exactly 307 to its selected
+recipient and closes the ATA, refunding exactly token-account rent.
+
+Administrative portfolio/slab closure also completes before an insufficient
+SPL transfer rejects, restoring the tombstone, vault closure and rent effects.
+The unchanged two-instruction cleanup prefix then commits: the vault and
+portfolio close, the market retains canonical tombstone rent, and the admin
+receives `market_lamports + portfolio_lamports + vault_rent - tombstone_rent`.
+The sink retains all 307 atoms, matching the fixed mint supply; the multisig
+Account stays byte-for-byte unchanged. This includes 24 full Account rollbacks,
+six unsigned payouts, six quorum redemptions and six final slab closures.
+Rollback comparisons include every compiled transaction Account plus tracked
+economic Accounts, with signature fees independently charged to the payer.
+Successful stock/reservation censuses, exact token Account frames, portfolio
+identity and terminal predicates establish progress. All measured transactions
+fit 1,232 bytes and 300,000 CU; the passing run peaked at 121,919 CU.
+
+This differs from INV-018's multisig deposit rejection: that test never funds
+the multisig-owned portfolio or reaches terminal payout. Existing prefunded and
+shared-custody terminal histories retain ordinary wallet owners and have no
+multisig quorum boundary. Delegated/close-authority destination variants do not
+convert a funded portfolio owner to an SPL-owned multisig. Administrative cleanup
+is supporting disposition evidence, not the new coverage relation.
+
+All state construction uses System, SPL, ATA and wrapper instructions; wallet
+airdrops and Clock advancement are environment fixtures. No program-owned bytes
+are injected. Host token packing constructs expected snapshots only. Row 418
+remains OPEN: this finite witness does not cover multisig deposit support, PnL,
+receipts, backing/insurance/fees, native/secondary rails, other quorum sizes,
+unavailable quorums for subsequent spending, arbitrary histories or maximum
+shapes. Administrator availability is assumed for mechanical cleanup. No
+production defect, correction or invariant-status promotion is claimed.
+
+Base: `160dc00d89e769692c96acac47613115b8db5df6`, from the requested origin branch.
+Worktree: `/run/user/1001/percolator-row418-custody-20260913`; branch:
+`codex/astra-row418-custody-composition-20260913`. The unchanged production SBF
+was rebuilt here with locked/offline dependencies and platform-tools v1.52;
+SHA-256 `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The private cache was copied from a local build, then rebuilt in this worktree.
+Exact validation commands (logs retained in the private TMPDIR):
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/row418-custody-20260913-target
+export TMPDIR=/run/user/1001/row418-custody-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::multisig_terminal_custody::v16_program_multisig_owner_conversion_preserves_unsigned_terminal_payout_and_quorum_disposal -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+```
+
+## INV-012 retained mixed renewals after reduction (row 412, 2026-09-13)
+
+Owner: [stateful/inv_012_mixed_episode_renewal.rs](stateful/inv_012_mixed_episode_renewal.rs),
+mounted by `stateful/inv_012_retained_grant_atomicity.rs`. Exact selector:
+`inv_012_capability_and_delegate_scope::retained_grant_atomicity::mixed_episode_renewal::v16_program_retained_mixed_renewals_preserve_reduced_episode_and_independent_retry`.
+Requirement: `retained-capability-cannot-cross-any-authority-revoking-state-transition`.
+
+Sixteen public LiteSVM histories cross bilateral versus owner-only partial
+reduction, stale-peer-first versus stale-peer-last renewal order, both CPI
+transports and both position signs. Each subject first uses its matcher grant to
+open 12 lots on asset 0, then reduces three lots through `TradeNoCpi` or
+`RebalanceReduce`. The reduction advances the subject episode and clears its
+enabled flag/expiry without consuming its grant sequence. A separate peer's
+grant, positions and episode remain unchanged. Consumers use live asset 1 to
+avoid the reduced asset's cohort/admission conditions.
+
+**The new relation is retained joint renewal and independent retry across mixed
+revoked/live starting states after a committed reduction.** Only after that
+reduction, the subject and peer owners sign a joint renewal, a second identical
+instruction bundle with a distinct CU envelope, and an independent subject
+renewal. All three exact transactions simulate successfully before a competing
+peer renewal consumes the peer sequence. The two retained bundles then reject
+with `EngineStale` at wrapper instruction 0 or 1 (transaction index 2 or 3).
+The late case must log one successful subject renewal before the peer rejection
+rolls it back, preserving the subject's automatic revocation and unconsumed
+sequence. Each envelope remains byte-identical from signing to delivery.
+
+A consumer retained before reduction rejects with `EngineStale`; a request
+retained after reduction binds current episodes and rejects `Unauthorized` after
+the failed bundles. Neither denial invokes the matcher. An unchanged peer
+consumer retained before both bundle attempts still fills. The subject's
+independently retained renewal also still commits, restoring exactly the original
+tuple/cap/expiry with one sequence increment and no episode increment; a fresh
+nonzero consumer then fills through the opposite CPI transport. Both successful
+consumers have only the taker and separate payer signatures, with no LP signature.
+
+The existing append-only authorization journal derives IDs, epochs, sequences,
+enabled state, expiry and exact basis positions from committed public events.
+Every delivery checks all five owners' distinct capital, zero PnL, empty source
+and destination wallets, total capital/vault/insurance, physical SPL custody and
+fixed mint supply. Asset-1 long/short OI equals the committed fill sum; final
+subject/peer/taker positions are `-size/-size/2*size`. Complete tracked and
+transaction Accounts, including metadata, absence, matcher state and lamports,
+are compared on rejection. Only the exact signature fee leaves the separate
+payer. Successful operations may change only their declared market/portfolio/
+matcher accounts; grant writes preserve every economic account. Simulations
+also compare complete Accounts and never supply committed oracle events.
+
+Overlap boundaries:
+
+| Existing owner | Scope distinction |
+| --- | --- |
+| `retained_grant_atomicity` | Flat, enabled portfolios and competing grant-only updates; no prior used/reduced episode or mixed revoked/live renewal state. Its grant builder and signer are reused. |
+| `owner_episode_revocation` and `revocation_words` | Retained consumers and fresh regrants; no retained joint renewal rollback followed by an unchanged independent renewal retry. |
+| CU `revocation_atomicity` and `grant_writer_order` | Position/grant ordering inside an atomic bundle; this keeps the reduction committed and uses an independently competing peer sequence to abort later joint renewal. |
+| `retained_grant_expiry` | Delivery-time expiry; this keeps the authenticated slot fixed and both expiries live. |
+
+**Row 412 remains OPEN.** This is one finite conformance schedule, not a generic
+generator/oracle, vulnerable-pin comparison, independent discovery or invariant
+status promotion. It deliberately retains grant instructions after reduction;
+admission of grant instructions signed before automatic revocation remains
+outside this test. Also excluded: arbitrary writer words, grant-plus-fill atomic
+bundles, other reduction amounts, full closes/reopens, expiry boundaries,
+liquidation/Recovery/cure, authority/incarnation/asset replacement, changed
+matcher tuples, nonzero fees/funding/PnL, multi-leg/max shapes and final custody
+withdrawals. Asset-0 effective cohort accounting is not independently modeled.
+The existing `V16Svm::new` setup seeds valid external accounts and zeroed program
+storage, then uses public initialization, grant, deposit and oracle instructions.
+All subsequent changes use signed public wrapper instructions; no initialized
+program bytes are injected, edited or restored. Production and shared support
+are unchanged; no current public-interface property violation was observed.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`4886d7bdae8a48ebb2f0e9bcd7702e7980f0a289`. Branch:
+`codex/row412-mixed-renewal-20260913`; isolated worktree:
+`/home/anatoly/percolator-row412-mixed-renewal-20260913`. The main checkout was
+not edited. Host Rust 1.90.0, LiteSVM 0.1.0, locked engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Host and SBF cache files were copied
+from `/dev/shm/astra-capability-6d2a-target` into a private target; the default
+Anchor-v2 wrapper and matcher SBF were rebuilt from this worktree offline with
+platform-tools v1.52. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+Validation: exact selector **1/1 passed in 8.27s**, with 16 histories,
+176 transactions (excluding fixture initialization), 80 live simulations,
+64 exact rejections, 16 rolled-back grants and 56 committed fills. Peak measured
+success/rejection/bundle CU: **169,807 / 8,411 / 16,218**, all below the existing
+1,400,000-CU transaction limit. The two required metadata selectors and the
+format/whitespace checks below pass. An initial compile required changing the
+test simulation helper to borrow LiteSVM mutably; no production edit was needed.
+Existing unused-support and Solana future-incompatibility warnings remain.
+No broad suite, additional behavioral selector or Kani run is claimed.
+
+Exact commands, run from the isolated worktree (private target directories use
+mode 0700; cleanup follows validation, retaining one unpushed local commit):
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/row412-mixed-renewal-20260913-target
+export TMPDIR=/run/user/1001/row412-mixed-renewal-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -m 700 "$CARGO_TARGET_DIR" "$TMPDIR" /run/user/1001/row412-mixed-renewal-20260913-matcher-target
+cp -a /dev/shm/astra-capability-6d2a-target/debug /dev/shm/astra-capability-6d2a-target/release /dev/shm/astra-capability-6d2a-target/sbpf-solana-solana "$CARGO_TARGET_DIR/"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /run/user/1001/row412-mixed-renewal-20260913-target/deploy -- --locked
+CARGO_TARGET_DIR=/run/user/1001/row412-mixed-renewal-20260913-matcher-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+sha256sum "$CARGO_TARGET_DIR/deploy/percolator_prog.so" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::retained_grant_atomicity::mixed_episode_renewal::v16_program_retained_mixed_renewals_preserve_reduced_episode_and_independent_retry -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /run/user/1001/row412-mixed-renewal-20260913-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir /run/user/1001/row412-mixed-renewal-20260913-matcher-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir tests/fixtures/auth_matcher/target
+rmdir /run/user/1001/row412-mixed-renewal-20260913-tmp
+```
+
+## INV-058 fee-bearing existing-pair cap competition (row 427, 2026-09-13)
+
+Owner: [cu/inv_058_existing_leg_fee_competition.rs](cu/inv_058_existing_leg_fee_competition.rs),
+mounted by `cu/inv_058_multi_asset_oi_fee_handoff.rs`. Exact selector:
+`inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset::existing_leg_fee_competition::v16_existing_pairs_compete_for_fee_bearing_side_headroom_across_pair_order`.
+Requirement: `side-oi-cap-enforcement-must-compose-across-distinct-owner-pairs`.
+
+Sixteen public LiteSVM histories cross both position signs, both execution orders
+of two disjoint owner pairs, and four route assignments: single bilateral/batch
+CPI, batch CPI/single bilateral, single CPI/batch bilateral, and batch
+bilateral/single CPI. Both pairs already have a nonzero leg on asset 0. Asset 1
+and the fixture's third pair stay flat, providing untouched-account controls.
+With `H = MAX_OI_SIDE_Q / 2`, the initial magnitudes are `H - q0` and `H - q1`,
+where `q0 = 72 * POS_SCALE / 100 + 1` and `q1 = q0 - 2`. Their aggregate side OI
+is exactly `MAX_OI_SIDE_Q - q0 - q1`; both stored side counts remain two throughout
+the increases. The mark stays 100 and public policy sets the growth fee to
+137 bps. The independent two-ceiling calculation yields notionals 73/72 and
+fees 2/1 per owner; omitting the notional ceiling incorrectly yields one for q0.
+
+An atomic bundle first increases one existing pair and charges its fee, then
+asks the other existing pair for its allocation plus one quantity atom. The
+second application instruction rejects with exact `EngineInvalidLeg` at
+transaction index 3, after the two compute-budget instructions. Wrapper/CPI
+success-log counts prove the first fill and the expected matcher calls executed.
+The complete Account frame rolls back market/portfolio data, matcher contexts,
+SPL mint/vault/wallets, economic lamports, metadata and account absence. It
+includes all tracked accounts and compiled transaction keys; only the payer's
+exact network signature fee is deducted. No fee or position epoch survives.
+
+The same first instruction then commits separately. Its sibling's unchanged
+over-cap instruction still rejects with full rollback at index 2, preserving
+the first pair's committed fee and OI. The already-built exact sibling fill
+commits, reaching precisely the shared cap. Both pairs independently reject one
+more atom, through their assigned routes, with complete rollback. Every proposal
+stays strictly below account position/notional caps and has sufficient capital
+including its fee, isolating the aggregate side bound. Retries reuse instruction
+bytes/metas, with fresh enclosing signatures/blockhashes; retained serialized
+transactions or duplicate-signature replay are not claimed.
+
+Input-derived positions, epochs, health notional, capital, zero PnL, OI, stored
+counts, insurance domains, fixed mint supply and SPL custody reconcile after each
+trade or rollback. Final fees are exactly `[2, 2, 1, 1, 0, 0]`, the active asset's
+insurance budgets are `[3, 3]`, total capital is `120000000000 - 6`, and both
+active pairs have magnitude H. Public zero-fee closes and six full withdrawals
+pay `[19999999998, 19999999998, 19999999999, 19999999999, 20000000000, 20000000000]`.
+Capital/OI end at zero; accounting and SPL vaults retain exactly six insurance
+atoms. Successful fills preserve complete unmentioned Accounts; payout frames
+also preserve unrelated Accounts and all economic lamports.
+
+This is **fee-bearing admission into two existing pairs without releasing OI**.
+At base, the atomic and multi-asset fee handoff owners refill a fresh third pair;
+the generated existing-leg owner has zero fees. None owns this unequal-fee,
+existing-pair admission and pair-order relation. The existing public System,
+ATA, SPL and wrapper fixture constructs all accounts, funds six distinct owners
+with 20000000000 atoms each and revokes mint authority. No initialized program
+bytes are injected, edited or restored.
+
+**Row 427 remains OPEN.** This is a fixed conformance schedule, not a generic
+generator/oracle. Other route products, multiple simultaneously active assets,
+arbitrary pair counts/histories, nonunit ADL, PnL/funding, elapsed liabilities or
+rate limits, partial matcher fills, other fee destinations, mixed lifecycle
+states and maximum shapes remain outside this increment. Production code,
+dependency pins and invariant status rows are unchanged; no current
+public-interface property violation was observed.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at exactly
+`4886d7bdae8a48ebb2f0e9bcd7702e7980f0a289`. Branch:
+`codex/row427-existing-leg-cap-20260913`; isolated worktree:
+`/run/user/1001/percolator-row427-existing-leg-20260913`. Main checkout untouched.
+Host Rust/Cargo 1.90.0, LiteSVM 0.1.0; private locked/offline default-feature
+wrapper and authenticated matcher rebuilds use platform-tools v1.52, Anchor v2
+and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The private target starts from a copy of an existing cache; shared targets are
+not written. The new selector passes 1/1 on its first run: **16 worlds, 64 exact
+rollbacks, 96 payouts**. Peak CU rejection/trade/custody is
+**316317 / 177878 / 46382**. Assertions bound trades and rejections by
+`345000 * instruction_count` (690000 for the two-trade rejection), and custody
+by 300000, within the harness's 1400000-CU transaction envelope.
+
+Both required metadata selectors pass (2/2), as do repository formatting and
+working/staged whitespace checks; the resulting local commit is checked too.
+Exact commands follow. No broad behavioral suite is claimed.
+After validation, private Cargo and fixture targets are cleaned; the worktree
+and one unpushed local commit are retained.
+
+```bash
+cp -a --reflink=auto /dev/shm/percolator-row427-f6c2-target /run/user/1001/row427-existing-leg-20260913-target
+export CARGO_TARGET_DIR=/run/user/1001/row427-existing-leg-20260913-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /run/user/1001/percolator-row427-existing-leg-20260913/tests/fixtures/auth_matcher/target/deploy -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+rustfmt --edition 2021 tests/invariants/cu/inv_058_existing_leg_fee_competition.rs
+cargo test --locked --offline --test v16_cu inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset::existing_leg_fee_competition::v16_existing_pairs_compete_for_fee_bearing_side_headroom_across_pair_order -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /run/user/1001/percolator-row427-existing-leg-20260913/tests/fixtures/auth_matcher/target
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+```
+
+## INV-008 co-owned withdrawal stock and sibling retry (row 415, 2026-09-13)
+
+Owner: [cu/inv_008_coowned_withdrawal_stock.rs](cu/inv_008_coowned_withdrawal_stock.rs),
+mounted by `cu/inv_008_intent_uniqueness_and_bounded_replay.rs`. Exact selector:
+`inv_008_intent_uniqueness_and_bounded_replay::coowned_withdrawal_stock::v16_coowned_withdrawals_preserve_separate_budgets_after_passive_replenishment`.
+Requirement: `a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution`.
+
+Eight public LiteSVM histories cross original amounts 1/37, which co-owned
+portfolio pays first, and both passive-credit orders. The portfolios share one
+signer and SPL destination, and begin with equal amounts and owner sequence 1
+but distinct public portfolio IDs. Two separately owned fee sources create
+82/41 atoms of recipient capital through `SyncMaintenanceFee` at fixed Clock 2,
+with rate 41 and 100% keeper share. This replenishment advances neither recipient's
+sequence. The already-paid request stays stale, while the sibling's original
+unexecuted request pays exactly its signed amount after replenishment and leaves
+all of its new reward stock. Separate sequence-2 consents pay the two rewards.
+
+The first rejected bundle executes both original SPL payouts and both passive
+credits before an `EngineStale` suffix rolls them all back. After one payment
+commits, another failed bundle rolls back both credits and the sibling payout.
+A credit-only prefix, a sibling-payout prefix and a two-fresh-payout prefix also
+roll back before their unchanged requests subsequently commit. Rejection pins
+the exact application instruction index plus the two compute-budget instructions;
+wrapper/SPL success logs prove the intended prefix executed. All tracked and
+compiled non-payer Accounts compare exactly, including metadata, lamports and
+absence; the payer loses only the exact signature fee. Successful operations
+preserve complete unmentioned portfolio Accounts, and passive credits preserve
+complete mint, vault and wallet Accounts.
+
+Input-derived per-portfolio books check capital, fee cursors, consent sequences,
+IDs, position epochs, zero positions/PnL/reserved claims, total capital, accounting
+vault, insurance budgets, controls, fixed mint supply, shared SPL receipts and the
+untouched 103-atom peer after every transaction. Final receipts are separately
+`amount + 82` and `amount + 41`; the common wallet holds `2 * amount + 123`.
+Both subject portfolios have zero capital; sources retain 421/560 atoms and
+the vault holds exactly 1,084 atoms, including the peer. Every delivery is signed
+before the first payment with retained instruction bytes/metas and a distinct
+CU envelope. Serialized transactions remain unchanged until delivery; no duplicate
+signature cache, blockhash refresh or rebinding supplies the retry evidence.
+System, ATA, SPL and wrapper instructions construct all economic accounts; mint
+authority is revoked before retained execution. No initialized program bytes
+are injected, edited or restored.
+
+Net-new scope is **independent live and consumed portfolio consents at one shared
+signer/destination**, composed with two passive stock sources and joint payout
+rollback. The existing passive-reward and mixed stock-history owners have one
+withdrawal recipient; the recreation owner changes the portfolio incarnation.
+Neither owns this fixed-incarnation sibling consent/payout relation. This test
+does not add another standalone reward, redeposit or custody-rail probe.
+
+**Row 415 remains OPEN.** This is a finite conformance schedule, not a generic
+withdrawal-stock generator/oracle or a vulnerable/fixed-pin comparison. Insurance
+and backing withdrawals, arbitrary histories, recipient/source aliasing, other
+fee shares, owner or incarnation replacement, other quote rails, PnL conversion,
+terminal modes, durable nonces and detached signatures remain outside this
+increment. Production code, dependency pins and invariant statuses are unchanged;
+no current public-interface property violation was observed.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`9c6fe4b1fc129718f33d529978485792232d6d5d`. Branch:
+`codex/row415-withdrawal-stock-retry-20260913`; isolated worktree:
+`/home/anatoly/percolator-row415-withdrawal-stock-retry-20260913`.
+The main checkout was not edited. Host Rust/Cargo 1.90.0 and LiteSVM 0.1.0;
+the private default-feature SBF rebuild uses platform-tools v1.52, Anchor v2
+and locked engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+A private copy of an existing target cache seeds the build; no shared target is
+written. The exact selector passes 1/1: eight worlds, 136 transactions, 88 full
+rollbacks, 48 rolled-back SPL payouts and 32 committed payouts. Peak **328,376 CU**
+is below the 400,000-CU bundle limit; standalone transactions retain the existing
+300,000-CU custody limit. An initial run passed its economic/rejection checks but
+the five-instruction bundle exceeded the mistakenly reused standalone limit at
+325,376 CU. Correcting that test-only limit was not a production fix.
+
+The two INV-079 metadata selectors, formatting and Git whitespace checks pass.
+No broad behavioral suite or other row selector is claimed. Exact commands from
+the isolated worktree follow; the private target is cleaned after validation,
+with the worktree and one unpushed local commit retained.
+
+```bash
+cp -a --reflink=auto /dev/shm/row415-retained-withdrawal-20260912-target /dev/shm/row415-coowned-retry-20260913-target
+export CARGO_TARGET_DIR=/dev/shm/row415-coowned-retry-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::coowned_withdrawal_stock::v16_coowned_withdrawals_preserve_separate_budgets_after_passive_replenishment -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+```
+
+## INV-014 retained mixed-route fee budgets (row 411, 2026-09-13)
+
+Owner: [cu/inv_014_retained_mixed_route_fees.rs](cu/inv_014_retained_mixed_route_fees.rs),
+mounted by `cu/inv_014_retained_single_cpi_policy_history.rs`. Exact selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_mixed_route_fees::v16_retained_mixed_route_fee_budgets_survive_bilateral_revocation_and_renewal`.
+
+This increment composes retained fee consent with a **CPI opening, bilateral
+reduction, owner-authorized matcher renewal, and CPI residual close on the same
+pair**. Eight bounded worlds cross both position signs, single/one-leg-batch CPI,
+and independently single/one-leg-batch bilateral reductions. The fee-policy
+history is `19 -> 37 -> 7 -> 101 -> 37`. Both owners, the payer, and matcher
+context are distinct. The reused parent fixture creates portfolios through
+System/wrapper instructions and quote accounts through SPL/ATA instructions,
+funds 100,003 and 200,007 atoms, leaves 113 atoms in the taker's source ATA, and
+revokes mint authority. No initialized program bytes are injected or edited.
+
+All three trade transactions, the funded-close rejection alternative, and the
+LP's renewal are signed **before any policy change or fill**. Full serialized
+transactions retain their original signatures, blockhash, account metas and
+instruction bytes. Future position epochs and the post-renewal matcher sequence
+are explicit signed request fields. CPI has payer+taker signatures and no LP
+signature; bilateral consent has both owners plus the payer. Single CPI signs a
+37-bps cap and fixed-price limit 100. Batch CPI signs zero slippage and exact
+95/58-atom opening/closing caps; its per-leg 137-bps field and the LP's separate
+137-bps standing grant remain independently permissive. Bilateral reduction
+signs an explicit 99-bps rate. The bilateral fill clears the grant expiry to zero;
+the retained renewal restores the same LP grant tuple, cap and original expiry,
+consuming exactly one owner control sequence.
+
+An input-only two-ceiling oracle computes fees on nonintegral quantities:
+95 atoms for opening, 100 for bilateral reduction, and 58 for residual close,
+per owner. The bilateral fill at live policy 7 still charges its signed 99 bps
+and disables the prior grant. After renewal, policy 101 exceeds the close's
+retained taker bound. The funded close rejects at instruction 3 with exact
+`InvalidInstruction`: its 113-atom SPL deposit succeeds first; batch CPI also
+returns successfully before aggregate-cap rejection. Complete tracked and
+compiled Accounts roll back, including economic lamports, matcher context,
+positions, grant/control sequences, insurance and SPL custody. Only the separate
+payer's exact network signature fee is charged. Restoring policy 37 permits the
+other already-signed close transaction to commit without refreshing any bounds.
+Distinct CU-limit nonces distinguish the pre-signed alternatives; no claim is
+made that a recorded failed Solana signature can execute again.
+
+Each policy/fill/rollback/renewal/payout prefix reconciles both owners' capital,
+zero PnL and fee credits, remaining position, both OI sides, per-side insurance,
+total capital, engine/SPL custody, fixed mint supply and stock/encumbrance
+censuses. Route-specific matcher calls, request counts, position epochs and
+grant enablement are checked. Fresh exact withdrawals pay 99,863 and 199,754
+atoms, leaving zero owner capital and precisely 506 earned insurance atoms in
+custody. Single/batch variants and both signs reach these same endpoints.
+
+Non-overlap at base `c377c7bdd267f31f3b0cbd2ff1172bdfe93217db`:
+
+| Existing selector | Distinct scope of this increment |
+| --- | --- |
+| `v16_retained_policy_route_budgets_bound_each_committed_prefix` | Existing history keeps transport fixed; this history revokes and renews the same LP grant between differently priced CPI/bilateral fills. |
+| `v16_program_retained_grants_bind_context_across_mixed_transport_reductions` | Existing mixed-route relation keeps policy fixed; this retains the entire three-fill fee history and renewal before policy changes. |
+| `v16_retained_close_withdrawal_reconciles_repriced_fees_across_all_trade_routes` | Existing retained close/withdrawal product has no intervening bilateral reduction and retained grant renewal. |
+
+**Row 411 remains OPEN** for
+`retained-trade-fee-consent-bounds-every-fee-bearing-route`. This is a fixed
+three-fill Live/manual-mark/base-fee relation, not a generic generator/oracle.
+Arbitrary histories, cross-asset batches, matcher-selected partial fills,
+underfunded fees, source/backing/mark/funding/maintenance fees, authority or
+recipient changes, terminal routes and alternate quote rails are outside this
+increment. Production code and invariant status rows are unchanged.
+
+Worktree: `/home/anatoly/percolator-row411-retained-fee-route-20260913`; branch:
+`codex/row411-retained-fee-route-increment-20260913`. Base is the requested local
+origin ref at exactly `c377c7bdd267f31f3b0cbd2ff1172bdfe93217db`; engine pin
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Fresh locked/offline default-feature
+SBF builds use platform-tools v1.52. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+authenticated matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The exact new selector passes **8 worlds, 24 fills, 8 exact funded rollbacks,
+and 16 owner payouts**. Peak CU: simulation **148,838**, policy/renewal **10,477**,
+rejection **208,504**, fill/payout **225,173**. Every measured transaction is
+bounded by 500,000 CU (signed limits subtract small nonce values). Preliminary
+runs corrected only test expectations: the grant enable accessor is `u64`, and
+bilateral revocation clears expiry. No production inconsistency was observed.
+Both required `inv_079` metadata selectors pass (2/2), as do repository formatting
+and working/staged whitespace checks. The commit check runs on the resulting
+local commit. Private Cargo and fixture targets are removed after validation;
+the worktree and single local commit are retained without pushing.
+
+Exact commands from the worktree root:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/row411-mixed-fee-20260913-target
+export TMPDIR=/run/user/1001/row411-mixed-fee-20260913-target/tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /run/user/1001/row411-mixed-fee-20260913-target/deploy -- --locked
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /home/anatoly/percolator-row411-retained-fee-route-20260913/tests/fixtures/auth_matcher/target/deploy -- --locked
+rustfmt --edition 2021 tests/invariants/cu/inv_014_retained_mixed_route_fees.rs
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_mixed_route_fees::v16_retained_mixed_route_fee_budgets_survive_bilateral_revocation_and_renewal -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /home/anatoly/percolator-row411-retained-fee-route-20260913/tests/fixtures/auth_matcher/target
+cargo clean --target-dir /run/user/1001/row411-mixed-fee-20260913-target
+```
+
+## INV-045/038/085 retained funding-checkpoint retry (row 425, 2026-09-13)
+
+Owner: [cu/inv_045_retained_funding_retry.rs](cu/inv_045_retained_funding_retry.rs),
+mounted by `cu/inv_045_funding_carry_entitlement.rs`. Exact selector:
+`inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::retained_funding_retry::v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpoint`.
+
+Eight public LiteSVM histories cross both premium directions, forward/reversed
+asset and payout order, and failed-attempt/no-failure controls. Four owners hold
+unequal integral positions on two assets and deposit a fixed 1,000,066 SPL atoms.
+At accrual slot 2, price-cap carries are `[4800, 6000]` and funding is nonzero.
+Both owners pre-sign a two-asset, two-lot reduction before the authenticated
+Clock advances to 5 and `PushAuthMark` reverses both targets. The target change
+resets carry at the still-lagging accrual frontier 2 and stores a real pending
+funding checkpoint at slot 5. Funding must retain the old premium through that
+boundary; the new premium applies from slot 6.
+
+Each failure history rejects the retained economic instruction with exact
+`EngineStale` both before catch-up and after one public crank. That partial crank
+rebuilds carries `[2400, 3000]`; rejection must roll back all attempted inline
+funding, settlement and position changes. Further bounded public cranks at fixed
+Clock 5 activate the checkpoint and leave carries `[7200, 9000]`. The signed
+owners' complete Accounts remain unchanged throughout target replacement and
+catch-up. A pre-signed transaction then executes the reduction successfully before
+an invalid suffix forces full rollback; wrapper success logs establish that the
+economic prefix ran. The retained reduction subsequently commits, preserving
+complete oracle profiles and absent-owner Accounts.
+
+All delivery variants are signed at slot 2 with identical economic instruction
+bytes and account metas. Distinct CU limits avoid LiteSVM's failed-signature
+cache; the test checks serialized transactions stay byte-identical across the
+history. It does not expire blockhashes or refresh generation/position guards
+between signing and delivery, and signature/packet checks remain enabled.
+These are retained signed alternatives, not a claim that an already-recorded
+Solana transaction signature can execute again.
+
+The local oracle derives carry quotients/remainders, K, signed-floor funding and
+each owner's settled-plus-latent entitlement from input anchors, premiums,
+elapsed slots and signed quantities. Existing owner-ledger and payout helpers
+check decoded snapshots, matched OI, capital/PnL totals, fixed mint supply and
+SPL custody. Further public cranks through slot 9 cross integer price boundaries
+and leave carries `[6800, 1000]`. Signed bilateral flattening, account cranks,
+released-PnL conversion and withdrawals pay 32 exact owner entitlements, leaving
+zero vault, capital and positive PnL. Failure/control histories and both orderings
+agree on K/F, carry and every payout. Mint authority is revoked through SPL.
+System/ATA/SPL/wrapper instructions construct all economic accounts; no initialized
+program account bytes are edited.
+
+Overlap review discarded funding plus CPI/no-CPI switching and split-fill
+coverage because `generated_fractional_routes` already covers it. The existing
+`funding_carry_entitlement` reversal updates a caught-up market and explicitly
+asserts no pending funding checkpoint. This increment adds **retained reduction
+rejection and recovery across a pending funding checkpoint with nonzero carry**.
+No shared helper implementation changed; the parent module only registers the
+new child, so adjacent controls were not required.
+
+**Row 425 remains OPEN.** This is bounded INV-045/038/085 conformance, not a generic
+generator/oracle or an invariant-status promotion. It covers AuthMark, two assets,
+integral lots, unit ADL, zero fees, solvent bilateral batches and public catch-up
+before reduction. Arbitrary checkpoint replacement chains, retained CPI/single
+routes, successful inline accrual carry, fractional K/F position settlement,
+nonzero fees/ADL, other oracle/quote modes, bankruptcy/Recovery, resolved/terminal
+transitions and arbitrary settlement cadence remain outside this increment.
+No implementation mismatch was observed; production and dependency pins are unchanged.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`d451d68ad01932cb364b432d0e58389df667da75`. Branch:
+`codex/row425-funding-retained-retry-20260913`; isolated worktree:
+`/tmp/percolator-row425-funding-retained-retry-20260913`. The coordinator checkout
+was not edited. Requested model/reasoning: `gpt-6-astra` / `ultra`; the session
+provides no model switch or independent verification of that setting.
+
+Environment: Linux `6.1.0-52-cloud-amd64`, x86_64; host Rust/Cargo 1.90.0;
+LiteSVM 0.1.0 with bundled SPL Token/ATA programs. The private default-feature
+SBF build uses platform-tools v1.52, Anchor v2 and locked engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact selector passes 1/1 across eight histories, with eight stale rejections,
+four successful-prefix rollbacks and 32 exact payouts; peak **364,049 CU** is
+below the 600,000-CU bound. Both metadata selectors, formatting and whitespace
+checks pass. Validation commands from the isolated worktree:
+
+```bash
+export CARGO_TARGET_DIR=/run/user/1001/row425-funding-retry-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::retained_funding_retry::v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpoint -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-073 unsigned dual-quote reserve progress (row 433, 2026-09-13)
+
+Owner: [cu/inv_073_dual_quote_reserve_progress.rs](cu/inv_073_dual_quote_reserve_progress.rs),
+mounted by INV-073. Exact selector:
+`inv_073_no_permanent_user_lock::dual_quote_reserve_progress::v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_surplus`.
+Primary INV-073; the assertions join INV-070 terminal disposition and INV-024
+beneficiary attribution. PR135 row433 retains its existing related-invariant list.
+
+Four fixed public LiteSVM histories cross native quote in the primary/secondary
+position with forward/reverse reserve payout order. One asset has two fresh
+backing domains funded with 401 and 307 atoms and a distinct insurance beneficiary
+funded with 67 atoms. The primary vault holds all 775 claim atoms; a separate
+997-atom secondary-vault donation is raw custody, with no engine claim. The
+provider, insurance beneficiary and insurance operator keys are dropped before
+resolution. A distinct keeper then makes six unsigned payments per history:
+prefixes `[101,59,17]` on rails `[0,1,0]` followed by remainders `[300,248,50]`
+on the opposite rails. Both beneficiaries receive value on both rails.
+
+The oracle derives every claim and payout from those inputs. Every payment
+strictly decreases logical vault stock by its amount, preserves each other
+domain's remaining claim, and updates only the selected beneficiary's custody.
+Per-domain backing/status/expiry and insurance budgets, raw/decoded stock and
+encumbrance censuses, market shape, authority profiles and control sequences are
+checked after every payment. Complete Account frames cover all other transaction
+and fixture accounts, including the unused rail, recipients, reserve-role wallets,
+administrator, mints and vault authority. Signed transactions verify with exactly
+one keeper signature for every economic payout; only its calculated signature
+fee leaves the keeper wallet.
+
+The independent custody equations require primary physical stock to equal
+outstanding claims plus cumulative secondary payouts. The stock census receives
+logical custody after explicitly classifying this raw surplus. Exact SPL Account
+images also bind native token atoms to lamports above rent, while nonnative mint
+supply stays fixed with no mint/freeze authority. At the endpoint, backing and
+insurance claims are zero; the two raw vault surpluses are `[409,588]`. A single
+administrator-signed dual-vault `CloseSlab` transfers those amounts to the admin's
+respective token accounts, preserves the beneficiaries' paid custody, reclaims
+both vaults and leaves the typed market tombstone. The admin's wallet receives
+exactly market rent minus tombstone rent plus both empty-vault rents, excluding
+native token principal.
+
+Novelty is **unsigned reserve claim continuity across different quote rails and
+the resulting raw-surplus disposition**, beyond row418's dual-quote user payout
+and signed insurance withdrawal. Single-native provider-principal redemption and
+native insurance-ledger/donation candidates were discarded as existing coverage.
+Existing row433 payout orders, missing/frozen custody, repair and close retries
+do not exercise this cross-rail reserve accounting. Shared helper implementations
+are unchanged, so no adjacent controls are required. System/ATA/SPL/wrapper
+instructions construct all economic accounts and transitions. The existing native
+fixture supplies only the missing native-mint genesis account; there are no edits
+to initialized program account bytes. Expected Account images are never installed.
+
+**Row 433 remains OPEN.** This is a four-history conformance increment, not a
+generic generator/oracle or status promotion. Earned-fee/ledger composition,
+receipts/pending losses, Recovery/recredit, expiry races, custody disruption,
+multiple assets, arbitrary amounts/orders/quote variants, maximum shapes and
+absent-market-authority retirement remain open. No production change is made.
+
+Base: `c3a0ecedc915c1a4eb7e81ea062e3bfcaab71689`, exactly the requested
+`origin/codex/astra-open-holdout-ledger-20260912` ref at worktree creation.
+Branch: `codex/row433-native-reserve-verification-20260913`; worktree:
+`/home/anatoly/percolator-row433-native-reserve-20260913`. The parent checkout was
+not edited. Environment: Linux `6.1.0-52-cloud-amd64` x86_64, rustc/cargo 1.90.0,
+default `anchor-v2` features, LiteSVM 0.1.0, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, SBF platform-tools v1.52.
+Dependency artifacts were copied with `cp -a --reflink=auto` from
+`/tmp/percolator-astra-row421-operator-progress-20260913/target` to this worktree's
+private `target`. The default-feature SBF wrapper was freshly rebuilt here with
+locked/offline dependencies. SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+No matcher is used. The exact new selector passes **1/1 in 1.64s**, completing
+four histories, 24 keeper-only reserve payments and four slab closures. Observed
+peak CU is **35,469 for payment / 44,549 for closure**, each below the asserted
+150,000-CU limit. The initial development run hit LiteSVM `AlreadyProcessed` when
+setup repeated creation of the bootstrap native vault; the fixture now reuses
+that existing public ATA. No economic assertion failed or was removed. The
+existing `solana-client v1.18.26` future-incompatibility warning remains.
+Exact build and validation commands, run from this worktree:
+
+```sh
+export CARGO_TARGET_DIR=/home/anatoly/percolator-row433-native-reserve-20260913/target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::dual_quote_reserve_progress::v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_surplus -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-070/088 resolved claimant actionability after later cleanup (row 424, 2026-09-13)
+
+Owner: [cu/inv_088_resolved_actionability.rs](cu/inv_088_resolved_actionability.rs),
+mounted by INV-088. Exact selector:
+`inv_088_global_summaries_are_not_account_local_proofs::resolved_actionability::v16_program_last_later_asset_blocker_reclassifies_unchanged_earlier_claimant`.
+
+Four public LiteSVM histories cross both position directions with both cleanup
+orders for two accounts on asset 1. Four owners deposit 1,000 atoms each; asset 0
+moves from 100 to 120 or 80, giving its first claimant a 20-atom gain. Resolution
+at slot 10 and cleanup at fixed authenticated slot 13 pay the losing account 980
+and detach the earlier winner's leg. The winner retains 1,000 capital and 20 PnL,
+with no active leg, stale flag or pending fee synchronization. Its retained
+`PermissionlessCrank` (empty observations, caller slot 1) rejects with exact
+`EngineNonProgress` while the two later-asset accounts block positive payout.
+
+After the first later account closes, the same request still rejects. After the
+last later account closes, it succeeds and pays exactly 1,020; the winner's
+complete Account remains unchanged across both environmental transitions, and
+Clock remains 13. A further identical crank rejects without double payment.
+Before committing the last cleanup, a transaction executes that cleanup, its
+1,000-atom transfer, the newly enabled winner payout, and then a failing System
+suffix. Both transfers and the reclassification roll back; the winner again
+rejects until the last blocker is removed in a committed transaction.
+
+The oracle counts actual stored portfolio legs independently of the raw and
+decoded global blocker summaries, excludes stale counts and pending loss
+barriers, and checks the progression `2 -> 1 -> 0`. Input-derived payouts are
+`[1020, 980, 1000, 1000]`, conserving all 4,000 minted atoms. Stock and reservation
+censuses, complete fixture/compiled Account rollback (including exact payer fees),
+successful-transition peer frames, fixed Clock, absent mint/freeze authority,
+packet limits, and executed wrapper/SPL log counts constrain the result. The
+endpoint has four economically terminal portfolios and zero capital, positive
+PnL and vault balance. This selector does not delete portfolios or close the slab.
+
+The new dimension is **an earlier positive claimant's nonactionable observation
+invalidated solely by later-asset claimant cleanup**. The existing INV-088
+two-asset claimant-order census uses zero-PnL claimants; row424's source-deadline,
+retired-slot, native denomination and insurance withdrawal evidence does not
+exercise this positive-payout readiness transition. Standalone expiry and local
+insurance withdrawal variants were excluded as overlapping coverage. No shared
+helper changed, so no adjacent controls were required. All economic accounts
+are constructed through System/ATA/SPL/wrapper instructions; LiteSVM supplies
+programs, signer SOL and Clock. No initialized program account bytes are edited.
+
+**Row 424 remains OPEN.** This is finite actionability-summary conformance, not a
+generic generator/oracle or a terminal scan-cursor invalidation proof. Arbitrary
+claim populations and interleavings, successful earlier-slot scan restarts,
+scanner insurance-recredit rediscovery, backing/reserve reclassification,
+Recovery, receipts, underfunded/fractional claims, alternate quote rails and
+maximum shapes remain outside this increment. Production, dependency pins and
+machine invariant statuses are unchanged.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`f07a33b86ebf159f3007cef293df6e7f1ab6da7f`. Branch:
+`codex/row424-resolved-prefix-conformance-20260913`; isolated worktree:
+`/tmp/percolator-row424-resolved-prefix-20260913`. The coordinator checkout was
+not edited. Requested model/reasoning: `gpt-6-astra` / `ultra`; this session
+provides no model switch or independent verification of that setting.
+
+Environment: Linux `6.1.0-52-cloud-amd64`, x86_64; host Rust/Cargo 1.90.0;
+LiteSVM 0.1.0 with its bundled SPL Token 3.5.0 and ATA programs. The private
+default-feature SBF build uses platform-tools v1.52, Anchor v2 and locked engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact selector passes 1/1 across four histories: 20 committed terminal
+continuations, 16 exact NonProgress rejections and four aborted two-payment
+prefixes. Peak **288,437 CU**, below the 900,000-CU transaction limit. Validation
+commands from the isolated worktree:
+
+```bash
+export CARGO_TARGET_DIR=/run/user/1001/row424-resolved-prefix-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_088_global_summaries_are_not_account_local_proofs::resolved_actionability::v16_program_last_later_asset_blocker_reclassifies_unchanged_earlier_claimant -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-024 delayed terminal submitters (row 410, 2026-09-13)
+
+Owner: [cu/inv_024_delayed_terminal_submitter.rs](cu/inv_024_delayed_terminal_submitter.rs).
+Exact selector:
+`inv_024_attributed_quote_value_conservation::terminal_earnings_succession::delayed_terminal_submitter::v16_program_delayed_terminal_cleanup_preserves_earned_fees_across_submitter_changes`.
+Primary INV-024; bounded INV-036/081 attribution and success-state evidence for
+PR135 row 410. Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`fe1cc012f416a7d72e2d45618f893b4e0d83a618`. Isolated branch:
+`codex/astra-row410-delayed-terminal-20260913`; worktree:
+`/home/anatoly/percolator-row410-delayed-terminal-20260913`.
+
+Six public LiteSVM histories cross exact/late backing expiry (slots 100/101)
+with three lifecycle orders:
+
+- User settlement at slot 7, delayed last-portfolio deletion, expiry normalization,
+  then the provider's first fee payment.
+- User settlement at slot 7, delayed last-portfolio deletion, a 17-atom provider
+  fee payment, then expiry normalization.
+- User settlement itself delayed until slot 100/101: `CloseResolved` normalizes
+  expired backing while portfolios still exist, then user settlement and deletion
+  precede fee payments.
+
+All three orders preserve the same independent input-derived entitlements:
+56,627/1,995,000 atoms to the two users, 875 earned fees to the provider and
+31 insurance atoms to the separate insurer. Expired 100,000-atom principal is
+burned at final slab closure. The delayed-settlement order has zero historical
+provider credit because backing expires before conversion; timely settlement
+records the 5,000-atom provider receivable and spent-backing history. This
+accounting difference cannot change the recipient of already earned fees.
+
+The former losing user pays the first 17-atom fee payout, the insurance operator
+pays its 858-atom tail, and the settled winner pays last-portfolio deletion,
+any subsequent expiry normalization, and the insurer's payout. A keeper pays
+final slab closure. All seven actors are distinct. Reserve instructions are
+constructed while Live with nonsigner beneficiaries and retained unchanged
+through resolution, delays and payer changes. Neither user gains quote value
+after its exact user payout; operator, keeper and market authority receive zero
+quote atoms. The market authority signs mechanical cleanup and receives exact
+rent refunds, independently of SPL ownership.
+
+The local entitlement checker frames every destination and vault Account, mint,
+authority profile and control sequences; checks provider fee stocks and ledger
+identity/paid history, insurance budget/spend, principal expiry and source
+receivables; and runs the stock census with the actual expected materialized
+portfolio set. Every public user continuation must change market or portfolio
+state and preserve external quote conservation. With one settled portfolio still
+present, slab cleanup and fee payout each reject with exact Account rollback
+apart from signature fees. All six histories then complete a market tombstone,
+exact principal burn, unchanged paid ledger and exact rent disposition.
+
+This adds expiry *before* terminal reserve admission, including normalization
+during delayed economic settlement and already-paid users becoming public
+submitters. Existing `terminal_cleanup_submitter` finishes before expiry;
+`terminal_earnings_expiry` and `terminal_public_reserves` start with portfolios
+already deleted. The fee-loss/recredit fixture is unused: insurance is never
+spent here, and beneficiary succession, existing-wallet recredit and shutdown
+attribution are not extended. Existing constructors, `reserve_payout` and `land`
+are reused without behavior changes; the parent file only mounts the new module.
+All initialized program state comes from public System/SPL/wrapper instructions.
+Mutable Account copies are assertion frames and are never installed into LiteSVM.
+
+**Row 410 remains OPEN.** This is six bounded conformance histories, not a generic
+generator/oracle or whole-invariant proof. Other assets and quote rails, other
+claimant/role orders, fees earned across multiple lifecycles, concurrent receipts,
+insurance depletion/recredit, donated surplus, arbitrary funding and authority
+histories, and larger transaction compositions remain open. No production or
+dependency changes, vulnerable-pin experiment, other-row claim or status promotion.
+
+Environment: Linux x86_64 (`6.1.0-52-cloud-amd64`), host Rust/Cargo 1.90.0,
+default `anchor-v2` features, LiteSVM 0.1.0, Solana platform-tools v1.52.
+The SBF artifact was built offline from the exact base in this worktree;
+SHA-256 `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Private target/temp paths and exact commands:
+
+```sh
+cd /home/anatoly/percolator-row410-delayed-terminal-20260913
+export CARGO_TARGET_DIR=/tmp/row410-delayed-terminal-20260913-target
+export TMPDIR=/tmp/row410-delayed-terminal-20260913-tmp
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::delayed_terminal_submitter::v16_program_delayed_terminal_cleanup_preserves_earned_fees_across_submitter_changes -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
+Validation: new selector **1/1**, six completed closures, twelve exact admission
+rollbacks, peak **255,710 CU** under the shared 1,200,000 limit. Timely settlement
+needs two user calls; delayed settlement needs four, within the sixteen-call
+bound. Both requested metadata selectors pass **1/1**; formatting and Git
+whitespace checks pass. Adjacent controls were not run because no shared helper
+behavior changed. Development corrected a test field name, the census's
+materialized-portfolio input, and assumptions about market-only progress and
+source-credit history during late settlement. No production violation was found.
+
+## INV-067 fractional conversion and same-source expiry (row 417, 2026-09-13)
+
+Owner: [cu/inv_067_receipt_fractional_source.rs](cu/inv_067_receipt_fractional_source.rs).
+Exact selector:
+`inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_fractional_source::v16_program_fractional_source_conversion_preserves_receipts_through_same_bucket_expiry`.
+
+Four public LiteSVM histories split the existing 1,000-face backed winner into
+350- and 650-face owners, preserving total deposits, backing and SPL supply.
+One owner converts against the shared 350-atom backing pool before its deadline:
+`floor(350 * 350 / 1000) = 122` or `floor(650 * 350 / 1000) = 227`. Both divisions
+have a half-atom remainder. Only the converted atoms leave the terminal claim
+denominator. The converted owner's remaining 228 or 423 face becomes a third
+paid receipt alongside the older 700- and 1,300-face receipts. Their unchanged
+top-up instructions remain usable when the **same** bucket's remaining 228 or
+123 atoms expire at slot 13 or are processed late at slot 15.
+
+The oracle derives payouts from submitted deposits, trade sizes and price changes.
+It checks complete receipt identity with only cumulative paid value changing,
+portfolio identity/provenance, exact and unreceipted claim bounds, consumed
+provider attribution, remaining source stock, every owner's SPL balance, and
+mint/vault custody. Clock advancement alone cannot release this stock or pay a
+receipt. A rejected transaction must first normalize expiry, replace the final
+bound and execute all four owner transfers, then restore complete fixture
+Accounts; only the separate payer's signature fee remains charged. The unchanged
+requests subsequently pay exact positive top-ups to all three retained receipts,
+including the owner whose source conversion rounded down. Zero-due cleanup,
+repeated byte-identical retries and rent-exact deletion of all six portfolios
+finish each history.
+
+With the 350-face owner converting first, final owner payments in fixture order
+are `[1177, 0, 529, 0, 1329, 814]`; with the 650-face owner converting first they
+are `[1157, 0, 428, 0, 1292, 972]`. These are different economic histories, so the
+test compares exact/late expiry within each history, not conversion-order equality.
+Each endpoint has one provider wallet atom and two unpaid rounding atoms in
+custody, conserving all 3,852 minted atoms.
+
+Overlap review discarded an adjacent-backing-amount rounding probe because
+`receipt_rounding_threshold` already covers that dimension. `receipt_source_realization`
+converts one owner's integral allocation; `receipt_conversion_then_expiry` converts
+one source and expires another. This increment instead combines a fractional
+allocation, a newly retained converted-owner receipt and later expiry within one
+shared pool. It adds a `SplitClaimants` constructor variant to the existing
+`late_expiry::World`; the adjacent single-source, staggered-source and variable-
+backing controls below cover the shared constructor paths. System/SPL/ATA/wrapper
+calls construct and mutate all economic accounts. LiteSVM supplies programs,
+signer SOL and Clock advancement. No initialized program account bytes are edited.
+
+**Row 417 remains OPEN.** This is a finite conformance increment, not a generic
+generator/oracle or vulnerable-pin experiment. Arbitrary claim populations,
+conversion amounts/rates, repeated conversion/expiry words, Recovery, insurance
+(including overfunding), other backing/insurance routes, alternate collateral
+rails, absent roles and maximum shapes remain open. Slab retirement and disposal
+of the final two rounding atoms are outside this selector. Production, dependency
+pins and machine invariant statuses are unchanged.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`8b82465a9b95f80a0b35b27451feeba7b6733916`. Isolated branch:
+`codex/row417-fractional-stock-20260913`; worktree:
+`/home/anatoly/percolator-row417-fractional-stock-20260913`.
+The coordinator checkout was not edited. The requested model/reasoning setting
+was `gpt-6-astra` / `ultra`; this worker session exposes no switch or independent
+verification of that setting.
+
+Environment: Linux `6.1.0-52-cloud-amd64`, x86_64; host Rust/Cargo 1.90.0;
+LiteSVM 0.1.0 with its bundled SPL Token 3.5.0 and ATA programs. A private,
+default-feature SBF build uses platform-tools v1.52, Anchor v2 and locked engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The new selector passes all four histories, four exact rollbacks and 24 portfolio
+deletions; peak settlement cost is **611,544 CU** against the 900,000 bound.
+All three adjacent constructor controls pass. The initial draft incorrectly
+expected an immediate transfer from the first receipt-creation call; bounded
+public preparation corrected that test assumption without changing the expected
+entitlements. No production invariant failure or correction was found.
+Exact commands from the isolated worktree (all test selectors use one thread):
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/row417-fractional-stock-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_fractional_source::v16_program_fractional_source_conversion_preserves_receipts_through_same_bucket_expiry -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_source_realization::v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_conversion_then_expiry::v16_program_committed_conversion_then_late_expiry_preserves_receipt_attribution -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_rounding_threshold::v16_program_late_receipt_rounding_threshold_preserves_zero_vault_settlement -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-039 pending attribution across sibling restart (row 419, 2026-09-13)
+
+Owner: [cu/inv_039_pending_loss_restart.rs](cu/inv_039_pending_loss_restart.rs),
+mounted under `inv_039_pending_loss_obligation_durability::restart`. Exact selector:
+`inv_039_pending_loss_obligation_durability::restart::v16_program_pending_debt_survives_sibling_restart_and_delayed_resolution`.
+
+Eight public LiteSVM histories cross mirrored position sides, both debtor-domain
+completion orders and both claimant payout orders. Two solvent pairs create
+unequal **30,000 / 40,000** atom debts on assets 1 and 2. Creditor-only accrual,
+asset shutdown and owner forfeiture retain zero-basis legs with nonzero loss
+weight while the opposing debtor Accounts remain exactly as they were after
+opening. Asset 0 undergoes public shutdown and `RestartAssetOracle` twice:
+once with both obligations pending, and again after only the first debtor pays
+and its holder releases. Both original domain engine slots, oracle profiles,
+owner Accounts, source-claim generation IDs and exact claim faces survive the
+sibling's fresh generation assignment. Global market mode remains Live during
+these asset-local Recovery/restart transitions.
+
+Each indebted asset separately rejects restart at three checkpoints: unbooked
+opposing debt, zero OI with one retained obligation, and released obligation with
+an unconsumed original source claim. All **48** rejections reach `EngineLockActive`
+and restore complete Accounts, including market control sequences, custody and
+lamports; only the independent transaction fee payer is excluded. Successful
+sibling restart proves that the public restart route is usable in the same
+worlds. Permissionless release removes only the paid domain's retained weight.
+After both debts settle, resolution and unsigned-owner `CloseResolved` calls
+preserve each original owner's capital + PnL + unpaid receipt + SPL payout at
+every prefix. Final entitlements are **230,000 / 150,000 / 340,000 / 210,000 / 777**
+atoms in either order. Forty payout retries preserve the complete frame; all
+forty portfolios then close, with zero vault/capital/positions/pending counts
+and unchanged **930,777** token supply.
+
+This adds pending-obligation attribution across an actual sibling restart and
+the three indebted-domain restart gates. Existing row419 forfeiture, resolution,
+cure/cancel, close/preemption and payout products do not exercise restart;
+INV-065's simultaneous lifecycle/restart product reaches zero pending counts.
+The new owner uses the existing `AttributionWorld` constructor and census without
+changing shared helper implementations. Economic accounts are created with
+System/SPL/ATA/wrapper instructions; LiteSVM supplies Clock and SOL funding.
+No initialized program account bytes are edited or restored. No production,
+dependency, engine-pin or invariant-status changes; adjacent behavioral controls
+are not rerun because the parent owner only gains a module mount.
+
+**Row 419 remains OPEN.** This is a finite, integral, zero-fee/funding/backing/
+insurance family, not a generic generator or oracle. The unbacked source claims
+are paid at resolution; this does not establish early Live conversion, successful
+restart of the originally indebted slots, fresh trading after restart, global
+Market Recovery/FinalizeRecovery, bankruptcy/B drift, ADL/reset, partial reductions,
+fractional rounding, CPI/alternate quotes, maximum shape or arbitrary histories.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`8b82465a9b95f80a0b35b27451feeba7b6733916`. Isolated branch:
+`codex/inv039-row419-recovery-20260913`; worktree:
+`/home/anatoly/percolator-prog-row419-recovery`. Environment: Linux x86_64,
+host Rust/Cargo 1.90.0, LiteSVM 0.1, default `anchor-v2` features,
+`solana-cargo-build-sbf` 2.3.13 with explicitly selected platform-tools v1.52,
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. The private target was copied
+from `/dev/shm/astra-row426-public-observations-target`; Cargo rebuilt this
+worktree's host tests and wrapper SBF offline. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The behavioral selector passes **8 worlds, 48 exact restart rollbacks, 16 sibling
+restarts and 40 exact payouts/retries/deletions**; peak measured CU **141,120**.
+
+Exact reproduction and required validation commands from the isolated worktree:
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/inv039-restart-8b82465a-20260913-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::restart::v16_program_pending_debt_survives_sibling_restart_and_delayed_resolution -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-039 pending debt across restarted-peer trading (row 419, 2026-09-13)
+
+Owner: [cu/inv_039_pending_loss_restart_trading.rs](cu/inv_039_pending_loss_restart_trading.rs),
+mounted by `cu/inv_039_pending_loss_resolved_histories.rs`. Exact selector:
+`inv_039_pending_loss_obligation_durability::resolved_histories::restart_trading::v16_program_peer_restart_preserves_pending_debt_through_fresh_trade_and_resolution`.
+
+Eight public LiteSVM histories cross mirrored sides, which of two debtors settles
+first, and forward/reverse terminal payout order. Integral price moves create
+independent debts of 30,000 and 40,000 atoms. Both claimants retain zero-basis,
+nonzero-loss-weight obligations after asset shutdown. The selected debtor pays
+through `ForfeitRecoveryLeg`; its holder releases through `PermissionlessCrank`.
+Restart attempts reject with exactly `EngineLockActive` before payment, after
+payment with retained weight, and after release with a historical source claim.
+A transaction stages a successful debtor forfeit before the rejected restart;
+the suffix error restores the payment, obligation, control sequences, complete
+economic Accounts and lamports. The distinct network fee payer is excluded.
+
+The unused base asset then shuts down and restarts at 700,000 with a new market
+generation and the restart-installed manual oracle profile. The paid debtor and
+its historical claimant open and close an unchanged-price position on that new
+generation. Each trade checks signed positions, OI, loss weights, stored counts,
+generation binding, unchanged original capital/PnL/source records, and complete
+Accounts outside its market/portfolio write set. Both old engine slots remain
+byte-identical across peer restart and each trade. The other cohort's original
+debtor Account is untouched and its obligation remains attributed to its holder.
+Restart of that occupied asset still rejects after the peer round trip.
+
+Global resolution starts with the second debtor's debt unbooked. Its holder can
+detach the pending leg but cannot receive a receipt or payout; a waiting retry
+returns `EngineNonProgress` with exact rollback. Bounded public closes settle the
+original debtor and reconcile all five entitlements to
+`[230000, 150000, 340000, 210000, 777]`, with zero vault, capital, OI and pending
+counts. Final receipt retries are exact no-ops and all five portfolios close.
+The existing input-derived attribution model and leg/count/weight/SPL census are
+reused unchanged. Supply remains 930,777 atoms throughout.
+
+Duplicate review: while this worker ran, origin advanced to `fe1cc012`, adding
+`v16_program_pending_debt_survives_sibling_restart_and_delayed_resolution`.
+That test explicitly excludes fresh trading after restart and resolves only
+after both debts settle. This increment covers **fresh-generation open/close
+with historical claims, followed by resolution with one debt still unbooked**;
+it also stages a debtor payment before a rejected restart. Restart-only gates
+are controls, not an additional novelty claim. Existing INV-073 restart/live-leg
+coverage has zero pending economic loss. The new file/module is distinct from
+the concurrent sibling-restart owner. Successful restart of an indebted asset
+after source-credit/provider-receivable retirement remains outside this selector.
+
+**Row 419 remains OPEN; invariant verdicts are unchanged.** This is a finite
+integral, solvent, single no-CPI trade family, with zero fees/funding, no external
+backing or insurance, one peer restart, two old cohorts and two payout orders.
+Restart of the indebted asset after all value retirement, fractional/ADL loss,
+underfunding, repeated restarts, CPI/batch transport, nonzero new-generation PnL,
+maximum shapes and arbitrary histories remain open. No generic generator/oracle,
+production correction or implementation-violation claim is added. System/SPL/ATA
+and wrapper calls construct all economic state; no initialized program Account
+bytes are edited or restored. The parent module gains only a mount, so shared
+helper implementations are unchanged and no adjacent behavioral controls are rerun.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`8b82465a9b95f80a0b35b27451feeba7b6733916`. Branch:
+`codex/row419-pending-recovery-20260913`; isolated worktree:
+`/home/anatoly/percolator-row419-pending-recovery-20260913`.
+Environment: Linux x86_64, host Rust/Cargo 1.90.0, LiteSVM 0.1.0, default
+`anchor-v2` features, engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+The private target was copied from `/dev/shm/percolator-row426-target`; Cargo
+rebuilt this worktree's host tests and SBF wrapper. SBF used
+`solana-cargo-build-sbf` 2.3.13, platform-tools v1.52 / Rust 1.89.0-dev.
+Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+SPL Token and ATA programs come from the cached LiteSVM package; no matcher is used.
+The selector passes 8 worlds, 40 restart rollbacks (8 staged debtor payments),
+8 peer restarts, 16 trades, 8 waiting rollbacks, and 40 exact payouts, receipt
+retries and portfolio deletions. Peak restart transaction: 98,842 CU.
+
+Exact validation/reproduction commands from the isolated worktree:
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/row419-pending-recovery-20260913-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::resolved_histories::restart_trading::v16_program_peer_restart_preserves_pending_debt_through_fresh_trade_and_resolution -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-028 last latent domain through Recovery (row 423, 2026-09-13)
+
+Owner: [cu/inv_028_recovery_latent_capacity.rs](cu/inv_028_recovery_latent_capacity.rs),
+mounted under the existing historical-capacity owner. Exact selector:
+`inv_028_source_domain_realizability_cap::historical_latent_capacity::recovery_latent_capacity::v16_program_last_latent_domain_survives_split_recovery_and_terminal_payout`.
+
+Four public LiteSVM histories cross both final-leg position signs with one full or
+two half `ForceCloseAbandonedAsset` calls. Thirteen assets first retain both source
+sides, using 26 of the supported 28 slots. A six-lot position on asset 13 settles
+one favorable move and reverses, retaining a 27th claim. The counterparty alone
+accrues a second favorable mark: the claimant Account is unchanged, and its final
+source remains latent when public shutdown moves that asset into Recovery.
+After the configured five-slot timeout, keeper-only force-close materializes the
+28th source, preserves every complete historical source record, and strictly
+reduces paired exposure to zero in one or two transactions. The split history
+retains all 28 claims while the half-position is still active.
+
+This is a distinct capacity/lifecycle composition. Existing row423 terminal-latent
+coverage crosses global resolution and owner-window expiry. The adjacent
+`v16_attack_max_source_force_close_abandoned_asset_stays_bounded` control starts
+Recovery with every source already materialized and stops at pair detachment;
+this selector requires new source storage during Recovery and complete payouts.
+
+The oracle derives the 62-atom gain from submitted sizes and one-atom price moves.
+It checks exact domain claims, principal, PnL, the historical/future resource union,
+signed positions and paired OI. Shared stock/reservation/source-rate censuses run
+at shutdown, every successful force-close, resolution, each terminal step and each
+portfolio deletion. Force-close preserves complete mint/vault/owner-token Accounts.
+Global resolution preserves both portfolio Accounts. After owner-window expiry,
+unsigned-owner `CloseResolved` calls retire exactly one source per claimant call,
+leave the absent peer Account and token Account unchanged, and transfer only the
+current owner's exact entitlement. The endpoint is 28 claimant calls plus one
+counterparty call, payouts **1,000,062 / 999,938** atoms, two closed portfolios,
+zero capital/vault/OI/live claims/fresh backing, and unchanged **2,000,000** SPL supply.
+
+The exact selector passes **4 worlds, 6 keeper force-closes and 116 terminal calls**.
+Maximum force-close: **1,256,569 CU**; maximum terminal step: **769,762 CU**; largest
+force-close/terminal transaction: **465 bytes**. Each measured lifecycle call is
+asserted below 1,375,000 CU, and portfolio deletion below the existing custody limit.
+System/SPL/ATA/matcher/wrapper instructions construct economic state. Fixture SOL
+funding and Clock advancement use existing LiteSVM helpers; no initialized program
+account bytes are edited or restored. No production code, engine pin, dependency,
+shared helper implementation or invariant status changes. The parent test module
+only gains a mount, so adjacent behavioral controls are not rerun.
+
+**Row 423 remains OPEN.** This finite positive family is not a generic resource
+generator or liveness oracle. It has one active asset at shutdown, integral claims,
+single no-CPI admission, fully realized counterparty backing, zero fees/funding and
+no provider contribution. Maximum simultaneous active legs, historical liens,
+consumed-provider-label retirement, backing expiry/reset composition, underfunded
+Recovery, alternate quotes/CPI, admission rejection/rollback histories and other
+future resource classes remain outside this increment. No implementation failure
+was found, and no other reopening row receives new evidence.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`0c3904470b1429d8e789a290b04982d330ee212a`. Isolated branch:
+`codex/inv028-row423-recovery-capacity-20260913`; worktree:
+`/tmp/percolator-inv028-row423-recovery-20260913`. Environment: Linux x86_64,
+host Rust/Cargo 1.90.0, LiteSVM 0.1, default `anchor-v2` features,
+`solana-cargo-build-sbf` 2.3.13 with platform-tools v1.52, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Host artifacts were copied from
+`/dev/shm/astra-row423-lifecycle-20260912-host` into the private target before
+Cargo rebuilt the current tests; both SBF programs were freshly built offline.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Auth matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The initial build/run used the worktree's temporary name
+`/tmp/percolator-inv028-row423-expiry-20260913`; the final selector and metadata
+checks run from the worktree path above after its Git-managed move.
+
+Reproduction commands from the worktree (builds use the same source and flags as
+the initial build; the SBF output location is independent of the worktree name):
+
+```bash
+cd /tmp/percolator-inv028-row423-recovery-20260913
+export CARGO_TARGET_DIR=/tmp/inv028-row423-recovery-20260913-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cd tests/fixtures/auth_matcher
+env CARGO_TARGET_DIR=/tmp/inv028-row423-recovery-20260913-matcher-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir /tmp/percolator-inv028-row423-recovery-20260913/tests/fixtures/auth_matcher/target/deploy --offline -- --locked
+cd ../../..
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::recovery_latent_capacity::v16_program_last_latent_domain_survives_split_recovery_and_terminal_payout -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-020 active reward recipient through CPI (row 426, 2026-09-13)
+
+Owner: [cu/inv_020_cpi_keeper_observations.rs](cu/inv_020_cpi_keeper_observations.rs),
+mounted as a child of `staged_action_observations::active_keeper_observations`.
+Exact selector:
+`inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations::cpi_keeper_observations::v16_program_cpi_active_keeper_observations_preserve_admission_and_payout`.
+
+Eight public LiteSVM histories cross CPI/bilateral transport, single/batch trades
+and partial/complete recipient refresh before admission. A two-leg target receives
+complete Hybrid-Pyth/AuthMark observations and pays a liquidation reward to an
+active recipient whose unrelated AuthMark short still has 32 slots of catchup.
+Receipt invalidates that recipient's certificate without settling its loss leg.
+The recipient is the maker on a new asset-3 position: public matcher initialization
+and delegation authorize CPI admission and exit with only the taker signing.
+Reward-bearing cranks separately require the recipient owner's signature. Complete
+refresh controls and trade-time recertification must include the exact recipient
+equity and side-specific adverse lag; both participants' current certificates are
+checked against the independent raw-state health oracle. Single exits close assets
+3 and 2 separately; batch exits close both in one actual two-leg batch.
+
+Every history first rolls back a successful liquidation-plus-admission prefix at
+an exact stale-report suffix, then commits the same liquidation. An omitted loss
+leg rejects with `EngineNonProgress`. Each exit is also executed before a stale
+suffix and retried successfully. Complete tracked and compiled-message Accounts,
+including matcher context, token custody, metadata, absence and lamports, must
+roll back apart from exact payer signature fees. The single matcher response is
+decoded after admission; the batch matcher uses return data and leaves its context
+unchanged. Market stock, reservation and fixed-supply SPL censuses accompany the
+health checks. Independently calculated liquidation penalty, reward and insurance
+domain allocations reconcile the keeper's exact final SPL withdrawal, and all
+eight routes must agree on owner capital/PnL, final OI and payout.
+
+This adds the active paid maker's CPI observation/admission/exit composition.
+The earlier active-keeper probe uses bilateral routes; chunked-observation CPI
+coverage has no liquidation reward or unrelated recipient leg. The first candidate,
+recipient Hybrid feeds, was discarded because recipient-to-target coverage already
+contains a composite Hybrid recipient. No shared helper implementation changed;
+the existing active-keeper owner only registers the new child. All economic state
+and matcher context construction use System/SPL/ATA/public wrapper or matcher
+instructions. Only signer SOL, Clock and external provider reports use harness
+fixtures. No initialized program account bytes are edited or restored.
+
+**Row 426 remains OPEN; invariant_status.tsv is unchanged.** This is a finite
+conformance product, not a generic observation generator/oracle. Nonzero funding,
+maintenance/trade fees, repeated rewards to one active recipient, recipient Hybrid
+feeds composed with CPI, arbitrary observation orders, omitted-Hybrid active
+certification, additional renewals, other market modes and maximum shapes remain
+outside this increment. Observation order is forward for single and reverse for
+batch, not an independent product axis. Production and dependency pins are unchanged.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`5fc55daca542417202d454c0663d0b5ecd1b87f0`. Branch:
+`codex/astra-row426-cpi-observations-20260913`; worktree:
+`/home/anatoly/percolator-row426-cpi-observations-20260913`.
+Environment: Linux x86_64, Rust/Cargo 1.90.0, LiteSVM 0.1.0, default `anchor-v2`,
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, platform-tools v1.52.
+The session cannot select or verify the requested `gpt-6-astra`/ultra settings.
+A private, non-hardlinked copy of `/dev/shm/percolator-row426-target` seeded the
+build cache. Wrapper and in-repository auth matcher SBF were rebuilt from this
+worktree. SHA-256: wrapper
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Development corrected the bitmap assertion's array type and the reward crank's
+required recipient-owner signer; neither was a production invariant violation.
+
+Behavioral validation: the exact selector passed 1/1 in 4.78s, with eight histories,
+28 exact rollbacks and eight 252925-atom keeper withdrawals. Each liquidation
+charges 8778 atoms, pays 2925 to the recipient and allocates the remaining 5853 to
+insurance. Peak transaction cost is 689686 CU, below the existing helper's 900000
+bound; each explicit transaction also fits the 1232-byte packet bound. No adjacent
+selectors are needed because shared helper implementations are unchanged.
+Both required INV-079 metadata selectors passed 1/1. `cargo fmt --all -- --check`
+and Git whitespace checks passed. The build cache and logs remain outside the
+tracked artifacts; no push is performed.
+
+Commands from the isolated worktree:
+
+```sh
+cp -a /dev/shm/percolator-row426-target /dev/shm/row426-cpi-observations-20260913-target
+export CARGO_TARGET_DIR=/dev/shm/row426-cpi-observations-20260913-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations::cpi_keeper_observations::v16_program_cpi_active_keeper_observations_preserve_admission_and_payout -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-070 native Recovery claim disposition (row 418, 2026-09-13)
+
+Owner: [cu/inv_070_native_recovery_disposition.rs](cu/inv_070_native_recovery_disposition.rs),
+mounted under `inv_070_zero_unattributed_terminal_residue_and_close_slab::native_recovery_disposition`.
+Exact selector:
+`inv_070_zero_unattributed_terminal_residue_and_close_slab::native_recovery_disposition::v16_program_native_recovery_claims_have_bounded_terminal_disposition`.
+
+Four public LiteSVM histories cross a native quote's 100->90/110 authenticated
+price move with one full or two half `ForceCloseAbandonedAsset` calls. Two owners
+deposit 1000/1300 atoms and open two lots. Cranking debits the loser's 20 atoms
+and leaves the winner's funded 20-atom source claim. A public 37-lamport vault
+donation remains unsynced before shutdown, during Recovery, through resolution
+and both user payments. The oracle derives the 980/1320 or 1020/1280 payouts
+from entry price, exit price and position size; it checks the source-claim bound,
+paired OI, engine stock/reservation censuses and complete native token Accounts.
+The native mint remains byte-identical throughout.
+
+Every force-close is first executed before an unfunded ordinary SPL transfer
+suffix. Six complete transaction-Account rollbacks preserve Recovery claims,
+positions, native token backing and unsynced lamports, except exact signature
+fees. Logs require the wrapper prefix to have succeeded. The identical force-close
+instruction then succeeds with only the payer signing and exact custody frames.
+After resolution and its timeout, two unsigned losing-first user payments exhaust
+all booked custody. Two owner-signed portfolio deletions and one `CloseSlab`
+complete each history. Each owner then publicly closes the funded wSOL account,
+receiving exactly the claim plus its token rent. Final slab disposition preserves
+canonical tombstone rent and gives the administrator only market excess, vault
+rent and the 37 unsynced lamports; its token destination receives zero atoms.
+Explicit test transactions are bounded at 500000 CU and 1232 bytes.
+
+The new relation is a nonzero native source claim crossing partitioned Recovery
+force-close and actual terminal redemption. The existing classic-SPL Recovery
+close selector has unchanged price and no PnL; the native PnL/sync and shared
+custody selectors resolve directly. The classic-SPL Recovery reserve cleanup
+selector does not exercise native backing, unsynced lamports or redemption.
+No shared helper changes or adjacent control runs are needed: only a new local
+module and its INV-070 registration are added. All account creation/funding and
+economic transitions use System/ATA/SPL/public wrapper instructions. The existing
+native helper supplies LiteSVM's omitted native-mint genesis fixture. Packed
+expected Account images are never installed into the VM; no initialized program
+account bytes are edited.
+
+**Row 418 stays OPEN; invariant_status.tsv is unchanged.** This finite family
+does not provide a generic generator/oracle. Native booked-residue retirement,
+fractional claims, unpaid/underfunded or bankrupt Recovery, backing/insurance/fee
+stocks, dual quotes, unavailable custody, unsupported token variants, arbitrary
+claimant order, maximum shapes and arbitrary histories remain open. Owners still
+sign portfolio deletion and redemption, and the administrator signs shutdown,
+resolution and slab closure. Production is unchanged.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`9653b677d23a10a2631011669d789b9e630da897`. Branch:
+`codex/astra-row418-native-recovery-20260913`; isolated worktree:
+`/home/anatoly/percolator-row418-native-residue-20260913`.
+Environment: Linux x86_64, Rust/Cargo 1.90.0, LiteSVM 0.1.0, default `anchor-v2`
+features, engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336` and platform-tools
+v1.52. A private, non-hardlinked copy of `/dev/shm/percolator-watch-test-target`
+seeded the build cache. The wrapper was freshly rebuilt from this worktree;
+SHA-256 `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+This bilateral fixture does not load a matcher. The initial host build was stopped
+to match the cache's no-debug settings. Development corrected census argument
+arity and expectations about already-debited losing PnL and the funded source
+claim; no production violation or correction is claimed.
+
+Validation: the new exact selector passed 1/1 in 1.80s, covering four histories,
+six exact rollbacks, four slab closures and eight owner redemptions. The peak was
+264974 CU (limit 500000). Both required INV-079 metadata selectors passed 1/1;
+formatting and Git whitespace checks passed. No adjacent selectors were run.
+The private build cache is cleaned after validation; all committed artifacts
+are source tests and audit documentation.
+
+Commands from the isolated worktree:
+
+```sh
+cp -a /dev/shm/percolator-watch-test-target /dev/shm/row418-native-recovery-20260913-target
+export CARGO_TARGET_DIR=/dev/shm/row418-native-recovery-20260913-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::native_recovery_disposition::v16_program_native_recovery_claims_have_bounded_terminal_disposition -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /dev/shm/row418-native-recovery-20260913-target
+```
+
+## INV-024 depleted insurance beneficiary succession (row 429, 2026-09-13)
+
+Owner: [cu/inv_024_depleted_reserve_beneficiary_succession.rs](cu/inv_024_depleted_reserve_beneficiary_succession.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_fee_partition::depleted_reserve_beneficiary_succession`.
+Selector: `v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribution`.
+Primary INV-024; related INV-005/025/027/036/070/081. Target: row 429's
+`terminal-reserve-value-remains-bound-to-the-beneficiary-and-role-that-earned-it`.
+
+Eight public LiteSVM histories cross beneficiary succession before any spent
+insurance recovers versus after a seven-atom recovery payment, partial versus full
+recovery with excess burn, and both final provider-fee/insurance payout orders.
+The existing row410 fee-loss setup is extracted unchanged into
+`terminal_fee_loss_world`; its existing selector remains an adjacent control.
+System/SPL/ATA instructions create and fund accounts; public wrapper trades,
+authenticated marks, cranks, resolution, payouts and owner-signed deletion create
+the terminal state. VM controls are limited to signer SOL, Clock and blockhashes.
+There are no new program-owned account byte writes or production changes.
+
+The public loss history earns 657 provider-fee atoms and 218 insurance-fee atoms,
+then spends 73 insurance atoms. The old beneficiary withdraws all 176 available
+insurance atoms while 73 spent atoms remain recorded. The provider withdraws its
+one-atom counterparty-source remainder and all but 17 or 101 backing atoms.
+Succession either occurs at slot 61 with zero available insurance, or after
+expiry normalization at slot 100 and a seven-atom recovery payment. Both holders
+sign the transfer; the incoming holder initializes its own insurance ledger with
+`SyncInsuranceLedger`. Later reserve payouts require only the keeper's signature.
+
+The oracle derives every recipient's amount from funding, fee/loss arithmetic and
+the chosen public actions. It checks full SPL Account images and fixed supply,
+exact raw/booked vault and domain stocks, provider fee/principal attribution,
+complete insurance ledger records, role/configuration/epoch frames and the stock
+census. The old beneficiary's ledger retains its own paid prefix and observation;
+the successor receives only the unpaid recovery. When succession precedes
+recovery, the successor ledger records that recovery as profit. After an old-holder
+recovery prefix, its opening observation is the remaining stock and it records no
+new profit. The former ledger's stale observation does not block final retirement.
+
+| Backing left to expire | Old recovery prefix | Old beneficiary total | Successor total | Provider total | Spent before final close | Burn |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 17 | 0 | 176 | 17 | 100641 | 56 | 0 |
+| 17 | 7 | 183 | 10 | 100641 | 56 | 0 |
+| 101 | 0 | 176 | 73 | 100557 | 0 | 28 |
+| 101 | 7 | 183 | 66 | 100557 | 0 | 28 |
+
+Both payout orders reach each row. The operator and market administrator receive
+zero quote tokens; users retain their exact settled amounts. Eight rejected
+transactions combine an actual full provider-fee payout with the successor's
+insurance request carrying the former beneficiary's ledger. Complete Account
+rollback includes the fee payment, provider ledger initialization, and, in the
+four zero-prefix worlds, lazy recovery. Four further rejections prevent insurance
+from consuming the 28 burnable atoms after full recovery. Successful continuations
+pay the exact separate stocks. Eight final slab closures preserve recipient and
+ledger Accounts, create the exact tombstone, refund exact rent and burn only the
+tabulated excess.
+
+This adds beneficiary succession across depleted insurance and delayed recredit.
+Prior row429 funded exchanges do not deplete/recover insurance, and row410
+recredit/submitter witnesses keep the beneficiary fixed. **Only row 429 gains
+evidence; it remains OPEN and invariant statuses are unchanged.** This finite
+family is not a generic generator/oracle. Nonconsensual authority changes, live
+shutdown administrative fallback, other assets/quote rails, absent signers,
+arbitrary accrual/role/expiry histories, ledger disposal and generic replay or
+terminal closure remain outside this increment. No public-route implementation
+violation was observed in these consensual histories.
+
+Base: `c5bc37c0c54110e7461b5cdbeee3680b8458e3e3`; engine pin:
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Branch:
+`codex/astra-row429-terminal-attribution-20260913`; worktree:
+`/tmp/percolator-astra-row429-terminal-attribution-20260913`. The parent checkout
+was not edited. Build caches were copied, without hard links, from
+`/tmp/percolator-astra-row420-provider-progress-20260913/target/build` into this
+worktree's ignored `target/build`. Both artifacts were freshly rebuilt here using
+locked/offline platform-tools v1.52; the wrapper uses default features.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+The new selector passed 1/1 in 8.56s: eight histories, twelve exact rollbacks,
+eight completed closures. The isolated worker peaked at 594106 CU; integration
+on the watch branch peaked at 622606 CU, below the 700000-CU assertion.
+The shared-fixture control passed 1/1 in 13.16s (twelve histories, 42 exact
+rollbacks). Both required metadata selectors passed 1/1. Formatting and whitespace
+checks pass. No broad suite, old-wrapper comparison or engine proof was run.
+Existing unused-support warnings and the `solana-client v1.18.26`
+future-incompatibility warning remain.
+Exact build and validation commands, from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target/build"
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir target/build/deploy -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_fee_partition::depleted_reserve_beneficiary_succession::v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribution -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_fee_partition::v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_orders -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-073 unsigned native insurance ledger progress (row 421, 2026-09-13)
+
+Owner: [cu/inv_073_native_insurance_ledger_progress.rs](cu/inv_073_native_insurance_ledger_progress.rs),
+mounted under `inv_073_no_permanent_user_lock::native_insurance_ledger_progress`.
+Selector: `v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close`.
+Primary INV-073; related INV-017/018/021/027/064/067/069/070/071/078/082.
+
+Four public LiteSVM histories cross a ledger initialized by the beneficiary's
+`SyncInsuranceLedger` after funding with a fresh ledger created by a keeper after
+resolution, and native synchronization before versus between two unsigned
+payments. The two insurance roles are distinct, voluntarily drain their System
+wallets, and drop both signing keys before resolution. LiteSVM retains the empty,
+zero-lamport wallet Accounts; every measured step preserves those exact images.
+The existing public native fixture supplies the native mint's genesis account.
+All other setup and transitions use System, ATA, SPL and wrapper instructions;
+no program-owned bytes or snapshots are injected into the VM.
+
+Public funding contributes 37 long-domain and 61 short-domain atoms. After
+resolution, the keeper donates 17 raw lamports to the vault and 19 to beneficiary
+custody. `SyncNative` turns those donations into SPL stock without changing
+economic budgets or the optional ledger. Both 41/57-atom payments have exactly
+one signature, the keeper's; the operator is omitted from their account lists.
+The first payment crosses the long/short budget boundary. Each payment reduces
+the remaining claim by its exact amount and records only actual insurance paid.
+The independently expected ledger contains the market/beneficiary binding,
+98 cumulative withdrawn atoms, zero final observation, and no profit/loss from
+donations. Principal and deposit counters stay zero because these ledgers begin
+observing after funding, without a recorded deposit history.
+
+After every step, assertions reconcile full native token Account images, raw and
+synchronized lamports, exact payer fees/outflows, market stock and encumbrance
+censuses, role/control frames and the remaining budget. Four administrator-signed
+`CloseSlab` calls then close the actual vault and market with exact rent refunds.
+The administrator receives only the 17 donated vault atoms; beneficiary custody
+retains 98 insurance plus 19 donated atoms, and the paid ledger keeps its own rent
+and complete Account image. Native redemption is a separate beneficiary action.
+
+The new relation is keeper-only optional-ledger initialization/update composed
+with native custody synchronization and completed insurance disposition. Existing
+row421 frozen/recredited SPL custody, row420 provider exits and row433 reserve
+repair do not own this relation. INV-077's native insurance witness uses signed
+payments and redemption without an optional ledger. No adjacent row is changed.
+**Row 421 remains OPEN; invariant statuses are unchanged.** This finite family
+does not cover active user liabilities, insurance consumption/recredit, authority
+succession, other assets or quote rails, arbitrary histories, maximum shapes,
+transaction rollback, recipient redemption, ledger disposal or absent-admin
+retirement. No production change or public-route implementation violation is
+claimed.
+
+Base: `c4da24a211722bcb1cd32d18781217850034210e` from the requested origin branch.
+Worktree: `/tmp/percolator-astra-row421-operator-progress-20260913`; branch:
+`codex/astra-row421-operator-progress-20260913`. The parent checkout was not edited.
+Dependency artifacts were copied into this worktree's private `target` from
+`/dev/shm/astra-terminal-public-disposition-target`. The default-feature wrapper
+was freshly rebuilt from this worktree using locked/offline platform-tools v1.52;
+engine pin: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+No matcher artifact, old-wrapper comparison, broad suite or Kani run is used.
+
+Development corrected two fixture assumptions: LiteSVM preserves drained wallet
+Accounts, and a ledger passed through separate domain top-ups observes individual
+domain stock. The final preinitialized case uses the public asset-level
+`SyncInsuranceLedger` after funding. No failing terminal-progress assertion was
+removed; the final oracle still requires the full funded payout and exact ledger.
+
+The new exact selector passed **1/1 in 1.52s**: four histories, eight unsigned
+payments and four completed slab closures. Observed peak CU for lazy ledger
+creation, donation/sync, payment and closure was **450 / 6,438 / 36,278 / 28,568**,
+each below the asserted 150,000-CU limit. The existing `solana-client v1.18.26`
+future-incompatibility warning remains. Exact build and validation commands
+(run from the worktree):
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-row421-operator-progress-20260913/target
+export PERCOLATOR_FUZZ_SBF=/tmp/percolator-astra-row421-operator-progress-20260913/target/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/percolator-astra-row421-operator-progress-20260913/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::native_insurance_ledger_progress::v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-073 provider keeper and ledger handoff (row 420, 2026-09-13)
+
+Owner: [cu/inv_073_provider_keeper_ledger_handoff.rs](cu/inv_073_provider_keeper_ledger_handoff.rs).
+The INV-073 entrypoint uses the existing public `terminal_earnings_world` fixture
+and reserve transaction checker mounted under INV-024. Exact selector:
+`inv_073_no_permanent_user_lock::v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature`.
+
+Four public LiteSVM histories cross a resumed payout at expiry-1/expiry with reuse
+of the first keeper's ledger or creation of a second keeper's ledger. After the
+fixture's public trades, earned fees, unsigned user payouts and owner-signed
+portfolio deletion, the provider publicly closes its empty SPL ATA and drains its
+System wallet. Its key and the insurance operator's key are dropped. Keeper A
+recreates custody, funds a seeded program-owned ledger through System instructions,
+and pays 101 principal atoms plus 17 of the 875 earned-fee atoms. Keeper B then
+takes over the fee payer; A's key is dropped. B pays the remaining earnings using
+either A's ledger or its own newly created ledger, without a provider signature
+or `SyncBackingDomainLedger`. The fresh-ledger suffix omits A's ledger entirely.
+
+An input-derived oracle checks each committed payment's owner amounts, complete
+SPL Account images, mint supply, vault/stock and reservation censuses, unchanged
+beneficiaries/configuration/epochs, exact payer rent and fees, and the drained
+provider wallet. LiteSVM retains that wallet as an empty zero-lamport System
+Account, whose full image stays unchanged. Insurance is paid independently to its
+existing beneficiary. Before expiry, the provider receives exactly 100,875 atoms;
+at expiry it receives 976, while the unpaid 99,899 principal atoms lose their
+claim and burn at final close. Every earned-fee atom remains provider-attributed.
+Ledger-local withdrawn totals differ (875 in one ledger versus 17 plus 858 in
+two), but aggregate custody and retirement agree. The abandoned ledger's stale
+858-atom observation cannot require signed synchronization before closure.
+
+Each history also rejects a partial earnings payment followed by premature slab
+close, with complete Account rollback including new-ledger creation in the two
+replacement worlds. Retry pays the exact tail; an administrator then closes the
+market with an exact tombstone, rent refund and mint-supply check. Each world has
+five successful transactions after provider disappearance and one rejected bundle.
+The final selector passed 1/1 in 2.12s. Its observed peak is 479,229 CU, below the
+test's 500,000-CU assertion and the shared transaction checker's 1,200,000-CU limit.
+
+The new relation is keeper/ledger handoff after a paid prefix while the provider
+wallet is drained. Earlier row420 custody replacement and native redemption keep
+the payment ledger fixed or do not exercise earnings; row421 wallet repair concerns
+insurance recredit, and row433 close retries do not replace the mandatory earnings
+ledger. Open PR metadata was inspected as holdout context; no PR patch was copied.
+Only row 420 is targeted. **Row 420 remains OPEN; invariant statuses are unchanged.**
+This finite family does not cover active claims, economic loss/recredit, Recovery,
+other quote rails, multiple provider domains, missing market authority, missing
+portfolio owners during mechanical deletion, or arbitrary histories. There are no
+new program-owned byte writes, production changes, or observed implementation
+violations. The initial development run corrected a fixture assertion that expected
+LiteSVM to remove a drained Account rather than retain its zero-lamport image.
+
+Base: `c4da24a211722bcb1cd32d18781217850034210e`; engine pin
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Worktree:
+`/tmp/percolator-astra-row420-provider-progress-20260913`; branch:
+`codex/astra-row420-provider-progress-20260913`. Host/build caches were copied
+(not hard-linked) from `/tmp/percolator-astra-row429-target-20260912` into this
+worktree's ignored `target/build`. Both SBF artifacts were freshly rebuilt here
+with locked/offline platform-tools v1.52; the wrapper uses default features.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Exact commands, run from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target/build" TMPDIR="$PWD/target/tmp"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir target/build/deploy -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-008 native recipient recreation and retained insurance epoch (row 428, 2026-09-13)
+
+Owner: [cu/inv_008_insurance_native_recreation.rs](cu/inv_008_insurance_native_recreation.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::insurance_native_recreation`.
+Exactly one new selector:
+`v16_retained_insurance_epoch_survives_native_redemption_and_recipient_recreation`.
+
+One public LiteSVM/SBF Live history funds 37 long-domain insurance atoms and
+retains a withdrawal against the current asset authority epoch. A signed prefix
+pays those atoms into a native token recipient, redeems its SOL and rent through
+SPL `CloseAccount`, recreates the same address through System
+`CreateAccountWithSeed` and SPL `InitializeAccount3`, changes the oracle authority,
+then deposits 83 independent short-domain insurance atoms at the new epoch.
+The insurance beneficiary/operator, recipient address/owner, mint and market
+generation stay the same. Public construction owns both recipient lifetimes;
+only the existing native-mint genesis fixture and signer funding are harness inputs.
+
+Appending the retained withdrawal rejects exactly at instruction 8 with
+`EngineStale`, after all six prefix instructions complete. Every compiled and
+tracked Account is restored, including the SOL payout, rent, native token bytes,
+recipient recreation, role epoch, insurance funding sequence and full ledger.
+Only the separate payer's exact three-signature network fee remains charged.
+The valid prefix was signed and successfully simulated before rejection and
+then commits byte-for-byte unchanged. The original signed withdrawal envelope
+still rejects with all 83 replacement atoms available.
+
+A second prefix pays 37 atoms using fresh consent and again redeems/recreates
+the recipient. A retained suffix rejects exactly at instruction 6 while 46 atoms
+still cover its entire request, restoring that payout, rent and account lifetime.
+The separately pre-signed valid prefix commits unchanged; a second original
+envelope remains stale against the recreated account and fully funded stock.
+Fresh consent drains the final 46 atoms and closes the recipient. Exactly 120
+insurance atoms reach the holder's System wallet, plus the original recipient
+rent. All native token amounts and insurance budgets reach zero. Input-derived
+checks cover full decoded market state, complete native Accounts, all ledger
+fields, authority/control frames, fixed mint and stock/encumbrance censuses.
+
+The increment is **retained epoch binding across native redemption, recipient
+account recreation and independently replenished stock in the same transaction**.
+Row428's destination-owner repair keeps its token account alive; fee-stock
+coverage deletes a portfolio; the round-trip owner consumes a top-up intent.
+Row421's native redemption retry uses separate recipients without recreation,
+epoch succession or replacement insurance stock. Their existing standalone
+rejection, ledger, payout-order and funding cases were not added here.
+
+**Row 428 remains OPEN; invariant statuses are unchanged.** This is bounded
+authority-epoch conformance, not intrinsic withdrawal-stock consumption at a
+fixed epoch. Production carries no independent withdrawal stock-sequence field.
+Arbitrary histories, independent victim loss, active liabilities, fee-created
+stock, terminal recredit, other assets/rails and durable nonces remain unproven.
+No production change, held-out patch import or public-interface bug is claimed.
+SVM rollback and the bundled native SPL implementation remain platform assumptions.
+
+Base: `273c0535`, the latest requested origin branch at worktree creation.
+Worktree: `/home/anatoly/percolator-astra-row428-epoch-invariant-20260913`;
+branch: `codex/astra-row428-epoch-invariant-20260913`. A private target was copied
+from the existing native-redemption build cache, then default-feature SBF was
+rebuilt locally, locked/offline with platform-tools v1.52. Engine pin:
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact selector passed 1/1 in 0.41s: four exact rollbacks, three committed
+continuations and peak 60,141 CU under 200,000. No diagnostic probe remains;
+no broad suite or Kani run is claimed. Exact build and validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row428-epoch-invariant-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::insurance_native_recreation::v16_retained_insurance_epoch_survives_native_redemption_and_recipient_recreation -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-008 insurance destination repair and oracle-role epoch (row 428, 2026-09-13)
+
+Owner: [cu/inv_008_insurance_destination_epoch_retry.rs](cu/inv_008_insurance_destination_epoch_retry.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::insurance_destination_epoch_retry`.
+Exact selector:
+`v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch`.
+
+Eight public LiteSVM histories cross target asset 0/1, Live execution versus
+resolution after signing in Live, and omitted/lazy insurance ledgers. Public
+System/SPL instructions create the accounts and mint a fixed 196-atom supply;
+mint authority is revoked before four `TopUpInsuranceDomain` calls attribute
+73/41 long/short atoms to the target and 59/23 to its peer. The established
+`inv018_public_spl_market_with_params` fixture initializes the market and canonical
+vault publicly. No account data is repaired or restored by the test.
+
+The retained target and peer envelopes are signed before destination or epoch
+changes. A transaction pays 37 target atoms, transfers the destination's SPL
+ownership, and hands off the target's **oracle** authority, then fails on an
+unfunded SPL transfer. All three successful operations roll back, and the
+unchanged retained target envelope pays 37. A committed destination-owner change
+then rejects another original envelope at `InvalidTokenAccount`. A repair/peer
+payout/oracle-handoff prefix reaches `EngineStale` at the retained target suffix,
+restoring foreign destination ownership, peer stock, both ledgers and the epoch.
+
+After repair and oracle handoff commit, an original signed envelope still rejects
+at `EngineStale`, although 77 target atoms remain and the insurance holder,
+operator, mint, destination address and repaired owner all match the original
+request. Another stale suffix rolls back a completed peer payout. The unchanged
+signed peer envelope pays 11 at its untouched epoch, and fresh target consent
+pays 37 at the new epoch. Final exact drains pay the target's remaining 40 and
+peer's remaining 71; the Resolved worlds use unsigned terminal withdrawals for
+this final step. Custody ends at zero with exact 114/82 recipient attribution.
+
+The oracle-role handoff and external destination-owner repair are the added
+composition dimensions. There is no insurance operator ABA, insurer succession,
+amount-only test, or replenishment-order matrix in this increment. Every stage
+checks all four domain budgets, spent counters, aggregate insurance/vault,
+generation IDs, full control sequences and oracle profiles, all ledger fields,
+complete SPL accounts and fixed mint supply. Each rejection compares every
+transaction account and all watched accounts exactly, except for the explicitly
+calculated signature fee at the separate payer. Program-success logs require
+the asserted wrapper and SPL prefixes to have completed.
+
+**Row 428 remains OPEN; invariant statuses are unchanged.** This is bounded
+INV-008/010/024/031/064/080/081 conformance at a shared per-asset authority epoch.
+`WithdrawInsuranceAsset` has no independent stock-sequence field, and the test
+does not establish consumption of a successful withdrawal at an unchanged epoch
+or binding across independently replenished stock. Fee-created stock, policy
+updates, liabilities, native/secondary collateral, destination close/recreation,
+durable nonces and arbitrary histories remain outside this evidence. SVM rollback
+and the bundled classic SPL programs remain platform assumptions. Production and
+dependency pins are unchanged; no public-route implementation violation was found
+in these histories.
+
+Base: `c4da24a211722bcb1cd32d18781217850034210e`, the requested
+`origin/codex/astra-open-holdout-ledger-20260912` tip at worktree creation.
+Branch: `codex/astra-row428-insurance-stock-20260913`.
+Worktree: `/tmp/percolator-astra-row428-insurance-stock-20260913`.
+All SBF/host artifacts were built in its private `target`; the parent checkout
+was not edited. The default-feature wrapper was built locked/offline with
+`cargo-build-sbf 2.3.13`, platform-tools v1.52. Host rustc: 1.90.0.
+No matcher is used. SHA-256 provenance:
+
+- Wrapper `target/deploy/percolator_prog.so`: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+- `Cargo.lock`: `c9edf71dafda5e617f5b3e6f5c19cb6c8585551b2cb426b4ca8bc7b3a7e4e6a0`.
+- LiteSVM 0.1.0 bundled `spl_token-3.5.0.so`: `18264f491c7e0ad056dd36f42f8de6d1fedf9f044d1f521e714b4dc6b61594b6`.
+- LiteSVM 0.1.0 bundled `spl_associated_token_account-1.1.1.so`: `e5e7aed11ad3969eea2aa76c8b4d2e73ea25be7e6b5cce989b7710cf5452496e`.
+
+The new selector passed **1/1 in 3.21s**: eight histories, 40 exact rollbacks and
+48 successful continuations, peaking at **80,136 CU** under the existing
+300,000-CU custody bound. Success logs establish 24 rolled-back insurance payout
+CPIs across the matrix. Development corrected a missing Rust `u32` annotation
+and an initial test expectation that lazy telemetry backfills principal from
+unattached deposits; recorded principal correctly starts and remains zero here.
+Neither correction changed production or discarded a history. Both requested
+metadata selectors passed (2/2), along with formatting and all three whitespace
+checks; the HEAD whitespace check also covers the final commit. Existing unused
+support warnings and the `solana-client v1.18.26` future-incompatibility warning
+remain. No broad suite,
+matcher execution, Kani run or whole-invariant closure is claimed.
+
+Exact build and validation commands, run from this worktree:
+
+```sh
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo build-sbf --tools-version v1.52 --offline -- --locked
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::insurance_destination_epoch_retry::v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-012 interleaved revocation words (row 412, 2026-09-13)
+
+Owner: [stateful/inv_012_revocation_words.rs](stateful/inv_012_revocation_words.rs),
+mounted under `inv_012_capability_and_delegate_scope::revocation_words`.
+Exact selector:
+`v16_program_interleaved_revocation_words_bind_every_retained_prefix_and_owner_value`.
+
+This bounded generator exhausts 256 public LiteSVM histories: all 64 length-three
+words over owner regrant, participating-LP CPI, former-LP-as-taker CPI through a
+peer context of the same matcher program, and bilateral position mutation; each
+word crosses both starting transports and both position signs. Writer and consumer
+routes alternate between single and one-leg batch. Two writer assets and a third
+consumer asset share four economically active portfolios; a fifth actor pays the
+locally constructed transactions' network fees.
+
+The existing append-only `AuthorizationHistory` predicts grant sequence, enabled
+state, expiry, scope, portfolio ID, position episodes and exact positions from
+committed events. Each world first successfully uses the subject capability. Before
+each writer it signs and retains both a subject request and a peer request. Actual
+delivery distinguishes episode/sequence staleness from disabled authority, while
+the untouched peer request provides positive scope isolation. A second probe binds
+current episodes but the original grant sequence, separating automatic revocation
+from stale-position rejection. A current-grant probe and final explicit regrant
+exercise nonzero liveness on both transports; using the fresh grant cannot revive
+the original grant in the subsequent episode. Rejected writers are journal no-ops.
+
+Every trade checks complete transaction and protected Accounts. Rejections restore
+all Accounts, including matcher writes, SPL custody/supply and economic lamports;
+only the exact signature fee changes at the separate payer. Successful fills can
+change only the market, participating portfolios and selected LP matcher context,
+and must leave all configured matcher tuples in their original owner/portfolio
+scope. All five owners have distinct initial capital. At constant price 100, each
+100-lot fill charges exactly one atom per participant at the explicitly signed
+one-basis-point cap. An input-derived oracle reconstructs each owner's fees,
+capital, zero PnL, side OI, total insurance and SPL custody after every trade.
+Reverse bilateral fills close all committed exposure. Every owner then withdraws
+exactly initial capital less its own fees, leaving only the charged insurance in
+the vault and zero user capital. No insurance payout is claimed.
+
+The net-new relation is prefix-by-prefix interleaving of position writers, role
+switches and grant replacement under one authorization and value oracle. The
+existing stateful one-writer matrix and grant-only word matrix do not compose
+these events. CU `grant_writer_order` owns atomic two-writer bundles, and
+`role_switch_generation` owns a fixed asset-reuse history. This increment adds
+neither bundle rollback nor asset reuse, and does not target row 410 or the
+completed neighboring rows.
+
+**Row 412 remains OPEN; invariant statuses are unchanged.** This is bounded
+conformance, not independent discovery or whole-invariant proof. Market/asset and
+portfolio recreation, authority handoff, expiry boundaries, liquidation, Recovery,
+close/cure writers, nonconstant prices/funding, multi-leg/max shapes, longer words
+and arbitrary matcher-program substitutions remain outside this generator. It
+uses the repository's existing `V16Svm::new` account setup and public wrapper,
+matcher and withdrawal interfaces; it adds no program-owned byte mutation or
+snapshot restoration. Production, shared support and dependency pins are unchanged.
+No vulnerable-pin experiment or implementation violation is claimed.
+
+Base: `88f0c98c74a3c8ca7147b6d2a1bb7346178457a7` from the fetched requested origin
+branch. Worktree: `/tmp/percolator-row412-capability-revocation-20260913`.
+Branch: `codex/row412-capability-revocation-20260913`. The parent worktree was not
+edited. Host dependencies were copied into a private target from
+`/dev/shm/astra-capability-6d2a-target`; both SBF artifacts were rebuilt from this
+worktree using locked/offline platform-tools v1.52 and default wrapper features.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+Validation: the new exact selector passed **1/1 in 165.85s**, covering 256 worlds,
+4,488 committed fills, 1,724 stale and 960 disabled-capability rejections,
+576 unchanged retained peer fills and 1,280 owner withdrawals. Peak trade CU was
+240,386, within the existing 1,400,000-CU transaction bound. Both requested metadata
+selectors passed (2/2), as did formatting and whitespace checks. Development corrected
+a Rust moved-value error and a test CPI fee cap that did not consent to the selected
+nonzero policy; a preliminary run was stopped to add the untouched-peer control.
+These were test construction changes, not an implementation violation. Existing
+unused-support and `solana-client v1.18.26` future-incompatibility warnings remain.
+Only the new exact selector and the two metadata selectors below were run; no
+broad suite, adjacent invariant selectors or Kani execution is claimed.
+
+Exact build and verification commands, with the private environment factored out:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row412-revocation-20260913-target
+export TMPDIR=/dev/shm/row412-revocation-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/row412-revocation-20260913-target/deploy -- --locked
+CARGO_TARGET_DIR=/dev/shm/row412-revocation-20260913-matcher-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::revocation_words::v16_program_interleaved_revocation_words_bind_every_retained_prefix_and_owner_value -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /dev/shm/row412-revocation-20260913-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir /dev/shm/row412-revocation-20260913-matcher-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir /tmp/percolator-row412-capability-revocation-20260913/tests/fixtures/auth_matcher/target
+```
+
+## INV-024 earned fees beside spent-insurance recovery (row 410, 2026-09-13)
+
+Owner: [cu/inv_024_terminal_recredit_fee_partition.rs](cu/inv_024_terminal_recredit_fee_partition.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_fee_partition`.
+Exact selector: `v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_orders`.
+Primary INV-024; related INV-005/024/036/081. Branch
+`codex/row410-terminal-role-attribution-20260913`, worktree
+`/tmp/percolator-row410-terminal-role-attribution-20260913`; rebased onto
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`88f0c98c74a3c8ca7147b6d2a1bb7346178457a7`, including row 418.
+
+Twelve public LiteSVM histories cross three remaining principal amounts
+(17/73/101), both provider-fee/insurance-recovery payment orders, and operator
+versus backing-provider transaction payers. The existing public earned-fee fixture
+charges 875 atoms: 657 belong to the provider and 218 to insurance. Authenticated
+observations move the mark from 105 to 51; resolved settlement consumes 73 insurance
+atoms while leaving all provider fees payable. The two users receive exactly
+0/2,051,699 atoms. Independent integer source-rate arithmetic accounts for the
+one counterparty-funded backing atom left by rounding; it is paid to the provider
+through domain 0. No observed payout is substituted for an expected entitlement.
+
+Provider, insurer, operator, market authority, both users and the original keeper
+are seven distinct identities. Public role consent establishes the insurer before
+resolution. The terminal payer owns either the provider role or the live insurance
+operator role. Reserve instructions mark beneficiaries as nonsigners: operator-paid
+transactions have no reserve-holder signature, while provider-paid transactions
+carry the provider's signature through the fee payer. Both backing domains'
+principal and the 176 unspent insurance atoms are paid, leaving only the selected
+principal tail, the provider's 657 earned fees and historical insurance spend. Before expiry,
+neither principal nor fees can fund additional insurance. At slot 100, public slab
+cleanup expires the tail; recoverable insurance is exactly `min(tail, 73)`, regardless
+of which reserve is paid first. The provider receives its remaining fees, the
+insurer receives 17/73/73 recovered atoms, and the operator and market authority
+receive zero quote atoms. Only the 101-atom world burns a residual, exactly 28 atoms.
+
+The input-derived entitlement book checks both principal domains, fee stocks and
+the provider ledger, insurance budgets/spend, provider receivables, beneficiary
+identities, full SPL Account frames, fixed mint supply, engine/SPL conservation,
+stock census and shape after every terminal reserve step. Config and authority
+sequences remain framed. Final closure preserves paid tokens and the provider ledger,
+closes the vault, and returns exact slab/vault rent to the market authority.
+
+There are **42 exact rollback checks**: 12 premature recoveries after real fee
+payouts; 12 expiry-plus-fee prefixes followed by over-capacity insurance withdrawals;
+12 identical prefixes followed by correctly signed insurance requests from the
+other reserve/control role; and six additional requests after insurance recovery
+has committed while provider fees remain unpaid. The latter cannot recredit those
+fees even when historical insurance spend survives. Shared `land` checks every
+tracked and compiled-message Account, account presence, lazy ledger initialization,
+successful prefix logs and exact signature fees. The identical expiry instruction
+then commits, followed by valid role payouts. New selector: **1/1**, 12 closures,
+observed peak terminal bundle **378,291 CU**
+under the shared 1,200,000 limit. An initial development expectation omitted the
+source-rate rounding atom; the independent arithmetic now accounts for it. No
+implementation violation or production change was found. All program-owned
+economic state comes from public wrapper calls; mutable Account copies are only
+assertion frames and are never installed into LiteSVM.
+
+The substantive addition is simultaneous earned provider fees and actually spent
+insurance across recovery, not another fresh-reserve payout order. Existing
+`terminal_recredit_surplus` has zero earned fees; `terminal_earnings_expiry` and
+`terminal_fee_share_succession` have no spent insurance. This does not extend row
+418 token variants/custody or row 433 absent-beneficiary exit coverage.
+**Row 410 remains OPEN.** This is a bounded invariant-owned entitlement oracle,
+not an arbitrary-history generator or whole-invariant proof. Other assets/quote
+rails, multiple recredit beneficiaries, concurrent receipts, raw donations together
+with earned fees, arbitrary role/funding histories and transaction compositions
+remain open. No vulnerable-pin experiment, status promotion or other row edit.
+
+Exact verification commands (only the new selector and the two requested metadata
+selectors are run; the private target and temporary directories are cleaned):
+
+```sh
+export CARGO_TARGET_DIR=/tmp/row410-terminal-role-20260913-target
+export TMPDIR=/tmp/row410-terminal-role-20260913-tmp
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_fee_partition::v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_orders -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+rmdir "$TMPDIR"
+```
+
+Default-feature SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+
+## INV-028 historical liens and future exit resources (row 423, 2026-09-13)
+
+Owner: [cu/inv_028_exit_resource_reservation.rs](cu/inv_028_exit_resource_reservation.rs),
+mounted under `inv_028_source_domain_realizability_cap::historical_latent_capacity::exit_resource_reservation`.
+Exact selector: `v16_program_historical_liens_preserve_future_domains_and_owner_exit`.
+
+Eight public LiteSVM worlds cross both position signs, single/batch bilateral trades,
+and provider-surplus withdrawal before or after latent settlement. Both settlement
+orders are exercised, coupled to the trade route. Public trades retain 16 historical
+source claims across eight assets, totaling 3,000 atoms. Public SPL top-ups add 400
+atoms per historical domain using each existing bucket's expiry. The winner withdraws
+all senior capital, then admits 30 lots on another asset at price 100: the entire
+3,000-atom margin requirement is backed by 16 nonzero historical liens. Two favorable
+settlements, separated by a cross-zero trade, materialize both new domains and bring
+the input-derived claim total to 3,060 atoms.
+
+This adds simultaneous historical reservations, provider withdrawal boundaries,
+new-domain growth and owner-only exit to the earlier one-historical-domain lien
+probe. The earlier historical/concurrent/active-leg capacity matrices require zero
+liens. This family uses **18 of the fixed 28 supported source slots**, not maximum
+source occupancy. All economic state is built through System/SPL/ATA/matcher/wrapper
+instructions. SOL funding and Clock use existing fixtures; no program-owned bytes,
+snapshot restores, production code or engine pin are changed. The existing history
+constructor is reused unchanged; its parent module only gains the new test mount.
+
+Every suffix transaction runs the shared stock, reservation and independently
+computed source-credit-rate censuses. Additional input-derived checks reconstruct
+claims, capital, signed positions, side OI, the historical/future domain union and
+each bucket's exact funded claim plus unreturned provider contribution. Settlement
+preserves complete historical source records and the absent portfolio Account.
+Provider withdrawals leave every portfolio Account unchanged, retain live liens
+and reject one atom beyond the independently constructed surplus boundary.
+
+Four exact rollback checks run per world: a successful admission followed by the
+active-portfolio withdrawal guard (`EngineStale`); an unfunded risk increase
+(`EngineLockActive`); the provider surplus-plus-one request (`EngineLockActive`);
+and conversion after final provider withdrawals invalidate its certificate
+(`EngineStale`). Prefix success logs prove the first admission actually executed;
+the unchanged admission retries successfully. All tracked and compiled-message
+Accounts, including metadata, absence, matcher context and SPL custody, roll back
+exactly; only the payer's exact signature fee changes. Conversion likewise retries
+unchanged after one public refresh.
+
+The risk owner alone calls `RebalanceReduce`. Permissionless cranks then strictly
+decrease the active-leg/lien-debt rank in **17 calls**, within a combined 20-call bound,
+without the counterparty's signature. Released provider principal becomes withdrawable;
+both owners receive exactly **1,003,060 / 996,940** atoms, and the provider recovers all
+**6,400** contributed atoms. Both portfolio Accounts close with empty data and zero
+lamports. Public side finalization restores Normal mode; vault, capital, live claims,
+live reservations and materialized portfolio count are zero. Per-domain consumed-backing
+and provider-receivable labels equal the corresponding converted claim exactly,
+totaling 3,060 atoms; retirement of those historical labels is not claimed. SPL mint
+supply remains exactly 2,006,400 atoms throughout the suffix.
+
+**Row 423 remains OPEN.** This is finite invariant-owned conformance, not a generic
+resource/liveness generator or theorem. The 26-history/two-latent variants explored
+during development exhausted 1.4 million CU before admission succeeded, including
+after public pre-refresh; they do not establish an admitted-risk exit violation or
+a maximum-shape result. Initial iterations also corrected bucket-expiry matching,
+the active-withdraw guard, conversion recertification and closed-account decoding.
+No implementation violation was proved. Partial claim-funded admission at maximum
+occupancy, CPI, fractional reservations, fees/funding, expiry, Recovery/Resolved
+market paths, arbitrary histories and generic INV-082/089 closure remain open.
+Rows 411/415/416/417/419/424/425/426/427/433 receive no new claims or edits.
+
+Validation uses branch `codex/row423-exit-resource-reservation-20260912` and worktree
+`/home/anatoly/percolator-prog-row423-exit-resource-reservation-20260912`, rebased onto
+`origin/codex/astra-open-holdout-ledger-20260912` at `a47abd05`, including `3496acf0`.
+The default-feature wrapper was rebuilt after the row427 production change using
+platform-tools v1.52; row411 changes only tests/documentation. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The privately rebuilt auth matcher has SHA-256
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The final behavioral run passes **8 worlds, 576 suffix calls, 32 exact rollbacks**,
+with peak transaction **1,187,334 CU** and maximum packet **758 bytes**.
+Only the new behavioral selector and the two requested metadata selectors are run.
+
+Exact verification commands from this worktree (build/test logs reside in the private
+TMPDIR; target directories are cleaned after verification):
+
+```bash
+export CARGO_TARGET_DIR=/tmp/row423-exit-reservation-20260912-target
+export TMPDIR=/tmp/row423-exit-reservation-20260912-tmp
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+# Run this matcher build from tests/fixtures/auth_matcher:
+env CARGO_TARGET_DIR=/tmp/row423-exit-reservation-20260912-matcher-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /home/anatoly/percolator-prog-row423-exit-resource-reservation-20260912/tests/fixtures/auth_matcher/target/deploy -- --locked
+# Return to the worktree root:
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+git diff --exit-code 3496acf0 HEAD -- src Cargo.toml Cargo.lock
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::exit_resource_reservation::v16_program_historical_liens_preserve_future_domains_and_owner_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+cargo clean --target-dir /tmp/row423-exit-reservation-20260912-matcher-target
+cargo clean --target-dir tests/fixtures/auth_matcher/target
+```
+
+## INV-070 shared terminal custody incarnations (row 418, 2026-09-13)
+
+Owner: [cu/inv_070_shared_custody_terminal_history.rs](cu/inv_070_shared_custody_terminal_history.rs),
+mounted under INV-070 as `shared_custody_terminal_history`. Exact selector:
+`inv_070_zero_unattributed_terminal_residue_and_close_slab::shared_custody_terminal_history::v16_program_generated_shared_custody_recreation_preserves_terminal_owner_value`.
+
+Four deterministic XorShift seeds (`418`, `418070`, `418025`, `418081`) generate
+unequal capital, integral position sizes, mark changes, external surplus and
+sibling claim order. Two owners each hold two, three or four independent
+portfolios, sharing one payout ATA per owner. Seed parity ensures both winning
+sides occur. Each history runs on fixed-supply classic SPL with 0/6/9 decimals
+and native wSOL, comparing accumulated custody with custody disposal/recreation
+between sibling payouts: **32 public LiteSVM worlds**.
+
+The new relation is cumulative owner entitlement across **already-paid user
+custody incarnations while sibling claims remain pending**. Classic SPL payouts
+move to another token account owned by the same user before the payout ATA
+closes; wSOL payouts unwrap directly to that user's wallet. A keeper recreates
+the same ATA address for the next sibling claim. Both schedules must deliver
+the independently computed sum of each portfolio's principal plus/minus
+`lots * mark_change`, with rent accounted separately. `CloseResolved` and
+`PermissionlessCrank` alternate and exchange roles between schedules. All payout
+transactions require only the external payer's signature; token disposal is
+owner-authorized, and slab cleanup is administrator-authorized.
+
+This adds a shared-destination, multiple-portfolio terminal composition beyond
+INV-070's single-claim prefunded/frozen destination repairs and native PnL sync
+retry. Row 415 owns retained live withdrawals and replenishment; row 433 owns
+reserve-custody recreation. This family has no reserve claims, retained trade
+policy, capacity-admission pressure, late receipt stock release, persisted scan
+prefix or funding-carry history. It adds no coverage claim to rows
+411/413/415/416/417/419/423/424/425/426/427/433.
+
+The oracle checks every committed terminal step and every rejection. It tracks
+detachment separately from payment: earlier winners detach without payment,
+then receive their exact claims after the remaining cohort is ready. The
+generated schedule needs at most `3 * pairs - 1` successful terminal calls
+(eleven at the largest sampled cohort), without an unbounded retry loop.
+Independent remaining entitlements reconcile engine custody, both OI sides,
+per-owner accumulated/redeemed value, token supply, native backing and rent.
+Full stock/reservation censuses and market/portfolio shape validation run too.
+Whole token Accounts are compared with expected copies; successful steps frame
+all other Accounts. Portfolio rent remains in the market slab until final
+reclaim. Every world deletes all portfolios, closes the canonical vault and
+retains exactly tombstone rent; only the input external surplus reaches the
+administrator's token destination. No booked residue is burned in this family.
+
+Evidence totals: **192 exact payments, 64 detach-only steps, 128 user custody
+closes, 64 committed ATA recreations, 576 committed terminal/disposal steps and
+608 exact Account rollbacks**. The failures include 32 premature slab closes,
+128 completed-claim replays after successful ATA-creation prefixes, 256 aborted
+detach/payment continuations and 192 aborted portfolio-deletion continuations,
+including all 32 final slab closes. Logs verify 480 successful wrapper calls
+before failing suffixes. Complete transaction/fixture Accounts, including
+created/deleted custody and the mint, roll back; only the exact payer signature
+fee is charged. The unchanged instruction prefixes then commit with fresh
+blockhashes. All transactions submitted by the terminal step runner fit 1,232
+bytes and enforce 500,000 CU; the resolution helper's measured CU is bounded too.
+
+**Row 418 remains OPEN.** This is bounded generated conformance, not an arbitrary
+history or all-token-variant theorem. Native booked-residue retirement,
+nonzero backing/insurance/fees, fractional claims, Recovery, partial receipt
+top-ups, dual quote, frozen/delegated custody composition, absent-owner token
+disposal, unsynced donations, longer histories and maximum market shapes remain
+outside this increment. No implementation violation was found; production code
+and invariant verdicts are unchanged. The existing native-mint genesis fixture
+is reused; all market, portfolio and custody creation and subsequent transitions
+use public System/SPL/ATA/wrapper instructions, with no program-owned byte edits.
+
+Validation worktree: `/tmp/percolator-row418-terminal-token-variant-20260913`;
+branch: `codex/row418-terminal-token-variant-20260913`; originally fetched base
+`a47abd05`, then rebased onto `4e5bffd3` from
+`origin/codex/astra-open-holdout-ledger-20260912` before final validation/commit.
+The incoming row423 notes are preserved verbatim. Default-feature wrapper and
+authenticated matcher SBFs were rebuilt here with platform-tools v1.52; the
+rebase changes only invariant tests/documentation and preserves all production,
+dependency and shared fixture inputs to those builds.
+SHA-256: wrapper `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The rebased exact selector passed in **19.92s**, peak **224,233 CU**; both requested
+metadata selectors passed (2/2). The earlier pre-rebase run peaked at 226,554 CU;
+the 500,000-CU guard accommodates fixture address variation. Development
+corrected two test type annotations and the oracle's initial assumptions about
+one-call winner payment and immediate portfolio-rent refunds; these were test
+errors, not implementation violations. An earlier passing run prompted explicit
+coverage of both winning sides. Only this new selector and the two metadata
+selectors below are run; no adjacent or broad test suite is used.
+
+Exact commands from this worktree (all build and temporary paths are private):
+
+```sh
+export CARGO_TARGET_DIR=/tmp/row418-terminal-token-target
+export TMPDIR=/tmp/row418-terminal-token-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/row418-terminal-token-target/deploy -- --locked
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/percolator-row418-terminal-token-variant-20260913/tests/fixtures/auth_matcher/target/deploy -- --locked
+sha256sum /tmp/row418-terminal-token-target/deploy/percolator_prog.so tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+git diff --exit-code a47abd05 HEAD -- src Cargo.toml Cargo.lock tests/fixtures tests/v16_cu.rs tests/support
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::shared_custody_terminal_history::v16_program_generated_shared_custody_recreation_preserves_terminal_owner_value -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /tmp/row418-terminal-token-target
+cargo clean --target-dir /tmp/percolator-row418-terminal-token-variant-20260913/tests/fixtures/auth_matcher/target
+cargo clean --target-dir /tmp/row418-terminal-token-tmp
+```
+
+## INV-014 retained policy and route budgets (row 411, 2026-09-13)
+
+Owner: [cu/inv_014_retained_policy_route_budgets.rs](cu/inv_014_retained_policy_route_budgets.rs).
+Exact selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_policy_route_budgets::v16_retained_policy_route_budgets_bound_each_committed_prefix`.
+The parent module supplies its public System/SPL/ATA funding, signing and complete
+Account rollback helpers, with an optional asset count preserving its old default.
+
+The bounded generator crosses four transports (single/batch, CPI/bilateral), two
+position signs, both suffix asset orders and quantities `POS_SCALE + 1` and
+`100 * POS_SCALE + 1`: **32 worlds, 80 committed prefixes, 96 executed legs and
+120 exact rollbacks**. Three unequal signed legs share the same two owners. The
+first leg permits 37 bps; the remaining opposite-direction legs permit 99 bps.
+All transactions, future position epochs, funded deposit sequences, rejection
+alternatives and consumed-consent checks are signed before the first policy write
+or fill. Accepted transactions retain byte-identical messages and signatures.
+The policy history is `19 -> 101 -> 37 -> 101 -> 99`, with the first fill landing
+at 37 and the suffix at 99. Original first-fill consent is simulated at 19.
+
+The new composition is an already charged, differently priced prefix followed
+by retained multi-asset fee **and** slippage bounds across policy detours. The
+existing `retained_partial_fee_routes` matrix compares one executed quantity and
+fee rate. INV-011's `v16_program_funded_signed_leg_prefixes_preserve_original_aggregate_limits`
+checks aggregate prefixes at fixed policy. Neither supplies this combined
+retained-policy, heterogeneous-budget and multi-leg route relation.
+
+The independent oracle uses integer buy-quote ceilings, sell-quote floors,
+per-leg adverse-slippage ceilings and two-stage base-fee ceilings. CPI prints
+come from matcher context/return data; bilateral prices are explicit signed
+instruction fields. The two-leg slippage sum exceeds rounding the combined
+numerator once by exactly one atom, in both asset orders. At every committed
+prefix and policy step, assertions reconcile cumulative signed consumption,
+each owner's capital and zero PnL, all three positions and both OI sides, exact
+per-asset/per-side insurance fee attribution, total capital, fixed mint supply,
+source ATAs and vault custody. Full stock and reservation censuses run too.
+Instruction-local fees are bounded separately from previously paid fees; the
+cumulative bound is the sum of the separately signed authorizations, not a new
+protocol-level multi-transaction allowance. Every executed leg's quote equals
+its signed boundary, including the sell proceeds floor.
+
+The 120 failures comprise 64 above-consent policy deliveries, eight batch atom
+caps short by one, sixteen CPI slippage/price bounds short by one atom/tick, and
+32 consumed-position-epoch submissions. All 88 economic-bound failures execute
+and roll back a real SPL deposit prefix (43 or 70 atoms). Batch cap failures
+also complete matcher CPI; batch slippage and fee caps are each tested with the
+other bound sufficient. The remaining 32 replay checks submit the consumed trade
+without an exhausted deposit source, proving the position binding supplies the
+rejection. Complete Accounts, matcher state and sequence counters roll back,
+with only the exact network-signature charge allowed on the external payer.
+Successful routes preserve passive Accounts and allow data-only writes to their
+declared participants. Raw economic endpoints agree across routes and asset
+orders; route-specific position and matcher-request counts are checked separately.
+
+**Row 411 remains OPEN.** This covers Live, fully funded, fixed manual marks,
+constant authenticated matcher spreads and base fees. Print slippage is checked
+as signed execution consent; it is not represented as PnL under this manual-mark
+fixture. Dynamic/mark/backing fees, partial fills, underfunded collection,
+recipient changes, authority succession, terminal settlement, arbitrary history
+lengths and changing transport within a history remain outside this increment.
+Rows 415/416/417/419/423/424/425/426/427/433 are unchanged. No implementation
+violation was found and production code is unchanged.
+
+Validation worktree: `/tmp/percolator-row411-policy-routes-20260912`; branch:
+`codex/row411-retained-trade-policy-routes-20260912`; fetched base `3496acf0` from
+`origin/codex/astra-open-holdout-ledger-20260912`. Both default-feature wrapper
+and authenticated matcher SBFs were built from this checkout. SHA-256:
+wrapper `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The new selector passed with peak CU **330,609**. Its first run stopped at a
+test-only matcher configuration opcode error; correcting the fixture call made
+the selector pass without a production change. Only the new exact selector and
+the two required metadata selectors are used in this increment.
+
+Exact commands (from this worktree; the fixture output is also private):
+
+```sh
+export CARGO_TARGET_DIR=/tmp/row411-policy-routes-target
+export TMPDIR=/tmp/row411-policy-routes-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/row411-policy-routes-target/deploy -- --locked
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/percolator-row411-policy-routes-20260912/tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_policy_route_budgets::v16_retained_policy_route_budgets_bound_each_committed_prefix -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /tmp/row411-policy-routes-target
+cargo clean --target-dir /tmp/percolator-row411-policy-routes-20260912/tests/fixtures/auth_matcher/target
+```
+
+## INV-058 generated existing-pair side OI (row 427, 2026-09-12)
+
+Owner: [cu/inv_058_generated_side_oi_composition.rs](cu/inv_058_generated_side_oi_composition.rs),
+mounted under
+`inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset::generated_side_oi_composition`.
+Exact selector:
+`v16_program_generated_existing_pair_side_oi_caps_compose_across_split_merge_routes`.
+
+Four deterministic XorShift seeds (`427`, `427058`, `427052`, `427080`) generate
+unequal initial allocations and six-event histories across all six directed
+source/recipient choices among three disjoint owner pairs. Both position signs
+and two equivalent execution schedules give sixteen public LiteSVM worlds. Each
+pair holds both assets throughout the generated history; releases only partially
+reduce live legs, and refills increase existing legs. Random quantities and
+quantities adjacent to a quote-notional atom are partitioned into two or three
+unequal fills. The merged schedule uses bilateral batches; the partitioned
+schedule alternates all four single/batch CPI/bilateral transports and reverses
+asset order. All sixteen release/refill route combinations are exercised.
+
+The existing two-asset `World` fixture constructs the market, six portfolios,
+matcher contexts, SPL mint, ATAs and deposits with System/SPL/ATA/wrapper
+instructions. Its fixed 120,000,000,000-atom supply has no remaining mint authority.
+There are no program-owned account-byte writes. Its independent input ledger
+tracks quantities, position episodes and capital. After every committed fill,
+including each separately submitted single-asset fill, the raw portfolio census
+reconciles both side-OI counters and stored counts, checks account-position and
+ceil-notional limits and health certificates, and reconciles capital, insurance,
+mint supply and vault custody. Grant renewals also run the census. Every successful
+fill frames complete Accounts outside its participants and matcher context.
+
+The histories repeatedly reach cap-minus-one and the exact cap while all six
+accounts stay strictly below their individual position ceilings. Both the current
+recipient and the third pair face shared admission checks. There are 480 exact
+Account rollbacks, including successful wrapper prefixes and completed matcher
+calls, with only the payer's exact signature fee deducted. Local trade-size,
+account-position, notional and collateral checks establish that these attempts
+isolate aggregate admission. At 104 paired checkpoints the independently checked
+raw owner quantities, capital/PnL, certified risk, side OI/counts and market stock
+agree across merged and partitioned schedules. Public closes leave both books
+with zero OI and no stored positions.
+
+**An actual implementation violation was found and repaired.** The first exact
+selector run failed on the original wrapper because an inadmissible aggregate
+resize committed. The unchanged generic probe passes with a 23-line wrapper fix:
+the shared single and batch execution paths check each affected asset's resulting
+long and short OI against `MAX_OI_SIDE_Q`, returning `EngineInvalidLeg` on excess.
+This supplies the missing aggregate postcondition for existing-leg resizes and
+lets Solana roll back the entire transaction. The engine dependency is unchanged.
+No finding-specific replay or separate exploit selector was added.
+
+**Row 427 remains OPEN.** This is bounded generated conformance for fixed marks,
+unit ADL, zero PnL/funding/fees, two assets and three solvent pairs. Elapsed rate
+and maintenance limits, nonunit ADL, nonzero PnL/funding/fees combined with these
+resizes, mixed lifecycle/Recovery states, maximum portfolio shapes and arbitrary
+histories remain open. Historical row notes are retained; their older claims
+describe their respective narrower probes. No row426 or other row's disposition
+is changed. Validation intentionally runs only the new exact behavioral selector
+and the two requested metadata selectors, not the broader production test suite.
+
+Branch `codex/row427-side-oi-cap-conformance-20260912`, worktree
+`/tmp/percolator-row427-side-oi-cap-conformance-20260912`, initially based on
+`c94b77a9` and fetched/rebased onto `5f3e33b9` (including row426) before final
+validation. The first pre-fix behavioral run failed; the fixed run passed all
+sixteen worlds, with final rebased peak rejection/success CU 763,263/285,908 (transaction limit
+1,400,000). The behavioral selector, both metadata selectors and all formatting/
+diff checks pass on the rebased tree. Default-feature SBF was built locked/offline
+with platform-tools v1.52 in private paths. SHA-256: original wrapper
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+repaired wrapper `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Exact verification commands (from the worktree root unless noted):
+
+```bash
+git fetch origin codex/astra-open-holdout-ledger-20260912
+git rebase --autostash origin/codex/astra-open-holdout-ledger-20260912
+export CARGO_TARGET_DIR=/tmp/row427-side-oi-cap-target
+export TMPDIR=/tmp/row427-side-oi-cap-tmp
+export PERCOLATOR_FUZZ_SBF=/tmp/row427-side-oi-cap-target/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/row427-side-oi-cap-target/deploy -- --locked
+# Matcher build command, run from tests/fixtures/auth_matcher:
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/percolator-row427-side-oi-cap-conformance-20260912/tests/fixtures/auth_matcher/target/deploy -- --locked
+# Return to the worktree root for all remaining commands.
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_cu inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset::generated_side_oi_composition::v16_program_generated_existing_pair_side_oi_caps_compose_across_split_merge_routes -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /tmp/row427-side-oi-cap-target
+cargo clean --target-dir /tmp/percolator-row427-side-oi-cap-conformance-20260912/tests/fixtures/auth_matcher/target
+cargo clean --target-dir /tmp/row427-side-oi-cap-tmp
+```
+
+## INV-020 renewed liquidation certificates (row 426, 2026-09-12)
+
+Owner: [cu/inv_020_renewed_liquidation.rs](cu/inv_020_renewed_liquidation.rs),
+mounted under `inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::renewed_liquidation`.
+Exact selector: `v16_program_renewed_observations_preserve_repeated_liquidation_certificates`.
+
+Eight public LiteSVM histories cross forward/reverse Hybrid-Pyth/AuthMark observations,
+caller slot hints `0`/`u64::MAX`, and uninterrupted/interrupted execution. Each history
+renews the same two-leg short twice, advances authenticated Clock by 64 slots per
+episode, completes two bounded market prefixes, recertifies and liquidates. The
+first episode takes one liquidation action; the second takes two, including full
+retirement of the first leg. Public counterparty refresh follows each episode, and
+the keeper withdraws its initial deposit plus all three earned rewards through SPL.
+System/SPL/ATA/wrapper instructions construct all economic state, with mint authority
+revoked at a fixed 10,221,000-atom supply. Only signer SOL, Clock and external Pyth
+reports use existing harness fixtures. There is no program-account byte injection,
+snapshot restoration, production change or engine-pin change.
+
+This increment adds repeated renewal of a previously liquidated target, the next
+episode's multi-action liquidation, and exact withdrawal of accumulated rewards.
+The existing staged-action/interrupted-fee probes use one liquidation episode;
+recipient-to-target coverage changes the target. This does not add fractional K/F
+route coverage or alter row425 or the notes for rows 415/416/417/419/424/433.
+
+The oracle checks every current certificate after each successful tested crank,
+opening trade and final withdrawal against detached full refresh. That existing
+oracle also compares full refresh with the independent raw-state health model,
+requires the cached lanes to be no more favorable, and frames non-cache bytes using
+its documented normalizations. Partial market work must leave every portfolio
+Account unchanged and cannot produce a current target certificate. Completed
+refresh and every liquidation must have a current target certificate; each action
+strictly decreases its independently checked deficit within a four-action bound.
+Both authenticated asset slots/prices and zero funding are checked at the relevant
+prefixes. All worlds compare the complete asset states, certificate lanes/epochs,
+owner capital/PnL/wallet values and aggregate stocks at every scheduled checkpoint.
+Stock and reservation censuses run alongside the certificate oracle. Penalties,
+per-action half-share rewards, insurance, unchanged custody before withdrawal and
+the final exact keeper payment reconcile across the complete sequence.
+
+The interrupted words reject previous-publication reports (`OracleStale`), duplicate
+hints (`InvalidInstruction`), and empty/Hybrid-only observations while AuthMark work
+remains (`EngineNonProgress`). Fresh blockhashes prevent duplicate-cache shortcuts.
+Before every liquidation they also execute a successful liquidation instruction
+followed by a stale-report suffix in one transaction: the suffix must fail at the
+specified index, and program-success logs must prove the prefix ran. All 44 rejected
+transactions restore complete fixture and compiled-message Accounts, including
+metadata, absence and lamports; the separate payer loses exactly the signature fee.
+After full recertification, empty-observation liquidation agrees with the complete
+observation control at the same authenticated slot.
+
+**Row 426 remains OPEN.** This is a bounded conformance product, not a generic
+observation-completeness generator or proof. Funding, maintenance fees, active keeper
+legs, omitted Hybrid evidence, composite/provider changes, arbitrary observation
+orders between steps, longer histories and maximum shapes remain outside this probe.
+Development corrected the assumption that one liquidation always restores health.
+A trial third renewal after full retirement of the first leg returned
+`EngineLockActive` during the final refresh, including with public peer settlement;
+that continuation remains unresolved and is excluded from the passing two-episode
+claim. No implementation violation was proved and no liveness claim is made for it.
+
+Validation uses branch `codex/row426-authenticated-refresh-coverage-20260912` and
+worktree `/tmp/percolator-row426-authenticated-refresh-20260912`, fetched and rebased
+onto `origin/codex/astra-open-holdout-ledger-20260912` at `c94b77a9` before final
+validation, including row425. The default-feature wrapper was freshly built from
+unchanged production sources with platform-tools v1.52; SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+No matcher is needed. The new selector passes: **8 worlds, 16 renewal episodes,
+24 liquidation actions, 44 exact rollbacks and 112 full-refresh comparisons**;
+peak transaction CU **415,681**. Only this new behavioral selector and the two
+requested metadata selectors are run; no broad suite is run.
+
+Exact verification commands, from this worktree (the initial host prebuild used
+the same new selector with `--no-run`):
+
+```bash
+export CARGO_TARGET_DIR=/tmp/row426-authenticated-refresh-20260912-target
+export TMPDIR=/tmp/row426-authenticated-refresh-20260912-tmp
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::renewed_liquidation::v16_program_renewed_observations_preserve_repeated_liquidation_certificates -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+```
+
+## INV-045 fractional owner settlement cadence (row 425, 2026-09-13)
+
+Owner: [cu/inv_045_generated_fractional_routes.rs](cu/inv_045_generated_fractional_routes.rs).
+One new exact selector:
+`inv_045_no_free_mark_movement::public_carry_order::generated_fractional_routes::v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjusted_entitlement`.
+
+Four public LiteSVM/SBF histories cross both AuthMark premium directions with
+deferred and eager fractional-owner settlement. All worlds have identical market
+cranks at slots 1 through 12 and identical bilateral two-asset reductions at
+slots 4, 8 and 12. The eager variant additionally settles the two fractional
+owners at slots 2, 6 and 10. Integral passive owners keep the same schedule.
+System/SPL/ATA/wrapper instructions construct every economic account; mint
+authority is revoked at exactly 1,000,066 atoms. Only program loading, signer
+funding, Clock and blockhashes are harness inputs; program-owned bytes are never
+patched.
+
+The existing independent signed-numerator ledger derives cap carry, K/F indices,
+owner checkpoints, separate K/F floors, rational entitlement and gross funding
+flows from public input anchors, rates, quantities and elapsed slots. Every
+public prefix checks that ledger against owner value, snapshots, OI, custody,
+fixed supply and capital/PnL totals. Absent portfolios remain complete-Account
+equal. Extra owner cranks preserve complete oracle profiles. Both schedules end
+with identical market accrual and carries `[8800, 6000]`.
+
+The new relation compares **different fractional-owner settlement frontiers**:
+each owner's payout difference must equal its additional K/F rounding residue,
+and each inserted frontier can cost at most one atom per asset and K/F lane.
+The unchanged integral owners must receive identical payouts. In both directions,
+the fractional owners receive respectively one and two fewer atoms under eager
+settlement, exactly matching the increase from six to nine terminal custody
+residue atoms. Rational owner entitlement is identical. Sixteen resolved SPL
+payouts reconcile to the ledger; no capital, positive PnL, insurance, recoverable
+backing lien, fresh backing or provider earnings remains.
+
+Eight account-crank suffix failures attempt real fractional settlement at slots
+3/7, and twelve trade suffix failures precede the successful reductions. All
+twenty roll back complete tracked and compiled Accounts, including metadata and
+custody, apart from the independently calculated payer signature fee. Wrapper
+success logs establish that each economic prefix ran. The later scheduled
+settlement and identical trade-instruction retries still match the input ledger.
+
+Novelty: the existing generated fractional-route selector explicitly preserves
+fractional-owner settlement frontiers, while INV-052's funding-cadence controls
+use integral positions. This selector checks exact owner-local conservative
+differences and custody residue when those fractional frontiers change. Existing
+helper implementations and selectors are unchanged; one new selector is added.
+
+**Row 425 remains OPEN; invariant dispositions are unchanged.** This is a finite
+two-asset, fixed-target, zero-fee, unit-ADL, solvent bilateral family. Two-slot
+settlements assert consistent per-actor/per-asset signs, keeping consumption of
+earlier positive source claims outside the K/F floor oracle. A preliminary
+one-slot candidate mixed that additional source-credit rounding into the oracle
+and was dropped. Arbitrary cadence, source-credit haircuts, target/checkpoint
+replacement, CPI, fees/ADL and other oracle modes remain outside this increment.
+No production bug or generic closure is claimed.
+
+Worktree: `/home/anatoly/percolator-astra-row425-carry-interleaving-20260913`;
+branch: `codex/astra-row425-carry-interleaving-20260913`; rebased onto supervisor
+`e9a2133e`. Default-feature wrapper SBF was rebuilt locked/offline with
+platform-tools v1.52 in a private target copied from an existing dependency cache.
+Production source and dependency pins are identical before/after the rebase.
+Engine: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact selector passes 1/1; peak success/rejection CU is 423,442/423,654,
+below 1,400,000. Validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row425-cadence-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::generated_fractional_routes::v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjusted_entitlement -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-045 generated fractional K/F routes (row 425, 2026-09-12)
+
+Owner: [cu/inv_045_generated_fractional_routes.rs](cu/inv_045_generated_fractional_routes.rs),
+mounted under `inv_045_no_free_mark_movement::public_carry_order::generated_fractional_routes`.
+Exact selector:
+`v16_program_generated_fractional_kf_routes_preserve_carry_owner_value_and_residue`.
+
+Four deterministic XorShift seeds (`425`, `425010`, `425038`, `425052`) generate
+six-event histories with 2--4-slot intervals, unequal 1/8--3/8-lot reductions,
+and optional owner settlement before each fill. Both opposite AuthMark directions
+run as an equivalent pair: grouped market accrual plus whole bilateral batches,
+and one-slot market accrual plus half-sized fills alternating all four public
+single/batch CPI/bilateral routes. The latter reverses asset and owner order and
+inserts account cranks between fill halves. Sixteen public LiteSVM worlds start
+with two portfolios holding fractional legs, two holding integral legs, four
+unequal deposits, and a fixed 1,000,066-atom SPL supply. System/SPL/ATA/wrapper
+instructions construct economic state; no program-owned account bytes are patched.
+
+The local ledger derives price carry from the fixed input anchor and elapsed time,
+funding from the bounded premium and one-slot signed floor, and owner value from
+signed input quantities. It keeps independent account checkpoints, separate K/F
+floor residues, exact rational entitlement and four gross funding counters per
+owner. Every accrual, grant renewal and fill checks committed and latent owner
+value, decoded K/F snapshots, matched OI, carry/mark/funding provenance, capital/PnL
+totals, mint supply and custody. Trades and renewals preserve complete oracle
+profiles; absent portfolios remain complete-Account equal. No deployed arithmetic
+helper or decoded index supplies an expected value.
+
+This adds repeated price movements with simultaneous fractional K and F settlement
+to the earlier one-move/zero-funding fractional test and integral funding-reversal
+test. The paired routes preserve the same fractional-owner settlement frontiers;
+only the integral market-crank owner changes cadence. Thus the comparison does
+not assume arbitrary account-settlement fragmentation is economically identical.
+Fifty-four settlement steps distinguish separate K/F floors from flooring their
+sum. The independent owner ledger and each owner's K/F residue and gross funding
+counters agree between routes, as do all four final SPL payouts.
+
+Each event also executes a valid economic prefix followed by an invalid suffix:
+96 full Account rollbacks, including matcher context, absence and metadata, with
+only the exact payer signature fee deducted. Prefix-success logs establish that
+the economic instruction ran. Non-progress crank/close rejections retain the
+existing helpers' exact writable-economic-Account rollback checks. Signed closes
+and later resolved settlement pay 64 exact owner entitlements and leave only the
+independently computed 10--14 residue atoms. No recoverable backing lien, fresh
+backing, provider earnings or insurance remains. The shared payout helper now
+asserts the actual authenticated resolution slot; the shared public constructor
+accepts an accrual limit and matching minimum funding lifetime (both four here).
+
+**Row 425 remains OPEN.** This is a bounded generator/oracle, not coverage of all
+economic routes: fixed AuthMark targets, rate cap 10,000, unit ADL, zero fees,
+solvent reductions and two assets deliberately exclude target replacement,
+pending funding checkpoints, trade-driven mark discovery, nonzero fees/ADL,
+other oracle/quote modes, bankruptcy/Recovery and arbitrary settlement cadence.
+No production change or implementation violation is established. Initial probe
+iterations corrected fixture parameters (one-slot accrual and an inadmissible
+funding cap); those were harness setup failures, not implementation findings.
+
+Branch `codex/row425-fractional-carry-routes-20260912`, worktree
+`/tmp/percolator-row425-fractional-routes-20260912`, initially based on `fd425093`
+and fetched/rebased onto `5e4d80eb` including row424 before final validation.
+Existing row notes and dispositions are preserved. Default-feature wrapper and
+authenticated matcher SBF were built locked/offline with platform-tools v1.52
+in private paths. SHA-256: wrapper
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Measured successful/rejected prefix peaks after rebase: 469,587/469,799 CU
+(limit 1,400,000).
+Only the new behavioral selector and the two requested metadata selectors are run.
+Exact verification commands (from the worktree root unless noted):
+
+```bash
+export CARGO_TARGET_DIR=/tmp/row425-fractional-routes-target
+export TMPDIR=/tmp/row425-fractional-routes-tmp
+export PERCOLATOR_FUZZ_SBF=/tmp/row425-fractional-routes-target/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/row425-fractional-routes-target/deploy -- --locked
+# Matcher build command, run from tests/fixtures/auth_matcher:
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/percolator-row425-fractional-routes-20260912/tests/fixtures/auth_matcher/target/deploy -- --locked
+# Return to the worktree root for all remaining commands.
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::generated_fractional_routes::v16_program_generated_fractional_kf_routes_preserve_carry_owner_value_and_residue -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /tmp/row425-fractional-routes-target
+cargo clean --target-dir /tmp/percolator-row425-fractional-routes-20260912/tests/fixtures/auth_matcher/target
+cargo clean --target-dir /tmp/row425-fractional-routes-tmp
+```
+
+## INV-039 insured pending debt through resolution (row 419, 2026-09-12)
+
+Owner: [cu/inv_039_pending_loss_insured_resolution.rs](cu/inv_039_pending_loss_insured_resolution.rs),
+mounted under `inv_039_pending_loss_obligation_durability::close_reopen::two_domain_resolution::insured_resolution`.
+Exact selector: `v16_program_insured_pending_domains_preserve_exact_debt_through_resolution_orders`.
+
+The bounded input product crosses two insurance allocations, mirrored sides, either
+first debtor, first booking in Live or Resolved, and both claimant/deletion orders:
+32 public LiteSVM histories. Two matched reductions create 20,000- and 30,000-atom
+bankruptcy residuals and distinct zero-basis obligations. A bystander's public
+withdrawal, SPL transfer and two `TopUpInsuranceDomain` calls fund the original
+claimant domains after the residuals exist. Its 20,001-atom initial deposit and all
+other economic state are constructed with System, SPL, ATA and wrapper instructions;
+the test never writes program-owned account bytes. Supply stays fixed at 950,001.
+The shared fixture accepts explicit deposit inputs and checks the complete portfolio
+census after each opening, accrual and matched reduction.
+
+An independent book derives the partition and owner entitlement from deposits,
+price movements, positions and insurance inputs. For each domain it checks the full
+close ledger, including zero support/drift/explicit-loss credits, and requires
+`insurance_spent + b_loss_booked + residual_remaining == original residual`.
+Funding cannot touch either debtor or holder. Booking spends exactly that domain's
+insurance and records only the remaining B loss; the holder retains its old weight
+until its own debit is applied. Releasing the first domain preserves the other
+domain's unbooked debt, holder bytes, insurance allocation and pending census.
+
+| Insurance Inputs | B Losses | Exact Payouts: Holder 0, Holder 2, Donor |
+| --- | --- | --- |
+| 7,500 / 6,000 | 12,500 / 24,000 | 387,500 / 556,000 / 6,501 |
+| 12,000 / 6,000 | 8,000 / 24,000 | 392,000 / 556,000 / 2,001 |
+
+Both debtors receive zero. At every checked prefix, capital, PnL, remaining receipt
+face and wallet value reconcile to the original owner's entitlement, with no payout
+before debt booking and the required holder settlement. The full census checks
+matched OI, retained loss weights, pending/stored counts, ADL factors, capital/PnL
+aggregates, custody and mint supply. Premature `ClosePortfolio` and explicit
+`ClaimResolvedPayoutTopup` calls reject; valid live booking, resolved booking/debit
+and payment prefixes followed by an invalid suffix roll back completely. Rejections
+compare complete fixture/compiled Accounts, including metadata, absence and lamports,
+with exactly the signature fee charged to the separate payer. Prefix-success logs
+and fresh blockhashes prevent an early failure or duplicate cache hit from passing.
+The fixed continuation reconciles all five owners, rejects repeated terminal closes,
+empties vault/capital/PnL and OI/pending-weight aggregates, and deletes every portfolio with
+exact count decrement and unchanged foreign Accounts.
+
+This adds insured residual/B composition across resolution; existing two-domain
+bankruptcy coverage has zero insurance, while INV-039 terminal-fee coverage does
+not spend its insurance budgets. It adds no row417 receipt-history or retained-intent
+generator. Row415/416/417/433 evidence and dispositions are preserved.
+
+**Row 419 remains OPEN.** These are finite integral histories, not a general
+pending-obligation generator/oracle or a status-changing proof. The selected source
+credit ratios are exactly representable (24/25 or 15/16, and 125/128). Initial
+small-budget samples exposed a one-atom terminal accounting difference outside the
+simple exact-rate oracle; no implementation violation was established from it.
+Fractional source conversion/terminal rounding, arbitrary insurance amounts,
+overfunding, backing, ADL, fees/funding, close drift/expiry, restarts, maximum shape
+and arbitrary histories remain open. No production code, engine pin or invariant
+status was changed; INV-066/067/076/086 are not newly discharged.
+
+Worktree: `/home/anatoly/percolator-prog-row419-conformance-20260912`; branch:
+`codex/row419-pending-obligation-resolution-20260912`. Before final validation it
+was fetched and rebased onto `origin/codex/astra-open-holdout-ledger-20260912` at
+`350df938`, including the new row417 notes. The parent worktree was not edited.
+The private host cache was copied from an existing target; the default-feature
+wrapper SBF was rebuilt locked/offline with platform-tools v1.52 and the unchanged
+engine pin. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+
+The new selector passes: 32 histories, 624 complete rollback checks, 160 exact
+owner payout checks (96 nonzero destinations) and 160 portfolio deletions; peak
+observed CU 329,085. Both requested metadata selectors and formatting pass.
+Required Git whitespace checks and private-target cleanup commands are included below.
+Only this new behavioral selector and the two requested metadata selectors are run.
+Exact verification commands from this worktree:
+
+```bash
+export CARGO_TARGET_DIR=/tmp/row419-pending-resolution-20260912-target
+export TMPDIR=/tmp/row419-pending-resolution-20260912-tmp
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::close_reopen::two_domain_resolution::insured_resolution::v16_program_insured_pending_domains_preserve_exact_debt_through_resolution_orders -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+cargo clean --target-dir "$TMPDIR"
+```
+
+## INV-070 generated source actionability and persisted prefixes (row 424, 2026-09-12)
+
+Owner: [cu/inv_070_generated_prefix_actionability.rs](cu/inv_070_generated_prefix_actionability.rs),
+mounted as `inv_070_zero_unattributed_terminal_residue_and_close_slab::generated_prefix_actionability`.
+Exact selector:
+`v16_program_generated_scans_recompute_actionability_across_source_deadlines_and_prefixes`.
+
+Three explicit boundary histories and 24 seeded, shrinkable histories each run
+twice through public System/SPL/ATA/wrapper construction and LiteSVM Clock changes.
+Four funded sources occupy both sides of two assets. The first asset and spacing
+vary around the 256-asset scan boundary; the generator permits 4 through 516 slots.
+Funding varies from 1 through 257 atoms per source, deadlines from slots 1,020
+through 1,029, and external surplus from 1 through 101 atoms. Equal deadlines,
+reverse deadline order, a short source overdue while its long sibling is live,
+and later overdue sources behind an earlier live source are included. The first
+scan persists a nonzero prefix before any deadline or external transfer.
+
+An input-derived source-table oracle predicts waits, one-source normalization,
+bounded cursor progress and final readiness without calling engine transition
+or residual helpers. Each singleton step and each committed group independently
+reconciles every decoded source and bucket, Fresh summary, zero claim/insurance/OI
+classes, engine time, booked vault, expired residual, SPL balances and fixed mint
+supply. The decoded rank `(Fresh source count, slots - cursor)` must match the
+oracle and each successful nonterminal scan reduces it. Every persisted prefix
+must exclude all Fresh buckets, even when a later bucket is already overdue;
+previously scanned slot bytes remain exact. Clock changes alone preserve the
+complete market Account and cannot silently normalize stock.
+
+The two executions compare incremental deadline-boundary/singleton scheduling
+with one overdue clock landing and generated groups of one through three scans.
+Before every successful group, a real parked-scan rejection or invalid System
+suffix rolls back its executed prefix. Exact Account comparison covers all
+compiled and tracked accounts, including Clock, with only the calculated payer
+signature fee charged. Wrapper and SPL success counts prove prefix execution.
+A post-prefix SPL donation first rolls back with a parked scan, then commits;
+it changes raw custody without changing booked stock or the persisted prefix.
+Terminal rollback includes burn, surplus transfer, vault deletion and rent.
+Successful closure burns exactly the input backing, sweeps exactly the external
+surplus, deletes the vault and leaves the exact-rent market tombstone.
+
+This adds a reproducible generated deadline/position/cadence/transaction product
+and input-derived scan oracle to the existing fixed three-source cursor-time
+and fixed external-surplus witnesses. No program-owned bytes are installed or
+restored by the probe. **Row 424 remains OPEN**: these source classes preserve
+prefix validity by preventing scans past Fresh state; they do not demonstrate
+a successful cursor restart after an earlier slot becomes newly actionable.
+Scanner rediscovery of insurance recredit, new earlier claims/obligations,
+Recovery, source refill/reuse, receipts, alternate quote rails, arbitrary source
+populations and maximum account shapes remain outside this generator. The
+related INV-024/025/063/069/071/086/088 claims are sampled stock, normalization,
+progress and oracle evidence; INV-033/041 gain no general theorem. Rows
+415/416/417/419/433 and machine invariant statuses are unchanged.
+
+Worktree: `/tmp/percolator-row424-actionability-invalidation-20260912`; branch:
+`codex/row424-actionability-invalidation-20260912`, initially based on `350df938`
+and rebased before final validation onto fetched
+`origin/codex/astra-open-holdout-ledger-20260912` at `fd425093` (including rows
+413/433/415/416/417/419). Existing row notes are preserved. A fresh locked/offline
+default-feature SBF build uses platform-tools v1.52 and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. The rebase changed only invariant
+tests/metadata, so the rebuilt artifact remains applicable.
+SBF SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+
+Final post-rebase selector: **1/1 passed**, 59.53s, **54 worlds, 356 commits,
+558 exact rollbacks** (302 scanner prefixes and 108 custody prefixes; categories
+may overlap), peak **194,318 CU** under the 900,000 transaction bound. The same
+selector passed before rebase with peak 197,305 CU. Two earlier attempts stopped
+in fixture activation: first sparse slot indices, then the activation cooldown.
+Setup now activates contiguous slots at increasing clocks before slot 1,000;
+neither initial failure reached the invariant campaign or proved a program defect.
+Both requested INV-079 selectors pass. No actual implementation violation was
+found, and no production change or other behavioral selector was needed. Existing
+unused-support and Solana future-compatibility warnings remain. Exact commands,
+with the environment used on each Cargo invocation, are below; formatting and
+working/staged/post-commit whitespace checks and private cleanup complete validation.
+
+```bash
+git fetch origin codex/astra-open-holdout-ledger-20260912
+git rebase --autostash origin/codex/astra-open-holdout-ledger-20260912
+export CARGO_TARGET_DIR=/tmp/percolator-row424-actionability-target
+export TMPDIR=/tmp/percolator-row424-actionability-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo fmt --all
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::generated_prefix_actionability::v16_program_generated_scans_recompute_actionability_across_source_deadlines_and_prefixes -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+cargo clean --target-dir "$TMPDIR"
+```
+
+## INV-067 generated overdue source histories (row 417, 2026-09-12)
+
+Owner: [cu/inv_067_receipt_overdue_history.rs](cu/inv_067_receipt_overdue_history.rs),
+mounted as `inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_overdue_history`.
+Exact selector:
+`v16_program_generated_overdue_source_histories_preserve_receipt_identity_and_attribution`.
+
+The existing public six-owner, three-asset fixture supplies unequal 700/1,300-face
+receipts and a third claimant with 1,000 face across two source domains. This
+increment advances directly past both source deadlines before normalization.
+It generates zero through eight claimant calls in each of five phases around four
+bounded source-close calls, with repeated/deferred/reversed claimant priority,
+one-through-four-instruction transaction groups and optional rejected suffixes.
+Three explicit boundary histories and 24 ChaCha-seeded shrinkable histories each
+run as singleton transactions and as generated groups. Failure-only persistence
+uses `proptest-regressions/inv_067_receipt_overdue_history.txt`; the shrink limit is
+128. Clock landings range from slot 15 (the second deadline) through slot 63.
+
+An action-word oracle derives cumulative floors from public input faces and the
+501 initial residual plus 161/189 released atoms. It does not read engine payout
+rates to choose expected amounts. Every committed transaction checks immutable
+receipt fields, owner/provenance/portfolio ID/position epoch, monotone paid value,
+exact and unreceipted claim bounds, each source's reserve/claim/receivable class,
+all six owner balances, provider attribution, capital, mint supply and vaults.
+In the singleton run every instruction is checked. The first normalization must
+leave the second overdue source Fresh and fully reserved. Clock alone cannot
+increase either receipt's paid value. The same retained requests catch up and
+clear after the final bound replacement; further retries must preserve exact
+tracked Accounts. Each failed group must execute its entire expected wrapper/SPL
+prefix, then restore complete fixture Accounts, with only the separate payer's
+exact signature fee charged. Successful groups frame unrelated Accounts and
+reconcile the exact custody delta and SPL transfer count.
+
+Every history ends with owner payments 1,198 / 1,283 / 1,368, one provider atom,
+two attributed rounding atoms in custody and cleared claims. Split/grouped runs
+compare the complete resolved payout ledger and all owner payments. This adds a
+generated two-overdue-source, multi-receipt cadence/transaction product to the
+fixed separate-deadline `receipt_repeated_stock` and single-source
+`receipt_expiry_interleavings` products. The earlier stateful generated receipt
+drain varies one retained claimant; this probe checks two unequal retained
+receipts through the same independently bounded releases. No program-owned bytes
+are installed or restored by the probe; setup uses System/SPL/ATA/wrapper calls
+and the existing LiteSVM Clock/airdrop facilities.
+
+**Row 417 remains OPEN**, and invariant statuses are unchanged. Population,
+amounts, source order and initial trade/resolve history are fixed. Arbitrary
+reclassification histories, Recovery, insurance, conversion/expiry mixtures,
+alternate collateral rails, absent roles, maximum shapes and portfolio/slab
+retirement remain outside this generator. Rows 415/416/433 retain their existing
+coverage and notes; this increment makes no production change.
+
+Worktree: `/tmp/percolator-row417-receipt-late-expiry-20260912`; branch:
+`codex/row417-receipt-late-expiry-20260912`. Fetched and rebased onto
+`origin/codex/astra-open-holdout-ledger-20260912` at `78aed475`, including the
+row416 handoff commit. The private default-feature SBF build uses platform-tools
+v1.52 and locked engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Its SHA-256 is
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The rebase changed only invariant tests/metadata, so the rebuilt artifact is
+unchanged. The new selector passes on its first run: **54 worlds, 1,139 committed
+transactions and 132 exact rollbacks**, including 63 paying and 28 stock-release
+prefixes (these categories may overlap). Peak settlement cost is **529,178 CU**,
+below the 900,000 bound. Both requested INV-079 selectors pass, as do formatting
+and Git whitespace checks. No actual implementation violation was found; no
+other behavioral selector or broad suite was run. Private target/tmp cleanup
+uses the Cargo commands below. Exact commands, run from this worktree:
+
+```bash
+export CARGO_TARGET_DIR=/tmp/percolator-row417-receipt-late-expiry-target
+export TMPDIR=/tmp/percolator-row417-receipt-late-expiry-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_overdue_history::v16_program_generated_overdue_source_histories_preserve_receipt_identity_and_attribution -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+cargo clean --target-dir "$TMPDIR"
+```
+
+## INV-008 paid withdrawal across portfolio stock recreation (row 415, 2026-09-12)
+
+Owner: [cu/inv_008_recreated_withdrawal_stock.rs](cu/inv_008_recreated_withdrawal_stock.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::recreated_withdrawal_stock`.
+Exact selector:
+`v16_paid_withdrawal_cannot_acquire_recreated_portfolio_stock_across_atomic_retries`.
+
+Sixteen public LiteSVM histories cross withdrawal amounts 1/37, one/three portfolio
+recreations, bundled/separate lifecycle transactions, and custody donation before/after
+the lifecycle. Each recreation uses `ClosePortfolio`, a System transfer to fund the
+same address, `InitPortfolio`, and `Deposit`. The same owner, destination, quote rail,
+sequence 1 and withdrawal amount return with a new program-assigned portfolio ID.
+Original instruction bytes/metas and signature-distinct standalone retry transactions
+are retained before each intent's first execution. The instruction codec checks that
+changing only the ID yields the next incarnation's fresh withdrawal.
+
+A first-payment/recreation/replenishment/stale-withdrawal bundle must reject after all
+four wrapper, three SPL and one System prefix instructions succeed. Full rollback
+restores the original unpaid intent, which then pays unchanged once. A second failed
+bundle starts after that committed payment and rolls back just the stock/lifecycle
+prefix. Its unchanged lifecycle then commits, together or step by step. Every older
+paid intent rejects against sufficient new capital at the matching sequence. A final
+fresh-payment/stale-intent bundle rolls back its SPL payout before the unchanged fresh
+intent succeeds. Incarnation mismatches return `EngineProvenanceMismatch`; the consumed
+intent in the final current incarnation returns `EngineStale`.
+
+An input-derived book tracks deposits, payments and sequence separately per incarnation.
+After every transaction, and every separately committed lifecycle step, it checks each
+incarnation's payout bound, current capital, total capital, accounting/SPL vaults, owner
+wallet, custody-only surplus, fixed mint supply, the untouched 103-atom peer, controls,
+portfolio ID allocation, materialized count, and exact portfolio/market/owner lamports.
+Closed incarnations retain no unpaid claim. Every failed transaction compares complete
+fixture and compiled non-payer Accounts, including metadata, lamports and absence;
+the payer loses exactly its signature fee. Logs pin the actual completed prefix, so
+neither early rejection nor validator duplicate caching can supply the witness. System,
+SPL, ATA and wrapper instructions construct all economic state; no program-owned bytes
+are injected, rewritten or restored by the test. The fixture's initial airdrops fund
+the finite schedule, and mint authority is revoked before retained execution.
+
+Net-new coverage is the atomic composition of an already executed withdrawal with
+same-address stock recreation, including rollback of the first payment, rent movement,
+ID allocation and replacement deposit together. The existing INV-003 retained-intent
+matrix checks unexecuted consent after committed A-B-A recreation; the existing INV-008
+stock-history generator keeps the portfolio incarnation fixed. Neither covers this
+paid-intent/lifecycle rollback relation with per-incarnation economic books. This test
+uses no first-risk admission, accrued fees, terminal market mode, reserve beneficiary
+or permissionless terminal payout; row413 and row433 work is not duplicated.
+
+**Row 415 remains OPEN.** This is a finite invariant-owned portfolio generator, not a
+general withdrawal-stock oracle or an unchanged-oracle vulnerable/fixed-pin result.
+Insurance/backing withdrawal stock binding, arbitrary histories, owner changes, other
+stock reclassifications, alternate quote rails, durable nonces, detached signatures and
+maximum shapes remain outside this increment. No production change or status promotion.
+
+The worktree is `/tmp/percolator-row415-retained-withdrawal-stock-retry-20260912`, branch
+`codex/row415-retained-withdrawal-stock-retry-20260912`. It was fetched and rebased onto
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`25d40f1117d07e2007fa0a43cd02a4e1b9262c8c`, preserving the row433 notes. The parent
+worktree was not edited. A private copy of the existing host build cache was used;
+default-feature wrapper SBF was rebuilt locked/offline with platform-tools v1.52 and
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+
+The new selector passes: 16 worlds, 328 transactions, 184 complete rollback checks,
+32 aborted first-payment/lifecycle bundles, 32 aborted replacement-stock bundles,
+and 48 committed payouts. Peak observed CU is 154,796 against the 300,000 custody
+bound; the final run measured 148,796 CU. Both requested INV-079 metadata selectors
+pass, as do formatting and unstaged whitespace checks. Close transfers all portfolio
+lamports to the market slab; the owner separately funds each replacement address.
+Initial test development corrected the expected incarnation-mismatch error code and
+funded the fixture's complete three-recreation lamport schedule. Neither failure was
+an implementation violation. No broad behavioral suite or other row selector was run.
+
+Exact verification commands from the worktree (logs are outside the repository):
+
+```bash
+export CARGO_TARGET_DIR=/tmp/row415-retained-withdrawal-stock-retry-20260912-target
+export TMPDIR=/tmp/row415-retained-withdrawal-stock-retry-20260912-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::recreated_withdrawal_stock::v16_paid_withdrawal_cannot_acquire_recreated_portfolio_stock_across_atomic_retries -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+cargo clean --target-dir "$TMPDIR"
+```
+
+## INV-005 cold-admin ABA and funded handoff scope (row 416, 2026-09-12)
+
+Owner: [cu/inv_005_cold_admin_handoff_scope.rs](cu/inv_005_cold_admin_handoff_scope.rs),
+mounted under `inv_005_authority_incarnation_binding::cold_admin_handoff_scope`.
+Exact selector:
+`v16_program_cold_admin_aba_and_burn_preserve_funded_handoff_scope_and_value`.
+
+The finite public LiteSVM product crosses three funded roles (insurance authority,
+insurance operator, backing operator), either asset as the rotated scope, and
+Active/DrainOnly for that asset. The sibling remains Active. Both assets hold
+distinct long/short principal: backing `[101, 103, 107, 109]` and insurance
+`[17, 19, 23, 29]`. An independent user's flat portfolio retains 211 atoms.
+All market, portfolio, mint and token state is constructed through public
+System/SPL/ATA/wrapper instructions; only ordinary fixture airdrops and SBF loading
+use the harness. Mint authority is revoked at a fixed 719-atom supply.
+
+Before management, each world signs an incumbent-approved two-asset role handoff
+and prevalidates it in LiteSVM without committing any account changes. A cold-admin
+A-to-B-to-A rotation changes only the subject's admin and shared authority epoch.
+Neither funded incumbent moves. The original subject handoff then rejects
+`EngineStale`, alone and after a successful sibling funded handoff. A separate
+bundle executes that same sibling handoff before a current-epoch, correctly signed
+cold-admin replacement of the subject's funded role rejects `EngineLockActive`.
+Both failed bundles must roll back the sibling's profile and epoch writes.
+
+The subject then renounces its cold-admin role. Its previous cold key loses
+management authority even with a fresh epoch. The sibling's original signed
+handoff remains executable with unchanged signatures, blockhash, metas and bytes.
+The subject's unchanged funded incumbent can transfer after renunciation with
+only the retained handoff's epoch renewed. Each successful management step checks
+the complete decoded economy, both complete role profiles and control-sequence
+records, and fixed-supply wallet/stock accounting. No role change moves tokens.
+
+Payout controls distinguish policy authority from token authority: an insurance
+authority successor cannot withdraw the independent operator's insurance; an old
+backing/insurance operator cannot withdraw after transferring its role. Current
+payout holders then receive exactly all 420 backing and 88 insurance atoms through
+six public withdrawals per world. Untransferred roles still pay their incumbents;
+only an explicit incumbent-approved transfer changes a recipient. Every payout
+checks domain stocks, SPL destinations, supply, profiles and epochs. User capital
+and its full portfolio Account remain intact, leaving exactly 211 vault atoms.
+
+Each rejection checks its exact instruction index/error and complete compiled
+plus tracked Accounts, including unrelated wallets and the user portfolio, with
+only calculated payer signature fees excluded. Logs must prove the successful
+wrapper prefix and absence of SPL invocation on rejected management/payout routes.
+Successful transactions enforce the unchanged Account frame outside the named
+market/vault/recipient writes. The CU ceiling is 600,000 per transaction.
+
+This adds **retained incumbent role-management consent across cold-admin ABA and
+renunciation**, with an unchanged signed sibling-scope control. Existing funded
+withdrawal ABA rotates the funded holder itself; retained empty-insurance
+management checks stock arrival and same-asset role ordering; earned/consumed
+backing coverage does not retain this pair of incumbent management messages.
+No withdrawal replenishment, spent-custody repair, or terminal close family is
+added for rows 415/433. **Row 416 remains OPEN.** This finite matrix does not
+provide an arbitrary-history generator, funded-oracle replacement protection,
+market-authority coalescence, asset reincarnation, nonzero positions or claims,
+earned/impaired backing, expiry/oracle provenance variation (INV-020), telemetry
+ledger succession, native/dual quote, or terminal-lifecycle certification.
+
+Initial base: `25d40f11`; fetched and rebased before final validation onto
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`5cc857dcf41a24b9bf910e8910c2061cdeb16bc3`, preserving row415 and row433 notes.
+Production and Cargo inputs are identical across the rebase. Worktree:
+`/home/anatoly/percolator-prog-row416-cold-admin-containment-20260912`; branch:
+`codex/row416-cold-admin-containment-20260912`. The default-feature wrapper SBF
+was built locked/offline from this worktree in a private target with platform-tools
+v1.52 and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+
+Final rebased result: **1/1 passed**, 12 worlds, 12 prevalidated pairs, 60 exact
+rejections, 24 committed funded handoffs and 72 reserve payouts in 5.30 seconds.
+Peak CU `[management, rejection, payout]` was `[2,177, 19,945, 42,549]`.
+The pre-rebase run also passed (peak `[2,177, 27,439, 54,543]`).
+The initial host compile found a moved `Option` in the new transaction helper;
+borrowing the expected error fixed compilation. The first runtime execution
+passed every economic assertion. No implementation violation or production fix
+was found. Validation is limited to this exact selector and the two metadata
+selectors below, with no full-suite or adjacent row415/433 run.
+
+Exact build, focused validation and cleanup commands (run in this worktree):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row416-cold-admin-containment-20260912-target
+export TMPDIR=/dev/shm/row416-cold-admin-containment-20260912-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::cold_admin_handoff_scope::v16_program_cold_admin_aba_and_burn_preserve_funded_handoff_scope_and_value -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD # post-commit
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+cargo clean --target-dir "$TMPDIR"
+```
+
+## INV-027 first batch fee boundary (row 413, 2026-09-12)
+
+Owner: [cu/inv_027_first_batch_fee_boundary.rs](cu/inv_027_first_batch_fee_boundary.rs),
+mounted under
+`inv_027_protected_principal_seniority::joint_admission_liabilities::first_batch_fee_boundary`.
+Selector:
+`v16_program_first_batch_admission_accounts_each_rounded_fee_after_maintenance`.
+
+Eight public LiteSVM histories cross either constrained participant, both distinct
+asset request orders, and committed versus atomic `SyncMaintenanceFee` plus
+`PermissionlessCrank` prefixes. Both portfolios have never held a position. An
+unrelated empty keeper advances slots 1 through 4 at unchanged AuthMark prices;
+both funded portfolio Accounts remain byte-identical, with 21 atoms of elapsed
+maintenance each. Public synchronization and refresh precede the first
+`BatchTradeNoCpi`, either in an earlier transaction or the same transaction.
+
+The constrained owner deposits 120 atoms, leaving 99 after maintenance. Two
+100-bps trade fees on notionals 48 and 49 round separately to one atom each.
+The resulting equity and total initial margin both equal 97. Increasing the
+second asset's quantity by one position quantum raises its notional to 50 and
+total IM to 98, while both trade fees remain one atom. That batch rejects with
+`EngineInvalidConfig` at the trade instruction. Rounding the combined 98-atom
+notional only once would charge one atom and incorrectly leave 98 available;
+omitting either maintenance or a leg's fee also changes the boundary. The exact
+97-atom request succeeds, excluding double collection as well as undercollection.
+
+All eight rejections restore complete tracked economic Accounts, including the
+market, both traders, keeper, fee cursors, insurance, owner lamports, mint, vault,
+and owner SPL accounts. The network fee payer is outside this economic frame.
+The four atomic failures also undo the successful fee/refresh prefix. The
+committed-prefix controls independently validate current flat certificates with
+zero requirements and equity after maintenance. Successful admission checks both
+complete current certificates against the independent health oracle, exact IM/MM,
+zero liquidation deficit and PnL, both signed positions, effective OI, stored-leg
+counts, fee cursors, stock/reservation censuses, and unchanged unrelated Accounts
+and SPL custody. Insurance is exactly 46, with domain budgets `[21, 23, 1, 1]`.
+Sixteen same-slot fee-sync retries leave the tracked Accounts exactly unchanged.
+
+This adds a first-risk **margin decision that depends on the sum of two rounded
+trade fees after elapsed maintenance**. Row 413's flat prefix and withdrawal
+boundaries use one trade leg; its standalone nonzero-fee first opens have ample
+collateral. INV-047's two-asset fee-partition test uses 1,000,000 atoms per owner
+and no elapsed maintenance, so it does not exercise this admission boundary.
+Existing reward mapping, funding, cross-asset credit and joint-liability histories
+are not repeated. **Row 413 remains OPEN.** Standalone admission without fee
+collection, CPI batches, shared owners, changing fee/reward policies, funding or
+target lag, fee exhaustion/debt, fractional settlement carry, nearly-flat prior
+positions, larger batches and later owner exits remain outside this increment.
+No tested property violation, production change or invariant-status change.
+
+Base: `93ed160f164486c5309335d0179ef4614f9bfed7`. Worktree:
+`/tmp/percolator-row413-20260912`; branch:
+`codex/row413-first-risk-liability-admission-20260912`. The parent worktree was
+not edited. Default-feature SBF was rebuilt locked/offline using platform-tools
+v1.52 and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The initial host compilation failed on a test-helper `u16`/`usize` argument
+mismatch; correcting that test call allowed all three exact selectors below to
+pass (3 passed, 0 failed, 1,278 filtered out). The new selector completes eight
+exact rejections, eight exact admissions and sixteen fee-sync no-ops, peak CU
+451,229 within the 600,000 bound including the entire fee/refresh transaction.
+No unfiltered suite was run. Private target/tmp directories were cleaned with
+Cargo immediately after validation (1.6 GiB reclaimed); shared artifacts were
+not removed. Formatting and Git whitespace checks pass.
+
+Exact validation commands:
+
+```bash
+export CARGO_TARGET_DIR=/tmp/percolator-row413-target
+export PERCOLATOR_FUZZ_SBF=/tmp/percolator-row413-target/deploy/percolator_prog.so
+export TMPDIR=/tmp/percolator-row413-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/percolator-row413-target/deploy -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_027_protected_principal_seniority::joint_admission_liabilities::first_batch_fee_boundary::v16_program_first_batch_admission_accounts_each_rounded_fee_after_maintenance inv_027_protected_principal_seniority::v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled inv_054_certificate_epoch_completeness::v16_program_fee_only_invalidation_cannot_preserve_pre_debit_trade_headroom
+cargo clean --target-dir /tmp/percolator-row413-target
+cargo clean --target-dir /tmp/percolator-row413-tmp
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-073 recreated reserve custody through final-close retry (row 433, 2026-09-12)
+
+Owner: [cu/inv_073_recreated_reserve_close.rs](cu/inv_073_recreated_reserve_close.rs),
+using the existing public terminal-earnings fixture and reserve transaction checker.
+Selector:
+`inv_073_no_permanent_user_lock::v16_program_recreated_reserve_custody_preserves_spent_prefix_through_close_retry`.
+
+Two classic-SPL/asset-0 LiteSVM histories publicly pay 101 backing-principal atoms,
+17 earned-fee atoms and all 31 insurance atoms after user payouts and portfolio
+deletion. The provider spends its 118 received atoms to a separate payee and closes
+its now-empty ATA through SPL instructions. Provider, insurance operator and
+beneficiary keys are then dropped; the market authority and keeper are distinct
+from every reserve recipient. The paid earnings ledger remains initialized while
+the original provider ATA is absent and 99,899 principal plus 858 earnings atoms
+remain due.
+
+A bundle recreates the same ATA, pays principal, then attempts slab close before
+earnings payment. Its exact `EngineLockActive` rejection rolls back creation,
+principal disposition and rent. A second bundle recreates custody, pays both
+remainders and actually closes the vault/slab; a repeated-close suffix rejects
+`InvalidAccountLen`, restoring missing custody, the paid ledger, market/vault
+Accounts and rent. Completed wrapper/ATA prefixes and exact rejection indices
+are checked. Every compiled/tracked Account rolls back except calculated payer
+signature fees.
+
+The retained completion instructions then retry unchanged. One history still has
+absent custody; the other first commits a separate keeper-only ATA repair, making
+the retained creation instruction idempotent. Recreation rent is charged exactly
+once across either successful schedule. Each finishes with 100,757 atoms in the
+recreated provider ATA, 118 at the payee, 31 at the insurance beneficiary, user
+payouts 56,627/1,995,000 and no administrator tokens: fixed supply 2,152,533.
+The full decoded earnings ledger differs from its paid prefix only in cumulative
+withdrawals (875) and remaining observed earnings (zero). Exact tombstone/vault
+closure and administrator rent refund are checked. A fresh delivery after closure
+cannot pay or refund again. Stock/encumbrance censuses, full decoded market/config
+prefixes and SPL custody frames accompany the history. Assertion-only account
+copies are never installed into SVM state.
+
+The distinct obligation is persistence of a spent paid prefix and its earnings
+ledger across same-address custody recreation, rollback of actual closure, and
+an intervening repair before retry. Existing final-close retry retains populated
+custody; frozen/reassigned replacement coverage changes destination; native
+provider redemption has no earned-fee ledger or rollback of recreation together
+with final closure; Recovery repair crosses portfolio deletion with an initially
+unpaid ledger. These existing probes are not repeated here.
+
+**Row 433 remains OPEN.** This finite family does not cover native/dual quote,
+multiple domains, receipts or pending losses, Recovery/recredit, expiry races,
+repeated custody disruption, maximum shape, or an absent market authority.
+Prior owner-signed portfolio deletion and administrator-signed mechanical close
+remain prerequisites. Production code and `invariant_status.tsv` are unchanged.
+
+Base: `1011c0523b8063dd69d6cdc395abfdc07e117ce6`. Worktree:
+`/tmp/percolator-row433b-20260912`; branch:
+`codex/row433-terminal-reserve-conformance-20260912`. The default-feature wrapper
+SBF was built locked/offline in a new isolated target using platform-tools v1.52;
+engine pin `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, wrapper SHA-256
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The new selector passes 1/1: two histories, six exact rollbacks and two closures.
+Observed peak CU [setup, rejected bundles, separate repair, final retry] is
+[596,963, 512,088, 22,342, 493,804], below the asserted 800,000 ceiling (the reused
+transaction helper allows 1,200,000). The three adjacent exact controls pass 3/3.
+An initial run reached successful retirement but expected `InvalidAccountLen` for
+fresh principal replay; its tombstone preflight reports `InvalidAccountKind`.
+Only that test expectation was corrected; no economic assertion failed and no
+production correction was required. Charter/index and machine-status checks pass
+2/2; formatting and Git whitespace checks pass. Existing unused-support and
+Solana client future-compatibility warnings remain. After validation,
+`cargo clean --target-dir /dev/shm/percolator-row433b-target` removed 6,385 files
+(1.7 GiB); the isolated temporary directory retains only small validation logs.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row433b-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row433b-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row433b-tmp CARGO_BUILD_JOBS=2
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_recreated_reserve_custody_preserves_spent_prefix_through_close_retry -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry \
+  inv_073_no_permanent_user_lock::v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings \
+  inv_073_no_permanent_user_lock::v16_program_absent_native_provider_redeemed_prefix_preserves_public_remainder_and_close
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+cargo clean --target-dir /dev/shm/percolator-row433b-target
+git show --format= --check HEAD # post-commit
+```
+
+## INV-045 keeper maintenance across reward catchup (row 422, 2026-09-13)
+
+Owner: [cu/inv_045_reward_maintenance_catchup.rs](cu/inv_045_reward_maintenance_catchup.rs),
+mounted under `inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_maintenance_catchup`.
+Exactly one new selector:
+`v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchup`.
+
+Two public LiteSVM histories compose a keeper's own collectible maintenance with
+paid Hybrid discovery on asset 1, fresh reports during lag, two liquidations and
+full catchup. One collects the keeper's fees before the target cranks at slots
+6/7/14. The other collects after reward credit at 6/7 and leaves the final fee to
+`Withdraw` after catchup. The selected Hybrid liquidation's remaining fees belong
+to domains 2/3; maintenance belongs exclusively to canonical asset-0 domains 0/1.
+The 160-atom rate makes this collection-order comparison exact without introducing
+a separate fee-fragment rounding question. All accounts are constructed with
+System/SPL/ATA/wrapper instructions. Clock, external Pyth reports, signer SOL and
+program loading are harness inputs; no initialized protocol bytes are installed.
+
+Independent elapsed-cap and two-stage fee arithmetic bind effective prices
+997600/995206/980000, distinguishing the fee from the initial price, paid mark,
+raw/accepted prints and fresh target. Reward credit changes only recipient capital
+and certificate validity, preserving its own fee cursor. Explicit collection
+frames foreign portfolios, Hybrid state/profile and SPL custody. Treasury and
+source/stock/reservation censuses check each prefix; all five fee cursors reach
+the prescribed checkpoints, with only the deliberately deferred final keeper fee
+remaining unpaid before withdrawal. No refresh or final catchup awards a bonus.
+
+Both histories earn 4759 atoms and collect 2080 keeper maintenance atoms, consuming
+1080 atoms beyond its original 1000-atom principal. Each pays exactly 3679 SPL
+atoms. Canonical budgets finish at 5200/5200, selected liquidation budgets at
+4760/4762, and all 1540072 discovery atoms remain outside domain budgets. Owner
+capital, PnL, fee cursors and legs, all domain budgets, custody and the three-atom
+open-position residual agree across histories. Six healthy retries reject exactly.
+Two rejected System suffixes follow independently simulated successful withdrawals;
+the deferred case collects 1120 maintenance atoms and pays SPL before rejection.
+Complete tracked and compiled Account frames roll back, including fee and reward
+accounting, except the separately checked exact network fee. Unchanged withdrawal
+instructions then commit.
+
+This adds **recipient maintenance reclassification across distinct canonical and
+selected-asset budgets**, including an atomic fee-collection/payout retry. The
+existing authenticated/retained-penalty tests already own stale/fresh observation
+and equivocal-suffix relations. Policy succession and exposed-keeper catchup use
+zero maintenance; `interleaved_cap_carry` includes one asset-0 reward and a net
+maintenance payout without full catchup or a separate selected-asset budget.
+INV-027's reward-recipient admission uses maintenance rewards and first risk,
+not paid-Hybrid liquidation receipts. Those existing relations are not new claims.
+
+**Row 422 remains OPEN; invariant statuses are unchanged.** This is finite positive
+conformance only. Limits include CPI, additional providers, fee rewards/clipping,
+nonzero funding, exposed or shared-owner keepers, arbitrary histories and full
+terminal redemption. No production change, bug finding or vulnerable-pin experiment.
+
+Base: `c8b6483f65cd7e3d44925eef3beb4a7d4d3baa27`, latest requested origin branch
+when this worktree was created and rechecked. Worktree:
+`/home/anatoly/percolator-astra-row422-reward-20260913`; branch:
+`codex/astra-row422-reward-invariant-20260913`. A private copy of the existing
+row426 build cache seeded the target. Default-feature wrapper SBF was rebuilt
+locally, locked/offline with platform-tools v1.52; engine pin `394fd0bf`.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+No matcher artifact is used. The exact selector passed 1/1 in 1.34s with two
+histories, four liquidations, eight exact rollbacks and peak 322069 CU, below the
+500000-CU per-instruction allowance. Both metadata gates passed 1/1; formatting
+and whitespace checks passed. The first host compilation required correcting
+three test-harness type/API references; no economic assertion failed. No full
+suite or Kani run is claimed. Exact validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/astra-row422-reward-20260913-target
+export TMPDIR=/run/user/1001/astra-row422-reward-20260913-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_maintenance_catchup::v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchup -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+```
+
+## INV-045 reward policy succession during catchup (row 422, 2026-09-12)
+
+Owner: [cu/inv_045_reward_policy_catchup.rs](cu/inv_045_reward_policy_catchup.rs),
+mounted under
+`inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_policy_catchup`.
+Selector:
+`v16_program_reward_policy_succession_preserves_receipts_and_effective_price_catchup`.
+
+Two public LiteSVM histories carry an earned reward through a liquidation-share
+policy update while a second liquidation is already certified and the accepted
+price still lags both the paid mark and the fresh report. One withdraws the first
+reward before the update; the other retains it until after full catchup. The exact
+same second liquidation instruction is constructed and used for refresh before
+the policy update, then retained unchanged for liquidation afterward.
+
+Paid Hybrid discovery charges 1,540,072 atoms and stages 992,320 from 1,000,000.
+Fresh reports at slots 6 and 7 produce effective prices 997,600 and 995,206; the
+second report targets 980,000. Independent cap arithmetic and two-stage fee
+rounding bind the effective price, with distinct results at the original price,
+paid mark, fresh target and trade prints. The two episodes close 12,001,223 and
+16,653,247 quantity units, charge 5,987 and 8,287 atoms, and pay 1,995 and 6,444
+atoms under the respective 3,333 and 7,777 bps policies. The update increments its
+control sequence and preserves complete portfolio Accounts, the oracle profile,
+OI, insurance and domain budgets. The old reward is neither repriced nor paid
+again. Only new fee remainders enter domains, totaling 2,917/2,918; discovery stock
+stays outside those entitlements. Full catchup at slot 14 pays no additional fee
+or reward. Each boundary has an exact healthy-retry rollback, six in total.
+
+Both withdrawal histories return precisely 9,439 SPL atoms, including keeper
+principal. Remaining owner values, insurance, budgets and vault balances agree.
+Stock/reservation/source-rate censuses and independently checked current health
+certificates accompany public settlement of the other exposed accounts. SPL
+custody and the mint are framed, and initial custody equals remaining custody plus
+keeper payouts. Still-open fractional positions leave the same four-atom residual
+in both histories; this test does not claim terminal redemption of those claims.
+An initial development assertion incorrectly required rounded open-position claims
+plus insurance to exhaust custody. It was corrected to retain the stock census,
+nonnegative residual and complete endpoint comparison. No reward-price or policy
+assertion failed, and no production correction was needed.
+
+The distinct obligation is earned-receipt persistence and execution-time policy
+selection across a certified liquidation during paid-mark/fresh-report catchup.
+The adjacent retained-penalty test has a constant policy and no earlier paid
+reward; authenticated-handoff coverage has only one liquidation episode per
+history; the INV-061 control checks a single fixed-share reward. This increment
+adds no fractional-carry, observation-completeness or mark-envelope matrix.
+**Row 422 remains OPEN with partial conformance evidence.** Generic provenance
+persistence, CPI/AuthMark handoffs, multiple assets/providers, exposed keepers,
+funding/maintenance, arbitrary policy histories and full owner exits remain
+outside this finite family. Current behavior did not violate the tested property.
+
+Base: `2e8c6c97126ac5dc354afc0b9c5fa5d95dd6529d`, the requested
+`origin/codex/astra-open-holdout-ledger-20260912`. Worktree:
+`/tmp/percolator-row422-20260912`; branch:
+`codex/row422-mark-reward-provenance-20260912`. A private copy of the
+`/dev/shm/percolator-row426-target` build cache seeded this worker's target;
+host tests and default-feature wrapper SBF were rebuilt locked/offline from this
+worktree. Platform-tools v1.52; engine pin
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The new selector passes both histories; peak crank/policy/payout CU are
+319,341/1,870/52,088, within the existing route limits. The four adjacent controls
+pass 4/4, including 96 actual-catchup histories and 16 authenticated-handoff
+histories. Charter/index and machine-status checks pass 2/2; formatting and Git
+whitespace checks pass. Existing unused-support and Solana future-compatibility
+warnings remain. Exact validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row422-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row422-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row422-tmp CARGO_BUILD_JOBS=4
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_policy_catchup::v16_program_reward_policy_succession_preserves_receipts_and_effective_price_catchup \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::retained_penalty_handoff::v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper_exit \
+  inv_045_no_free_mark_movement::accepted_price_reward::reward_catchup_order::v16_program_reward_price_tracks_actual_catchup_across_report_and_crank_orders \
+  inv_061_deterministic_bounded_liquidation::v16_program_liquidation_cranker_reward_bounded_by_fee
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-045 exposed AuthMark keeper during Hybrid catchup (row 422, 2026-09-13)
+
+Owner: [cu/inv_045_exposed_keeper_provenance.rs](cu/inv_045_exposed_keeper_provenance.rs),
+mounted under
+`inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::exposed_keeper_provenance`.
+Selector:
+`v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybrid_catchup`.
+This exercises INV-045 with INV-020/024/036/041/061/062 and the row's obligation
+`liquidation-reward-provenance-follows-the-effective-price-until-catchup`.
+
+Four public LiteSVM histories cross a keeper's long/short two-lot AuthMark position
+with its settlement before/after receiving Hybrid liquidation rewards. The keeper's
+counterparty also holds the target's opposite Hybrid exposure. Unlike the earlier
+flat-keeper histories, the reward recipient has its own pending authenticated mark,
+active exposure and nonzero position PnL. System/SPL/ATA and public wrapper instructions
+create and fund all accounts. Only external Pyth reports, Clock, airdrops and program
+loading use harness inputs; no initialized protocol bytes or snapshots are installed.
+
+Paid Hybrid discovery stages 992,320 from 1,000,000. Fresh reports at slots 6/7/14
+cross effective prices 997,600/995,206/980,000. Independent elapsed-cap and two-stage
+fee arithmetic distinguish the liquidation price from the original price, accepted
+print, raw print, paid mark, fresh target and the keeper's AuthMark price. Each
+receipt credits only keeper capital and invalidates its certificate, preserving
+the entire remaining keeper record, the unobserved AuthMark asset, foreign portfolio
+Accounts and SPL custody. Refreshes and final catchup cannot manufacture receipts.
+Only each new liquidation fee's remainder enters the selected Hybrid domains;
+the second asset's budgets remain zero and all discovery fees stay unbudgeted.
+
+AuthMark settlement accounts separately for the keeper's final +10,000/-10,000
+position PnL. The test settles all five portfolios with independent current-health,
+stock, source-rate and reservation censuses, compares every owner's capital, PnL
+and legs across the two settlement orders. Withdrawal while exposed must reject
+with exact `EngineStale` rollback. A signed AuthMark close then permits withdrawal
+of exactly the earned rewards to the keeper's SPL account. The endpoint includes
+insurance, both domain budgets, custody and the nonnegative open-claim rounding
+residual. No terminal redemption of remaining capital or source claims is claimed.
+
+**Row 422 remains OPEN with partial conformance evidence.** This finite two-asset
+family does not close arbitrary histories, CPI or AuthMark-origin reward handoffs,
+underwater/shared-owner keepers, additional provider assignments, nonzero funding
+or maintenance, or terminal exits. AuthMark is the recipient's independent exposure;
+the selected liquidated asset remains a direct Pyth Hybrid. No production code changes.
+
+Base: `c5bc37c0c54110e7461b5cdbeee3680b8458e3e3`, branch
+`codex/astra-row422-mark-provenance-20260913`, worktree
+`/tmp/percolator-astra-row422-mark-provenance-20260913`. A private, ordinary copy of
+`/dev/shm/percolator-row426-target` seeded the worktree's ignored `target` directory.
+Both the host test and default-feature wrapper SBF were rebuilt from this worktree,
+locked/offline. Platform-tools v1.52; engine pin
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+No matcher artifact is used. The new two-asset family uses the existing mixed-provider
+test's 500,000-CU action bound; the reused helper retains the original 325,000-CU
+default for all earlier callers.
+
+The new selector passes four histories: eight positive liquidations, twelve exact
+healthy-retry rollbacks and four exact exposed-withdrawal rollbacks. Each history
+closes 12,001,223 then 16,653,247 Hybrid quantity units, charges 5,987/8,287 atoms,
+and earns 1,995/2,762 atoms under the fixed 3,333-bps share. Each keeper withdraws
+exactly 4,757 SPL atoms after its signed AuthMark close. Peak crank/payout CU are
+354,125/64,336; every endpoint retains the same four-atom open-Hybrid-claim residual.
+Both adjacent controls pass. Development corrected test assumptions about the
+one-asset CU bound, unchanged AuthMark publication and the required flat-account
+withdrawal route. No public-route implementation violation was found.
+Exact build and validation commands, from this worktree:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target"
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::exposed_keeper_provenance::v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybrid_catchup -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --quiet --test-threads=1 \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper_exit \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_policy_catchup::v16_program_reward_policy_succession_preserves_receipts_and_effective_price_catchup
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-073 native provider redemption before unsigned remainder (row 420, 2026-09-12)
+
+Owner: [cu/inv_073_native_provider_redemption.rs](cu/inv_073_native_provider_redemption.rs),
+sharing the existing terminal reserve transaction checker and public native-market
+fixture. The INV-073 selector is
+`inv_073_no_permanent_user_lock::v16_program_absent_native_provider_redeemed_prefix_preserves_public_remainder_and_close`.
+
+Four public LiteSVM histories fund 401 native quote atoms in backing domain 1.
+After resolution, a keeper pays 101 atoms without the provider signature. The
+provider publicly closes that populated wrapped-SOL destination, redeeming both
+the paid atoms and its rent, and its key is dropped with 300 atoms still owed.
+A keeper recreates the same ATA and pays exactly the remainder, either separately
+or in one transaction. Two histories first prefund the missing address with rent
+plus 19 lamports: initialization wraps those 19 atoms without reducing the claim.
+Every continuation requires only the payer, except the market authority's final
+CloseSlab. No provider signature is available after redemption.
+
+The oracle checks full native Account images, exact payer rent and signature fees,
+the redeemed provider wallet, unchanged beneficiary/profile/control sequences,
+fresh reservation and stock censuses, and a rent-exact terminal tombstone. The
+vault closes empty; the administrator's quote destination and native mint remain
+unchanged. Redeemed principal plus the recreated destination balance equals 401
+plus only the independently supplied native value. Each history finishes in two
+to four transactions after the provider disappears, under a 150,000-CU bound;
+the observed peak is 57,885 CU. Account-image edits build expectations only;
+the existing native mint genesis fixture is the only injected account.
+
+This adds native redemption of a *populated* provider payout account while its
+remaining claim is still funded. The classic-SPL row420 custody witness retains
+paid atoms in a reassigned account; the row418 prefunded-custody witness repairs
+user payout accounts; the native dual-quote provider control uses a cooperating
+provider. Another unsigned payout permutation, frozen destination, missing empty
+ATA, or principal-expiry-only route was excluded as duplicate coverage.
+**Row420 remains OPEN**, with finite green conformance for native principal.
+There is no observed property violation or production correction. Earned fees,
+live source claims, economic loss, Recovery, absent market authority, multiple
+provider redemptions and arbitrary histories are outside this increment.
+
+Base: `037a055e8783aa5abf410983ceee99fe38467cd2`; branch
+`codex/row420-provider-terminal-progress-20260912`; worktree
+`/tmp/percolator-row420-20260912`. Dependency artifacts were copied into the private
+target from `/dev/shm/astra-terminal-public-disposition-target`. Shared-memory
+exhaustion interrupted the first SBF build; the private target's host `debug`
+directory was moved under this worktree's ignored `target/row420-cache` and linked
+back. The locked/offline default-feature SBF rebuild then succeeded with
+platform-tools v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The first test run caught an oracle assumption: full repayment clears an empty
+bucket's expiry. The retained assertion checks both expiry and Empty/Fresh status.
+
+Validation uses the following exact selectors and private environment:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row420-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row420-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row420-tmp CARGO_BUILD_JOBS=4
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_absent_native_provider_redeemed_prefix_preserves_public_remainder_and_close -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings \
+  inv_073_no_permanent_user_lock::v16_program_terminal_public_reserve_disposition_preserves_value_across_orders \
+  inv_073_no_permanent_user_lock::absent_provider_expiry_retirement::v16_program_absent_provider_staggered_expiry_reaches_funded_terminal_retirement \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::prefunded_quote_custody::v16_program_prefunded_quote_repair_keeps_terminal_principal_separate_from_wrapping
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-008 fee reclassification and retained insurance retry (row 428, 2026-09-12)
+
+Owner: [stateful/inv_008_insurance_fee_reclassification.rs](stateful/inv_008_insurance_fee_reclassification.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::insurance_fee_reclassification`.
+Selector: `v16_program_stale_insurance_retry_restores_fee_stock_and_exhausted_portfolio`.
+
+Two public-wrapper LiteSVM histories pay an original 7-atom insurance request,
+then advance its bound authority epoch through insurer succession while retaining
+the same live operator. Five authenticated slots at 7 atoms/slot reclassify
+35/17 capital atoms into base-asset insurance. The 17-atom case exhausts and
+deletes the fee-paying portfolio, returning its rent to the market. No new
+custody or funding intent supplies this insurance; caller slot MAX cannot
+increase the charge beyond the authenticated interval or available capital.
+
+Both `[SyncMaintenanceFee, retained withdrawal]` and
+`[SyncMaintenanceFee, fresh withdrawal, retained withdrawal]` reject with
+EngineStale after their successful prefixes. Complete tracked/compiled Accounts
+and exact payer fees establish rollback of the fee anchor, source capital,
+insurance allocation, real SPL payout, portfolio deletion and rent transfer.
+The unchanged fresh bundle, signed and successfully simulated before both
+failures, then commits. Its payout differs from the old request only in the
+authority epoch. The original retained envelope still rejects with enough
+asset-local insurance and custody to pay its full amount. Retained peer consent
+pays 43 atoms through the unaffected asset.
+
+Input-derived checks reconcile all domain budgets/spend, aggregate insurance,
+capital and custody, every SPL source/destination Account, fixed mint supply,
+all role profiles/control sequences and unrelated economic Accounts. Existing
+stock/encumbrance censuses run at each checkpoint. The operator receives exactly
+42/24 atoms, the portfolio owner receives 66/0 remaining capital atoms, and the peer
+receives 43; both histories finish at zero custody. V16Svm supplies its existing
+empty allocation/SPL fixtures; initialized economic changes use public wrapper
+routes, with no account repair or snapshot restoration.
+
+This adds passive fee reclassification and rent-bearing source deletion to
+row428. Row415's rail retry restores deposit/backing/donation prefixes; the
+retained-reserve and optional-ledger tests restore funded payouts/top-ups; the
+insurance round-trip test consumes a top-up sequence with zero net custody.
+The retained-fee-stock trade history couples payouts to trade-intent rejection,
+without an epoch-stale insurance suffix or fee-exhausted portfolio deletion.
+Those existing dimensions were not added as standalone tests.
+
+**Row 428 remains OPEN**, with partial INV-008/024/031/064/080/081 conformance.
+Current behavior did not violate the bound authority-epoch cases tested.
+WithdrawInsuranceAsset still has no intrinsic withdrawal stock-sequence field;
+this test does not establish successful-debit consumption without an authority
+change, terminal residual recredit, other quote rails, or arbitrary histories.
+No production correction or status promotion is made.
+
+Base: `037a055e8783aa5abf410983ceee99fe38467cd2`; branch:
+`codex/row428-insurance-stock-epoch-20260912`; worktree:
+`/tmp/percolator-row428-20260912`. Default-feature wrapper and authenticated
+matcher SBF were rebuilt locked/offline with platform-tools v1.52. Wrapper
+SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Build caches were privately copied from
+`/dev/shm/row428-intrinsic-stock-retry-20260912-target`.
+Shared memory filled during cache preparation and the first SBF attempt;
+only this worker's target was moved to its worktree's ignored `target`
+directory, with the requested `/dev/shm/percolator-row428-target` path retained
+as a symlink. The subsequent builds and checks use the environment below.
+
+The new selector passes two histories, four simulations, eight measured
+successes and six exact rollbacks, including two rolled-back SPL payouts and
+two rolled-back portfolio deletions. Peak success/rejection CU:
+**78,493/87,842**, below 300,000. Three adjacent stateful and five CU controls,
+charter/index and machine status pass. Formatting and working/staged whitespace
+checks pass. Existing unused-support and Solana future-compatibility warnings
+remain. Exact commands (no full-suite claim):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row428-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row428-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row428-tmp CARGO_BUILD_JOBS=4
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture --test-threads=1 \
+  inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::insurance_fee_reclassification::v16_program_stale_insurance_retry_restores_fee_stock_and_exhausted_portfolio \
+  inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::insurance_ledger_retry::v16_program_retained_insurance_epoch_rejection_restores_optional_ledger_and_fresh_retry \
+  inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_paid_retained_insurance_stays_bound_after_replenishment_and_operator_aba \
+  inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_008_intent_uniqueness_and_bounded_replay::insurance_round_trip_retry::v16_insurance_round_trip_consumption_survives_cross_route_retry \
+  inv_008_intent_uniqueness_and_bounded_replay::underfunded_rail_retry::v16_underfunded_withdrawal_retry_preserves_replenished_stock_across_quote_rails \
+  inv_008_intent_uniqueness_and_bounded_replay::v16_insurance_failed_bundle_retry_stays_consumed_after_alternate_route \
+  inv_008_intent_uniqueness_and_bounded_replay::v16_insurance_refund_does_not_revive_consumed_cross_route_intent \
+  inv_064_insurance_withdrawal_policy_equivalence::v16_program_insurance_withdrawal_ledger_history_is_economically_transparent
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-045 funding reversal and unsettled carry entitlement (row 425, 2026-09-12)
+
+Owner: [cu/inv_045_funding_carry_entitlement.rs](cu/inv_045_funding_carry_entitlement.rs),
+mounted under `inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement`.
+Selector: `v16_program_funding_reversal_preserves_carry_and_unsettled_owner_entitlement`.
+
+Sixteen public System/SPL/wrapper histories compose two opposite AuthMark premiums,
+nonzero funding, and fractional price-cap carry with alternating single/batch
+bilateral and authenticated CPI reductions. Market accrual is committed first;
+the active owners' account cranks occur before or after reductions at slots 2 and
+5. A passive short portfolio remains byte-identical through all eight market
+cranks, retaining unsettled K/F while the other pair changes exposure.
+
+At slot 3, publication reverses both premiums with carry numerators 7,200/9,000.
+Only the price carry resets; previously earned funding remains attributable to
+the original lots. Independent one-slot premium/rate/floor arithmetic and a
+signed-lot ledger check each prefix's carry, K/F indices, latent plus settled
+owner value, OI, capital/PnL totals and fixed-mint SPL custody. Later price atoms
+land at slots 7/8 with carry 2,000/5,000. Every reduction frames the complete
+oracle profiles and absent portfolios, including matcher-grant renewal.
+
+Both signs and all route/settlement orders pay exactly
+`[100108, 199904, 300089, 399965]` to the four owners after signed closes, public
+certificate refresh, released-PnL conversion and SPL withdrawal. All 64 payouts
+reconcile to the original 1,000,066 atoms with zero final vault, capital and PnL.
+Peak measured suffix cost in the final seven-selector run is **460,796 CU**,
+below 1,400,000.
+
+This adds funding-entitlement attribution across a premium reversal and changed
+exposure to the existing zero-funding carry/exit cases. It is not a split-route
+equivalence oracle: every prefix and final owner amount has an independent
+input-derived expectation. Integral lots, unit ADL, zero fees, committed market
+frontiers and this finite two-target schedule are deliberate bounds. Inline
+trade-driven market accrual, pending funding-checkpoint replacement, fractional
+position settlement, fees, ADL and arbitrary economic histories remain outside
+this selector. **Row425 remains OPEN with partial conformance evidence.** Current
+behavior did not violate the tested property; no production correction or
+invariant-status promotion is claimed.
+
+Base `f903e3eb0653b7520ab22d6df4cdbce2011db58f`; isolated worktree
+`/tmp/percolator-row425-20260912`, branch `codex/row425-fractional-carry-20260912`.
+Default-feature wrapper and authenticated matcher SBF were built locked/offline
+with platform-tools v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Shared `/dev/shm` exhaustion interrupted validation compilation. Only this worker's
+host cache was moved to the ignored `target/row425-host-debug` in its isolated
+worktree, with `/dev/shm/percolator-row425-target/debug` linking to it. The required
+environment paths and private SBF remained unchanged; interrupted checks were rerun.
+Validation:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row425-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row425-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row425-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::v16_program_funding_reversal_preserves_carry_and_unsettled_owner_entitlement \
+  inv_045_no_free_mark_movement::public_carry_order::precrank_carry::v16_program_row425_precrank_reductions_preserve_carry_and_owner_entitlement \
+  inv_045_no_free_mark_movement::public_carry_order::carry_transport_exit::v16_program_row425_matcher_handoffs_preserve_precrank_carry_and_exact_owner_exit \
+  inv_045_no_free_mark_movement::public_carry_order::fractional_position_residue::v16_program_fractional_positions_partition_carry_into_exact_owner_payouts_and_residue \
+  inv_045_no_free_mark_movement::v16_program_pending_fractional_carry_survives_due_trade_and_resolution \
+  inv_052_split_merge_invariance::v16_program_upward_funding_is_crank_partition_invariant \
+  inv_052_split_merge_invariance::v16_program_downward_funding_is_crank_partition_invariant
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_special_verification_method_registry_matches_charter
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-028 latent capacity reuse with retained history (row 423, 2026-09-12)
+
+Owner: [cu/inv_028_latent_capacity_reuse.rs](cu/inv_028_latent_capacity_reuse.rs),
+mounted under `inv_028_source_domain_realizability_cap::single_slot_admission::latent_capacity_reuse`.
+The selector `v16_program_latent_pair_reuse_preserves_historical_claims_and_replacement_exit`
+adds eight public LiteSVM histories using the existing `SparseHistory` fixture.
+System/SPL/wrapper instructions retain 26 detached, one-sided claims across 26
+assets. An unrelated leg occupies the remaining two future-domain slots; a
+partial reduction keeps both domains latent. Its final matched close and a new
+position on the other spare asset execute either as separate trades or as one
+close-then-open `BatchTradeNoCpi`, across both signs and both spare-asset choices.
+
+Admission preserves every historical source record, both capitals, and SPL vault
+custody, with exactly 26 occupied plus two replacement latent domains. Later
+authenticated marks and bounded permissionless cranks create a 7-atom claim,
+then an opposite 11-atom claim after cross-zero admission. All 28 occupied domains
+remain attributable; the abandoned leg's domains stay empty. No conversion
+occurs before this settlement. Final reduction, exact conversion, both complete
+owner payouts (1,000,069 and 999,931 atoms), and both portfolio deletions clear
+every claim and backing reservation, preserve mint supply, and exhaust custody.
+The input-derived fixture oracle checks every successful economic transition;
+each settlement crank must strictly reduce economic/accrual work within four calls.
+
+This adds reuse of an unmaterialized domain pair while historical claims remain.
+INV-077's reclamation control converts the entire historical table before new
+admission; existing row423 single-slot, retained-episode, concurrent-cohort and
+active-increase selectors do not replace a latent pair on an unrelated asset.
+Those existing angles were excluded during review. This finite no-CPI comparison
+does not cover arbitrary admission histories, all future resource classes,
+unrelated risk admitted while the old leg remains active, reverse batch ordering,
+liens, expiry, Recovery, or maximum active-leg combinations. **Row423 remains OPEN**
+with partial INV-028/057/073/077 conformance. Current behavior did not violate the
+property in the retained cases; no production correction or status promotion.
+
+The new selector passes 8/8 worlds and 1,172 successful post-funding calls.
+Peak CU for trade / mark-crank / conversion / withdrawal / close:
+**919,832 / 526,257 / 712,924 / 49,455 / 26,540**, within the existing ceilings.
+Base `2c1842f11337f12e1507137c5977290adac70f1b`; branch
+`codex/row423-historical-capacity-20260912`; worktree
+`/tmp/percolator-row423-20260912`. Host dependency artifacts were copied into the
+private target from `/dev/shm/row415-retained-withdrawal-20260912-target`; the wrapper
+and auth matcher were rebuilt locked/offline with default features and platform-tools
+v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+All four adjacent selectors pass, as does the charter/index check and formatting.
+At worker base, the separate machine-status check failed with `stale
+counterexample projection for INV-058`: row427 was OPEN in `coverage_reopenings.tsv`
+while `invariant_status.tsv` still recorded no counterexamples. This integration
+also records row427 in the machine status as `REFUTED_CURRENT`; that bookkeeping
+fix is independent of the row423 witness. Focused validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row423-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row423-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row423-tmp CARGO_BUILD_JOBS=4
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::single_slot_admission::latent_capacity_reuse::v16_program_latent_pair_reuse_preserves_historical_claims_and_replacement_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_028_source_domain_realizability_cap::single_slot_admission::v16_program_single_vacant_domain_admission_preserves_historical_claims_and_exit \
+  inv_028_source_domain_realizability_cap::single_slot_admission::v16_program_batch_admission_cannot_share_last_future_domain_slot \
+  inv_028_source_domain_realizability_cap::historical_latent_capacity::v16_program_historical_and_latent_domains_share_bounded_settlement_capacity \
+  inv_077_bounded_work_and_maximum_shape_compute::v16_program_max_source_capacity_reclamation_restores_funded_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-005 consumed backing after principal repayment (row 416, 2026-09-12)
+
+Owner: [cu/inv_005_consumed_backing_containment.rs](cu/inv_005_consumed_backing_containment.rs),
+mounted under `inv_005_authority_incarnation_binding::consumed_backing_containment`.
+Selector: `v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only`.
+Base: `575a6a0ee7f4992323facd8f3136203a9da7c029`, the requested origin branch at
+worktree creation. Worktree: `/tmp/percolator-row416-cold-admin-20260912`;
+branch: `codex/row416-cold-admin-containment`.
+
+Four public System/SPL/ATA/wrapper histories cross backing domains 0/1 with
+Active/DrainOnly. A 5,000-atom profitable episode earns 708/875 provider atoms.
+Both positions close, a permissionless crank releases their liens, the winner
+converts its PnL, and all 100,000 provider principal atoms are repaid. The bucket
+then has no fresh, valid-liened or impaired backing, but retains the conversion's
+5,000-atom consumed receivable and the provider's earnings.
+
+Past the recorded slot-100 expiry, a correctly signed cold-admin rotation and
+all-but-one-atom earnings payout both execute before funded-role replacement
+rejects. At authenticated slot 112, stale maturity independently rejects payout
+with OracleStale and rolls back the valid rotation. The unchanged oracle holder's
+fresh report uses Clock slot 112 despite caller slot MAX; the same rotation and
+payout then commit without renewing backing or altering other roles. Cold-admin
+replacement still rejects with one earned atom, and again after an executed
+last-atom SPL payout: the consumed receivable itself retains incumbent consent.
+The incumbent separately receives that last atom and authorizes the role transfer.
+Both users then withdraw their complete input-derived claims. Both administrators
+receive zero quote atoms; the vault and user capital finish at zero.
+
+The test checks complete Account rollback, exact signature fees, successful prefix
+counts, transaction size, complete market economics, provider ledger history,
+fixed SPL supply, oracle configuration, role profiles and control sequences.
+It reuses the existing cold-admin test's transaction/frame helper. Results:
+**4 histories, 16 exact rollbacks, 8 completed SPL-prefix rollbacks, 4 incumbent
+handoffs and 8 user exits**. Peak CU: rejection **224,577**, management/payout
+**228,526**, user exit **140,263**; existing limits are unchanged.
+
+**Row 416 remains OPEN.** This is bounded privileged INV-005/020/024/027/055
+coverage. No public-interface LoF/DoS was found in these histories; no production
+or engine change is made. Nonconsensual funded-oracle management, Recovery,
+Resolved, authority ABA and arbitrary role/history products remain outside this
+increment. The engine remains pinned to `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+
+Duplicate candidates discarded during review: ordinary empty-role management,
+live valid-lien/earned-reserve rotation, and unconsumed two-domain refilling are
+already owned by the nearby INV-005 selectors. No duplicate tests were retained.
+The preliminary `earnings_only_containment::v16_program_earnings_only_role_survives_expiry_stale_clock_and_drain_only`
+selector was run during fixture development and removed: conversion retains a
+consumed receivable, and the proposed refill/final-principal-withdrawal order with
+unpaid earnings is not admitted by the pinned engine's bucket-shape rules. It
+does not establish loss or permanent denial; the retained public history proves
+complete payouts and incumbent-consented succession with that receivable present.
+
+Default-feature SBF was rebuilt locally using platform-tools v1.52, locked/offline.
+Artifact SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The new selector and the existing earned-reserve/refunding controls pass. The
+additional funded-insurer stale-resolution control fails on its unsigned terminal
+insurance payout rejection expectation; the wrapper now permits a canonical
+beneficiary payout without that signature. The same exact selector fails in the
+detached original-base checkout `/tmp/percolator-row416-base-check-20260912`.
+Its test, production source, harness and Cargo inputs are unchanged by this patch.
+This pre-existing expectation is not counted as a new LoF/DoS or silently repaired.
+Focused validation commands (no broad-suite claim):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row416-cold-admin-20260912-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::consumed_backing_containment::v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_005_authority_incarnation_binding::cold_admin_earned_reserve::v16_program_cold_admin_rotation_preserves_earned_reserve_after_partial_principal_repayment \
+  inv_005_authority_incarnation_binding::backing_role_refunding::v16_program_backing_role_containment_tracks_both_domains_through_refunding
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::funded_insurer_stale_resolution::v16_program_funded_insurer_handoff_preserves_stale_deadline_and_permissionless_user_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-008 underfunded withdrawal rail and replenishment (row 415, 2026-09-12)
+
+Owner: [cu/inv_008_underfunded_rail_retry.rs](cu/inv_008_underfunded_rail_retry.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::underfunded_rail_retry`.
+The selector `v16_underfunded_withdrawal_retry_preserves_replenished_stock_across_quote_rails`
+checks 1- and 37-atom withdrawals across all six deposit/backing/donation orders.
+A secondary vault one atom short rejects at Withdraw's late custody check,
+rolling back the debit, owner sequence, successful backing SPL transfer, funding
+watermark and first ledger initialization. The unchanged withdrawal bytes then
+pay through the primary rail and exhaust the original capital.
+
+Later public replenishment creates three separately accounted stocks: owner
+capital from Deposit, provider backing from TopUpBackingBucket, and secondary
+custody surplus from a direct SPL transfer. A retained withdrawal suffix on
+either rail aborts all three prefixes; the identical replenishment bundle then
+commits. Both old rails reject with EngineStale despite sufficient capital and
+custody. A fresh partial withdrawal survives both a paid-prefix/stale-suffix
+rollback and a duplicate across rails, then pays through the secondary rail.
+All four consumed variants stay stale while a full same-amount payout remains
+funded. Every rejection checks the complete Account frame and exact payer fee;
+every transaction checks independent capital/backing books, immutable bystander
+state, both fixed mint supplies, and all token destinations and vaults.
+
+This adds late withdrawal failure composed with backing-ledger rollback and
+cross-rail recovery. Standalone redeposit, passive-reward, PnL-conversion and
+insurance round-trip candidates were excluded as existing coverage; no duplicate
+test was added and later removed. Frozen-destination admission was also excluded
+because it rejects before the intended mutation boundary. This is bounded
+INV-008/010/011/024/031/064 evidence, not reserve-withdrawal stock-sequence or
+arbitrary-history certification. **Row415 remains OPEN.** No new public-interface
+LoF/DoS, production fix, engine change or status promotion is claimed.
+
+The new selector passes 12 histories / 168 transactions / 132 exact rollbacks;
+peak **92,247 CU**, within the unchanged 300,000 custody ceiling. Base:
+`575a6a0ee7f4992323facd8f3136203a9da7c029`, isolated worktree
+`/tmp/percolator-row415-20260912`, branch `codex/row415-retained-withdrawal-20260912`.
+Default-feature SBF was rebuilt locked/offline with platform-tools v1.52 into
+`/dev/shm/row415-retained-withdrawal-20260912-target`; wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Host tests use that same private target with debug info and incremental compilation
+disabled. No matcher is needed. Exact validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row415-retained-withdrawal-20260912-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::underfunded_rail_retry::v16_underfunded_withdrawal_retry_preserves_replenished_stock_across_quote_rails -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_008_intent_uniqueness_and_bounded_replay::v16_retained_withdrawal_stays_consumed_after_redeposit_restores_custody \
+  inv_008_intent_uniqueness_and_bounded_replay::v16_consumed_withdrawal_rails_stay_stale_across_reserve_replacement \
+  inv_008_intent_uniqueness_and_bounded_replay::withdrawal_stock_history::v16_program_generated_withdrawal_stock_histories_preserve_first_execution_budget
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-012 prior-epoch keeper revocation (row 412, 2026-09-12)
+
+Owner: [cu/inv_012_prior_epoch_cleanup_revocation.rs](cu/inv_012_prior_epoch_cleanup_revocation.rs),
+mounted under `inv_012_capability_and_delegate_scope::joint_incarnation_binding`.
+Four public System/SPL/wrapper histories cross both CPI consumers with both signs.
+A configured matcher opens two positions; a signed sibling-asset exit successfully
+simulates before the peer's owner-only reduction resets the other asset's LP side.
+The reset leaves the LP Account and grant byte-identical, with a prior-epoch leg.
+
+Permissionless cleanup then detaches that leg, advances the LP portfolio episode
+once, disables the grant and clears expiry, preserving its sequence, tuple and
+fee cap. It neither calls the matcher nor changes the live sibling leg or peer
+Account. A cleanup-plus-current-episode consumer rejects Unauthorized after the
+cleanup succeeds internally, restoring the complete economic Account frame and
+charging only the exact network fee. Committed cleanup independently rejects the
+original retained bytes, a request with only the peer episode refreshed, and a
+request with both episodes refreshed. All reject before matcher CPI. Explicit
+owner reauthorization permits the same sibling exit, side-reset finalization,
+and both owners' complete principal withdrawals.
+
+This adds the automatic prior-epoch detachment writer excluded by the existing
+Recovery-forfeit coverage. The INV-028 reset-exit selector covers claim storage
+and payout, without retained sibling capability or rollback of revocation.
+Standalone disable/re-enable, owner reduction/conversion, Recovery forfeit and
+liquidation probes were rejected as duplicates during design review; none were
+added and removed. **Row 412 remains OPEN.** This sampled INV-004/005/010/012/024/081
+increment does not close arbitrary writer histories, policy changes, retained
+grant delivery, incarnation replacement, fees/funding/claims or maximum shape.
+No public-interface LoF/DoS was found, and no production fix, engine dependency
+change or invariant-status promotion is claimed.
+
+The new selector passes four live previews, sixteen exact rejected transactions,
+four committed cleanups, eight matcher fills and eight complete withdrawals.
+Measured maxima: cleanup **220,997 CU**, rejected cleanup bundle **325,855 CU**,
+matcher fill/preview **461,832 CU**, owner reduction/grant **243,446 CU**, withdrawal
+**138,767 CU**. Existing CU ceilings are unchanged.
+
+Isolated worktree `/tmp/percolator-row412-20260912`, branch
+`codex/row412-retained-capability-20260912`, requested origin base
+`5bbe2d722cd89b3a8a288be29dd9ac89a3605846`. Private host/deploy outputs were copied
+from `/dev/shm/percolator-row424-sync-20260912-target`; production/Cargo/matcher
+inputs match `82f44d1146a45f1f0cf07a76fb171a280d5c21e2`. Cached default-feature
+wrapper SHA-256 is `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256 is `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Host tests compile in this worktree. No SBF rebuild or broad-suite run is claimed.
+Focused validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row412-cleanup-20260912-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::prior_epoch_cleanup_revocation::v16_program_prior_epoch_cleanup_revokes_retained_sibling_capability -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::mixed_batch_revocation::v16_program_clear_cross_zero_batch_roundtrip_cannot_revive_retained_capability \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::revocation_atomicity::v16_program_retained_capability_tracks_committed_revocation_after_bundle_rollback \
+  inv_012_capability_and_delegate_scope::cure_revocation::v16_program_funded_close_cancellation_requires_fresh_matcher_capability \
+  inv_028_source_domain_realizability_cap::historical_latent_capacity::latent_reset_exit::v16_program_latent_source_survives_owner_reduction_and_prior_epoch_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-073 Recovery reserve repair across final portfolio cleanup (row 433, 2026-09-12)
+
+Owner: [cu/inv_073_recovery_reserve_cleanup.rs](cu/inv_073_recovery_reserve_cleanup.rs),
+sharing the public INV-024 earned-fee fixture and invoked by INV-073's
+`v16_program_recovery_reserve_repair_crosses_last_portfolio_cleanup_without_beneficiary_signatures`.
+Primary INV-073; related INV-018/021/024/027/067/069/070/071/078/081/082.
+
+Two whole-route LiteSVM histories reverse user payout and portfolio cleanup order.
+Public trading creates 875 earned-fee atoms and live 1,050-contract positions.
+Public SPL closure removes both reserve destinations; user, provider, insurance
+operator and terminal beneficiary keys are then dropped. Asset shutdown enters
+Recovery at slot 2. One keeper-only force-close at the exact slot-7 deadline
+removes both positions while preserving the input-derived claims. After signed
+market resolution, each user receives its exact 56,627/1,995,000 atoms in one
+unsigned CloseResolved at the slot-12 boundary. Reserve destinations remain absent.
+
+The market authority deletes the first empty portfolio. With exactly one still
+materialized, keeper-funded ATA reconstruction followed by each reserve route
+rejects EngineLockActive. Earlier versions of those same three bundles reject
+ExpectedSigner in asset Recovery, while market mode is still Live. Both stages
+verify the completed ATA prefix and exact full-Account rollback. These six probes
+run only in the first history. In both histories a deeper bundle deletes the last
+portfolio, reconstructs provider custody, pays the earned fees and initializes its
+ledger, reconstructs insurance custody, then rejects a wrong-role insurance
+destination. The exact failure index and successful wrapper/ATA prefix counts
+prove the final-cleanup boundary was crossed. Deletion, rent movement, both new
+accounts, payment and ledger initialization all roll back; only signature fees
+remain charged.
+
+After the identical last-deletion instruction commits separately, the unchanged
+repair/payout instructions pay all three claims with just the keeper signing.
+Principal-first and earnings-first orders return 100,000 principal plus 875 fees
+to the provider and 31 insurance atoms to its distinct beneficiary. Idempotent
+provider ATA reconstruction charges rent once. Each prefix checks reserve stock,
+source reservations, ledger attribution, usable beneficiary-owned SPL custody,
+wallet/profile frames, fixed mint supply and market/encumbrance censuses. Both
+histories close the empty vault and slab with exact refund and tombstone rent.
+
+The new relation is **funded Recovery plus absent reserve custody across the last
+materialized portfolio's deletion and rollback**. The nearest force-close/retirement
+control has no surviving reserves; existing replacement tests begin after user deletion.
+Standalone frozen replacement, generic six-order payout, provider expiry/reassigned
+custody, insurance exhaustion and row418 quote-variant probes were excluded during
+coverage review as duplicates; none were added and subsequently removed.
+
+**Row433 remains OPEN.** No production bug, wrapper/engine change or status promotion
+is claimed. Resolution and mechanical cleanup still require the market authority.
+This is finite classic-SPL/asset-0 evidence with integral matched PnL; global market
+Recovery, recredit, receipts, pending loss, native/dual rails, unavailable market
+authority and maximum shapes remain outside this increment.
+
+Worktree `/tmp/percolator-row433`, branch
+`codex/row433-terminal-reserve-coverage-20260912`, starts at requested origin base
+`5bbe2d72`. Private build cache: `/dev/shm/percolator-row433-target`. The default-feature
+SBF was rebuilt in this worktree with locked/offline dependencies and platform-tools
+v1.52; SHA-256 `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The new selector passes both histories with eight exact rollbacks and six unsigned
+reserve payments; peak **498,082 CU**, below the reused **1,200,000-CU** limit.
+The four adjacent exact controls and charter/index pass (4/4 and 1/1).
+Formatting and unstaged whitespace checks pass. Existing unused-support and
+Solana client future-compatibility warnings remain. Focused validation (no unfiltered suite):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row433-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_recovery_reserve_repair_crosses_last_portfolio_cleanup_without_beneficiary_signatures -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_recovery_force_close_reaches_zero_residue_and_close_slab \
+  inv_073_no_permanent_user_lock::v16_program_public_reserve_payments_wait_for_resolved_senior_disposition \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_reserve_destination_recovery::v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_value \
+  inv_073_no_permanent_user_lock::v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-070 native denomination after a terminal prefix (row 424, 2026-09-12)
+
+Owner: [cu/inv_070_terminal_native_reclassification.rs](cu/inv_070_terminal_native_reclassification.rs),
+mounted as `inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_native_reclassification`.
+Selector: `v16_program_native_sync_after_terminal_prefix_reclassifies_only_external_surplus`.
+
+Three public LiteSVM histories compare no native synchronization, synchronization
+before scanning, and synchronization after a successful final-close preview. A
+257-asset market has 37 insurance atoms on asset zero, 23 unexpired backing atoms
+on asset 256, and 19 external unsynchronized lamports. CloseSlab persists cursor
+256. An unsigned insurance withdrawal pays the absent beneficiary exactly 37;
+the provider withdraws its 23 before expiry. Both preserve the persisted cursor.
+No portfolios, claims, earnings or booked residue remain.
+
+The same signed final CloseSlab transaction first simulates successfully. In the
+late schedule, a payer-only SPL SyncNative then changes the vault's token amount
+without changing its lamports or any market Account byte. Authenticated time
+advances from 300 to 301; the serialized close, signatures and blockhash stay
+identical. The retained close must now transfer 19 wrapped atoms before closing
+the vault. Without synchronization, those same atoms instead join the authority's
+raw-lamport refund. Every schedule preserves the exact beneficiary totals and
+leaves the canonical typed tombstone with exact rent.
+
+Input-derived native Account images distinguish booked insurance/backing, raw
+lamports, wrapped surplus and rent. Stock and encumbrance censuses, all domain
+budgets, complete compiled/tracked Account frames, exact signature fees, simulation
+nonmutation and total lamport conservation constrain the continuation. The native
+mint genesis account is the existing helper's sole injected fixture; protocol
+state is constructed only with System/ATA/SPL/wrapper instructions. There are six
+committed CloseSlab calls, three insurance payouts, three backing withdrawals,
+two permissionless synchronizations and three successful final-close previews.
+
+The new relation is **denomination change with unchanged custody lamports after
+a persisted scan and successful readiness preview**. The existing post-prefix SPL
+donation adds custody; native surplus and native insurance controls have no
+persisted scan. Standalone donation, expiry, asset-reuse and native-disposal probes
+were rejected during coverage review as duplicates; none were added and removed.
+An initial fixture incorrectly expected insurance alone to trigger a bounded scan.
+Its normal EngineLockActive rejection was corrected by funding the later unexpired
+bucket, not by changing production behavior or weakening the final assertions.
+
+**Row 424 remains OPEN.** This is sampled INV-070 and adjacent conservation,
+classification, allocation and progress evidence. It does not cover earlier-slot
+expiry/recredit discovery, nonzero insurance liens (INV-033), expiry normalization
+(INV-063), receipts, Recovery, user claims, native booked-residue retirement,
+secondary quote rails or arbitrary environmental histories. No production bug,
+fix, engine dependency change or invariant-status promotion is claimed.
+
+Worktree: `/tmp/percolator-row424-20260912`; branch:
+`codex/row424-persisted-reclassification-20260912`; requested origin base:
+`d16e2f01bec53960e74d5efa80448a1a2606aba4`. Private host/deploy outputs were copied
+from `/dev/shm/astra-terminal-public-disposition-target`. Production/Cargo inputs
+match `82f44d1146a45f1f0cf07a76fb171a280d5c21e2`; the deployed default-feature SBF
+SHA-256 is `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Host tests compile in this worktree; no SBF rebuild or full-suite run is claimed.
+The new exact selector passes 1/1 across three histories, peak **32,783 CU** under
+the unchanged 300,000-CU ceiling. The four adjacent exact controls pass 4/4, and
+the charter/index and authoritative-status checks pass 2/2. Repository-wide
+formatting and Git whitespace checks pass. Existing unused-support and Solana
+client future-compatibility warnings remain. Focused validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row424-sync-20260912-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_native_reclassification::v16_program_native_sync_after_terminal_prefix_reclassifies_only_external_surplus -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_terminal_scan_reconciles_external_surplus_arriving_after_cached_prefix \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_native_quote_terminal_surplus_sync_has_exact_token_and_lamport_disposition \
+  inv_071_crank_progress::terminal_prefix_insurance::v16_program_scanned_insurance_withdrawals_preserve_peer_entitlements_across_late_expiry \
+  inv_077_bounded_work_and_maximum_shape_compute::native_insurance_exit::v16_program_native_insurance_partial_redemption_reaches_bounded_terminal_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-073 provider custody replacement after partial payment (row 420, 2026-09-12)
+
+Owner: [cu/inv_073_provider_custody_replacement.rs](cu/inv_073_provider_custody_replacement.rs).
+The verifier shares the existing public terminal-earnings fixture, with its test
+mounted under INV-073:
+`inv_073_no_permanent_user_lock::v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings`.
+
+Six public LiteSVM histories cross slot 99/100/101 around principal expiry at 100
+with separate/bundled replacement creation. After unsigned payments of 101 principal
+and 17 earnings atoms, the provider signs an SPL AccountOwner reassignment of that
+populated associated token account to a distinct custodian. Provider, custodian
+and insurance operator keys are then dropped. The existing 118 paid atoms remain
+in the voluntarily reassigned account, whose entire Account stays unchanged.
+Neither custody reassignment nor keeper-funded replacement creation changes the
+market's backing beneficiary, authority epoch or existing provider ledger identity.
+
+A keeper creates a different SPL account owned by the absent provider through
+System CreateAccountWithSeed and SPL InitializeAccount3. At slot 99 the remaining
+99,899 principal and 858 earned-fee atoms reach that account. At exact/late expiry,
+CloseSlab first normalizes the unpaid principal; 858 fees remain payable, and the
+99,899 principal atoms are ultimately burned. The separate 31-atom insurance claim
+is paid exactly. Each history ends with a closed vault, rent-exact tombstone and
+the original users' 56,627/1,995,000 payouts unchanged. Provider reserve account
+metas stay unsigned throughout the continuation. The market authority signs
+normalization and mechanical closure; its signature is not reserve consent.
+
+Each replacement-payment continuation first runs before a stale-destination
+earnings request. That suffix rejects with InvalidTokenAccount after successful
+SPL payment and ledger update. All six transactions restore complete compiled and
+tracked Accounts, apart from exact signature fees; three also restore replacement
+creation and four restore expiry normalization. The unchanged valid instruction
+prefix then commits. There are eight rolled-back provider payments, 26 committed
+reserve payments and six final closures. Input-derived stock/reservation censuses,
+complete SPL and earnings-ledger images, fixed pre-retirement supply, provider
+identity and exact rent accounting constrain every committed stage. Snapshot edits
+construct assertion expectations only; no initialized program-owned bytes are
+injected or restored in LiteSVM.
+
+The new boundary is an unavailable provider with a *populated, reassigned* original
+destination and an already-paid earnings ledger. Row410's destination repair
+recreates empty ATAs and uses reserve-holder signatures; row418/INV-082 replacement
+histories cover user payouts or signed insurance disposal. Row433 retains working
+destinations through final-close rollback. Rows420/421 depleted-reserve retirement
+have no surviving provider fees. Standalone unsigned payout permutations, missing
+ATA repair, expiry-only retirement and another final-close rollback were discarded
+as duplicates. A standalone stale-destination rejection was removed as marginal;
+the retained rejection is tied to successful replacement/payment progress.
+
+**Row 420 remains OPEN.** This is finite Resolved/classic-SPL/asset-0 conformance,
+with solvent user settlement, available market authority and prior owner-signed
+empty-portfolio deletion. Frozen canonical vaults, absent market authority,
+insurance recredit, provider economic-loss exhaustion, active source claims,
+Recovery/ADL, native/dual quotes, multiple custody successions, maximum shapes and
+arbitrary histories remain gaps. No production bug, fix or invariant-status change
+is claimed.
+
+Worktree: `/tmp/percolator-row420-astra.NMC9MX/worktree`, starting at the latest
+requested remote branch when fetched, `96534045`. Production sources and manifests
+match `82f44d1146a45f1f0cf07a76fb171a280d5c21e2`; engine pin remains `394fd0bf`.
+Private host/deploy outputs were copied from
+`/dev/shm/astra-terminal-public-disposition-target`. The cached default-feature SBF
+SHA-256 is `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+No SBF rebuild or unfiltered suite was run, and neither protected checkout was edited.
+
+The initial individual selector passed. The final focused run passes **4/4**:
+new selector success/rejection/close peaks **447,764/649,316/31,080 CU**, under the
+reused 1,200,000-CU transaction ceiling; adjacent signed-expiry, destination-repair
+and unsigned-reserve controls peak at **353,430**, **365,139** and **229,994 CU**.
+The charter/index and authoritative reopening-status checks pass **2/2**;
+formatting and Git whitespace checks pass. Existing unused-support and Solana client
+future-compatibility warnings remain. All Cargo invocations use this private environment:
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row420-astra.NMC9MX/worktree/target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings \
+  inv_073_no_permanent_user_lock::v16_program_terminal_public_reserve_disposition_preserves_value_across_orders \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_reserve_destination_recovery::v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_value \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_earnings_expiry::v16_program_terminal_expiry_preserves_earned_fees_and_bounded_signed_disposal
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-073 missing insurance wallets through loss and recredit (row 421, 2026-09-12)
+
+Owner: [cu/inv_073_missing_insurance_wallet_recredit.rs](cu/inv_073_missing_insurance_wallet_recredit.rs),
+mounted under `inv_073_no_permanent_user_lock::absent_insurer_spent_retirement`.
+Selector: `missing_insurance_wallet_recredit::v16_program_recredited_insurance_reaches_terminal_exit_without_wallets_or_signatures`.
+
+Four public LiteSVM histories cross asset 0/1 with a 0/1-atom insurance remainder.
+The existing loss/expiry fixture funds 100/101 insurance atoms and 307 unused
+backing atoms. Before trading, public SPL close and System transfers remove the
+beneficiary's token account and drain both beneficiary/operator wallets to zero;
+all reserve keys are dropped. The configured identities persist unchanged.
+Permissionless stale resolution and three user exits pay exactly `[1200, 0, 137]`,
+consuming 100 insurance atoms. Signed empty-portfolio deletion and backing expiry
+leave a 100-atom recredit entitlement plus the original 0/1-atom remainder.
+
+The new continuation starts before recredit is booked. An unrelated keeper pays
+ATA creation rent and submits `WithdrawInsuranceAsset` with no reserve or admin
+signature. This first payment implicitly recredits insurance and pays 37 atoms;
+a second unsigned payment pays the remaining 63/64. The input-derived outstanding
+entitlement strictly decreases `100/101 -> 63/64 -> 0`, including insurance that
+has not yet been recredited. Both absent wallet Account images remain unchanged;
+the repaired SPL account belongs to the original beneficiary. Exact market state,
+domain budgets/spend, role profiles/control sequences, token custody, payer fees,
+stock and encumbrance censuses bind each successful prefix. One administrator-signed
+slab close burns the separately unallocated 207 atoms and returns exact rent.
+
+In each world, a bundled ATA creation, implicit recredit, real partial payment and
+premature slab close rejects only after the creation/payment prefix succeeds.
+Every tracked and compiled Account rolls back, except transaction fees, including
+the missing destination and historical insurance spend. Retrying with keeper-only
+signatures succeeds without creating either wallet account.
+
+This adds **wallet-account absence across an insurance loss/recredit history**.
+Row420 custody replacement preserves a funded provider wallet and never spends
+insurance; row433 destination repair and Recovery cleanup retain beneficiary
+wallets. Row421 frozen-custody coverage retains both wallets and unspent insurance.
+INV-024's raw-surplus/recredit control already pays restored claims unsigned into
+existing custody; the old INV-073 recredit control stops at the protected claim.
+Those cases are controls, not new standalone coverage claims.
+
+**Row 421 remains OPEN**, with partial green conformance and no production change.
+This finite classic-SPL fixture does not prove arbitrary histories, native/secondary
+rails, missing market authority, or access to paid custody when the beneficiary's
+private key is permanently lost. It proves economic disposition to that identity's
+custody. Administrative deletion, expiry normalization and final retirement still
+use the market authority or portfolio owner. No property violation was observed.
+
+Validation starts from `037a055e` in worktree `/tmp/percolator-row421-20260912`,
+branch `codex/row421-insurance-terminal-progress-20260912`. The default-feature SBF
+and private host-cache copies came from `/dev/shm/astra-terminal-public-disposition-target`.
+SBF SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Production sources and Cargo files match the recorded artifact baseline
+`82f44d1146a45f1f0cf07a76fb171a280d5c21e2`; no SBF rebuild is claimed. Shared-memory
+exhaustion required the two requested `/dev/shm` paths to point to private storage
+under this worktree's ignored `target/`. A test-helper compilation error was fixed
+before the first execution; no failing economic case was removed.
+
+The final new selector passes **1/1** (four histories, 2.20 seconds), with eight
+keeper-only payments, four custody creations, four exact rollback bundles and four
+final closes. Peak CU is **170,252** for the new continuation and **222,909** across
+its measured settlement/cleanup transactions, below the unchanged **300,000** bound.
+The eight adjacent exact controls pass **8/8** in 45.69 seconds. Existing Solana
+future-compatibility warnings remain; no full-suite or Kani run is claimed.
+
+Exact validation commands (test output logs are under this worktree's `target/`):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row421-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row421-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row421-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::missing_insurance_wallet_recredit::v16_program_recredited_insurance_reaches_terminal_exit_without_wallets_or_signatures -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_reserve_roles_preserve_recredited_insurance_after_backing_expiry \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_depleted_reserves_preserve_exhaustion_and_retirement_across_retries \
+  inv_073_no_permanent_user_lock::frozen_insurance_remainder::v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement \
+  inv_073_no_permanent_user_lock::v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings \
+  inv_073_no_permanent_user_lock::v16_program_recovery_reserve_repair_crosses_last_portfolio_cleanup_without_beneficiary_signatures \
+  inv_073_no_permanent_user_lock::v16_program_terminal_public_reserve_disposition_preserves_value_across_orders \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_surplus::v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-073 frozen paid insurance and unsigned remainder (row 421, 2026-09-12)
+
+Owner: [cu/inv_073_frozen_insurance_remainder.rs](cu/inv_073_frozen_insurance_remainder.rs),
+mounted as `inv_073_no_permanent_user_lock::frozen_insurance_remainder`.
+Selector: `v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement`.
+
+Four public LiteSVM histories cross the target asset (0/1) with permanent SPL
+destination freezing before/after resolution. The target's two insurance domains
+receive 19/28 atoms; a distinct peer beneficiary receives 11/13 atoms on the other
+asset. The target beneficiary initially also holds the operator role, takes a
+valid 7-atom Live payout, and transfers the operator role to a distinct key. Both
+beneficiaries and both current operators then stop signing. A separate freeze
+authority freezes the paid target ATA and irrevocably removes its authority.
+The mint authority is also removed, fixing supply at 71 atoms.
+
+After resolution, the keeper creates two ordinary non-ATA SPL accounts owned by
+the original beneficiaries using System/SPL instructions and only its own
+signature. Three unsigned insurance payments interleave 13 target, 24 peer and
+27 target atoms. The first target payment crosses its long/short domain boundary;
+the peer payment preserves the target's remaining 27-atom allowance. Every payment
+strictly reduces outstanding insurance by its input amount. Full SPL account
+images, every domain budget, both authority profiles/control sequences, stock and
+encumbrance censuses, compiled/unrelated Accounts, exact keeper fees and creation
+rent bind each prefix. The canonical vault remains unfrozen. Each world finishes
+with 40/24 atoms in fresh custody, the original 7 atoms still frozen externally,
+zero booked reserves and one administrator-signed slab close. Both empty vaults
+close, and the administrator receives exactly excess slab/vault rent.
+
+The new boundary is **remaining insurance after a funded destination becomes
+permanently frozen**, with neither current reserve role signing. Row418's frozen
+destinations contain no previously paid insurance and exercise user PnL;
+rows420/421's depleted-reserve retirement has no payable remainder; row433's
+reserve-prefix/final-close retries retain usable recipient custody. INV-024's
+destination-repair control recreates missing ATAs with beneficiary signatures.
+Basic unsigned reserve orders, empty/missing destination repair, provider expiry,
+insurance exhaustion/recredit and optional stale-ledger retries were discarded
+as standalone additions because adjacent tests already own those cases. The old
+insurance cooldown field is reserved and required to be zero, so no unsupported
+cooldown policy history is counted as new coverage.
+
+**Row 421 remains OPEN** and invariant statuses are unchanged. This is finite
+insurance-only, classic-SPL primary-quote conformance with an empty secondary
+vault and no portfolios. It does not establish recovery of the externally frozen
+7 atoms, frozen canonical-vault progress, Recovery/ADL, user liabilities, spent
+insurance recredit, backing expiry/provider earnings, missing beneficiary wallets,
+native or funded secondary quote, optional ledgers, maximum shapes, arbitrary
+histories or retirement without the market authority. No production bug or fix
+is claimed. Initial setup attempts used the beneficiary instead of the Live
+operator, then repeated a fixture airdrop; both were corrected before the terminal
+continuation was exercised. No economic case or CU ceiling was discarded.
+
+The exact new selector passes **1/1**, all four histories in 1.62 seconds, with
+12 unsigned payouts, 8 keeper-funded token creations and 4 full retirements.
+Measured transaction maxima: Live prefix **27,178 CU**, destination creation
+**4,662 CU**, unsigned payout **33,993 CU**, slab close **28,201 CU**; all below
+the unchanged **300,000-CU** test ceiling.
+
+The four adjacent exact controls pass **4/4** in 37.01 seconds. Their maxima are
+**359,568 CU** for the frozen-user control (including rejected bundles),
+**226,926 CU** for depleted-reserve retirement, **72,757 CU** for stale-ledger
+insurance exit and **232,994 CU** for public reserve disposition. The charter/index
+and authoritative-status checks pass **2/2**. Formatting and Git whitespace checks
+pass. Existing unused-support and Solana future-compatibility warnings remain.
+
+Validation uses isolated worktree `/tmp/percolator-row421-terminal-coverage-20260912`,
+branch `codex/astra-row421-terminal-coverage-20260912`, based on latest fetched
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`9653404554059f07d030f42c19e190d17ec21a2a`. Private host/deploy cache copies came
+from `/dev/shm/astra-terminal-public-disposition-target`. The reused default-feature
+wrapper SHA-256 is
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+production and dependency files match `82f44d1146a45f1f0cf07a76fb171a280d5c21e2`.
+The engine pin is unchanged. No SBF rebuild, full-suite or Kani run is claimed.
+Exact focused commands:
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row421-terminal-coverage-20260912/target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::frozen_insurance_remainder::v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledger \
+  inv_073_no_permanent_user_lock::v16_program_terminal_public_reserve_disposition_preserves_value_across_orders \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_depleted_reserves_preserve_exhaustion_and_retirement_across_retries \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::frozen_destination_exit::v16_program_frozen_destinations_preserve_pnl_exit_without_freeze_authority
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-045 retained liquidation penalty across fresh handoff (row 422, 2026-09-12)
+
+Owner: [cu/inv_045_retained_penalty_handoff.rs](cu/inv_045_retained_penalty_handoff.rs),
+mounted under `inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::retained_penalty_handoff`.
+Selector: `v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup`.
+Exact requested base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`3abff5d2bc6d521d26768c386b847f2b014058e2`. Branch:
+`codex/astra-row422-fresh-reward-20260912`; isolated worktree:
+`/tmp/percolator-astra-row422-fresh-reward-20260912`.
+
+One public LiteSVM history adds an actual previously retained liquidation penalty
+to the fresh-report boundary. The existing `authenticated_reward_handoff` already
+covers paid discovery followed by fresh evidence during lag, including funding and
+reward rollback; `corroborated_mark_fees` preserves discovery fees after full
+catchup. Neither enters fresh liquidation with a committed stale-mark liquidation
+penalty belonging to the earlier episode. No publication-order, common-owner,
+raw-print/share or keeper-payout matrix was added. Standalone stale/equivocal
+rejections and route-order variants were discarded as duplicate candidates.
+
+A paid Hybrid trade stages 992,320 from 1,000,000 and pays 1,540,072 discovery
+atoms. At slot 6, stale evidence advances the effective price to 997,600 and
+liquidation retains 5,987 atoms, with zero reward or domain credit. At slot 7,
+fresh evidence publishes 980,000 while the accepted price is still 995,206,
+above even the old paid target. The target replacement resets the cap anchor to
+997,600; independent integer cap arithmetic gives the 2,394-atom accepted step.
+The next liquidation charges 8,287 atoms at that effective price, rewards 2,762,
+and assigns only its 5,525-atom remainder to domains (2,762/2,763).
+Two-stage fee rounding distinguishes the effective price from the fresh report,
+old paid target, accepted/raw trade prints and initial price. Closed quantity is
+an observed deployed input, not an independent proof of liquidation sizing.
+
+Before each successful fresh target crank, the identical independently simulated
+instruction is followed by same-time equivocal evidence. Rejection at instruction
+3 restores every tracked and compiled complete Account, including the old penalty,
+oracle profile, reward and domain budgets, except the separate payer's exact
+signature fee. The unchanged valid instruction then commits. Public account-local
+settlement obtains independently checked current certificates for all exposed
+owners. At slot 14 the fresh target fully catches up without another liquidation,
+fee or reward. Healthy retries at all three boundaries reject exactly. The keeper
+withdraws precisely 3,762 SPL atoms; 1,546,059 old fee atoms remain outside budgets.
+
+System/SPL/ATA/wrapper instructions construct all economic accounts and revoke mint
+authority at the fixed 125,101,000-atom supply. Clock, signer SOL and external Pyth
+reports are harness inputs; no initialized program Account is injected or restored.
+Stock, reservation and source-rate censuses and independent certificate checks run
+through the history. Unrelated exposed owners and complete mint/vault Accounts are
+framed across liquidation; the keeper payout checks all SPL owner endpoints.
+
+**Row 422 remains OPEN.** This is bounded INV-020/024/036/041/045/061 conformance;
+it adds no independent identity matrix for affected INV-062. It does not establish
+general paid-origin persistence until catchup or that every fresh report can make
+a liquidation reward eligible. Upward moves, AuthMark/CPI, multiple assets/providers,
+funding/maintenance in this retained-penalty history, policy changes, source liens,
+complete exposed-owner/terminal exits and arbitrary compositions remain gaps.
+No production bug, vulnerable-pin experiment, fix or invariant-status promotion is
+claimed. Development corrected the cap-anchor assumption and the expectation of a
+third liquidation: the fresh liquidation already restored health through catchup.
+
+Validation uses a private copy of the host cache and the current default-feature
+wrapper SBF, SHA-256
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Production and Cargo inputs match documented artifact base
+`6ab7856fbe1e2f89ed11c1103fb5282fab404dee`; host tests rebuild in this worktree.
+No SBF rebuild or broad-suite claim. The new selector passes with two liquidations,
+three late rollbacks (one rewarded), three exact healthy-retry rollbacks and a
+complete keeper payout. CU peaks `[trade, crank, rejected bundle, payout]` are
+`[147001, 319341, 347660, 47588]`, within existing per-operation limits.
+The four-selector run passes **4/4**; adjacent authenticated-handoff, corroborated
+and stale-catchup peaks are **346,435**, **318,071** and **268,838 CU**, respectively.
+Charter/index passes **1/1**. Formatting and all three Git whitespace checks pass.
+Existing unused-support and Solana future-compatibility warnings remain. Only the
+selectors and checks below were run.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-row422-fresh-reward-20260912/target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+module=inv_045_no_free_mark_movement::trade_origin_catchup
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  ${module}::authenticated_reward_handoff::retained_penalty_handoff::v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup \
+  ${module}::authenticated_reward_handoff::v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper_exit \
+  ${module}::corroborated_mark_fees::v16_program_corroborated_paid_mark_only_distributes_new_liquidation_fees \
+  ${module}::v16_program_trade_origin_liquidation_prices_and_entitlements_survive_catchup_order
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-008 atomic insurance round-trip stock retry (row 428, 2026-09-12)
+
+Owner: [cu/inv_008_insurance_round_trip_retry.rs](cu/inv_008_insurance_round_trip_retry.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::insurance_round_trip_retry`.
+Selector: `v16_insurance_round_trip_consumption_survives_cross_route_retry`.
+
+Four public System/SPL/ATA/wrapper histories cross both insurance refill routes
+with absent/lazily initialized telemetry. A fixed 90-atom mint funds 37 target
+atoms and 53 peer atoms. A withdrawal returns all 37 target atoms to its source;
+a refill moves those same atoms back into insurance. Custody returns to identical
+complete SPL Accounts, while the direct route allocates 18/19 long/short atoms
+and the domain route allocates 0/37. Only a committed refill advances the shared
+insurance funding sequence. Authority epochs, generation and profiles stay fixed.
+
+One aborted bundle completes withdrawal/refill/withdrawal before the alternate
+refill rejects its duplicate intent. Another completes withdrawal/refill before
+a trailing SPL transfer fails. Both restore every tracked and compiled Account
+apart from exact payer signature fees, including the domain allocation, shared
+sequence and lazy ledger. An alternate round-trip envelope signed before these
+attempts then commits unchanged. The original retained envelope rejects after
+its successful payout prefix; both old refill routes remain stale after a fresh
+round trip. Full ledger fields, all domain budgets/spend, aggregate insurance,
+vault, fixed mint supply and complete SPL endpoint images are checked throughout.
+The target's final 37 atoms leave through signed live or unsigned resolved
+admission. The opposite admission rejects against the exhausted target budget
+while 53 peer atoms still satisfy custody preflight; the peer then withdraws
+exactly 53, leaving zero custody and no stranded stock.
+
+This adds a committed zero-net-custody stock cycle and an aborted *three-transfer*
+cycle to the existing refund and late-top-up-error controls. Those controls have
+no successful withdrawal/refill round trip inside one transaction. Standalone
+authority ABA, amount-only exhaustion, optional-ledger masks and another
+single-transfer late-error probe were discarded during coverage review as
+duplicates; none was added. The telemetry and exhaustion checks retained here
+constrain the new composed history.
+
+**Row 428 remains OPEN.** The consumed intrinsic sequence is the insurance
+**top-up** lane, not a withdrawal stock sequence. This does not prove standalone
+withdrawal uniqueness against independent replenishment, consume a withdrawal
+policy/window epoch, or cover active liabilities, native quote, lifecycle
+restart or arbitrary histories. The absent withdrawal binding is already an
+explicit gap in this branch. No new public-interface bug was established and
+no production or engine change was made. A future withdrawal-binding contract
+must specify its own consumption and retry semantics; these funding assertions
+must not be cited as that contract's proof.
+
+Validation uses branch `codex/row428-intrinsic-stock-retry-20260912` in
+`/tmp/percolator-row428-intrinsic-stock-retry-20260912`, based on requested origin
+commit `d16e2f01bec53960e74d5efa80448a1a2606aba4`. The default-feature SBF was rebuilt
+from this worktree with platform-tools v1.52; SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The new selector passes **1/1**, with four histories, 24 exact rollbacks and
+32 rolled-back SPL transfers, peaking at **95,699 CU** (limit 300,000).
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row428-intrinsic-stock-retry-20260912-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::insurance_round_trip_retry::v16_insurance_round_trip_consumption_survives_cross_route_retry -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_008_intent_uniqueness_and_bounded_replay::v16_insurance_failed_bundle_retry_stays_consumed_after_alternate_route inv_008_intent_uniqueness_and_bounded_replay::v16_insurance_refund_does_not_revive_consumed_cross_route_intent inv_064_insurance_withdrawal_policy_equivalence::v16_program_insurance_withdrawal_ledger_history_is_economically_transparent
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-008 optional insurance ledger rollback and retry (row 428, 2026-09-12)
+
+Owner: [stateful/inv_008_insurance_ledger_retry.rs](stateful/inv_008_insurance_ledger_retry.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::insurance_ledger_retry`.
+Selector:
+`v16_program_retained_insurance_epoch_rejection_restores_optional_ledger_and_fresh_retry`.
+
+Three public LiteSVM histories compare omitted, lazily initialized and previously
+paid insurance telemetry. Both attached and omitted 137-atom withdrawal requests
+are signed and successfully simulated before a partial payout. Public operator
+succession advances the asset epoch twice; only afterward does short-side funding
+restore its stock to 312 atoms. A current-epoch 17-atom payout then completes before
+the retained request rejects with `EngineStale`. Both attachment orders restore
+complete Accounts, including the SPL payout, lazy ledger initialization or existing
+ledger update; only exact signature fees remain charged to the separate payer.
+Both original stale envelopes also reject.
+The separately signed fresh envelope remains byte-identical and pays 17; fresh
+consent without telemetry pays the remaining 295. The independent peer receives
+43 atoms, and all histories end with exactly 449 target atoms paid and zero custody.
+
+The input-derived books check every domain budget, complete SPL endpoints and mint,
+fixed supply, all authority profiles/control sequences, stock and encumbrance
+censuses, and the separate payer's exact fees. The successful ledger retry checks
+every decoded field: previously observed funding contributes 137 profit atoms only
+in the already-paid history; the lazy history starts at the current stock. Later
+unobserved payouts leave that record unchanged. A System instruction allocates the
+new ledger. The existing V16Svm fixture supplies empty program allocations and SPL
+endowments; all initialized economic transitions use public instructions, with no
+program-state repair or snapshot restoration.
+
+This adds an optional-account initialization/update and attachment-switch retry
+dimension to row428. Existing operator ABA, replenishment-order, amount-only and
+preinitialized ledger-mask cases were discarded as standalone additions because
+their boundaries are already covered. The absent-ledger world here is the paired
+economic control. **Row 428 remains OPEN**: this is authority-epoch conformance,
+without an intrinsic withdrawal stock sequence or standalone successful-debit
+consumption proof. Fee-created/terminal-reclassified stock, other assets or quote
+rails, insurer changes, policy histories, active liabilities, resolution and
+arbitrary compositions remain gaps. No production bug was established.
+
+The worker originally validated this in isolated worktree
+`/tmp/percolator-row428-astra-20260912`; coordinator integration reran the new
+selector, adjacent retained-reserve controls, INV-064 ledger control,
+charter/index, formatting and Git whitespace checks on the current invariant
+branch. No SBF rebuild or full-suite claim is made. The new selector passes
+**1/1** with 3 histories, 9 simulations, 21 successes, 12 exact rollbacks and
+6 rolled-back SPL payouts. Peak success/rejection CU is **37,718/55,330**,
+below 300,000.
+The two adjacent retained-reserve selectors pass **2/2**, with success/rejection
+peaks **49,718/64,212** and **37,724/93,067**. The INV-064 ledger control passes
+**1/1**, peaking at **36,181 CU**; charter/index passes **1/1**. Formatting and
+Git whitespace checks pass. Existing unused-support and Solana future-compatibility
+warnings remain.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row428-astra-20260912/target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::insurance_ledger_retry::v16_program_retained_insurance_epoch_rejection_restores_optional_ledger_and_fresh_retry -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture --test-threads=1 inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_paid_retained_insurance_stays_bound_after_replenishment_and_operator_aba inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession
+cargo test --locked --offline --test v16_cu inv_064_insurance_withdrawal_policy_equivalence::v16_program_insurance_withdrawal_ledger_history_is_economically_transparent -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-045 fractional positions and payout residue (row 425, 2026-09-12)
+
+Owner: [cu/inv_045_fractional_position_residue.rs](cu/inv_045_fractional_position_residue.rs),
+mounted under `inv_045_no_free_mark_movement::public_carry_order::fractional_position_residue`.
+Selector: `v16_program_fractional_positions_partition_carry_into_exact_owner_payouts_and_residue`.
+
+Thirty-two public LiteSVM histories cross both target directions, reduction before
+or after the slot-4 market crank, single/two-asset batch no-CPI transport,
+aggregate/two-part reductions, and forward/reverse asset and owner ordering.
+The existing public `World` supplies four unequal deposits and two balanced
+position pairs. With both price-cap carries already nonzero, public quarter-lot
+and half-lot reductions leave the active pair holding 12.75 and 16.5 lots.
+Later reductions leave 10.75 and 14.5 lots. The passive pair stays integral.
+System/SPL/ATA/wrapper instructions construct all economic state; mint authority
+is revoked after the fixed 1,000,066-atom endowment. No program-owned account
+images are injected, restored, or normalized.
+
+The independent input ledger computes each accepted price and cap remainder from
+`anchor * 24 * elapsed / 10000`, then partitions each signed K settlement as
+`quantity * price_delta = floor_atoms * POS_SCALE + nonnegative_remainder`.
+Each asset moves exactly once in this finite family. At every live trade/crank
+boundary, complete decoded legs, raw capital/PnL plus conservatively rounded
+unsettled K, per-owner value, both OI lanes, funding/B, insurance budgets,
+provider fees and fixed SPL supply/custody are checked. Absent owners' complete
+Accounts and both complete oracle profiles are framed across reductions.
+Nonzero unsettled K is required. This is not an assertion that arbitrary
+incremental K settlements must equal one deferred settlement.
+
+For the positive target direction, active-owner PnL is `[-5, +3]` for trade-first
+or `[-7, +5]` for crank-first; the negative direction exchanges those values.
+Passive PnL is `[-4, +4] * direction`. Complementary quarter/three-quarter and
+half/half remainders produce exactly two settlement-residue atoms. The accepted
+prices and owner values agree across routes, partitions and orders within each
+timing schedule; the distinct timing schedules are intentionally not equated.
+
+After public flattening and resolution at slot 5, `CloseResolved` at slot 106
+normalizes the loss-backed sources beyond their slot-104/105 expiries and pays
+all four exact entitlements. The shared matcher-exit helper now accepts an
+explicit payout slot, expected residue and a pre-close callback; its existing
+selector retains slot 100 and zero residue. Live source backing is legitimate
+intermediate stock. At this new test's endpoint, capital, positive PnL,
+insurance, provider earnings and recoverable backing are zero; the remaining
+two SPL atoms equal the input-derived settlement residue, with zero additional
+unallocated surplus. Consumed-backing metadata is not counted again as cash.
+No portfolio deletion, residual burn or slab retirement is claimed.
+
+An empty-instruction suffix rejects at the exact instruction index after 32
+successful trade prefixes and 144 successful SPL payout prefixes. Every compiled
+and tracked complete Account rolls back, with only the calculated payer signature
+fee deducted. Simulation selects payout-bearing closes without changing state;
+the actual rejected transaction must independently log both wrapper and SPL
+success before the suffix error. Unchanged valid instructions then commit.
+
+Distinct coverage: the existing public-order, precrank and matcher-exit owners
+use integral positions; INV-038's B/receipt remainder tests and INV-052's fee
+partition tests cover different rounding origins. Additional integral-lot route
+or ordering variants were discarded during design as duplicates. No executed
+history was discarded. Development corrected fixture assumptions about one-slot
+accrual, loss-backed intermediate stock, immediate live conversion, Resolved
+crank dispatch and the source expiry horizon. No production defect was found.
+
+**Row 425 remains OPEN.** This adds bounded INV-024/038/041/045/052/071/085/086/088
+composition, without new INV-010 replay evidence. Fees/funding, CPI with
+fractional positions, repeated fractional K settlements, trade-driven accrual,
+target replacement, nonunit ADL, external backing providers, liquidation/Recovery,
+maximum shapes and arbitrary histories remain gaps. No generic oracle,
+vulnerable-pin experiment, production fix or invariant-status promotion is claimed.
+
+The worker originally validated this in isolated worktree
+`/tmp/percolator-astra-row425-validation-20260912`; coordinator integration reran
+the new selector, three adjacent INV-045 controls, charter/index, formatting and
+Git whitespace checks on the current invariant branch. No SBF rebuild or
+full-suite claim is made. The new selector passes 32 histories, 176 exact
+rollbacks and 128 owner payouts: peak successful CU **346,701**,
+rejected-bundle CU **346,913**, both below 1,400,000.
+The three adjacent selectors pass **3/3**: matcher handoff **395,617 CU**,
+precrank **376,794 CU**, and public order/partition **376,801 CU**. Charter/index
+passes **1/1**; formatting and all three Git whitespace checks pass. Existing
+regression-harness dead-code and Solana future-incompatibility warnings remain.
+Only focused affected selectors and the checks below were run; no full-suite claim.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-row425-validation-20260912/target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+module=inv_045_no_free_mark_movement::public_carry_order
+cargo test --locked --offline --test v16_cu ${module}::fractional_position_residue::v16_program_fractional_positions_partition_carry_into_exact_owner_payouts_and_residue -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  ${module}::carry_transport_exit::v16_program_row425_matcher_handoffs_preserve_precrank_carry_and_exact_owner_exit \
+  ${module}::precrank_carry::v16_program_row425_precrank_reductions_preserve_carry_and_owner_entitlement \
+  ${module}::v16_program_row425_public_carry_entitlement_is_partition_and_order_equivalent
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-020 composite reward recipient becomes a target (row 426, 2026-09-12)
+
+Owner: [cu/inv_020_reward_recipient_liquidation.rs](cu/inv_020_reward_recipient_liquidation.rs),
+mounted under `inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations::reward_recipient_liquidation`.
+Selector: `v16_program_reward_recipient_becomes_liquidation_target_after_composite_refresh`.
+
+Four public System/SPL/ATA/wrapper histories cross full/empty discovery after
+complete refresh with single/batch owner exit. Four separately funded portfolios
+hold three exposed assets. The first liquidation target has a Pyth and an
+AuthMark leg; its active reward recipient holds an unrelated two-Pyth composite
+short. Mint authority is revoked at 20,340,000 atoms. Economic Accounts are never
+injected or replayed; signer SOL, Clock and external provider reports are fixtures.
+
+The bounded catchup call at Clock slot 64 leaves every portfolio byte-identical
+and the three exposed markets at slot 32. Target-only observation then refreshes
+the first target to 130,000 equity and 209,000 margin. Liquidation charges 8,778,
+credits 2,925 to the keeper and leaves its composite leg unsettled at slot 32.
+That credit invalidates its certificate without settling its unrelated loss.
+
+A numerator renewed without the matching denominator epoch rejects atomically,
+even though both reports are individually fresh. The keeper's counterparty then
+commits coherent provider evidence while leaving the keeper Account unchanged;
+the keeper consumes that committed state with no provider tail. Independent
+certificate arithmetic requires 72,925 equity, 105,000 maintenance margin and
+32,075 deficit, explicitly including the first reward once. The same incoherent
+input rejects again before the second liquidation. All eight rejections check
+complete tracked/compiled Accounts and exact payer signature fees, preserving
+the already committed first reward and its fee allocation.
+
+The keeper now becomes the second target. Full or empty hints charge the same
+3,564 penalty, credit 1,187 to its counterparty and leave zero certified deficit.
+The two insurance allocations remain separately attributed to their respective
+asset domains. Owner reduction through either single or batch trade closes the
+recipient's residual position and its full 69,361 capital pays in SPL. The
+counterparty's 50,000 trading gain remains PnL, separate from its capital reward.
+Independent stock/reservation/certificate checks, fixed mint supply, the first
+target's complete Account and the final economic comparison hold in every world.
+Peak is **396,811 CU**, within a **500,000 CU** single-instruction ceiling.
+
+This adds a reward-recipient-to-liquidation-target transition with an independent
+composite epoch. The existing active-keeper selector uses a solvent AuthMark
+recipient; the current-health and liquidation-replay selectors do not carry a
+prior reward into a second target's health and independently attributed fee.
+**Row 426 remains OPEN.** An exploratory omitted-Hybrid partial-state rejection
+expectation encountered the previously documented unresolved schedule; that probe
+was removed and no value-moving continuation from it is retained or certified.
+Funding, CPI, terminal claims, maximum shapes and general observation completeness
+remain outside this increment. No real public-interface LoF/DoS is confirmed and
+no production, dependency or invariant-status change is made.
+
+Base `2c1842f11337f12e1507137c5977290adac70f1b`, branch
+`codex/row426-authenticated-observations-20260912`, isolated worktree
+`/tmp/percolator-row426-20260912`. Default-feature wrapper SBF was rebuilt from
+this worktree with platform-tools v1.52, locked and offline; SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Host tests use the same private target. No matcher is needed. The new selector
+passes 1/1, adjacent controls 4/4 and charter/index 1/1. The additional machine
+status check fails at the unchanged INV-058 projection: `invariant_status.tsv`
+has no counterexample, while row427 is OPEN. A forced host recompile of a pristine
+`git archive` of the base in `/dev/shm/percolator-row426-tmp/baseline` reproduces
+the same `{}` versus `{427}` failure. This pre-existing status mismatch is not
+repaired by row426 coverage. Validation commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row426-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row426-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row426-tmp CARGO_BUILD_JOBS=4
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+m=inv_020_authenticated_clock_slot_and_oracle_provenance
+cargo test --locked --offline --test v16_cu "${m}::staged_action_observations::active_keeper_observations::reward_recipient_liquidation::v16_program_reward_recipient_becomes_liquidation_target_after_composite_refresh" -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  "${m}::staged_action_observations::active_keeper_observations::v16_program_active_keeper_reward_recertifies_unrelated_loss_across_partial_refresh" \
+  "${m}::current_health_evidence::v16_program_mixed_hybrid_auth_mark_requires_current_health_evidence_before_owner_exit" \
+  "${m}::liquidation_observation_replay::v16_program_liquidation_rejects_rewound_observations_after_authenticated_market_move" \
+  "${m}::staged_action_observations::v16_program_staged_observations_match_current_liquidation_and_reduction"
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-020 active keeper observations after liquidation (row 426, 2026-09-12)
+
+Owner: [cu/inv_020_active_keeper_observations.rs](cu/inv_020_active_keeper_observations.rs),
+mounted under `inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations`.
+Selector: `v16_program_active_keeper_reward_recertifies_unrelated_loss_across_partial_refresh`.
+
+Eight public LiteSVM histories cross observation order, single/batch admission,
+and admission before/after complete market observation and explicit recipient
+refresh. Four portfolios separate the liquidation target and its counterparty
+from the active reward recipient and its counterparty. System/SPL/ATA/wrapper
+instructions construct all economic accounts and revoke mint authority at
+20,520,000 atoms. Only signer SOL, authenticated Clock and external Pyth reports
+are harness inputs; no initialized economic Account is injected or restored.
+
+A bounded observation prefix advances the three exposed assets to slot 32.
+The target's two assets then reach authenticated Clock slot 64, while the recipient's separate
+losing AuthMark leg remains at slot 32. Target liquidation charges 8,778 atoms,
+credits 2,925 to the active keeper and invalidates its certificate without
+settling its position or changing its counterparty. A transaction containing
+this real liquidation, a successful new position in a fourth market, and an
+old Pyth report rejects at instruction 4 with `OracleStale`. All compiled and
+tracked complete Accounts roll back, including both position changes, reward,
+insurance and rent; only the exact separate payer signature fee is charged.
+The unchanged liquidation instruction then succeeds. A recipient crank that
+omits its pending loss leg rejects with exact `EngineNonProgress` rollback.
+
+The trade route can admit new risk before all market slots catch up. The test
+therefore checks complete account recomputation against the independent raw-state
+certificate oracle, rather than treating any success as an observation bypass.
+In the partial branch the recipient has 270,925 equity and a 221,200 requirement,
+including the entire 18,000-atom adverse target/effective lag. The opposite long
+has no adverse lag charge. In the fully observed branch the recipient has
+252,925 equity and a 205,000 requirement. Every certificate lane, epoch and bitmap
+is checked. Subsequent complete observations, owner reductions and SPL withdrawal
+converge across all eight histories to identical decoded capital/PnL and OI:
+252,925 paid to the keeper, 121,222 target capital and 5,853 retained insurance,
+split exactly between the liquidation asset's two domains. Layout validation,
+stock/reservation censuses and fixed SPL supply hold throughout.
+
+This adds a stale, exposed reward recipient to the existing target-account
+observation histories, plus rollback across liquidation and recipient admission.
+Discarded duplicates: another omitted-target probe, another flat-keeper reward
+payout and another fee-refresh loop repeat `staged_action_observations`,
+`mixed_provider_liquidation` and `interrupted_refresh_fees`. The initial admission
+fixture reused a market with unsettled losses, so its `EngineLockActive` rejection
+did not isolate observation completeness; the final fixture uses an initially
+flat fourth market. The partial-state success and side-specific lag are expected
+certificate semantics, not a confirmed public LoF/DoS finding.
+
+**Row 426 remains OPEN.** This is bounded INV-020/024/053/054/056/061/071/072/081/086
+evidence, not a proof that every favorable action requires every asset at Clock.
+The difference between current committed-state certification and complete
+elapsed observations remains explicit. CPI, batch fills with multiple legs,
+recipient Hybrid/composite feeds, funding/maintenance, insolvent recipients,
+multiple reward episodes, retained consent, terminal claims and maximum shapes
+remain outside this increment. No production, dependency, pin or status changes.
+
+Validation in isolated worktree `/tmp/percolator-astra-row426-20260912`, branch
+`codex/astra-row426-observations-20260912`, starts from the latest requested remote
+at fetch time, `7c176a13a764cbdfa1c5cd5cb01c4b00b762f765`. Private ignored `target/`
+copies the row-427 build cache. The reused default-feature wrapper SBF SHA-256 is
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+production/manifests/pins match documented artifact base `6ab7856fbe1e2f89ed11c1103fb5282fab404dee`.
+Host tests are rebuilt here; no SBF rebuild or full-suite run is claimed.
+New selector: 1/1, eight histories, sixteen exact rollbacks and eight payouts.
+Observed CU maxima `[observation/liquidation, rejected bundle, trade, payout]`:
+`[396821, 654237, 302049, 61103]`, each below the 900,000 transaction ceiling.
+The final four-selector run passes 4/4; its payout maximum is 56,603 CU
+(fresh public key/PDA construction varies that cost between runs).
+The charter/index passes 1/1; formatting and Git whitespace checks pass.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-row426-20260912/target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+module=inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  ${module}::active_keeper_observations::v16_program_active_keeper_reward_recertifies_unrelated_loss_across_partial_refresh \
+  ${module}::v16_program_staged_observations_match_current_liquidation_and_reduction \
+  ${module}::partial_observation_routes::v16_program_partial_observation_three_leg_reductions_match_single_and_batch \
+  ${module}::mixed_provider_liquidation::v16_program_mixed_provider_liquidation_omissions_preserve_exact_entitlements
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-039 canceled residual through resolution (row 419, 2026-09-12)
+
+Owner: [cu/inv_039_pending_loss_cure_resolution.rs](cu/inv_039_pending_loss_cure_resolution.rs),
+mounted under `inv_039_pending_loss_obligation_durability::close_reopen::cure_resolution`.
+Selector:
+`v16_program_canceled_close_keeps_debt_through_pending_release_and_resolution`.
+
+Eight public LiteSVM histories cross mirrored sides, immediate resolution versus
+live claimant refresh after funded cancellation, and both debtor/claimant payout
+orders. System/SPL/ATA/wrapper instructions construct all economic accounts. Before
+opening, a consenting third owner withdraws and transfers 100,000 of its own
+principal into the debtor's token account. Mint authority is then revoked at a
+fixed supply of 930,777 atoms. Five authenticated 40,000-atom price moves and a
+one-lot matched reduction leave a 200,000-atom claimant gain, a 20,000-atom debtor
+residual, and one zero-basis retained loss-weight leg.
+
+The funded `CureAndCancelClose` cancels the reversible close and credits 100,000
+capital, but leaves exactly -20,000 PnL on the original debtor. The claimant's
+complete Account and original weight remain unchanged. The canceled ledger keeps
+its original residual partition through resolution and all subsequent settlement;
+neither B index increases, no insurance is consumed, and no loss shifts to the
+donor or the two unrelated owners. An independent per-owner equation reconciles
+capital, signed PnL, unpaid receipt face and SPL payouts after each economic
+prefix. The existing portfolio census independently checks aggregate capital,
+positive PnL, OI, loss weights, stored legs, pending counts, booked/SPL custody and
+fixed supply. Successful instructions also frame all unrelated tracked Accounts.
+
+In claimant-first schedules, the first terminal call makes bounded progress
+without paying the claimant while the debtor remains unsettled. All eight worlds
+complete within two prescribed passes, with exact payouts
+`[400000, 80000, 200000, 250000, 777]`, zero remaining custody, and five portfolio
+deletions each. Twenty-four deliberately rejected transaction suffixes follow
+successful cure, debtor-settlement/payment, or claimant-payment prefixes. Logs
+confirm each wrapper and SPL prefix completed; all compiled and tracked complete
+Accounts roll back, including token bytes, canceled-ledger state, sequences and
+lamports, apart from the exact separate payer signature fee. The same valid
+prefixes subsequently succeed. No simulation selects the final test's schedule.
+
+This is bounded INV-024/037/039/041/048/066/067/073/076/081 evidence. Existing
+INV-037 cure and INV-071 obligation-release witnesses stop at live release and
+operation admission. INV-086's active-close frontier checks transitions and a
+positive aggregate exit; it does not require these exact per-owner terminal
+entitlements across immediate resolution and both payout orders. The existing
+row419 bankruptcy-preemption test finalizes residual into B instead of funding
+and canceling it. Funding-only resolution, debtor recreation, shared-holder
+domains, cohort reduction, backing expiry, zero-cure rejection and capability
+revocation were discarded as duplicate candidate directions at source review.
+
+**Row 419 remains OPEN; invariant verdicts are unchanged.** Limits include one
+asset and bankruptcy pair, integral quantities and divisible prices, one funded
+cancellation before irreversible progress, no close restart, no adverse drift
+during the close, zero fees/funding/insurance/backing, and no arbitrary histories
+or maximum-shape claim. Generic INV-086 equivalence is not established. During
+development, geometric price inputs produced a one-atom entitlement mismatch;
+the retained fixture uses an exactly divisible 200,000-atom gain and makes no
+fractional-rounding claim. A presumed early nonprogress rejection was corrected
+to the observed valid, nonpaying terminal refresh. No production defect or fix is
+claimed, and no production code, dependency, pin or tracked artifact changed.
+
+Validation worktree: `/tmp/percolator-row419-astra-20260912`, branch
+`codex/astra-row419-obligation-20260912`, starting from the freshly fetched
+coordinator head `231c6d46382274c1011c7152cae82485e244a8d8`.
+Private copied build outputs are under this worktree's `target`; host tests were
+rebuilt here. Wrapper SBF SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+its documented source base `6ab7856fbe1e2f89ed11c1103fb5282fab404dee` has no
+production/manifest/pin difference from this head. The private matcher copy has
+SHA-256 `397cdded3ba64b5e03ea54498a160878dcc81dc844222f3ffbdc4e6210dd2936`
+and unchanged fixture source. No SBF rebuild or full-suite run is claimed.
+The new selector (1/1), adjacent CU controls (4/4), stateful cure controls (2/2),
+charter/index checks (2/2), formatting and Git whitespace checks pass. The new
+selector covers eight worlds, 24 prefix rollbacks, 40 payouts and 40 deletions.
+Its observed peak CU for selected setup, cure/rollback, and terminal/
+rollback transactions is `[144943, 264391, 177849]`. Shared setup helpers do not
+all report CU. Every transaction measured by the new helper fits 1,232 bytes
+and its 600,000-CU ceiling; public accrual and deletion retain existing bounds.
+
+Exact focused commands (including adjacent controls and charter/index checks):
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row419-astra-20260912/target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::close_reopen::cure_resolution::v16_program_canceled_close_keeps_debt_through_pending_release_and_resolution -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_039_pending_loss_obligation_durability::close_reopen::v16_program_pending_loss_survives_debtor_recreation_and_bystander_payout \
+  inv_039_pending_loss_obligation_durability::close_reopen::close_preemption::v16_program_expired_bankrupt_close_preserves_pending_cohort_entitlement_across_routes \
+  inv_039_pending_loss_obligation_durability::resolved_histories::funded_resolution::v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders \
+  inv_076_close_drift_residual_durability_and_finalization_atomicity::v16_program_public_close_zero_cure_rejects_atomically_and_terminal_progress_remains
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture --test-threads=1 \
+  inv_037_exact_residual_partition::inv037_public_cure_preserves_exact_partition_across_routes_and_sides \
+  inv_071_crank_progress::v16_program_cured_close_releases_counterparty_obligation
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_post_pr135_counterexamples_reopen_every_affected_invariant
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-024 terminal recredit excludes raw surplus (row 410, 2026-09-12)
+
+Owner: [cu/inv_024_terminal_recredit_surplus.rs](cu/inv_024_terminal_recredit_surplus.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_surplus`.
+Selector: `v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback`.
+Primary INV-024; affected INV-005/024/036/081. Base:
+`810ac694ab50e443fd01594ef916fe45a7939867` from
+`origin/codex/astra-open-holdout-ledger-20260912`. Worktree:
+`/tmp/percolator-astra-row410-20260912`, branch
+`codex/astra-row410-attribution-20260912`.
+
+Two public LiteSVM histories exhaust 100 insurance atoms through actual resolved
+bankruptcy. Inputs fix user capital at 1,000/100/137, a 200-atom gain, and complete
+user payouts of 1,200/0/137. Unused backing of 61 or 137 atoms survives, with one
+settled portfolio still materialized. A separate donor transfers 83 atoms through
+SPL into the vault; the complete market Account remains unchanged. Provider,
+insurer, live operator, donor, market authority, three users and cleanup payer
+are nine distinct identities. Mint authority is revoked before trading.
+
+At expiry slot 44, the market authority deletes the final portfolio and normalizes
+backing. An unsigned insurance withdrawal recredits only booked residual, bounded
+by spent insurance and the 100-atom opposing provider receivable. The 61-atom world
+retains 39 spent atoms even though raw custody could cover them; the 137-atom world
+recovers all 100 and leaves 37 booked atoms for burning. Both final closes sweep
+exactly 83 raw atoms to market authority, pay zero quote atoms to the cleanup
+payer/provider/operator/donor, preserve user payouts and retain exact tombstone
+rent. Portfolio rent enters the slab, and slab/vault rent goes to market authority.
+Reserve holders and users sign none of the cleanup continuation instructions.
+
+Each world first appends a repeated CloseSlab after deletion, expiry, insurer SPL
+payout and final disposal. The final instruction rejects InvalidAccountLen at
+index 6, after four successful wrapper instructions, including the burn when
+nonzero, surplus transfer and vault closure. The shared transaction oracle checks
+all tracked and compiled Accounts, account presence and exact signature fees.
+The unchanged first three instructions then commit, exposing the distinct
+insurance budget/spent counters and booked/raw custody, before the unchanged final
+close commits. Complete SPL Account frames, fixed supply less the exact burn,
+beneficiary identities/epochs, peer source counters and a reconciled stock census
+are asserted. Local Account copies are assertion frames only.
+
+The net-new relation is competition between booked recredit and raw surplus after
+real reserve consumption. Existing `terminal_cleanup_submitter` covers deletion
+with fresh earned reserves; `terminal_prefix_recredit` covers spent-insurance
+recovery without an external donation; the INV-070 external-surplus selector
+burns booked residue without a surviving recredit attribution boundary. The
+stateful expired-backing composition also supplies no raw SPL donation. Additional
+submitter-role permutations, insurer merge/split, provider custody replacement,
+fresh-reserve payout orders and a standalone repeated-close probe were discarded
+during source review; none was added as a separate test.
+
+Validation: new selector **1/1**, adjacent affected selectors **3/3**, invariant
+charter/index **1/1**. Observed CU maxima across isolated and focused runs
+[user settlement, rejected bundle, retry, final close] are
+**[222909, 324592, 286066, 39618]**, each bounded by **400,000**. Adjacent peaks:
+cleanup submitter **590833**, external surplus **131477**, earlier-asset recredit
+**225888** CU. The private
+default-feature SBF rebuild used locked/offline platform-tools v1.52; SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+No production source, engine pin or manifest changed. The first development run
+incorrectly passed raw custody to the strict booked-stock census; the test now
+checks the 83-atom difference independently before reconciling that census.
+No production bug was found. Formatting and all three Git whitespace checks pass.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/tmp
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_surplus::v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_cleanup_submitter::v16_program_last_portfolio_cleanup_cannot_confer_reserve_entitlement_on_submitter \
+  inv_071_crank_progress::terminal_prefix_recredit::v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_terminal_scan_reconciles_external_surplus_arriving_after_cached_prefix
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+**Row 410 remains OPEN.** These are two bounded resolution histories, not a generic
+shutdown/resolve attribution oracle. Other quote rails, retained receipts, earned
+fees alongside spent-insurance recovery, multiple recredit beneficiaries, custody
+replacement, arbitrary funding/role histories and all transaction compositions
+remain outside this increment. No vulnerable-pin experiment or status promotion.
+
+## INV-024 terminal cleanup submitter (row 410, 2026-09-12)
+
+Owner: [cu/inv_024_terminal_cleanup_submitter.rs](cu/inv_024_terminal_cleanup_submitter.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_cleanup_submitter`.
+Selector: `v16_program_last_portfolio_cleanup_cannot_confer_reserve_entitlement_on_submitter`.
+
+Four public LiteSVM histories leave one settled portfolio materialized, then pair
+the market authority's mechanical deletion with an actual provider-fee payout.
+The keeper, market authority, insurance operator and asset admin each pay one
+history's transactions. None holds either reserve role during these transitions.
+For each payer and each principal/earnings/insurance class, destination-only and
+authority-plus-destination substitutions fail after the deletion and fee payout
+complete. All 24 suffix failures restore complete Accounts, including portfolio
+rent and the lazily initialized provider ledger, apart from exact signature fees.
+The valid continuation pays 100,000 principal and 875 earned fees to the provider,
+31 insurance atoms to its beneficiary, and zero quote atoms to all four submitters.
+It ends with exact rent disposition and a closed market tombstone.
+
+The new boundary is transaction-local reserve admission when the final portfolio
+count falls from one to zero. This differs from funded-role exchange (row 429),
+absent-recipient/final-slab-close retry (row 433), depleted-reserve retirement
+(rows 420/421), and retained-fee detours (row 432). **Row 410 remains OPEN**:
+generic shutdown/resolve attribution, missing/depleted reserves, expiry,
+raw SPL surplus, other assets or quote rails, arbitrary payout/role histories
+and all transaction compositions remain outside this finite regression.
+
+Validation was first run in isolated worktree
+`/tmp/percolator-row410-submitter-attribution-20260912-r2`; coordinator
+integration reran the new selector, adjacent INV-024 controls, charter/index,
+formatting and Git whitespace checks on the current branch. New selector result:
+**1/1**, with four histories, 24 exact failed suffixes, four admission-gate
+controls and four final closures. CU maxima: blocked payout **208,609**,
+rejected cleanup-plus-redirect bundle **545,062**, successful reserve-tail
+bundle **583,333**, final slab close **26,742**. No production, dependency,
+invariant-status or full-suite claim is made.
+
+## INV-012 mixed batch episode revocation (row 412, 2026-09-12)
+
+Owner: [cu/inv_012_mixed_batch_revocation.rs](cu/inv_012_mixed_batch_revocation.rs),
+mounted under `inv_012_capability_and_delegate_scope::joint_incarnation_binding`.
+Eight public System/SPL/wrapper histories compose a simultaneous leg clear and
+cross-zero flip, restoration of the original two-leg vector, both CPI consumers,
+both leg orders and both signs. An inadmissible batch preserves retained consent;
+each committed batch revokes it once. Current-episode requests cannot bypass
+revocation, and current-episode requests with the old grant sequence still reject
+after same-tuple reauthorization. Fresh consent closes the positions, a stale
+suffix rolls back a completed SPL withdrawal, and both owners recover all capital.
+
+This is a mixed two-asset owner-batch coverage increment, distinct from isolated
+disable/re-enable, same-address portfolio recreation, asset-generation replay,
+one-leg flat round trips, retained same-asset episode coverage, and mixed-batch
+certificate/OI tests. **Row 412 remains OPEN**: arbitrary revocation writers and
+interleavings, asymmetric counterparties, longer capability histories, concurrent
+grants, asset/portfolio/market replacements, alternate matcher programs,
+fees/funding/PnL/backing claims, nonunit ADL ratios, recovery/liquidation, expiry
+and maximum portfolio shape remain outside this selector.
+
+Validation was first run in isolated worktree `/tmp/percolator-row412`;
+coordinator integration reran the new selector, adjacent INV-012 controls,
+charter/index, formatting and Git whitespace checks on the current branch.
+New selector result: **1/1**, with eight histories, sixteen live retained
+simulations, 48 exact rejected transactions, sixteen committed owner batches,
+twenty matcher fills and sixteen complete withdrawals. CU maxima: matcher
+fill/live simulation **464,832**, owner batch/grant **319,034**, rejected
+oversized batch **277,236**, retained rejection including SPL prefix **144,430**,
+final withdrawal **141,767**. No production, dependency, invariant-status or
+full-suite claim is made.
+
+## INV-005 cold-admin succession with earned reserves (row 416, 2026-09-12)
+
+Owner: [cu/inv_005_cold_admin_earned_reserve.rs](cu/inv_005_cold_admin_earned_reserve.rs),
+mounted under `inv_005_authority_incarnation_binding::cold_admin_earned_reserve`.
+Selector:
+`v16_program_cold_admin_rotation_preserves_earned_reserve_after_partial_principal_repayment`.
+
+Four public LiteSVM histories cross asset 0/1 with both orders of cold-admin
+succession and unchanged backing-policy renewal. After 97,377 principal atoms
+have been repaid, the original provider still owns 2,623 liened principal atoms
+and 875 earned atoms; a separate 5,000-atom reserve supports the user's live claim.
+Correctly signed role substitution, fee reclassification and destination
+substitution reject atomically. The 24 exact rollback checks include four
+completed SPL payout prefixes. Current incumbent instructions then pay all 875
+earned atoms to the same provider, while both administrators receive zero.
+Full market economics, provider telemetry, both portfolios, fixed SPL supply,
+authority epochs, policy sequence and the unaffected asset are checked.
+
+**Row 416 remains OPEN.** This is bounded nonterminal cold-admin containment,
+with no funded-role exchange, new fee-consent claim, or production change. It is
+distinct from row429 funded-role exchange, row410 terminal submitter attribution,
+rows420/421/433 absent-role terminal payout, rows432/411 fee consent, existing
+two-domain depletion/refunding and existing retained insurance-management
+coverage. Remaining gaps include generic role/state combinations, earnings-only
+buckets, both backing sides simultaneously, nonconsensual funded-oracle changes,
+admin burn/re-enable, key coalescence, authority ABA, nonzero funding, insurance
+earnings, impaired or consumed liens, expiry, recovery, terminal progress and
+arbitrary histories.
+
+Validation was first run in isolated worktree `/tmp/percolator-row416`;
+coordinator integration reran the three exact INV-005 selectors, charter/index,
+formatting and Git whitespace checks on the current branch. New selector result:
+**1/1**, with four histories, 24 rollback probes and four completed SPL-prefix
+rollbacks. CU maxima: selected setup fee-trade/principal transactions **437,784**,
+rejections **329,432**, successful management/payout transactions **327,621**.
+No production, dependency, invariant-status or full-suite claim is made.
+
+## INV-070 native PnL, late sync and atomic terminal retry (row 418, 2026-09-12)
+
+Owner: [cu/inv_070_native_pnl_sync_retry.rs](cu/inv_070_native_pnl_sync_retry.rs),
+mounted by INV-070 as `native_pnl_sync_retry`. Selector:
+`v16_program_native_pnl_terminal_sync_and_close_retry_preserves_unsynced_donation`.
+Exact base: `2f0d1b42c858318433aa559fe8d07bf1ba3bdbee`
+(`origin/codex/astra-open-holdout-ledger-20260912`), isolated worktree
+`/tmp/percolator-astra-row418-20260912`.
+
+One public LiteSVM history deposits 1,000/1,300 native quote atoms, trades one
+lot at 100, observes the authenticated mark at 110 and resolves. After the owner
+window, the keeper pays the solvent losing leg 1,290 atoms without either owner
+signing. The winning leg remains open with an input-derived 1,010-atom entitlement.
+A committed System transfer then donates 37 lamports to the canonical native
+vault. Complete market/portfolio bytes remain unchanged; the vault still reports
+1,010 token atoms but holds rent plus 1,047 lamports. Stock and encumbrance censuses,
+market/portfolio shape checks and exact native Account comparisons distinguish
+the pending entitlement from the unsynced donation.
+
+The final transaction runs `SyncNative`, the winner's permissionless
+`CloseResolved`, both administrator-signed `ClosePortfolio` calls and `CloseSlab`.
+An appended administrator-authorized 38-atom transfer from the 37-atom sweep
+destination fails with the exact SPL insufficient-funds error. Logs require all
+four wrapper calls and all four successful SPL calls (sync, payout, sweep and
+vault close) to precede that failure. Every compiled or additionally tracked
+Account rolls back exactly, including native backing lamports, unsynced token
+bytes, both portfolios, the paid loser, the pending winner, slab data and rents;
+only the two-signature payer fee is charged. The separately committed donation
+survives, while its wrapping is undone.
+
+Retrying the unchanged instruction prefix succeeds. The winner receives exactly
+1,010 native atoms, the earlier loser keeps 1,290, and the administrator's token
+destination receives only 37. Both portfolios and the canonical vault close;
+the slab retains exactly canonical tombstone rent. Full Account expectations
+reconcile the administrator's portfolio/vault/slab rent refund, both transaction
+fees, unchanged native mint and owner wallets, and aggregate tracked lamports.
+Native mint supply is not used as a proxy for wrapped SOL. The shared fixture
+supplies LiteSVM's missing native-mint genesis account; economic transitions use
+System/ATA/SPL/wrapper instructions, without program-owned byte injection.
+
+Overlap review discarded additional empty/native-capacity closes, classic-SPL
+surplus after a cached scan, cooperative frozen-destination retries, prefunded
+ATA repair and secondary sync/disposal suffix variants. Those are already covered
+by `terminal_quote_variants`, INV-070's external-surplus/native-principal selectors,
+`prefunded_quote_custody`, `secondary_quote_completion` and `frozen_destination_exit`.
+No temporary duplicate test was retained. The new relation is rollback and retry
+of late native wrapping while a nonzero winning PnL entitlement is still pending,
+through final payout and slab closure in the same transaction.
+
+**Row 418 remains OPEN.** This is bounded INV-018/021/025/069/070/073/077/078/081
+coverage with INV-080 rollback evidence. Native-primary booked-residue retirement,
+insurance/backing expiry, bankrupt or partial receipts, unavailable administrators,
+maximum-capacity scans and arbitrary histories remain outside this witness.
+No production defect was observed and no invariant status, production source,
+engine pin or manifest changed.
+
+The selector passes **1/1**. Observed CU maxima across the focused runs for
+`[reported setup, losing payout, donation, failed suffix, valid retry]` are
+`[120122, 142285, 450, 296866, 292541]`, bounded by 500,000. Shared ATA creation
+does not report CU; generated account addresses can vary the measured costs.
+Both final transactions fit 1,232 bytes and require only payer/admin signatures.
+The three exact adjacent selectors below and the charter/index selector pass.
+Formatting and unstaged/staged/HEAD whitespace checks pass. Validation reuses a
+private copy of the local row411 default-feature SBF; its checkout's `src`,
+`Cargo.toml` and `Cargo.lock` match this base byte-for-byte. Program SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Engine: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. No fresh SBF build or full-suite
+validation is claimed.
+
+```sh
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::native_pnl_sync_retry::v16_program_native_pnl_terminal_sync_and_close_retry_preserves_unsynced_donation -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_native_quote_terminal_surplus_sync_has_exact_token_and_lamport_disposition \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::frozen_destination_exit::v16_program_frozen_destinations_preserve_pnl_exit_without_freeze_authority \
+  inv_077_bounded_work_and_maximum_shape_compute::secondary_quote_completion::v16_program_secondary_quote_repair_after_expiry_has_atomic_bounded_disposition
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-070 frozen payout destinations with absent freeze authority (row 418, 2026-09-12)
+
+Owner: [cu/inv_070_frozen_destination_exit.rs](cu/inv_070_frozen_destination_exit.rs),
+mounted by INV-070 as `frozen_destination_exit`. Selector:
+`v16_program_frozen_destinations_preserve_pnl_exit_without_freeze_authority`.
+
+Four public LiteSVM histories cross both assignments of `CloseResolved` and
+`PermissionlessCrank` to a solvent matched pair with retained/revoked SPL freeze
+authority. System/SPL/ATA/wrapper instructions create every economic account.
+Deposits of 1,000 and 1,300 atoms fund a one-lot position at 100; a public
+authenticated-mark observation at 110 precedes resolution. Supply is fixed at
+2,317 atoms, including 17 unbooked vault atoms. A distinct SPL freeze authority
+freezes the two now-empty original user destinations and the administrator's
+empty sweep destination. It either retains its authority and stops signing or
+irrevocably removes that authority. Both user keypairs and the freeze-authority
+keypair are dropped before terminal payouts. The canonical vault stays unfrozen.
+
+After the configured owner window, a keeper creates ordinary non-ATA SPL accounts
+owned by the original beneficiaries and pays the losing leg followed by the
+winning leg in exactly two value-moving wrapper calls. The input-derived payouts
+are 1,290 and 1,010 atoms. No thaw, owner signature or mint-authority signature
+is needed. The two payout aliases trade roles across the matrix. After each
+payment the independent stock/encumbrance censuses reconcile the surviving
+portfolios, booked custody, zero insurance and 17 external surplus atoms. The
+mint, all three frozen original destinations, absent wallets and paid prefixes
+remain unchanged throughout subsequent terminal steps.
+
+Five complete-Account rollback checks per world cover each frozen user payout;
+keeper account creation plus the first successful payout followed by the second
+frozen destination; both portfolio deletions followed by frozen sweep rejection;
+and deletion, surplus transfer, both vault closes and tombstone creation followed
+by an insufficient-balance SPL burn. Failed transactions preserve every compiled
+and tracked Account, including creation rent, portfolio rent and token bytes;
+only the exact separate payer signature fee is charged. Logs confirm the preceding
+wrapper instructions completed before each late rejection. The same valid
+prefixes then succeed. Administrator-signed cleanup deletes both portfolios,
+pays the 17-atom surplus to fresh administrator-owned custody, closes both vaults,
+and refunds exactly slab excess, both portfolio rents and both vault rents while
+retaining canonical tombstone rent. Primary supply remains 2,317. The frozen
+original accounts retain their external token-account rent and zero token value.
+
+Overlap review discarded additional empty/native-capacity closes, cooperative
+thaw retirement, prefunded ATA repair, and delegated/close-authority destination
+probes. Existing `terminal_quote_variants` and `secondary_quote_completion`
+exercise cooperative thaw without funded user claims; INV-082's
+`terminal_custody_alternate` has flat principal and delegated/closable accounts,
+no freeze-authority removal and no final slab close. INV-018's delegated
+destination control restores the original account by owner-signed revocation.
+This increment combines nonzero resolved PnL with permanently frozen destinations
+and final market closure through fresh beneficiary-owned custody.
+
+**Row 418 remains OPEN** and invariant verdicts are unchanged. This is bounded
+INV-018/021/025/069/070/073/077/078/080/081 conformance, conditional on valid unfrozen
+canonical custody, authenticated price/time and administrator cleanup. It does
+not cover a frozen canonical vault, renewed interference by a retained freezer,
+native-primary booked residue, bankrupt/deferred receipts, source/backing or
+insurance retirement, arbitrary claimant orders, maximum shape, Token-2022 or
+arbitrary histories. No production defect or fix is claimed. The initial fixture
+omitted the public observation crank before resolution; its price assertion
+failed and was corrected before any terminal test ran.
+
+The worker originally validated this in isolated worktree
+`/tmp/percolator-astra-row418-terminal-20260912`; coordinator integration reran
+the new selector, four adjacent terminal/token controls, the two metadata
+selectors, formatting and Git whitespace checks on the current invariant branch.
+The new selector passes four worlds, 20 exact rollbacks, eight user payouts and
+four slab closes. Observed peak CU `[payout-with-creation, rejection, cleanup]`
+is `[216006, 349068, 85820]`; trade/observation/resolve use
+`120116/102019/3085` CU. Every measured terminal transaction fits 1,232 bytes and
+500,000 CU; shared setup helpers do not all report CU. No full-suite run,
+production change, dependency change or SBF rebuild is claimed.
+
+```sh
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::frozen_destination_exit::v16_program_frozen_destinations_preserve_pnl_exit_without_freeze_authority -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_public_destination_delegation_is_route_scoped_and_revocation_restores_payout \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_terminal_stock_and_close_slab_composition_is_source_complete \
+  inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent \
+  inv_082_state_indexed_liveness_theorem::terminal_destination_recovery::terminal_custody_alternate::v16_program_absent_reserve_holders_receive_principal_through_alternate_custody
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_post_pr135_counterexamples_reopen_every_affected_invariant
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-048/051/058/080/081 two-asset OI/fee handoff (row 427, 2026-09-12)
+
+Owner: [cu/inv_058_multi_asset_oi_fee_handoff.rs](cu/inv_058_multi_asset_oi_fee_handoff.rs),
+mounted under `inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset`.
+Selector: `v16_program_two_asset_oi_fee_handoff_is_atomic_across_clear_resize_and_route_switch`.
+
+Sixteen public LiteSVM histories cross both mixed-position signs, both asset
+orders, and release/refill routes `BatchCpi/NoCpi`, `Cpi/BatchNoCpi`,
+`BatchNoCpi/Cpi`, and `NoCpi/BatchCpi`. Two disjoint pairs fill both assets'
+side-OI caps. One pair fully clears its asset-0 leg and partially reduces its
+asset-1 leg; a fresh third pair takes the unequal released capacity. The
+two-leg batches and two signed singles use identical fills and 100-bps fees.
+Singles sign the next position epoch in advance within the same transaction.
+All accounts, tokens and matcher contexts are constructed through public
+System/SPL/ATA/wrapper routes; mint authority is revoked at 120,000,000,000
+atoms. There is no injected or restored program-owned economic state.
+
+Each world rejects two histories before accepting the unchanged handoff
+instruction bytes. A last-leg aggregate cap+1 fails after the complete
+fee-bearing release (and the first refill when delivered as singles). Every
+proposed quantity and account notional remains below its local cap. A separate
+SPL transfer from an empty owner source fails after all three wrapper trade
+instructions have succeeded. Exact instruction errors and wrapper/matcher
+success counts establish both tail locations. Complete compiled and fixture
+Accounts roll back, including the market, all six portfolios, matcher response
+bytes, owners and SPL custody, with only the exact payer signature fee deducted.
+
+An input-derived ledger checks signed quantities, matched long/short OI, stored
+position counts, per-instruction position epochs, canonical leg identity, cached
+risk notional, each owner's fee debit, four insurance domain credits, capital,
+zero PnL and fixed SPL supply. Both ADL indices and each leg's basis index are
+asserted to equal one, so the INV-051 contribution is restricted to this
+effective-quantity boundary. Route and asset-order outcomes agree after the
+handoff. Public fee reset, flattening and six withdrawals per world leave zero
+OI/capital and exactly the earned insurance fees in engine and SPL custody.
+
+**Non-duplicate:** the existing atomic handoff tests have one asset and one-leg
+batches. INV-047's two-asset fee partition opens flat portfolios and rejects a
+fee cap, without clear/resize transitions or release-dependent admission into
+two full books. This test combines those transitions with cross-route late
+failures and exact final owner entitlements. Plain one-asset handoff and flat
+two-asset fee-equivalence candidates were discarded after source comparison;
+no marginal runtime probes were retained. Row413 risk admission and row425
+fractional carry are excluded.
+
+**Row 427 is OPEN.** The base marked its narrower conformance row `COVERED`;
+this task explicitly reopens the broader atomic OI/fee family. No public LoF/DoS
+bug was found, and no wrapper, engine, manifest or pin changed. Existing-leg
+aggregate increases, nonunit ADL, nonzero PnL/funding, elapsed fee/rate histories,
+arbitrary route schedules and maximum shapes remain gaps. This adds sampled
+coverage without changing the invariant-status table or claiming family closure.
+
+Validation worktree: `/tmp/percolator-row427`, branch
+`codex/row427-atomic-oi-fee-20260912`, based on
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`575a6a0ee7f4992323facd8f3136203a9da7c029`. Build outputs were privately copied
+from `/dev/shm/percolator-row427-f6c2-target`; the authenticated matcher was
+privately copied from `/tmp/percolator-row427-audit-20260912-f6c2`.
+Production sources, manifests, pins and matcher source match the documented
+artifact checkpoint `6ab7856fbe1e2f89ed11c1103fb5282fab404dee` (`git diff --quiet`
+on `src Cargo.toml Cargo.lock tests/fixtures/auth_matcher` passes).
+Wrapper SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Matcher SHA-256: `397cdded3ba64b5e03ea54498a160878dcc81dc844222f3ffbdc4e6210dd2936`.
+Host tests were rebuilt here; no fresh SBF build or full-suite run is claimed.
+The new selector passes **16 worlds / 32 exact rollbacks / 96 payouts**;
+across both passing runs, peak CU `[rejection, trade, custody]` is
+`[601620, 597297, 58382]`.
+All five nearest exact controls below pass, as does the charter/index selector.
+Formatting and unstaged, staged and committed whitespace checks pass.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row427/target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::multi_asset::v16_program_two_asset_oi_fee_handoff_is_atomic_across_clear_resize_and_route_switch -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partitions \
+  inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff::v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes \
+  inv_047_equivalent_route_semantics::fee_leg_partition::v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles \
+  inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::v16_program_post_transition_caps_match_across_reduction_and_cross_zero_histories \
+  inv_048_matched_trade_and_open_interest_coherence::v16_program_all_trade_routes_keep_oi_equal_to_active_leg_scan
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-058 mixed-CPI side-OI handoff (row 427, 2026-09-12)
+
+Owner: [cu/inv_058_atomic_oi_fee_handoff.rs](cu/inv_058_atomic_oi_fee_handoff.rs),
+mounted under `inv_058_cumulative_position_oi_notional_and_rate_limit_integrity::atomic_oi_fee_handoff`.
+New selector:
+`v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes`.
+
+The existing no-CPI handoff fixture now also runs 24 public LiteSVM histories:
+both signs, packed/separate transactions, and six release/refill route pairs:
+`Cpi/BatchNoCpi`, `BatchNoCpi/Cpi`, `BatchCpi/NoCpi`, `NoCpi/BatchCpi`,
+`Cpi/BatchCpi`, and `BatchCpi/Cpi`. Two disjoint pairs fill the side cap;
+one releases capacity for a third, initially flat pair. Every account and
+proposed fill stays below its own quantity cap, isolating aggregate admission.
+System/SPL/ATA/wrapper instructions construct all economic state and matcher
+contexts. Mint authority is revoked at 120,000,000,000 atoms. No program-owned
+economic bytes are injected or restored.
+
+The release LP's matcher capability is renewed publicly after its owner-signed
+opening. A public 137-bps base-fee update then makes both handoff fills charge
+exactly two atoms per trader on independently ceiled 73-atom notional. Both
+instructions are built after this setup; no policy, capability or epoch is
+rebound between a rejected handoff and its unchanged successful retry.
+
+Refill-before-release rejects at instruction 2; release plus one-atom overfill
+rejects at instruction 3 after a successful fee-bearing release. The latter
+proves completion of the release matcher CPI when applicable. Every compiled
+and tracked complete Account rolls back, including matcher response bytes,
+market request state, all six portfolios, custody and lamports; only the exact
+separate payer signature fee is charged. The successful single-CPI control
+changes its response header to the requested quantity and exact price while
+preserving authorization bytes. Batch-CPI contexts remain byte-identical.
+
+The input-derived ledger checks both OI lanes and stored-position counts,
+positions/epochs, unit ADL indices, ceiled cached risk notional, zero PnL,
+individual capital, both insurance domain budgets, SPL balances and fixed supply
+after every economic prefix and rejection. Packed and separate handoffs have
+identical decoded economics and position epochs. A public fee reset after the
+handoff allows zero-fee flattening and six exact capital payouts per world:
+zero OI/capital, eight insurance/vault atoms and 119,999,999,992 paid atoms.
+
+This is a new INV-058/059 composition: aggregate admission after a successful
+CPI release, writable matcher-response rollback, and switching between context
+and batch-return transports. The existing distinct-owner cap matrix checks
+single rejected instructions; the prior atomic handoff selector has no CPI.
+The recreated-counterparty and same-pair controls do not isolate this product.
+**Row 427 remains COVERED**, with bounded conditional support and no production,
+dependency or invariant-status change. This does not add fee-consent, terminal
+reserve, retained withdrawal, pending-loss or fractional-carry coverage.
+Remaining gaps include existing-leg aggregate admission (including the earlier
+unresolved candidate documented below), arbitrary histories, multi-asset or
+maximum-shape batches, nonzero PnL/funding, partial ADL, liquidation/maintenance,
+elapsed rate limits and a complete route-pair Cartesian product. Batch trades
+here have one leg; return-data persistence outside the executing call is not claimed.
+
+Validation uses isolated worktree `/tmp/percolator-row427-audit-20260912-f6c2`,
+based on `origin/codex/astra-open-holdout-ledger-20260912` at
+`7841287b1b796391073a50d9c79260963bdefb72`, and private copied build outputs at
+`/dev/shm/percolator-row427-f6c2-target`. Wrapper SBF SHA-256 is
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+production, manifests and pins match its documented base `6ab7856fbe1e2f89ed11c1103fb5282fab404dee`.
+The private authenticated matcher copy has SHA-256
+`397cdded3ba64b5e03ea54498a160878dcc81dc844222f3ffbdc4e6210dd2936`;
+its source matches the supplying fixture. Host tests were rebuilt here; no SBF
+rebuild is claimed. The new selector passes 24 worlds, 48 exact rollbacks and
+144 payouts, with peak CU `[rejection, trade, custody] = [258550, 312932, 49376]`.
+Development corrected two setup assumptions: an owner-signed opening disables
+an earlier matcher grant, and single CPI uses the configured base fee rather
+than the no-CPI caller fee. Neither failure was a production defect.
+
+Five of the six adjacent exact controls below pass. The unchanged recreated-
+counterparty selector fails its expected-success branch at line 660 with
+`InstructionError(3, Custom(18))`. Running that selector alone in pristine,
+clean base worktree `/tmp/percolator-row427-base-20260912-f6c2` at `7841287b`,
+with the same SBF artifacts and freshly rebuilt host tests, reproduces the
+identical failure. This inherited control limitation is neither repaired nor
+counted as passing coverage here. No full-suite run is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row427-f6c2-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+module=inv_058_cumulative_position_oi_notional_and_rate_limit_integrity
+cargo test --locked --offline --test v16_cu ${module}::atomic_oi_fee_handoff::v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  ${module}::atomic_oi_fee_handoff::v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partitions \
+  ${module}::v16_program_distinct_owner_pairs_cannot_cross_shared_side_oi_cap \
+  ${module}::v16_program_split_fills_cannot_cross_position_or_side_oi_cap_on_any_route_pair \
+  ${module}::v16_program_post_transition_caps_match_across_reduction_and_cross_zero_histories \
+  ${module}::v16_program_recreated_counterparty_preserves_post_transition_cumulative_limits \
+  ${module}::liquidation_lifecycle::v16_program_liquidation_reset_reopen_reuses_capacity_and_preserves_live_notional
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-067 aborted realization across the second expiry (row 417, 2026-09-12)
+
+Owner: [cu/inv_067_receipt_aborted_realization.rs](cu/inv_067_receipt_aborted_realization.rs),
+mounted by INV-067 as `receipt_aborted_realization`. Selector:
+`v16_program_aborted_second_source_realization_preserves_receipts_across_expiry_and_order`.
+
+Eighteen public LiteSVM histories first commit a 161-atom expiry release and
+positive top-ups to two existing unequal receipts. At the next source's expiry-1,
+a failed suffix rolls back its Fresh realization, the resulting 189-atom bound
+reduction and all three SPL payments. The same retained instructions then finish
+at expiry-1, expiry or expiry+1, crossing all six claimant orders with reversed
+earlier priority. Complete Account rollback preserves the committed paid prefix;
+only the payer's exact signature fee is lost. Receipt identity, source stocks,
+exact bounds, all owner balances, token supply and full decoded market state on
+terminal retries are checked independently of observed payout rates.
+
+The fresh branch pays 1,164 / 1,379 / 1,306 atoms; the exact/late expiry branches
+both pay 1,198 / 1,283 / 1,368. Every order converges to its branch's complete
+payout ledger, owner payments and two-atom rounding residue. The later Clock
+advance cannot release already-consumed backing or revive a cleared receipt.
+Peak measured settlement transaction cost is **451,915 CU**, below 600,000.
+
+The new boundary is an aborted denominator reduction after a committed stock
+increase and positive receipt catch-up, followed by the second source deadline.
+It extends neither the pure two-release family nor the mixed-support residue
+family with another amount-only case. **Row 417 remains OPEN**: this is a finite
+three-claimant family, without generic histories, Recovery/insurance composition,
+arbitrary claim populations or portfolio/slab retirement.
+
+Validation uses isolated worktree `/tmp/percolator-row417`, based on the
+coordinator branch at `f52dca678136c48eacfc6df9b41a382c235b9fd3`, with private
+target `/dev/shm/percolator-row417-target`. The default-feature wrapper SBF is
+the documented public-reserve artifact,
+SHA-256 `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Production, manifests and dependency pins are unchanged. The new selector passes
+**1/1** (18 histories, 18 rollback probes), with peak measured settlement cost
+**451,915 CU**. The adjacent repeated-stock and source-realization controls pass
+**2/2**, and the charter/index passes **1/1**. Formatting and Git whitespace
+checks pass. No SBF rebuild or full-suite run is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row417-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_aborted_realization::v16_program_aborted_second_source_realization_preserves_receipts_across_expiry_and_order -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_source_realization::v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_repeated_stock::v16_program_receipts_preserve_identity_through_two_stock_releases_and_reversed_priority
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+## INV-008 partial reserve payouts and replenished earnings (row 415, 2026-09-12)
+
+Owner: [stateful/inv_008_retained_backing_earnings.rs](stateful/inv_008_retained_backing_earnings.rs),
+mounted as `inv_008_intent_uniqueness_and_bounded_replay::retained_backing_earnings`.
+Selector: `v16_program_partial_reserve_payouts_preserve_replenished_earnings_across_orders`.
+
+Twelve LiteSVM histories cross asset 0/1 with all six orders of a 137-atom
+principal replenishment, a new fee-accruing bilateral trade, and a retained
+738-atom earnings payout. The standard `V16Svm` fixture supplies initially empty
+program accounts and fixed SPL endowments; public initialization, deposits,
+authority assignment, backing policy/top-up, authenticated marks, cranks and
+trades construct the economic state. No account images create or repair the
+tested stock, lien, earnings or retained-request condition.
+
+The provider owns 100,000 principal atoms and earns 875 atoms on an input-derived
+2,623-atom lien. Separately signed 137-atom principal and earnings withdrawals
+pay the same provider token account before replenishment. Their transactions and
+the independent 738-atom earnings request are signed before either initial payout.
+At a fixed authenticated price of 105, the later 10-contract trade increases the
+lien by 1,400 atoms and charges exactly `ceil(1400 * 3333 / 10000) = 467` new fees.
+The original 738-atom request pays only its signed amount whether it lands before
+or after this accrual. New signatures then pay 137 principal and all 467 later
+earnings through the two distinct reserve handlers.
+
+The independent history books check each trader's capital/PnL, exact principal
+and earned-fee stocks, the complete provider ledger (including lazy fee
+observation), live backing encumbrance, all SPL balances, fixed mint supply,
+unaffected domains and authority/control epochs after every suffix attempt.
+The common stock and encumbrance censuses also run at every boundary. Final
+provider receipts are exactly `274 principal + 1342 earnings = 1616` atoms;
+99,863 deposited principal atoms remain attributed to the provider. The test
+does not confuse the equal initial amounts or their shared destination with a
+single interchangeable reserve allowance.
+
+Each permuted operation first succeeds as a transaction prefix before an
+earnings-overdraw suffix rejects at the exact instruction index. All compiled
+and tracked complete Accounts roll back, including 24 successful SPL prefixes
+and twelve fee-accruing trade prefixes; the payer loses only the exact signature
+fee. The unchanged standalone payload then succeeds. After both replenishments,
+old paid transactions return `AlreadyProcessed` without account or fee changes.
+Two public cranks refresh order-dependent health-certificate risk epochs, after
+which every tracked non-payer Account is byte-identical across all six orders.
+No account bytes are normalized for either rollback or endpoint comparison.
+
+This adds bounded INV-008/010/024/031 composition evidence: partial reserve-stock
+payouts followed by **new utilization earnings and principal replenishment** with
+one shared provider ledger/destination. The existing insurance/operator-ABA
+replenishment test, principal/earnings expiry-stock test, and row-428 insurer
+succession coverage do not own this product. Partial payouts here are separate
+fully executed signed amounts, not persistent partial authorization. Identical
+signed retries test LiteSVM's validator cache only; signature-distinct withdrawal
+payloads have no tested withdrawal-specific stock sequence. No new INV-011
+aggregate-budget or INV-064 insurance-policy guarantee is claimed. **Row 415
+remains OPEN**, with no generic oracle, production fix or invariant-status change.
+Other trade transports, arbitrary histories, authority succession, expiry,
+Recovery/Resolved payouts and complete provider/user exits remain outside this
+selector.
+
+Validation uses isolated worktree `/tmp/percolator-astra-inv008-row415-20260912`
+at base `8dd059afdc9bd0f26d0070fd8e69254f9c1a6c70` and private target
+`/dev/shm/astra-inv008-row415-20260912-target`. The reused default-feature wrapper
+SBF is a private copy with SHA-256
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Production/manifests/pins are unchanged from the README's documented artifact
+base `6ab7856fbe1e2f89ed11c1103fb5282fab404dee`; no SBF rebuild is claimed.
+The new selector passes 12 histories, 108 successful suffix transactions,
+36 exact rollbacks and 108 cache rejections; peak measured cost is **691,407 CU**
+under its 1,000,000-CU assertion and the 1,400,000-CU transaction limit.
+
+Discarded development assumptions: a 20-contract accrual exceeded the fixture's
+available post-fee credit and rejected before the intended suffix, so the retained
+history uses the admitted 10-contract increment. The provisional 600,000-CU test
+ceiling was too small for the successful trade prefix plus deliberate rejection.
+An immediate raw endpoint comparison observed different cached risk epochs;
+public recertification now makes the exact comparison valid. None was a proven
+production defect. No duplicate standalone insurance/expiry probe was added.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-inv008-row415-20260912-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_008_intent_uniqueness_and_bounded_replay::retained_backing_earnings::v16_program_partial_reserve_payouts_preserve_replenished_earnings_across_orders -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture --test-threads=1 inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_paid_retained_insurance_stays_bound_after_replenishment_and_operator_aba inv_063_backing_expiry_normalization::retained_reserve_stock::v16_program_retained_principal_expiry_preserves_encumbered_backing_and_earned_fee_stock
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
+## INV-073 frozen reserve destinations and public replacement (row 433, 2026-09-12)
+
+Owner: [cu/inv_073_frozen_reserve_replacement.rs](cu/inv_073_frozen_reserve_replacement.rs),
+mounted beside the public earned-fee fixture and invoked by the INV-073 selector
+`v16_program_frozen_reserve_destinations_allow_public_replacement_without_thaw_or_beneficiary_signatures`.
+The existing INV-018 public mint/market constructor and INV-024 earnings fixture
+gain an optional freeze authority; their existing callers continue to pass `None`.
+All economic state comes from System/SPL/ATA/wrapper instructions. Account packing
+builds expected host snapshots only; no initialized account bytes are installed.
+
+One public fixed-supply/classic-SPL/asset-0 history earns 875 provider-fee atoms,
+pays both users exactly 56,627/1,995,000 atoms and deletes their portfolios. The
+provider, insurance beneficiary, insurance operator, freeze authority, keeper and
+market authority are distinct. Public SPL instructions freeze both empty reserve
+ATAs; provider, beneficiary, operator and freeze-authority keys are then dropped.
+Mint authority was revoked at the input-derived 2,152,533-atom supply.
+
+The keeper funds and initializes two ordinary SPL token accounts owned by the
+absent beneficiaries. The only signatures on those transactions are the keeper
+and the new account being created. Every reserve instruction has unsigned metas.
+The new accounts receive exactly 100,000 principal plus 875 earnings atoms for
+the provider and 31 insurance atoms for the beneficiary, without a thaw, original
+destination repair or role succession during the continuation. The original ATAs
+remain byte-identical and frozen through administrative vault/slab closure.
+
+Each replacement first occurs in a rejected transaction: System creation, SPL
+initialization and one actual reserve payment succeed before a payout to a frozen
+original destination returns `InvalidTokenAccount` at instruction 5. Both complete
+Account rollbacks restore the absent replacement account, its creation rent, the
+completed payout and all tracked economic/control/ledger state, allowing only
+the exact two-signature fee. The retained valid prefix then commits. In the
+provider continuation a final unsigned earnings payment initializes the lazy
+ledger with the correct provider and cumulative 875-atom payment.
+
+Full decoded market/config comparisons check each committed and rejected prefix,
+including the source-credit/risk epoch increments at principal exhaustion. Stock
+and encumbrance censuses, fixed supply, complete mint/vault/original destination
+frames, exact replacement-account owner/delegate/close-authority fields, payer
+rent and administrator rent refund bind the accounting. Final closure leaves a
+typed tombstone at exact rent and no market vault. The keeper/admin/operator get
+no reserve tokens. The freeze authority remains recorded on the mint throughout.
+
+This extends the frozen-destination boundary to **fresh public custody with absent
+beneficiary and freeze signatures**. Discarded duplicates: ordinary unsigned payout
+orders and final-close replay (existing row433), signed ATA recreation (INV-024),
+thaw-and-retry (row418), last-portfolio submitter attribution (row410), and depleted
+provider/insurance retirement (rows420/421). **Row433 remains OPEN**: frozen vaults,
+an authority actively freezing each new destination, arbitrary role/quote/asset
+histories, native/dual rails, Recovery/recredit, pending-loss/receipt composition,
+maximum shapes and unavailable market authorities are outside this witness.
+Owner-signed portfolio deletion and administrator-signed slab closure remain
+fixture prerequisites. No production/dependency/pin or invariant-status change
+and no new production defect are claimed.
+
+The worker originally validated this in isolated worktree
+`/tmp/percolator-row433-coverage.ikLcJM/worktree`; coordinator integration reran
+the new selector, seven adjacent exact controls, charter/index, formatting and
+Git whitespace checks on the current invariant branch. No SBF rebuild or
+full-suite run is claimed. The new selector passes **1/1**, with two exact
+creation/payout rollbacks, two committed replacement accounts, three unsigned
+reserve payments and one closure. CU maxima `[freeze, rejected bundle,
+replacement payout, slab close]` are **[4,563, 424,835, 443,354, 19,242]**,
+below the asserted 600,000-CU ceiling; the reused transaction helper installs a
+1,200,000-CU limit. The initial run completed all public replacement payouts but
+caught omitted principal-exhaustion epoch increments in the expected host model;
+the corrected model passes.
+
+Exact focused commands, with no broad suite:
+
+```sh
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_frozen_reserve_destinations_allow_public_replacement_without_thaw_or_beneficiary_signatures -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry \
+  inv_073_no_permanent_user_lock::v16_program_terminal_public_reserve_disposition_preserves_value_across_orders \
+  inv_073_no_permanent_user_lock::v16_program_public_reserve_payments_wait_for_resolved_senior_disposition \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_reserve_destination_recovery::v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_value \
+  inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_cleanup_submitter::v16_program_last_portfolio_cleanup_cannot_confer_reserve_entitlement_on_submitter \
+  inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent \
+  inv_018_quote_mint_vault_token_program_and_authority_integrity::v16_primary_mint_decimals_preserve_exact_raw_atom_accounting
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-073 absent reserve recipients and final-close retry (row 433, 2026-09-12)
+
+Owner: [cu/inv_073_terminal_reserve_close_retry.rs](cu/inv_073_terminal_reserve_close_retry.rs).
+The INV-073 selector calls a narrow verifier mounted beside the existing INV-024
+earned-fee fixture, reusing its public System/SPL/ATA/wrapper construction:
+`inv_073_no_permanent_user_lock::v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry`.
+No initialized economic account bytes are injected, restored or edited in LiteSVM.
+
+Two independently constructed histories distinguish a zeroed, System-created
+earnings ledger from one already recording a committed 17-atom payment. Provider,
+insurance beneficiary, insurance operator, keeper and market authority are separate;
+the provider, beneficiary and operator keys are dropped before measured execution.
+A keeper-only transaction commits 101 principal atoms, 7 insurance atoms and either
+0 or 17 earnings atoms. All reserve account metas remain unsigned, including in
+the later transaction co-signed by the market authority for mechanical closure.
+
+An early close rejects while reserves remain. The next rejected transaction pays
+all three remaining claims, initializes or updates the earnings ledger, closes
+the SPL vault, shrinks the slab to its tombstone and refunds rent before a repeated
+CloseSlab rejects with InvalidAccountLen. Four completed wrapper instructions and
+the exact failing instruction index bind that boundary. Every compiled/tracked
+complete Account is restored, including prior committed payments, ledger state,
+market length, vault, mint, recipients, authority, Clock and rent; only the payer
+loses the exact two-signature fee. Removing the repeated close and refreshing the
+blockhash lets the byte-identical payout/close instructions commit. Fresh retries
+of both the whole bundle and CloseSlab reject without another payment or refund.
+
+Both worlds finish at the fixture's slot 7, before principal expiry at slot 100.
+Input-derived final entitlements are 56,627/1,995,000 user atoms, 100,000 principal
+plus 875 earned-fee atoms to the provider, and 31 insurance atoms to its beneficiary.
+Full SPL account images, authority/control state, stock and reservation censuses,
+ledger attribution, fixed 2,152,533-atom supply and exact tombstone/vault rent
+disposition bind the result. There are 11 committed reserve payments, 6 rolled-back
+reserve payments, 2 rolled-back full closures, 2 committed full closures and
+8 complete-account rejection checks.
+
+The new exact selector passes 1/1 (two histories). Passing-run transaction maxima:
+**560,960 CU** for the unsigned paid prefix, **591,113 CU** for rejection and
+**588,908 CU** for the combined remaining payouts/final close, each under the
+existing transaction helper's **1,200,000-CU** ceiling. The initial run passed all
+economic assertions but exceeded a provisional 500,000-CU test ceiling with a
+575,960-CU three-payment prefix; that ceiling was corrected to match the reused
+helper. No production defect, production edit or red/green production fix is claimed.
+The two adjacent exact controls pass 2/2; the 12-world reserve disposition control
+peaks at **235,994 CU** (the seniority control does not print a separate maximum).
+The charter/index passes 1/1. Formatting and all three requested Git whitespace
+checks pass. Existing unused-support and Solana client future-compatibility
+warnings remain.
+
+Discarded duplicate ideas: another basic unsigned three-reserve payout/order
+matrix, recipient destination repair, and absent-provider principal expiry. Their
+existing selectors already own those cases. This increment instead composes a
+committed payout prefix, lazy/existing ledger, successful full closure rollback,
+unchanged instruction retry and post-retirement replay. The adjacent reserve
+disposition and seniority controls below retain their existing scope.
+
+**Row 433 remains OPEN**; invariant statuses are unchanged. This is finite
+Resolved/classic-SPL/asset-0 evidence, without generic generation, native/dual
+collateral, Recovery/recredit, pending-loss/receipt composition, arbitrary roles
+or maximum shapes. The fixture still requires owner-signed deletion of empty
+portfolios, and the market authority still signs mechanical slab closure.
+Unavailable market authorities and permissionless mechanical retirement remain gaps.
+
+Worktree: `/tmp/percolator-terminal-reserve-20260912`, based on the requested
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`2a7bffd53bcfb4270d3164f41874c0dd8cc83078`. Private host/deploy outputs were copied
+from the standalone `/tmp/astra-terminal-identity-target` cache. The default-feature
+SBF matches the [public-reserve audit](terminal_public_reserves_audit_20260912.md),
+SHA-256 `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+no SBF rebuild or full-suite run is claimed. Production and dependency pins are
+unchanged. Only the following exact selectors and requested checks are validated:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/terminal-reserve-row433-20260912-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_073_no_permanent_user_lock::v16_program_terminal_public_reserve_disposition_preserves_value_across_orders inv_073_no_permanent_user_lock::v16_program_public_reserve_payments_wait_for_resolved_senior_disposition
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-024 earned insurance share through succession (row 429, 2026-09-12)
+
+Owner: [cu/inv_024_terminal_fee_share_succession.rs](cu/inv_024_terminal_fee_share_succession.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::terminal_fee_share_succession`.
+Selector: `v16_program_terminal_fee_share_succession_preserves_operator_paid_history`.
+Primary INV-024; bounded INV-025/027/036/070/081 attribution evidence. Base:
+`b5006413139cabb5ab1ea572f7d615430652e836`. Branch:
+`codex/row429-terminal-reserve-attribution-20260912`; isolated worktree:
+`/tmp/percolator-row429-20260912`. The parent worktree is not edited.
+
+This single public LiteSVM history parameterizes the existing live earned-fee
+fixture's insurance share before public funding; existing callers keep a zero
+share. The 2,500-bps share splits the initial 875-atom utilization charge into
+657 provider earnings and 218 short-domain insurance atoms, alongside 31 deposited
+long-domain insurance atoms. The provider, insurance operator and initial insurance
+beneficiary/administrator are distinct. A signed operator payout of 7 initializes
+an insurance ledger under the initial beneficiary, while a signed provider sync
+records the preexisting 657 earnings. A two-lot owner-signed fill at 105 increases
+the required lien from 2,623 to 3,603 atoms. The independent charge oracle is
+`ceil(980 * 3,333 / 10,000) = 327`, split into
+`floor(327 * 2,500 / 10,000) = 81` short-domain insurance atoms and 246 provider
+fee atoms. The user's capital pays the full 327; neither ledger observes the
+trade yet.
+
+The initial beneficiary consents to transfer funded insurance to the unchanged
+provider while both users still have positions. The entire engine economics and
+both portfolios are framed across the handoff; only the expected authority epoch
+and beneficiary change. The unchanged operator receives a further 13 atoms using
+a new ledger bound to the successor beneficiary. Its opening insurance balance
+includes the inherited fee share, with zero newly observed profit or deposits.
+The old ledger remains byte-identical at its 7 withdrawn / 242 last-observed prefix.
+Both operator payouts consume deposited long-domain insurance; 11 deposited atoms
+and all 299 earned short-domain atoms remain owed to the successor role.
+
+Asset shutdown at slot 2, market resolution and delayed unsigned owner payouts
+compose before signed portfolio deletion. Terminal keeper-only payouts then pay
+903 provider fees and 11 insurance atoms to the same token account through
+different typed ledgers. A former-beneficiary insurance-ledger suffix rejects
+`Unauthorized` at instruction index 4 after two successful wrapper/SPL payouts.
+All tracked and compiled Accounts roll back except actual signature fees. The
+identical two-instruction prefix commits on retry, including the provider ledger's
+first observation of 246 new earnings and 5,000 consumed-backing atoms. The final
+299-atom insurance payout is exactly the two charges' earned share. Its successor
+ledger records 323 total withdrawals: 13 live atoms paid to the operator and 310
+terminal atoms paid to the beneficiary, without conflating those recipients.
+
+At economic checkpoints an input-maintained book checks both insurance domains,
+provider earnings, beneficiary/operator/provider identities, policy, authority
+epoch, user fee debit, fixed mint supply and SPL custody. The independent stock
+census and market shape validation compose with full Account rollback checks.
+Final recipients hold 56,300 / 1,995,000 user atoms, 101,213 provider/beneficiary
+atoms (100,000 principal + 903 provider fees + 310 insurance), 20 operator atoms,
+and zero administrator atoms. All 2,152,533 minted atoms are accounted for.
+Portfolio rent enters the slab; final public `CloseSlab` frames recipient tokens,
+all three ledgers and the mint, refunds exact slab/vault rent and leaves the
+canonical rent-funded tombstone with no vault residue.
+
+Nonduplication: the existing live-successor exchange earns only provider fees
+with zero insurance share; resolved role exchanges start with fixed reserve
+stocks. Shutdown operator departure uses deposited insurance and maintenance,
+with zero provider earnings. This probe adds **source charges split across
+two reserve roles, unobserved earned insurance inherited by a live beneficiary
+successor, and the same operator's ledger attribution across that handoff**.
+Further fixed-stock payout orders, destination repair and a standalone operator
+departure probe were discarded as duplicate candidates.
+
+**Row 429 remains OPEN.** This is one asset-0/classic-SPL history, not an exhaustive
+beneficiary oracle. Arbitrary share rates, both source orientations, arbitrary
+accrual or role ABA histories, insurance spending/recredit, principal expiry,
+pending losses, maintenance/funding combinations, other assets/quote rails and
+mature asset-local shutdown fallback remain gaps. It does not establish unsigned live reserve
+management or arbitrary Recovery progress. Economic state is constructed only
+through public System/SPL/ATA/wrapper routes; existing harness controls install
+programs, fund native signer balances and advance Clock/blockhash. No economic
+Account image is mutated or restored. Production, dependencies and
+`invariant_status.tsv` are unchanged.
+
+Validation uses a fresh locked/offline default-feature SBF build from this worktree,
+platform-tools v1.52, engine pin `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+SBF SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The private target is on `/tmp` because `/dev/shm` was nearly full; no shared build
+cache was modified. The new selector passes **1/1**, peak **451,028 CU** under the
+existing **600,000-CU** ceiling, excluding fixture construction. Its first development
+run failed during setup: attempting to increase the insurance share after backing
+was funded correctly returned `EngineLockActive`. The fixture now sets and binds
+that share before funding. This was a test setup correction; no property violation
+or production fix was found. The two adjacent exact selectors pass **2/2**,
+including the zero-share live fixture control (441,987 CU peak) and four shutdown
+operator-departure worlds. Repository formatting, unstaged/staged whitespace and
+post-commit whitespace checks pass. The private build target is cleaned with the
+command below. Only the existing Solana-client future-compatibility warning remains.
+No unfiltered suite or machine-status promotion is claimed. Exact commands:
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row429-target
+export TMPDIR=/dev/shm/percolator-row429-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+terminal_module=inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence
+cargo test --locked --offline --test v16_cu "${terminal_module}::terminal_fee_share_succession::v16_program_terminal_fee_share_succession_preserves_operator_paid_history" -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  "${terminal_module}::live_earnings_terminal_exchange::v16_program_live_successor_accrual_survives_terminal_role_exchange" \
+  inv_024_attributed_quote_value_conservation::shutdown_operator_departure::v16_program_shutdown_operator_departure_preserves_terminal_beneficiary_and_backing
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+```
+
+## INV-024 live successor accrual through terminal exchange (row 429, 2026-09-12)
+
+Owner: [cu/inv_024_live_earnings_terminal_exchange.rs](cu/inv_024_live_earnings_terminal_exchange.rs).
+Primary INV-024; affected INV-005/025/027/036/070/081. Exact selector:
+`inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::live_earnings_terminal_exchange::v16_program_live_successor_accrual_survives_terminal_role_exchange`.
+
+One public LiteSVM history transfers funded backing **before wind-down**, while
+both users retain positions and a 2,623-atom backing lien. The existing fixture
+now optionally returns its user signers; its original callers and public setup
+are preserved. No production, engine pin, manifest or invariant verdict changes.
+System/SPL/ATA/wrapper instructions create all economic state. Harness controls
+are program installation, signer SOL, Clock and blockhash advancement; copied
+Account/token frames are assertion data and are never installed in LiteSVM.
+
+The old provider A receives 17 of the initially earned 875 atoms, then consents to
+transfer backing to B, the insurance beneficiary and unchanged administrator.
+B receives a 13-atom fee prefix, initializing its ledger against the inherited
+858-atom fee tail. Both portfolios and the complete engine economics remain
+unchanged by the live handoff. A subsequent owner-signed two-lot fill at 105
+increases the lien from 2,623 to 3,603 atoms. The input-derived fee is
+`ceil((3,603 - 2,623) * 3,333 / 10,000) = 327`; it debits the user's capital and
+increases the same backing role's earnings without writing either ledger.
+
+After resolution, two permissionless `CloseResolved` calls pay the users and
+their portfolio closures return rent to the slab. B then transfers insurance to
+A, completing the exchange, and receives its remaining 1,172 fee atoms. That
+payout is the successor ledger's first observation of the intervening 327 earned
+atoms and the 5,000-atom consumed-backing history. The exact ledger oracle checks
+all fields: 1,185 total fees withdrawn, 327 newly observed earnings, 5,000 consumed
+atoms, zero fee remainder and zero deposit/principal history. A's entire ledger
+Account remains frozen at its original 17-atom prefix.
+
+One rejected bundle completes the terminal insurance transfer and a real SPL fee
+payout, including both telemetry updates, before a wrong-role fee suffix rejects
+with `Unauthorized`. Successful wrapper/SPL log counts prove the prefix ran.
+Every tracked and compiled Account rolls back except actual signature fees.
+The identical handoff/payout instruction prefix succeeds on a fresh transaction.
+This adds accrual and consumed-backing observation across live/terminal succession
+to the existing resolved-state exchange coverage; it is not a new payout order.
+
+At every economic step, an input-maintained payout book, complete SPL Account
+frames, fixed mint, role profiles, control sequences and independent stock census
+reconcile custody. Final payouts are:
+
+| Recipient | User Payout | Provider Fees | Backing Principal | Insurance | Total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Long user | 56,300 | 0 | 0 | 0 | 56,300 |
+| Short user | 1,995,000 | 0 | 0 | 0 | 1,995,000 |
+| A, old provider / final insurer | 0 | 17 | 0 | 31 | 48 |
+| B, final provider / administrator | 0 | 1,185 | 100,000 | 0 | 101,185 |
+| Unchanged live insurance operator | 0 | 0 | 0 | 0 | 0 |
+
+The 2,152,533-atom supply is fully attributed. Public `CloseSlab` leaves the
+canonical tombstone, deletes the empty vault, refunds exact rent and frames both
+ledgers, all recipient tokens and the mint.
+
+Discarded duplicate candidates: more resolved payout permutations, fixed-stock
+coalescence/partition, destination repair/replacement and a standalone submitter
+redirect. Existing role-exchange, cleanup, provider-custody and frozen-reserve
+tests already own those relations. A development-only 50-lot second fill hit the
+existing admission limit because its required lien exceeded the user's claim;
+it was replaced by the bounded two-lot fill, without retaining an admission probe.
+Test integration also corrected private-helper placement and the `Live` enum name.
+No real program bug was found.
+
+**Row 429 remains OPEN.** This single asset-0/classic-SPL history does not cover
+arbitrary accrual/handoff histories, insurance-share fee accrual, expiry/recredit,
+other quote rails/assets, authority ABA, recovery, or a generic beneficiary oracle.
+
+Validation worktree: `/tmp/percolator-astra-row429-20260912`, exact requested
+origin base `65c74cbe326febe5d7b1b2f7887a8f3b7616bc1e`.
+Private target: `/tmp/percolator-astra-row429-target-20260912`, seeded by copying
+the existing public-disposition target. Default-feature SBF was rebuilt from this
+worktree using locked/offline platform-tools v1.52; SHA-256
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The new selector passes **1/1** (0.59 s). CU peaks, excluding fixture construction:
+management/payout **224,884**, new fee trade **441,987**, wind-down **255,637**,
+rejected bundle **415,655**, slab close **22,242**; all bounded by 600,000 CU.
+The four adjacent exact controls below pass **4/4** (12.98 s): earned-fee
+succession peaks at **423,137 CU**, coalescence at **366,532 CU**, resolved role
+exchange at **461,472 CU**, and cleanup submitter at **608,833 CU**, each within
+its existing test limit. Random keys can vary PDA costs. Existing Solana-client
+future-compatibility warnings remain. No full-suite or generic invariant proof
+is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-row429-target-20260912
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+terminal_module=inv_024_attributed_quote_value_conservation::terminal_earnings_succession
+cargo test --locked --offline --test v16_cu "${terminal_module}::terminal_role_coalescence::live_earnings_terminal_exchange::v16_program_live_successor_accrual_survives_terminal_role_exchange" -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  "${terminal_module}::v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance" \
+  "${terminal_module}::terminal_role_coalescence::v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements" \
+  "${terminal_module}::terminal_role_coalescence::terminal_role_exchange::v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders" \
+  "${terminal_module}::terminal_cleanup_submitter::v16_program_last_portfolio_cleanup_cannot_confer_reserve_entitlement_on_submitter"
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-024 funded terminal role exchange (row 429, 2026-09-12)
+
+Owner: [cu/inv_024_terminal_role_exchange.rs](cu/inv_024_terminal_role_exchange.rs),
+mounted beneath the existing terminal-role conformance module to reuse its public
+earned-fee fixture, reserve instructions, stock oracle and complete-Account frames.
+Exact selector:
+`inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::terminal_role_exchange::v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders`.
+
+Twelve independently constructed LiteSVM worlds exchange the backing provider A
+and insurance beneficiary B: backing `A -> B`, insurance `B -> A`. B remains the
+market/asset admin, while the separate live insurance operator C receives zero.
+The fixture publicly funds 100,000 backing and 31 insurance atoms, earns 875 actual
+utilization-fee atoms, resolves, pays users 56,627/1,995,000 atoms and deletes both
+portfolios. System/SPL/ATA/wrapper instructions construct all economic state;
+program installation, signer SOL, authenticated Clock and fresh blockhashes are
+the harness controls. Account copies are assertion frames, never installed as
+economic state. A receives 101 principal atoms before the exchange; the remaining
+99,899 principal atoms stay funded through both role transfers.
+
+The test compares all six linear extensions of the two role-local sequences
+`incumbent prefix payout -> consensual transfer + successor one-atom payout`,
+crossed with both final role payout orders. Prefixes are 17 provider-fee atoms
+and 11 insurance atoms. Each transfer needs the incumbent and successor; isolated
+reserve payouts use only the independent payer's signature. All worlds finish:
+
+| Recipient | Backing Principal | Provider Fees | Insurance | Total |
+| --- | ---: | ---: | ---: | ---: |
+| A, former provider / final insurer | 101 | 17 | 20 | 138 |
+| B, former insurer / final provider | 99,899 | 858 | 11 | 100,768 |
+| C, unchanged live operator | 0 | 0 | 0 | 0 |
+
+Every measured economic prefix checks input-maintained entitlements, exact SPL
+Account images, fixed supply, booked/raw custody, principal reservations, role
+profiles, authority epochs and unrelated source domains. Four separate post-hoc
+ledgers preserve each holder's role-specific withdrawals: fee counters 17/858,
+insurance counters 11/20, with no new deposits, earnings, profit or loss attributed
+by succession. Fee ledgers retain the input-derived 5,000-atom consumed-backing
+history. Each old holder's ledger remains unchanged when its successor is paid.
+
+For each transfer, a rejected bundle completes the transfer and a real successor
+SPL payout/lazy ledger initialization before rejecting the former holder's payout.
+After both transfers, two further rejected bundles pay one role before rejecting
+the other role's former-holder ledger. All 48 rejections check exact instruction
+errors and successful wrapper/SPL prefixes, then restore every tracked/compiled
+Account except actual signature fees. The identical instruction prefixes succeed
+on fresh transaction retries. This is rollback/retry coverage, not retained signed
+transaction or stock-replenishment evidence. The 120 committed reserve payments,
+24 committed handoffs and 12 slab closures conserve exact token and rent value.
+
+Distinct scope: both funded roles exchange holders while backing principal stays
+unpaid, and every valid cross-role payout/handoff ordering converges. Discarded
+duplicate ideas were fixed-holder payout permutations, single-role merge/split,
+provider round trips, destination repair, backing expiry, retained replenishment,
+pending-debt closure, cursor recredit and fractional-carry histories. Existing
+coverage owns those relations; rows 413/415/433 and 419/424/425 gain no new claim.
+No executed history was discarded. Development corrected a test-only expectation
+that post-hoc fee ledgers omit the fixture's historical consumed backing.
+
+**Row 429 remains OPEN.** This finite resolved asset-0/fixed-SPL witness does not
+cover transfers before full wind-down, other assets/quote rails, fresh fee accrual
+between transfers, expiry/recredit, outstanding user claims, arbitrary role
+histories or a generic generator/oracle. Production, dependency pins and invariant
+verdicts are unchanged; no correctness fix was needed.
+
+Validation uses worktree `/tmp/percolator-row429-terminal-attribution-20260912`,
+based on the requested local origin ref at
+`93860021819ad50997b3a1f15f7db7de4f9a73e3`. The private target is
+`/tmp/percolator-row429-target-20260912`; its cache was copied from the documented
+public-reserve target. Default-feature SBF was rebuilt locally, locked/offline,
+with platform-tools v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Reported CU excludes fixture construction. The final exact selector passes **1/1**
+(12 worlds, 7.32 s), with maxima **229,381 CU** for single calls, **452,472 CU** for
+successful bundles, **421,714 CU** for rejected bundles and **26,742 CU** for slab
+closure, all below the 600,000-CU per-transaction bound. Randomly generated keys
+can vary PDA derivation cost. The four adjacent exact controls pass **4/4** (6.93 s):
+coalesced roles peak at 339,532 CU, insurer merge/split at 226,385 CU and earned-fee
+succession at 423,137 CU; operator departure does not print an aggregate maximum.
+The charter/index passes **1/1**. Repository formatting, unstaged/staged whitespace
+and HEAD commit whitespace checks pass. Existing unused-support and Solana-client
+future-compatibility warnings remain. No full-suite or generic invariant proof is
+claimed.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row429-target-20260912
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+terminal_module=inv_024_attributed_quote_value_conservation::terminal_earnings_succession
+cargo test --locked --offline --test v16_cu "${terminal_module}::terminal_role_coalescence::terminal_role_exchange::v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders" -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  "${terminal_module}::terminal_role_coalescence::v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements" \
+  "${terminal_module}::terminal_role_partition::v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution" \
+  "${terminal_module}::v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance" \
+  inv_024_attributed_quote_value_conservation::shutdown_operator_departure::v16_program_shutdown_operator_departure_preserves_terminal_beneficiary_and_backing
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+```
+
+## INV-014 retained trade and Live recipient succession (row 411, 2026-09-12)
+
+Owner: [cu/inv_014_retained_recipient_succession.rs](cu/inv_014_retained_recipient_succession.rs),
+mounted under INV-014's `retained_redirect_entitlement::retained_recipient_succession`.
+Exact `v16_cu` selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_redirect_entitlement::retained_recipient_succession::v16_retained_trade_and_payout_consent_diverge_across_live_recipient_succession`.
+
+Four public LiteSVM histories cross direct/redirect insurance-operator succession
+with `A -> B` or `A -> B -> A`. An opening bilateral trade earns real fees; A and
+the other recipient receive unequal partial SPL payments before a complete CPI
+increase and trade/payout alternatives are signed and successfully simulated.
+After the funded role transfers, base fees rise from 19 to the signed 37-bps
+bound and the redirect policy changes from 3,333 to 6,667 bps. B receives three
+atoms of unpaid legacy earnings. A's retained payout then rejects after the CPI
+trade succeeds; returning A's key still cannot revive its old payout epoch.
+Each failure restores every complete Account, including matcher context and all
+five SPL destinations, except the exact payer network fee.
+
+The unchanged, originally signed trade-only transaction subsequently succeeds.
+A fresh bilateral close switches transport, and current recipient consent
+withdraws exactly the unpaid tail. A's and B's prior SPL payments stay in their
+original custody accounts. Input-priced fees are 48, 48 and 95 atoms per owner;
+the 382-atom total is attributed 220/162 between the redirect/source assets.
+Every owner and recipient payout, domain budget, capital, mint supply, vault,
+stock census and reservation census reconciles through an empty SPL vault.
+
+The net-new dimension is funded Live recipient succession between retained trade
+signing and execution, including the different lifetimes of owner trade consent
+and recipient payout consent after an atomic failure. The parent redirect test
+keeps both recipients fixed; terminal succession tests do not execute these Live
+retained fee-bearing trades. Discarded duplicate candidates, before adding tests:
+standalone authority-ABA denial, base/backing fee-cap sweeps, split/shared-taker
+fee-budget bundles, grant expiry and additional route-order products. No marginal
+probe is retained. INV-005/010/011/024/036/047/081 gain only this bounded composition;
+generic epoch admission and fee-cap enforcement are existing evidence.
+
+**Row 411 remains OPEN.** Backing-provider earnings, optional payout ledgers,
+underfunded fee collection, partial matcher fills, multi-leg/multi-asset trades,
+dynamic mark/funding/maintenance fees, arbitrary authority histories and terminal
+settlement remain outside this increment. No production bug or fix, vulnerable-pin
+experiment, whole-invariant proof, engine/manifests change or status promotion is
+claimed.
+
+Worktree: `/tmp/percolator-astra-row411-consent-20260912`, branch
+`codex/astra-row411-consent-succession-20260912`. Exact base from
+`origin/codex/astra-open-holdout-ledger-20260912`:
+`0ea8eb26a12cd19a2fb6bcb47ce33ea25ccc98d7`.
+The private `target` copies `/dev/shm/percolator-row427-f6c2-target`; production,
+manifests and fixture sources match its documented `6ab7856f` base. Cached
+default-feature wrapper SBF SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Private fixture copies from the coordinator checkout have authenticated matcher
+SHA-256 `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`
+and hostile matcher SHA-256
+`e0c20fad34a7822cc6ce42a3c77ff08a8591977102f0c497a339d66a9dd6240a`.
+Host tests compile in this worktree; no SBF rebuild or full-suite run is claimed.
+
+The new selector passes four worlds, ten initial simulations and six exact
+trade/matcher-prefix rollbacks. The final focused run passes **3/3** selectors.
+Peak CU: success/simulation **214,061**, rejection **200,826**, policy **2,929**,
+handoff **2,287**. Adjacent controls peak at **230,566** CU (fixed-recipient
+entitlements) and **299,215** CU (redirect-policy bundles). Setup and the standing
+matcher-grant writer are excluded from these phase maxima. Development corrected
+one host API assumption: LiteSVM simulation returns transaction metadata directly.
+
+Focused validation commands (private worktree only):
+
+```sh
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_redirect_entitlement::retained_recipient_succession::v16_retained_trade_and_payout_consent_diverge_across_live_recipient_succession -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_014_delayed_policy_and_policy_epoch_safety::retained_redirect_entitlement::v16_retained_fee_routes_preserve_recipient_entitlement_after_paid_redirect_history inv_036_fee_destination_and_policy_version_integrity::v16_program_retained_redirect_bundle_preserves_fee_rounding_and_policy_order
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-014 retained partial fee route equivalence (row 411, 2026-09-12)
+
+Owner: [cu/inv_014_retained_partial_fee_routes.rs](cu/inv_014_retained_partial_fee_routes.rs),
+mounted by INV-014 as `retained_partial_fee_routes`.
+Exact `v16_cu` selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_partial_fee_routes::v16_retained_partial_fill_fee_rate_matches_exact_routes_after_funded_rejection`.
+
+Twenty public LiteSVM worlds compare partial CPI with all four exact transports
+at the same executed quantity. A post-signature capacity reduction cannot permit
+an above-consent fee rate merely because the smaller debit fits below the signed
+full-request ceiling. Each route rejects its own signed fee bound, restoring a
+real SPL deposit prefix and every complete Account except the exact payer fee;
+batch CPI uses its aggregate atom cap and also rolls back matcher execution.
+Fresh fee consent produces identical input-priced owner capital, insurance
+budgets and SPL custody. This adds partial-quantity consent and cross-route
+economics beyond row 432's single-CPI full-fill base-policy detours.
+
+The new distinction is above-consent partial execution despite its lower absolute
+fee. Discarded duplicates: row 432 policy detours, existing permitted partial and
+redirect histories, aggregate/batch fee caps, backing caps and expiry histories.
+**Row 411 remains OPEN**: dynamic/backing/funding/maintenance fees composed with
+partial fills, underfunded collection, multiple assets or batch legs, maximum
+shapes, authority or matcher succession, withdrawals and terminal settlement
+remain outside this test. No production, dependency or invariant-status change is
+claimed.
+
+The worker originally validated this in isolated worktree
+`/tmp/percolator-row411-20260912`, based on coordinator commit
+`09cb7b880440dbf1c8bd7c06e7c2ec330b19d91a`, with private target
+`/tmp/percolator-row411-20260912/target`. The coordinator integration reran the
+same focused selectors on the current invariant branch using the shared
+`/dev/shm/percolator-watch-test-target` build. The new selector passes **1/1**
+(20 worlds, 20 initial simulations, 20 funded rollbacks and 20 fresh
+successes). CU maxima: success/simulation **192,577**, rejection **179,964**,
+policy **2,699**, matcher control **902**. Two adjacent INV-014 controls pass
+**2/2**; charter/index and authoritative-status selectors pass **2/2**.
+Formatting and Git whitespace checks pass. No full-suite run is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row411-20260912/target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_partial_fee_routes::v16_retained_partial_fill_fee_rate_matches_exact_routes_after_funded_rejection -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_014_delayed_policy_and_policy_epoch_safety::v16_retained_fee_terms_bound_partial_and_exact_fill_routes_after_policy_change inv_014_delayed_policy_and_policy_epoch_safety::v16_program_trade_requires_signed_base_fee_consent
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-014 retained underfunded single-CPI close (row 432, 2026-09-13)
+
+Owner: [cu/inv_014_retained_underfunded_close.rs](cu/inv_014_retained_underfunded_close.rs).
+Exact selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_underfunded_close::v16_retained_single_cpi_underfunded_close_preserves_consent_and_actual_fee_budget`.
+The existing row432 fixture now accepts public market-init parameters; its existing
+constructors retain their original parameters. No production code changed.
+
+Eight LiteSVM histories cross both signed directions, an underfunded taker or LP,
+and two positive residual balances. System/SPL/ATA/wrapper/authenticated-matcher
+instructions construct every economic account. A flat owner's public withdrawal
+leaves enough principal to open at 19 bps and meet 10-bps margin with a 1-bps/slot
+price cap. Opening the position charges 49 atoms per owner and leaves the chosen
+role with 31 or 139 capital atoms. No initialized account bytes are edited.
+
+Three independently signed close envelopes, with a 99-bps taker cap and permissive
+137-bps LP grant, predate the policy history. Each includes a real 113-atom taker
+deposit. Initially successful simulations preserve complete Accounts. A 100-bps
+policy rejects the retained close before matcher invocation and restores the SPL
+deposit, even though one participant cannot pay the full quoted fee. At restored
+99 bps, a second envelope successfully deposits and closes before an obsolete
+policy suffix rejects; complete Account rollback includes matcher output and both
+portfolios. An unchanged pre-signed alternative then commits the full close.
+
+The input-priced oracle requires `ceil(ceil(abs(q)*100/POS_SCALE)*bps/10000)`:
+49 atoms to open and 253 quoted atoms to close. The underfunded taker actually
+pays 144 or 252 closing atoms; the underfunded LP pays 31 or 139. The other role
+pays exactly 253. Only these collected amounts reach insurance and its signed
+trade-side budgets; the unpaid portion produces no extra insurance or user debit.
+After every public transition, capital, zero PnL/fee credits, positions/OI, SPL
+balances, market stock and reservation censuses agree. Both owners' final SPL
+entitlements equal their minted allocation minus their own collected fees; the
+only remaining custody is insurance. Mint authority is revoked and supply fixed.
+
+**Nonduplicate:** the first proposed expiry dimension was discarded because
+`stateful/inv_014_retained_fee_expiry.rs` already covers retained grant expiry.
+Existing row432 policy/ABA/route histories and INV-014 partial-fill/payout tests
+use funded fee collection. INV-040's uncollectible CPI exit test has no retained
+policy-change consent or input-exact per-role payout oracle. This increment
+composes underfunded collection with both early consent rejection and rollback
+after successful collection, including a one-atom taker collection shortfall.
+
+**Row 432 remains OPEN.** This is bounded Live, constant-price, single-asset,
+full-close/base-fee conformance, not a generic generator/oracle. Dynamic/backing
+fees, zero collectible capital, simultaneously underfunded roles, partial fills,
+expiry/authority composition with underfunding, terminal payout, insurance
+withdrawal and arbitrary histories remain outside this selector. Machine invariant
+verdicts are unchanged. No public-route invariant violation or production fix was
+found. Initial setup attempts rejected an incompatible margin/price envelope and
+withdrawal from an exposed portfolio; the final construction withdraws while flat.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`9653b677d23a10a2631011669d789b9e630da897`. Worktree:
+`/home/anatoly/percolator-row432-underfunded-20260913`; local, unpushed branch
+`codex/astra-row432-underfunded-consent-20260913`. The original worktree was not
+edited. Environment: Linux x86_64, host rustc 1.90.0, LiteSVM 0.1.0,
+default Anchor-v2 features, locked/offline SBF platform-tools v1.52, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Private build caches were copied
+from existing caches, then wrapper and matcher rebuilt from this worktree.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+Validation: new selector 1/1, 8 worlds, 32 simulations, 16 rollbacks, 8 committed
+closes and 8 final withdrawals. Peak simulation/control/rejection/close-or-payout
+CU: 283,451 / 179,072 / 283,250 / 270,475, all within 500,000 CU. Two adjacent
+controls exercise the extended shared constructor, and both required metadata
+selectors pass. Formatting and all pre/post-commit whitespace checks pass.
+Only the existing Solana future-compatibility and unused-support warnings remain;
+no full-suite result is claimed. Exact commands from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/percolator-row432-underfunded-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/run/user/1001/percolator-row432-underfunded-tmp
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+CARGO_TARGET_DIR=/run/user/1001/percolator-row432-underfunded-matcher-target cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_underfunded_close::v16_retained_single_cpi_underfunded_close_preserves_consent_and_actual_fee_budget -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --quiet --test-threads=1 inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollback inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_cpi_and_direct_policy_histories_differ_only_by_explicit_route_fees
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+# After the local commit:
+git show --format= --check HEAD
+```
+
+## INV-014 retained single-CPI fee policy detours (row 432, 2026-09-12)
+
+Owner: [cu/inv_014_retained_single_cpi_policy_history.rs](cu/inv_014_retained_single_cpi_policy_history.rs).
+Exact `v16_cu` selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollback`.
+
+Eight public LiteSVM worlds cross signed taker caps of 37/99 bps, long/short
+direction, and restored-policy/fresh-consent endings. Both complete transactions
+are signed under a 19-bps policy, before any policy update; their distinct CU
+limits avoid failed-signature caching without changing economic terms. Each
+contains a 113-atom SPL deposit followed by one exact-fill `TradeCpi`. Initial
+capital is 100,003/200,007, price is 100, and quantity is 255.5 lots plus one
+position quantum, so notional and fee rounding are both exercised. The LP's
+137-bps grant stays permissive throughout and the LP does not sign these trades.
+
+The first committed policy becomes the taker cap plus one. Rejection must occur
+at the trade's `InvalidInstruction` guard, after successful deposit and SPL CPI
+logs, before matcher invocation. Every tracked complete Account, including all
+transaction keys, portfolios, policy/control sequences, matcher context, token
+custody, supply and owner Accounts, rolls back; the separate payer loses exactly
+two signature fees. A subsequent policy exactly at the original cap makes the
+unchanged second transaction executable again. Four histories commit that retained
+alternative. The other four raise policy again to cap plus two, require another
+exact funded-prefix rollback, then succeed with a fresh signature changing only
+the trade's fee field. Position epochs and the LP grant sequence stay unchanged
+until the accepted fill; each position epoch advances exactly once.
+
+Input-derived accounting checks each owner's capital and zero PnL, both OI lanes,
+insurance and its two domain budgets, source/destination SPL balances, and stock
+and encumbrance censuses after every committed step. The 300,123-atom supply is
+fixed with mint authority revoked. Successful per-owner fees are 95/253 atoms for
+restored 37/99-bps consent and 100/259 atoms for fresh 39/101-bps consent.
+All economic construction uses System/SPL/ATA/wrapper instructions; the harness
+only funds signer SOL and loads programs. No economic bytes are injected or reset.
+
+This adds repeated above-cap/restored/above-cap policy history and actual SPL
+deposit rollback to the existing standalone taker-cap regression. Discarded
+duplicates: another standalone policy-increase rejection; the existing all-route
+fee/partial-fill matrix; and granted-expiry, delegated-LP, redirect-payout or batch
+aggregate-cap histories. Withdrawal stock replay, terminal reserve attribution,
+missing-beneficiary payout, flat accrued fees, pending close cohorts and fractional
+carry are outside this increment, avoiding rows 415/429/433 and 413/419/425.
+
+**Row 432 remains OPEN**, with bounded INV-010/011/014/024/036/080/081 conformance
+evidence only. There is no generic generator/oracle, invariant-status promotion,
+new vulnerable-pin experiment or production fix. Dynamic/backing fees, partial
+fills, underfunded collection, authority succession, expiry, multi-asset histories,
+cross-route equivalence and arbitrary policy schedules remain gaps. Positions
+remain open; this selector claims no withdrawal or terminal-settlement evidence.
+
+Validation: the new exact selector passes **1/1** (8 worlds, 24 simulations,
+12 complete-Account rollbacks, 4 retained and 4 fresh successes; 3.62 s). The three
+adjacent exact controls below pass **3/3** (2.48 s). New peak CU is **187,901** for
+simulation/success, **49,385** for rejection, and **2,699** for policy updates,
+within a 500,000-CU transaction ceiling. Adjacent standalone taker-cap rejection
+and success cost 4,308/144,303 CU; the oracle-policy bundle peaks at 185,442 CU.
+The charter/index and machine-status selectors pass **2/2**. Repository formatting,
+unstaged/staged whitespace checks and the committed patch check pass. No full-suite
+run is claimed. Development corrected simulation metadata access and mutable
+borrowing for the pinned LiteSVM API; no executed history was discarded and no
+production inconsistency was observed.
+
+Worktree: `/tmp/percolator-row432-fee-consent-20260912`, branch
+`codex/row432-fee-consent-20260912`, based on the requested local remote-tracking
+ref `origin/codex/astra-open-holdout-ledger-20260912` at
+`93860021819ad50997b3a1f15f7db7de4f9a73e3`. A private build cache was seeded from
+`/tmp/astra-terminal-identity-target`. Both the default-feature wrapper and the
+authenticated matcher were then rebuilt offline from this worktree with
+platform-tools v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Engine remains `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; production, manifests,
+locks and invariant statuses are unchanged. No GitHub PR/issue/branch inspection
+or withheld comparison data was used. Existing `solana-client v1.18.26`
+future-incompatibility warnings remain.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row432-fee-consent-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollback -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_retained_single_cpi_taker_fee_cap_rejects_policy_increase \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_program_trade_requires_signed_base_fee_consent \
+  inv_014_delayed_policy_and_policy_epoch_safety::v16_retained_cpi_price_limit_survives_oracle_policy_change
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+```
+
+## INV-014 retained CPI/direct policy-history economics (row 432, 2026-09-12)
+
+Owner: [cu/inv_014_retained_single_cpi_policy_history.rs](cu/inv_014_retained_single_cpi_policy_history.rs).
+New exact `v16_cu` selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_cpi_and_direct_policy_histories_differ_only_by_explicit_route_fees`.
+
+Eight public LiteSVM worlds cross both signed directions, `TradeCpi` versus
+bilateral `TradeNoCpi`, and policy histories `19 -> 31 -> 0 -> 7` and
+`19 -> 7 -> 0 -> 31`. Every deposit/trade transaction is signed at 19 bps with
+37-bps fee consent, exact price 100 and 255.5 lots plus one position quantum.
+Its bytes and signatures remain unchanged through all three policy updates.
+Thirty-two successful simulations preserve the complete tracked Account frame.
+The CPI LP grants an independent 137-bps cap and does not sign the retained trade;
+the direct route requires both owners' signatures.
+
+Before delivery, a separate transaction applies a temporary 23-bps policy,
+executes the original 113-atom SPL deposit and trade, then repeats that policy
+instruction. The duplicate rejects at instruction 5 with `EngineStale`. Logs
+require three successful wrapper calls, the SPL transfer, and exactly one matcher
+invocation/return for CPI or none for direct execution. All compiled and tracked fixture
+Accounts roll back exactly, including policy and position epochs, matcher context,
+LP grant, custody and mint. Only the independent payer's exact signature fee is
+charged. The original signed deposit/trade transaction then executes unchanged;
+it was not submitted as the failing transaction, so no failed-signature cache
+bypass, blockhash replacement or economic re-signing is involved.
+
+The input-derived oracle first checks unnormalized owner capital, zero PnL,
+signed positions, both OI lanes, insurance, domain budgets, capital total and
+SPL custody against the fixed 300,123-atom supply. The per-owner fee is 95 atoms
+for explicit 37-bps direct consent, versus 18/80 atoms for the current 7/31-bps
+CPI base policy. Stock and encumbrance censuses run after every policy update,
+rollback and retained success. Across routes and histories, the economic
+projections agree after removing only those independently predicted fees from
+capital/insurance/domain accounting. This is a semantic economic comparison;
+the independently generated world identities are not compared byte-for-byte.
+Route-specific controls have separate assertions: both position epochs advance
+once; the LP tuple, cap and matcher sequence persist; only CPI advances the
+matcher request sequence and preserves grant enabled/expiry state. Direct
+execution disables that grant and clears its expiry, with unchanged context.
+
+**Nonduplicate:** existing row432 coverage rejects above-consent policies before
+matcher CPI; the permitted-policy stateful selector compares single/batch CPI;
+the INV-047 fee-leg comparison uses equal current/signed fees. This increment
+crosses retained direct/CPI consent with unequal route fees and rollback after
+an actual fill. Additional standalone cap hikes, cap-boundary permutations and
+another CPI-only permitted-policy suffix rollback were discarded during overlap
+review. No executed probe was discarded. Development corrected use of a
+nonexistent position-epoch setter; economic assertions were not relaxed.
+
+**Row 432 remains OPEN.** This is bounded INV-010/011/014/024/036/047/080/081
+conformance, with no generic history generator, production fix or status change.
+Dynamic/backing fees, nonzero slippage, partial/multi-asset fills, aggregate batch
+terms, underfunded collection, authority succession, expiry and terminal payouts
+remain outside this selector. Positions remain open. No real bug was found.
+
+Worktree `/tmp/percolator-row432.SdbMC2`, branch
+`codex/astra-row432-retained-rollback-20260912`, exact requested base
+`origin/codex/astra-open-holdout-ledger-20260912`:
+`eaa16d2f78d4426d45f629eeb5be75cf91bbc22b`.
+A private cache was copied from the earlier permitted-policy worker; the wrapper
+and authenticated matcher were then rebuilt from this worktree, offline and
+locked, using platform-tools v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Engine remains `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+
+Observed new-selector CU maxima across the focused runs: simulation/CPI success
+**190,901**, direct success **174,891**, post-fill rollback **195,498**, policy
+**2,699**, all below 500,000. The final combined run passes **2/2** in 7.02 s;
+its new-selector peaks are 187,892/167,391/192,489/2,699 respectively. The
+existing selector still covers 8 worlds, 24 simulations, 12 rollbacks and
+8 retained/fresh successes, peaking at 189,392 CU for success/simulation and
+50,885 for rejection. Charter/index passes **1/1**. Formatting, unstaged/staged
+whitespace and committed-patch checks pass. Only existing unused-support and
+Solana future-compatibility warnings remain; no full-suite run is claimed.
+Validation commands from this worktree (only affected selectors and charter/index):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row432-SdbMC2-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_cpi_and_direct_policy_histories_differ_only_by_explicit_route_fees \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollback
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-014 retained CPI fee consent across authority ABA (row 432, 2026-09-12)
+
+Owner: [cu/inv_014_retained_fee_authority_epoch.rs](cu/inv_014_retained_fee_authority_epoch.rs),
+a child of the existing row432 policy-history owner that reuses its public SPL
+fixture, complete-Account delivery checks and independent rounded-fee census.
+Exact `v16_cu` selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_fee_authority_epoch::v16_retained_cpi_fee_terms_survive_authority_aba_and_stale_policy_bundles`.
+
+Four public LiteSVM/SBF worlds cross both signed directions and two successful
+continuations. At 19 bps, each world signs and successfully simulates three
+envelopes: deposit/policy/trade, deposit/trade/policy and deposit/trade. The signed
+taker cap is 37 bps, quantity is 255.5 lots plus one position quantum, and price
+limit is exactly 100. The retained policy is 31 bps at sequence `s+7`, epoch `e`.
+Neither retained policy bundle nor the trade-only envelope has an LP signature;
+the independent LP grant permits 137 bps.
+
+Public `UpdateAuthority` instructions transfer A -> B -> A, with both incoming
+signatures. B is the LP owner and, while authorized, sets the base fee to 41 bps
+at sequence `s+1`. After A returns, its key is again the live fee authority, but
+its original epoch is obsolete. The retained policy-prefix bundle rejects at
+instruction 3 with `EngineStale`: the SPL deposit succeeded, matcher invocation
+count is zero, and the current 41-bps policy survives. Sequence `s+7` is still
+ahead, so sequence supersession cannot explain the refusal. A separately signed
+bundle changing only that policy instruction's epoch to `e+2` simulates
+successfully, isolating the stale-epoch boundary.
+
+A then publicly restores 23 bps at sequence `s+2`. The retained policy-suffix
+bundle reaches a successful deposit and actual CPI fill before `EngineStale` at
+instruction 4. Complete tracked and compiled Accounts roll back, including SPL
+custody, matcher return/request sequence, policy state, both position epochs and
+the LP grant. Only the payer's exact signature fee is charged. The original
+trade-only envelope remains byte-identical and simulates successfully. Two
+worlds deliver it unchanged at 23 bps; two deliver the epoch-renewed policy-prefix
+bundle at 31 bps with sequence `s+7`. The latter bundle has new signatures,
+including the taker's; its encoded trade data and all message fields except the
+policy instruction data match the original prefix bundle.
+
+Input-derived accounting charges **59 or 80 atoms per owner**, with matching
+insurance/domain budgets, capital, positions, OI and fixed 300,123-atom SPL supply.
+The fee-policy lane advances only on successful policy writes; authority epoch
+stays `e+2`, and only a committed fill advances both position epochs and the
+matcher request sequence once. The complete expected LP config includes its
+packed position-epoch increment, with grant tuple, enabled bit, fee cap, expiry
+and matcher sequence preserved. The run covers **4 worlds, 20 nonmutating
+simulations, 8 exact rollbacks, 2 unchanged retained fills and 2 renewed-policy
+fills**. CU maxima: simulation/fill **187,291**, controls **2,699**, rollback
+**187,027**, each below the fixture's 500,000-CU envelope.
+
+**Nonduplicate:** prior row432 tests keep the authority epoch fixed, including
+their duplicate-policy rejection after a fill. The INV-010 policy/handoff owner
+covers one-way authority changes and standalone controls, not an authority key
+returning with still-forward retained policy sequences around a retained CPI
+fill. This increment distinguishes policy-epoch revocation from unchanged taker
+consent and proves their transaction composition before and after matcher work.
+Standalone fee/price-cap and route permutations were not added. The initial new
+selector failed only because the test expected the packed LP position epoch to
+remain unchanged after success; the corrected expectation uses the established
+position-control increment. No economic assertions were weakened.
+
+**Row 432 remains OPEN.** This adds bounded INV-010/011/014/024/036/080/081
+conformance, not generic closure or a new INV-047 route comparison. There was no
+property violation, production fix or machine-status change. Arbitrary authority
+and policy histories, separate per-asset fee-authority succession, dynamic/backing
+fees, nonzero slippage, partial/multi-asset fills, aggregate batch terms, expiry,
+underfunded collection and terminal payout remain outside this selector. Positions
+remain open.
+
+Worktree `/tmp/percolator-row432-20260912`, branch
+`codex/row432-retained-cpi-fee-terms-20260912`, exact base
+`b5006413139cabb5ab1ea572f7d615430652e836`. The parent worktree was not edited.
+Because `/dev/shm` and `/tmp` had little free space, private target/tmp directories
+use `/run/user/1001`. An existing row432 build cache was copied there, then the
+wrapper and authenticated matcher were rebuilt from this worktree, locked and
+offline with platform-tools v1.52. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Engine remains `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+
+Focused CU validation passes **3/3**, including both existing row432 controls;
+charter/index and machine-status validation passes **2/2** with the exact selectors
+below. Formatting and whitespace checks pass. Only existing unused-support and
+Solana future-compatibility warnings remain. No full-suite result is claimed.
+Commands, including post-commit patch validation and private artifact cleanup:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/percolator-row432-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/run/user/1001/percolator-row432-tmp
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+cargo build-sbf --tools-version v1.52 --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+CARGO_TARGET_DIR=/run/user/1001/percolator-row432-matcher-target cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_fee_authority_epoch::v16_retained_cpi_fee_terms_survive_authority_aba_and_stale_policy_bundles \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollback \
+  inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::v16_retained_cpi_and_direct_policy_histories_differ_only_by_explicit_route_fees
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /run/user/1001/percolator-row432-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir /run/user/1001/percolator-row432-matcher-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir tests/fixtures/auth_matcher/target
+```
+
+## INV-073 depleted reserves through retirement retries (rows 420/421, 2026-09-12)
+
+Owner: [cu/inv_073_absent_insurer_spent_retirement.rs](cu/inv_073_absent_insurer_spent_retirement.rs).
+Exact selector:
+`inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_depleted_reserves_preserve_exhaustion_and_retirement_across_retries`.
+
+The existing public fixture now has an optional withdrawn-provider history. A
+distinct provider funds 307 backing atoms and withdraws all 307 while Live, before
+trading or disappearing. Its bucket has zero fresh principal, lien, consumed
+backing and earnings. The current insurance beneficiary separately funds 100 or
+101 atoms. Provider, beneficiary and operator keys are then dropped; their profiles,
+wallets and token destinations remain fixed throughout the terminal continuation.
+System/SPL/ATA/wrapper instructions construct every economic account and balance;
+only signer SOL, authenticated Clock, program installation and fresh blockhashes
+come from the harness. Account snapshots are read-only assertions.
+
+Forty-eight histories cross asset 0/1, exact/one-atom-surviving insurance, both
+winner/idle payout orders and all six portfolio-deletion orders. Debtor settlement
+is first throughout. Input capitals `[1000, 100, 137]` and a ten-unit position
+moving from 100 to 120 yield a 200-atom loss: 100 capital plus exactly 100 insurance.
+Unsigned terminal payouts are exactly `[1200, 0, 137]`; the winner's finalized
+100-atom receipt and zero source-claim bound are checked separately. The provider
+keeps its already withdrawn 307 atoms. Mint authority is revoked at a fixed supply
+of 1,644 or 1,645 atoms, and custody reconciles every payment prefix.
+
+Each economic call first succeeds inside a transaction whose premature slab-close
+suffix rejects. The entire Account frame, insurance spend, receipt/payment state
+and rent roll back, excluding only exact network fees. The unchanged payout then
+commits with payer-only signing and strictly lowers the existing progress rank.
+All three users finish in one call each, below the eight-call bound. Owner-window
+denial, terminal payout retries and materialized-portfolio closure protection stay
+covered. The final deletion occurs at the old bucket's exact expiry for winner-first
+payouts, and one slot late for idle-first payouts; timing is paired with payout order,
+not an independent Cartesian axis.
+
+After two committed deletions, the exhausted case batches the final signed deletion,
+successful slab close and the same close again. The second close rejects the typed
+tombstone with `InvalidAccountLen`, restoring the last portfolio, complete market,
+vault and all rent transfers. Separate fresh-blockhash retries then delete and
+retire successfully. A further retained-close retry preserves the tombstone and
+closed vault. The one-atom control instead rolls back final deletion when slab close
+returns `EngineLockActive`, then permits deletion alone and continues to protect
+the exact remaining insurance claim. This adds **192 successful-prefix rollback
+transactions, 144 committed portfolio deletions and 24 full retirements**. Each
+exhausted market has zero SPL/internal vault, insurance and unreceipted claim
+residue before closure; mint supply never changes and the admin receives only
+exact excess market/vault rent. All measured transactions verify signatures,
+absent reserve signers, complete unrelated Account frames, packet size and a
+300,000-CU ceiling.
+
+The new boundary is a previously funded but fully withdrawn provider bucket combined
+with actually consumed insurance, reordered mechanical deletions and rollback of
+the last deletion plus completed retirement. The older never-funded-provider and
+fresh-backing-recredit callers retain their original scenarios. This is bounded
+INV-010/018/021/027/064/067/069/070/073/078/080/082 conformance. **Rows 420/421 remain
+OPEN**, with no invariant-status promotion or production change. Retirement still
+requires portfolio-owner deletion signatures and a market-authority signature.
+Provider principal consumed by economic losses, nonzero provider earnings,
+surviving-reserve public payouts, debtor-last settlement, arbitrary portfolios,
+Recovery/ADL, alternate quote rails, maximum shapes and a generic generator/oracle
+remain outside this increment.
+
+Discarded duplicates: standalone provider expiry and insurance exhaustion/recredit
+already have the adjacent selectors below. Beneficiary attribution and unsigned
+reserve-payment permutations belong to active rows 429/433; retained CPI fee terms
+belong to 432. First-risk liabilities, reserve replenishment, pending-debt ordering
+and fractional carry belong to 413/415/419/425. No such family was added. No runtime
+history was discarded from the new selector and no production inconsistency was
+observed.
+
+Validation uses worktree `/tmp/percolator-astra-terminal-420-421`, branch
+`codex/astra-terminal-reserve-420-421-20260912`, based on the requested
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`2843fbf5933c09d0769f83c710527bea2d25a4a5`. Host dependencies and the documented
+default-feature SBF are privately copied from `/tmp/astra-terminal-identity-target`
+to `/dev/shm/astra-terminal-420-421-target`. Wrapper SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`, matching
+[the public-reserve audit](terminal_public_reserves_audit_20260912.md).
+Production and pins match local production commit
+`82f44d1146a45f1f0cf07a76fb171a280d5c21e2`; engine pin remains
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. No SBF rebuild, full suite or Kani run is
+claimed. Neither protected checkout was edited; no GitHub PR/issue/branch or
+withheld comparison data was inspected.
+
+The new exact selector passes **1/1**, all 48 histories in 27.06 seconds. Adjacent
+validation initially passed four controls but the unchanged spent-insurance control
+exhausted its existing **325,000-CU** budget in an SPL transfer simulation. One exact
+diagnostic rerun passed all eight of that control's worlds in 4.73 seconds. The
+intermittent CU ceiling remains a validation limitation; no control budget was
+raised. Observed successful-run transaction maxima:
+
+| Selector Family | Maximum CU |
+| --- | ---: |
+| New depleted-reserve ordering/retry selector | 226,929 |
+| Existing exact insurance exhaustion | 221,402 |
+| Existing insurance recredit after backing expiry | 222,909 |
+| Existing absent-provider staggered expiry retirement | 89,857 |
+| Existing spent-insurance payout control (diagnostic rerun) | 321,089 |
+| Existing normal slab-close rent control | 21,849 |
+
+Exact commands (all five adjacent selectors have a passing run; the initial combined
+run is not claimed to have passed):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-terminal-420-421-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_depleted_reserves_preserve_exhaustion_and_retirement_across_retries -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_reserve_roles_preserve_recredited_insurance_after_backing_expiry \
+  inv_073_no_permanent_user_lock::absent_provider_expiry_retirement::v16_program_absent_provider_staggered_expiry_reaches_funded_terminal_retirement \
+  inv_073_no_permanent_user_lock::spent_insurance_terminal_exit::v16_program_spent_insurance_preserves_bounded_keeper_terminal_payouts \
+  inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_close_slab_refunds_exact_vault_and_market_excess_rent_after_normal_exit
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::spent_insurance_terminal_exit::v16_program_spent_insurance_preserves_bounded_keeper_terminal_payouts -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-067 repeated receipt stock releases (row 417, 2026-09-12)
+
+Owner: [cu/inv_067_receipt_repeated_stock.rs](cu/inv_067_receipt_repeated_stock.rs),
+selector
+`inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_repeated_stock::v16_program_receipts_preserve_identity_through_two_stock_releases_and_reversed_priority`.
+
+Twelve public LiteSVM histories cross exact/one-slot-late authenticated expiry
+with all six final orders of two retained top-ups and the last bound replacement.
+The older receipts receive their first positive top-ups in the opposite relative
+order. An optional layout in the existing `late_expiry::World` fixture splits the
+last winner's 1,000 face into 400/600 across two assets, the original 250 debtor
+capital into 100/150 across two debtors, and 100 provider backing into 61/39.
+The three-asset, six-portfolio layout preserves the original 3,852-atom endowment;
+existing callers retain their original two-asset construction. All economic state
+comes from System/SPL/ATA/wrapper instructions, including trading at authenticated
+marks from 100 to 150. No economic account images are installed.
+
+| Stock Stage | Residual | 700-Face Receipt Paid | 1,300-Face Receipt Paid |
+| --- | --- | --- | --- |
+| Snapshot at slot 12 | 501 | 116 | 217 |
+| Domain 3 releases 61 + 100 at slot 13/14 | 662 | 154 | 286 |
+| Domain 5 releases 39 + 150 at slot 15/16 | 851 | 198 | 368 |
+
+These floors are calculated from public inputs and the unchanged 3,000 total
+face. Each stock/payment prefix checks the full older receipts, exact and
+unreceipted bounds, both backing classes, provider receivables, separate owner
+balances, custody and fixed supply. Clock and fresh-blockhash zero-due retries
+alone preserve future claims. A rejected transaction executes the second release
+and both positive SPL top-ups, then restores every tracked complete Account and
+the first stage's already-committed payments; the payer loses exactly one signature
+fee. The final two-source close replaces the remaining bound and pays/clears its
+claim in the same call. Portfolio IDs, epochs and provenance survive settlement.
+
+All orders pay owners exactly 1,198 / 1,283 / 1,368 atoms, leave one never-deposited
+provider atom, and burn two rounding atoms. The 72 portfolio deletions and 12
+single-call slab closures reconcile exact rent and preserve unrelated Accounts.
+The new selector passes 12 worlds, 24 releases and 12 rollbacks, with peak measured
+settlement transaction cost **365,364 CU**, below its 600,000-CU ceiling.
+
+The new boundary is two committed stock increases for the same two retained
+receipts, followed by reversed priority and a two-source last-claim replacement.
+The source-realization, late-expiry, partition, rounding-threshold, terminal-
+disposition and provider/insurance selectors keep their existing coverage. Earlier
+stateful two-release coverage uses a different five-owner/two-winner family; it
+does not own this three-claimant permutation, second-release rollback and complete
+slab suffix. This adds bounded INV-010/024/029/063/066/067/068/070 evidence.
+**Row 417 remains OPEN** and invariant statuses are unchanged: there is no generic
+generator/oracle, Recovery/insurance composition, arbitrary claim population or
+claim closure before the last stock release in this increment.
+
+Validation is isolated at `/tmp/percolator-astra-receipt-late-stock-row417-20260912`,
+based on `origin/codex/astra-open-holdout-ledger-20260912` at
+`6ab7856fbe1e2f89ed11c1103fb5282fab404dee`. Private build outputs are in
+`/dev/shm/astra-receipt-late-stock-row417-20260912-target`. The default-feature SBF
+is a private copy of the artifact documented in
+[the public-reserve audit](terminal_public_reserves_audit_20260912.md), SHA-256
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Production, manifests and dependency pins are unchanged; no SBF rebuild is claimed.
+
+Discarded candidate: an unused-domain reserve layout was rejected before execution
+because receipt-local close does not normalize unrelated backing. No runtime
+history was discarded. Development corrected one host allocation type mismatch
+and a test assumption that the last fully paid receipt must persist; the observed
+1,283-atom payment matched the independent entitlement and the documented immediate
+terminal clear. Neither was an invariant violation or a production fix.
+
+The new exact selector passes **1/1** (12 histories, 16.03 s), and the seven
+adjacent exact controls below pass **7/7** (77.08 s). The charter/index selector
+passes **1/1**; repository formatting, both Git whitespace checks and the unchanged
+production/pin/status checks pass. No full-suite run is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-receipt-late-stock-row417-20260912-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_repeated_stock::v16_program_receipts_preserve_identity_through_two_stock_releases_and_reversed_priority -- --exact --nocapture
+receipt_module=inv_067_terminal_payout_completeness_and_exact_once_settlement
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  "${receipt_module}::late_expiry::v16_program_retained_claim_identity_survives_late_expiry_recipient_rotation_and_atomic_retry" \
+  "${receipt_module}::provider_insurance_retries::v16_program_terminal_provider_and_insurance_retries_preserve_separate_entitlements" \
+  "${receipt_module}::receipt_partition_confluence::v16_program_receipt_replacement_and_topup_partitions_converge" \
+  "${receipt_module}::receipt_partition_confluence::v16_program_rejected_receipt_partition_suffixes_preserve_terminal_entitlements" \
+  "${receipt_module}::receipt_rounding_threshold::v16_program_late_receipt_rounding_threshold_preserves_zero_vault_settlement" \
+  "${receipt_module}::receipt_source_realization::v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry" \
+  "${receipt_module}::receipt_terminal_disposition::v16_program_receipt_terminal_suffix_partitions_rounding_burn_surplus_and_rent"
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
+## INV-020 partial observation and three-leg reduction routes (row 426, 2026-09-12)
+
+Owner: [cu/inv_020_partial_observation_routes.rs](cu/inv_020_partial_observation_routes.rs),
+mounted under `inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::partial_observation_routes`.
+Selector: `v16_program_partial_observation_three_leg_reductions_match_single_and_batch`.
+
+Sixteen independently constructed public LiteSVM histories cross observation order,
+long/short taker, explicit/trade-time account refresh, and single/two-leg batch
+reduction. The fixture uses System, SPL, ATA and wrapper instructions for all
+economic account construction, revokes mint authority at 20,001,000 atoms, and
+supplies only signer SOL, authenticated Clock and external Pyth reports through
+the harness. No initialized economic state is injected or restored.
+
+Both owners hold three unit positions: one Hybrid and two AuthMark assets, initially
+priced at 1,000,000. Authenticated targets become 1,040,000 / 1,050,000 / 960,000.
+After a bounded 32-slot prefix, a Hybrid-only observation at slot 65 advances that
+asset to slot 64 while both omitted AuthMark siblings remain at slot 32. Every
+portfolio, including both stale certificates, remains byte-identical. Two complete
+observations through the flat keeper then reduce aggregate slot debt from 67 to 2
+to 0, still without settling either owner. Caller slot `u64::MAX` cannot replace
+the real Clock or the omitted asset observations.
+
+The explicit control settles both owners and recertifies the short after the
+long's loss settlement advances source-credit risk epochs. The alternate schedule
+lets the trade perform account refresh after complete market observation. Single
+or two-leg batch reductions close assets 0/1 while the untouched asset-2 loss leg
+remains live; the opposite transport and taker then close that last leg. After
+every reduction, both current certificates must equal the independent raw-state
+health oracle, including every epoch and bitmap. Input-derived margins, positions,
+both OI lanes, zero funding, stock/reservation censuses and decoded layout checks
+bind the result. Exact owner capital/PnL pairs agree across all routes, with
+input-derived total values 10,050,000 and 9,950,000. Mint, SPL custody, reports,
+Clock and non-fee signer Accounts remain unchanged through the account actions.
+
+This adds the composition of partial observation, two-leg batch reduction and an
+untouched third loss leg. It reuses the public funding helper, without duplicating
+the `interrupted_refresh_fees`, `selected_provider_assignment`,
+`mixed_provider_liquidation` or `hybrid_capacity_carry` selectors. Bounded
+INV-020/024/053/054/056/071/072/081/086 evidence is added; **row 426 remains OPEN**.
+There is no generic generator/oracle, production change or invariant-status
+promotion. INV-061 liquidation/rewards, omitted-Hybrid active certification,
+reductions before complete market observation, CPI, fees/funding, arbitrary
+histories and maximum shapes remain outside this increment. All positions close,
+but source claims remain; no claim conversion, SPL payout or terminal-disposition
+coverage is claimed.
+
+Discarded development probe: requiring both certificates to be current after
+exactly one crank per owner. The diagnostic rerun showed the earlier short
+certificate at risk epoch 3 while peer loss settlement had advanced the market
+to epoch 6. That is expected invalidation, not an invariant violation. The final
+explicit control includes the necessary third public crank; no economic history
+was discarded and no production inconsistency was observed.
+
+Validation: the new exact selector passes 1/1 (16 worlds, peak **479,703 CU**),
+and the two adjacent exact controls pass 2/2. The invariant index passes 1/1;
+repository formatting and Git whitespace checks pass. Measured post-setup transactions are
+bounded at 500,000 CU for observations and 750,000 CU for reductions. The worktree
+is `/tmp/percolator-astra-complete-observation-row426-20260912`, branch
+`codex/astra-complete-observation-row426-20260912`, based on requested origin ref
+`codex/astra-open-holdout-ledger-20260912` at
+`9df811a757db64a4f9e5e25da18df5bad2fe2ae0`. Host tests compile in a private target
+copied from the standalone `/tmp/astra-terminal-identity-target` build cache.
+Validation reuses its default-feature SBF artifact, already documented by this
+base's public-reserve audit, with verified SHA-256
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d` and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. No SBF rebuild or full-suite run.
+Existing host dead-code warnings and the `solana-client v1.18.26`
+future-incompatibility warning remain.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-complete-observation-row426-20260912-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::partial_observation_routes::v16_program_partial_observation_three_leg_reductions_match_single_and_batch -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::v16_program_staged_observations_match_current_liquidation_and_reduction inv_020_authenticated_clock_slot_and_oracle_provenance::current_health_evidence::v16_program_mixed_hybrid_auth_mark_requires_current_health_evidence_before_owner_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+```
+
+## INV-008 retained payout prefix and insurer succession (row 428, 2026-09-12)
+
+Owner: [stateful/inv_008_retained_reserve_replenishment.rs](stateful/inv_008_retained_reserve_replenishment.rs),
+selector
+`inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession`.
+
+Eight public LiteSVM histories cross separate/shared funding-provider and live-operator
+identities, separate/shared target-and-peer payout beneficiaries, and both peer-payout
+orders around a funded insurance-authority transfer. All economic state comes from
+normal System/SPL/wrapper construction. Before any payout, the test retains signed
+137-atom target and 43-atom peer withdrawals, a signature-distinct target retry, and
+the incumbent/incoming insurer's signed handoff. The live operator never changes.
+
+The first rejected transaction successfully pays both withdrawals and transfers the
+insurance authority before its old-epoch target suffix rejects. Complete Account
+rollback restores both SPL payments, every domain budget, and the authority profile
+and epoch. The original standalone target transaction then pays 137, draining the
+101-atom long budget and 36 of the 211 short atoms. A public 137-atom long-side top-up
+restores total target stock to 312 with a different side allocation. The unchanged
+retained handoff can now commit; target retries reject with `EngineStale`, including
+both orders against the peer payout. The peer's original signed request still pays
+43, and fresh target consent pays precisely the remaining 312.
+
+The existing input-derived books check each actor's complete source/destination SPL
+Accounts, all domain budgets, insurance/vault/capital totals, mint supply, authority
+profiles/control sequences and independent stock/encumbrance censuses after every
+delivery. Full tracked-account frames cover rejected transactions and unaffected
+success endpoints; exact signature fees are charged only to the separate payer.
+Final entitlements are 449 target atoms plus 43 peer atoms, summed only when their
+beneficiary keys coincide. The incoming insurer receives no live-operator payout.
+This adds bounded INV-008/010/024/031/064/080/081 composition evidence: 24 simulations,
+40 successful deliveries, 24 exact rollbacks and 20 rolled-back SPL payout CPIs.
+
+Unlike the existing operator-ABA/top-up-prefix test, this witness rolls back two
+actual payouts together with a funded transfer of the other insurance role, proves
+that uncommitted epochs preserve retained consent, and distinguishes per-asset
+authority binding from shared signer or recipient identity. **Row 428 remains OPEN**.
+There is no generic stock-epoch oracle: the stale boundary is a committed authority
+epoch change. Standalone successful withdrawal consumption without that change,
+fee-created or terminal-reclassified stock, policy changes, optional insurance
+ledgers, native collateral, active positions and arbitrary histories remain outside
+this finite Live/classic-SPL test. No production change is included.
+
+The exact selector passes with peak successful/rejected transaction costs of
+37,724/93,067 CU under the existing 300,000-CU bound. No implemented probe was
+discarded and no production bug was established. The wrapper and authenticated
+matcher were built offline from base `f9fdc1e23911dc612ef0140e4f362cd0fd4a8cf8`
+with platform-tools v1.52; their respective SHA-256 hashes are
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d` and
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+Validation from the isolated worktree uses private default-feature SBF and host builds:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row428-20260912-target
+export TMPDIR=/dev/shm/astra-row428-20260912-tmp
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_008_intent_uniqueness_and_bounded_replay::retained_reserve_replenishment::v16_program_paid_retained_insurance_stays_bound_after_replenishment_and_operator_aba -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
+## INV-045 matcher handoffs, precrank carry, and owner exit (row 425, 2026-09-12)
+
+Owner: [cu/inv_045_carry_transport_exit.rs](cu/inv_045_carry_transport_exit.rs),
+mounted under `inv_045_no_free_mark_movement::public_carry_order::carry_transport_exit`.
+Selector: `v16_program_row425_matcher_handoffs_preserve_precrank_carry_and_exact_owner_exit`.
+
+Twenty-four public LiteSVM histories cross both target directions, early reductions
+on even/odd slots, single/two-asset batch transport, and a bilateral control versus
+both phases of an alternating CPI/bilateral route word. The two mixed words also
+reverse asset hints, active-owner cranks and terminal owner order relative to one
+another. This is a finite comparison, not the full independent ordering product.
+At early slots, one lot reduces before the market crank and one afterward; at
+other slots, two lots reduce after it. Every mixed world executes a CPI reduction
+before accrual while **both** assets already have nonzero fractional carry.
+
+The test reuses the public SPL `World` and independent input ledger from
+`public_carry_order`. System/SPL/ATA/wrapper instructions construct economic state;
+the authenticated matcher context is System-created and initialized by its own
+program. The LP publicly renews its zero-fee delegation after bilateral fills;
+only the taker signs matcher fills. The harness supplies program loading,
+payer/admin SOL bootstrap, authenticated Clock warps and fresh blockhashes.
+No market, portfolio, matcher-context or token economic bytes are injected.
+
+After each renewal, trade and crank, the inherited oracle checks exact owner
+value including unsettled K, capital and positive-PnL summaries, OI, zero
+funding/B/cohorts, and SPL mint/wallet/vault conservation. Both complete oracle
+profiles survive reductions and renewals unchanged; absent owners' portfolios
+are byte-framed across fills. Public inputs determine each price and carry as
+`anchor +/- floor(anchor * 24 * elapsed / 10000)` and its remainder. Only lots
+still held when a price atom commits earn that atom. Final active-owner PnL is
+`direction * -5` for even-slot early reductions or `direction * -7` for odd;
+the peer receives its negative, and passive owners retain `[-4, +4] * direction`.
+Both carries end at `[2000, 5000]`.
+
+Resolution at slot 5 followed by owner-signed `CloseResolved` at slot 100 must
+pay all four independently predicted entitlements into their existing ATAs.
+Every close checks frozen price/carry, payout upper bounds, supply/custody and
+capital totals. Successful closes change the economic frame; non-progress
+rejections preserve complete tracked market/portfolio/mint/vault/wallet Accounts.
+Within 16 rounds, all four portfolios are terminal, both assets have zero OI,
+and vault/capital/positive-PnL totals are zero. Exact final SPL payouts and live
+economics agree across all six route/order variants of each timing schedule.
+
+Distinct coverage: `precrank_carry` excludes CPI/delegation and stops at live
+entitlement; `interleaved_cap_carry` checks one-asset fresh-feed fee/reward
+provenance, not two-asset AuthMark precrank entitlement and exact owner payout;
+`v16_program_pending_fractional_carry_survives_due_trade_and_resolution` uses
+one asset and no CPI. This increment connects valid matcher handoffs and both
+batch legs to the same public-input entitlement oracle and realized custody.
+
+This adds bounded INV-024/038/041/045/052/071/085/086/088 composition, with route
+ordering relevant to INV-010 but no new retained-intent/replay evidence. **Row 425
+remains OPEN.** Integral positions isolate price-cap carry from settlement
+rounding; nonzero fees/funding, fractional-position residue attribution,
+trade-driven accrual, target replacement, nonunit ADL, backing/receipt top-ups,
+liquidation/Recovery, all terminal-order permutations, maximum shapes, arbitrary
+route histories and full-width arithmetic remain outside this test. No generic
+oracle, production fix, invariant-status promotion or broad-suite result is claimed.
+No executed probe was discarded and no production mismatch was observed. Further
+no-CPI split/order-only variations were discarded during design as duplicates.
+
+Validation uses isolated worktree `/home/anatoly/astra-row425-20260912`, branch
+`codex/astra-row425-carry-20260912`, created only from local
+`origin/codex/astra-open-holdout-ledger-20260912` at `f9fdc1e2`.
+The main checkout, GitHub PRs/issues/branches and withheld data were not inspected.
+The copied default-feature SBF SHA-256 is
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256 is
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Source/Cargo/matcher-source comparison with the documented `82f44d1146a45f1f0cf07a76fb171a280d5c21e2`
+artifact baseline is empty. No SBF rebuild was needed. Cached host dependencies
+were copied into a private target; the matching matcher artifact is copied only
+to this worktree's ignored fixture path. The older `5029cc34` wrapper artifact
+was excluded because production source differs from its documented baseline.
+
+The exact new selector passes all 24 histories with peak measured
+trade/crank/resolve/close cost **395,182 CU**, under 1,400,000; setup and delegation
+renewal are excluded from this measurement. All three adjacent selectors, the
+charter/index selector, repository-wide formatting and all three whitespace
+checks pass. The adjacent precrank control passes 32 histories at 376,794 CU;
+the due-trade/resolution control passes eight at 214,785 CU. Existing regression
+harness dead-code warnings and the Solana client future-incompatibility warning
+remain. Reproduction commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row425-20260912-target
+export TMPDIR=/dev/shm/astra-row425-20260912-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::carry_transport_exit::v16_program_row425_matcher_handoffs_preserve_precrank_carry_and_exact_owner_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_045_no_free_mark_movement::public_carry_order::precrank_carry::v16_program_row425_precrank_reductions_preserve_carry_and_owner_entitlement inv_045_no_free_mark_movement::interleaved_cap_carry::v16_program_interleaved_trade_routes_preserve_oracle_cap_carry_and_reward_provenance inv_045_no_free_mark_movement::v16_program_pending_fractional_carry_survives_due_trade_and_resolution
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
+## INV-039 bankruptcy close preemption with retained weight (row 419, 2026-09-12)
+
+Owner: [cu/inv_039_pending_loss_close_preemption.rs](cu/inv_039_pending_loss_close_preemption.rs),
+mounted under `inv_039_pending_loss_obligation_durability::close_reopen::close_preemption`.
+The selector is
+`v16_program_expired_bankrupt_close_preserves_pending_cohort_entitlement_across_routes`.
+The existing bankruptcy setup in `cu/inv_039_pending_loss_close_reopen.rs` is shared
+without changing its public instruction history. System/SPL/ATA and wrapper calls
+construct every economic account; authenticated marks and Clock advance the world.
+
+Eight histories cross long/short claimant orientation, live residual booking versus
+expired-close preemption, and claimant-first/debtor-first terminal order. Public
+matched reduction leaves one zero-basis, one-lot loss-weight holder and a bankrupt
+debtor with 1,473,287 or 461,518 atoms of unpaid residual. The live control books B
+before resolution but leaves the holder's debit unsettled. The other route expires
+the active close, then permissionless cranks declare Recovery and finalize Resolved
+before any residual is booked. The active ledger, all portfolio Accounts, asset
+indices and source-credit stocks survive both mode transitions. The stale caller
+slot and empty observation list cannot substitute for authenticated close expiry.
+
+**Guarantee.** An input-derived prefix oracle checks each owner's capital, signed
+PnL and exact SPL payout, the complete debtor close ledger, and the market's
+pending counts, loss weights, stored positions, OI, aggregate capital/PnL and SPL
+conservation. In the expired route the first claimant call refreshes terminal state:
+the original leg, loss weight, full PnL and unpaid entitlement remain intact. Debtor
+settlement books exactly the original residual into B without consuming the holder's
+weight. The claimant's next call settles that debit, removes the weight and pays
+exactly 200,000 principal plus the debtor's 180,000 collectible atoms. Its finalized
+receipt records exactly 180,000 face and paid atoms. The live route reaches the same
+owner payouts: `[380000, 0, 300000, 250000, 777]`. Each unrelated owner keeps its full
+principal. No counter or leg disappearance is accepted as evidence of debt payment.
+
+Twelve rejected suffixes follow successful B booking or claimant debit/payment;
+forty terminal retries reject exactly. Each compares complete tracked and transaction
+Accounts, including payer lamports minus the exact signature fee. Positive retries
+complete the prescribed five or six terminal calls per history and delete all forty
+portfolios with zero remaining booked/SPL custody, capital, positive PnL and retained
+weight. Successful calls also frame every unrelated tracked Account.
+
+This adds bounded INV-024/037/039/041/048/066/067/073/076/081 evidence. The funded
+resolution and shared-holder selectors use solvent debts and do not cross an active
+bankruptcy close's expiration. The original close/reopen selector settles B before
+resolution; INV-071's expired-close/B-stale witness owns scheduler priority on a
+different account shape. This selector instead reconciles the pending claimant's
+original entitlement across live and preempted bankruptcy settlement. INV-086's
+generic reference/deployed equivalence requirement is not discharged by this finite
+oracle. **Row 419 remains OPEN; invariant statuses are unchanged.**
+
+Limits: one bankrupt pair on asset 1, integral one-lot quantities, two fixed price
+histories, zero fees/funding, no adverse drift after close start, and no insurance,
+backing, cross-domain pending cohort, maximum-shape or arbitrary-history product.
+There is no generic generator/oracle or production fix. Funding-only, shared-holder
+and backing-expiry candidates were discarded at source review as existing coverage;
+no executable candidate was discarded. Temporary diagnostic output was removed.
+
+Validation uses isolated worktree `/home/anatoly/astra-row419-pending-bankruptcy-20260912`,
+branch `codex/astra-row419-pending-bankruptcy-20260912`, based only on
+`f9fdc1e23911dc612ef0140e4f362cd0fd4a8cf8`. Private default-feature SBF rebuild with
+platform-tools v1.52 reproduces the current documented artifact's SHA-256:
+`c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Measured continuation peak: 216,130 CU (setup trades/admin/token calls are outside
+this peak); crank/custody/rejected-transaction bounds are 325,000/300,000/600,000 CU.
+The exact selector, four adjacent selectors, charter/index, workspace formatting and
+all three Git whitespace checks pass with the following commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row419-pending-bankruptcy-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::close_reopen::close_preemption::v16_program_expired_bankrupt_close_preserves_pending_cohort_entitlement_across_routes -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_039_pending_loss_obligation_durability::close_reopen::v16_program_pending_loss_survives_debtor_recreation_and_bystander_payout \
+  inv_039_pending_loss_obligation_durability::resolved_histories::funded_resolution::v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders \
+  inv_039_pending_loss_obligation_durability::shared_holder::v16_program_shared_holder_pending_domains_survive_partial_detach_and_debtor_close_orders \
+  inv_071_crank_progress::v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_progress
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
+## INV-024 terminal insurer merge and separation (row 410, 2026-09-12)
+
+The [terminal role partition audit](terminal_role_partition_audit_20260912.md)
+adds one selector in [cu/inv_024_terminal_role_partition.rs](cu/inv_024_terminal_role_partition.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_partition`:
+`v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution`.
+Four public LiteSVM histories cross two reserve payment orders with an independent
+keeper or the former insurer/admin paying subsequent terminal transaction fees.
+After partial payments, the insurer consensually transfers its unpaid claim to
+the backing provider, then that provider transfers only the remaining insurance
+to the unchanged live operator. Principal and real utilization earnings stay with
+the provider and its original ledger throughout both funded handoffs.
+
+The finite success-state oracle checks 36 reserve payments, eight role transfers,
+and four rent-exact slab closures. Input-derived SPL entitlements, stock classes,
+insurance budgets, ledger attribution, authority profiles/epochs and full Account
+frames distinguish explicit insurance succession from accidental movement of
+backing value. The former insurer/admin finishes with seven quote atoms; the
+provider receives 100,000 principal, 875 earned fees and five insurance atoms;
+the final beneficiary receives the remaining 19 insurance atoms. No new fees are
+created during these terminal transitions. This adds bounded INV-005/024/036/081
+evidence after full owner disposition, using the existing public fee fixture and
+reserve instruction builder. **Row 410 remains OPEN**: no generic generator/oracle,
+new rejection family or invariant-status promotion is claimed.
+
+## INV-024 coalesced funded roles (rows 416/429, 2026-09-12)
+
+The [coalesced reserve-role audit](terminal_role_coalescence_audit_20260912.md)
+adds one public LiteSVM selector with four histories. Earned backing fees and
+terminal insurance share a holder and destination before either role transfers
+away. Both payout orders preserve separate unpaid claims, exact recipient totals,
+and the unchanged oracle/operator roles. Twenty-eight complete-Account rollbacks
+include successful role-transfer and SPL-payment prefixes. All 32 signed reserve
+payouts agree with input-derived entitlements; peak measured transaction cost is
+379,503 CU on the integrated artifact. Rows 416 and 429 remain OPEN: this bounded
+composition does not add a generic authority/history oracle. No implementation
+change was needed.
+
+## INV-067 late receipt rounding threshold (2026-09-12)
+
+Owner: [cu/inv_067_receipt_rounding_threshold.rs](cu/inv_067_receipt_rounding_threshold.rs),
+selector
+`inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_rounding_threshold::v16_program_late_receipt_rounding_threshold_preserves_zero_vault_settlement`.
+
+This adds 36 public LiteSVM histories for row 417: three adjacent backing amounts,
+all six orders of two retained top-ups and the last bound replacement, and exact
+or two-slot-late expiry. The existing System/SPL/ATA/wrapper fixture now accepts a
+bounded backing amount; its original callers still use 100. Its 3,852-atom public
+endowment, five portfolios, 700/1,000/1,300 claim faces, and 501 initial residual
+are preserved. Uncommitted backing stays in the provider's SPL account. No economic
+account state is injected, and no production or dependency changes are included.
+
+| Late Backing | Final Residual | Claimant Payouts Including Capital | Burned Residue | Provider Tokens |
+| --- | --- | --- | --- | --- |
+| 88 | 839 | 1,195 / 1,279 / 1,363 | 2 | 13 |
+| 89 | 840 | 1,196 / 1,280 / 1,364 | 0 | 12 |
+| 90 | 841 | 1,196 / 1,280 / 1,364 | 1 | 11 |
+
+Independent integer arithmetic explains the threshold: one additional backing
+atom raises all three claimant floors by one, consuming two rounding atoms. The
+next backing atom changes none of the floors and must remain for retirement.
+Every row reconciles the original supply with user payouts, provider custody and
+the actual SPL burn. This adds the zero-custody receipt-cleanup boundary missing
+from `receipt_terminal_disposition` and `receipt_source_realization`, whose fixed
+histories leave two atoms, and from `receipt_partition_confluence`, which stops
+before this complete terminal disposition. Claimant permutations and generic
+late-expiry behavior retain their existing coverage owners.
+
+Each transaction checks the input-derived payout, custody delta, immutable receipt
+face/prior bound, paid counter, portfolio identity/provenance, and exact replacement
+of unreceipted bound. Authenticated time alone leaves retained claims unpaid until
+source normalization. Seventy-two rejected suffixes restore complete tracked
+Accounts after either all three SPL payments or both zero-due receipt clears;
+the fee payer is checked separately with exactly its signature fee deducted.
+The successful continuations reach 180 rent-exact portfolio deletions and 36
+single-call slab closures. Fresh-blockhash terminal retries are byte-inert, and
+zero booked custody still permits receipt cleanup and token-account retirement.
+
+The new exact selector passes: 36 worlds, 72 rollbacks, peak 421,873 transaction
+CU under the enforced 600,000-CU bound. Both adjacent CU controls, the charter/index
+selector, changed-file formatting and `git diff --check` also pass.
+Validation reuses the default-feature SBF
+documented in [the current base's reserve audit](terminal_public_reserves_audit_20260912.md),
+SHA-256 `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+no rebuild is needed for these host-only test changes. Commands from the isolated
+worktree, based on `82f44d1146a45f1f0cf07a76fb171a280d5c21e2`:
+
+```sh
+export CARGO_TARGET_DIR=/tmp/astra-terminal-identity-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_rounding_threshold::v16_program_late_receipt_rounding_threshold_preserves_zero_vault_settlement -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_067_terminal_payout_completeness_and_exact_once_settlement::late_expiry::v16_program_retained_claim_identity_survives_late_expiry_recipient_rotation_and_atomic_retry inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_terminal_disposition::v16_program_receipt_terminal_suffix_partitions_rounding_burn_surplus_and_rent
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_067_receipt_rounding_threshold.rs tests/invariants/cu/inv_067_terminal_claim_late_expiry.rs tests/invariants/cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs
+git diff --check
+```
+
+**Row 417 remains OPEN**, and invariant statuses are unchanged. This finite
+two-asset, classic-SPL family adds the rounding threshold and zero-vault suffix;
+arbitrary claim faces, repeated stock reclassifications, Recovery/insurance
+composition and generic history coverage remain outside its scope. No implemented
+probe was discarded and no public-route production bug was found in this pass.
+
+## INV-071 earlier-asset insurance after later expiry (row 424, 2026-09-12)
+
+Owner: [cu/inv_071_terminal_prefix_recredit.rs](cu/inv_071_terminal_prefix_recredit.rs),
+selector
+`inv_071_crank_progress::terminal_prefix_recredit::v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement`.
+
+Sixteen public LiteSVM histories cross long/short insurance spend, later backing
+of 61/307 atoms, exact/late expiry, and split/bundled normalization and payment.
+System, SPL, ATA and wrapper instructions create all economic state. AuthMark
+publication and authenticated Clock drive ten lots from 100 to 120/80. The
+1,000/100/137 capital inputs yield exact user payouts of 1,200/0/137 and 100 atoms
+of spent insurance before public portfolio deletion. Mint authority is revoked.
+
+`CloseSlab` then persists cursor 1 with no residual available to the earlier
+asset. Expiring backing on asset 1 leaves the earlier slot's complete bytes
+unchanged while making its insurance actionable. The oracle independently
+recomputes residual and paired-domain overlap from decoded stocks, compares
+fresh-backing and remaining-insurance sums with cached header totals, and requires
+restoration of `min(100 receivable, 100 spent, 61 or 307 residual)` atoms.
+`WithdrawInsuranceAsset` pays that earlier entitlement in two parts despite
+cursor 1; all 32 payments omit the beneficiary signature. No paid budget revives
+on the second payment. The immutable withdrawal instruction rejects before
+normalization, including after Clock reaches expiry, and succeeds after the
+public normalization step.
+
+The 56 exact rejections compare every compiled/tracked complete Account, with
+only the actual payer signature fee subtracted. Successful expiry, earlier-asset
+recredit and SPL-payment prefixes roll back when unpaid insurance blocks the
+close suffix. Each history completes three successful slab calls including final
+closure, burns exactly 0/207 atoms, and reconciles vault rent, market excess rent,
+tombstone rent and fixed mint supply. Peak measured transaction cost is 218,544 CU
+under the 400,000-CU limit.
+
+This adds the cross-asset transition absent from
+`terminal_prefix_insurance::v16_program_scanned_insurance_withdrawals_preserve_peer_entitlements_across_late_expiry`
+(unspent insurance, unchanged residual) and the INV-073 absent-reserve recredit
+selector (backing and restored insurance on the same asset). It is bounded
+INV-024/063/069/070/071/086/088 evidence for the asset-local withdrawal consumer.
+**Row 424 remains OPEN.** The scanner's own rediscovery/invalidation, arbitrary
+earlier assets, retirement/reuse, Recovery, pending claims and maximum capacity
+remain outside this family. No production fix or vulnerable-pin red/green result
+is claimed; invariant verdicts are unchanged. No marginal/duplicate probe was
+retained, and the existing reuse/time-only selectors were not duplicated.
+
+Validation reuses the documented fixed SBF artifact from the public-reserve
+change, SHA-256 `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`,
+with engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. No SBF rebuild is needed
+for these host-only coverage additions. Exact selectors and controls:
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-row424-env-worker-20260912/target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_071_crank_progress::terminal_prefix_recredit::v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_071_crank_progress::terminal_prefix_insurance::v16_program_scanned_insurance_withdrawals_preserve_peer_entitlements_across_late_expiry inv_071_crank_progress::terminal_cursor_time::v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_prefix_reuse::v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_reserve_roles_preserve_recredited_insurance_after_backing_expiry
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+```
+
+## INV-027 cross-asset funding credit before admission (row 413, 2026-09-12)
+
+Owner: [cu/inv_027_unfunded_credit_admission.rs](cu/inv_027_unfunded_credit_admission.rs),
+mounted under `inv_027_protected_principal_seniority::joint_admission_liabilities::unfunded_credit_admission`.
+Selector: `v16_program_unfunded_cross_asset_credit_cannot_precede_admission_liabilities`.
+
+Sixteen public LiteSVM histories cross four trade transports, the constrained
+trader as taker or unsigned CPI maker, and both old-leg insertion orders. Two
+different original counterparties hold the other sides of the trader's 10.1-unit
+long on asset 0 and short on asset 1. A fourth funded owner supplies the new
+asset-2 admission. System/SPL/ATA/wrapper instructions create all economic state.
+
+Empty-keeper cranks advance slots 2 through 4 with authenticated targets of 99,
+unchanged effective prices of 100 and a one-bps movement cap. Neither old trader
+nor either original peer is touched. Independent signed-floor funding arithmetic
+and position rounding produce a 21-atom payable on asset 1 and a 20-atom
+receivable on asset 0. Maintenance is independently `3 * 7 = 21`; adverse
+long-leg target lag is 11. The constrained deposit of 265 therefore leaves 223
+senior atoms, exactly covering old-leg IM 202, lag 11 and first asset-2 IM 10.
+
+The retained history distinguishes three admission conditions:
+
+1. An extra position quantum on the first asset-2 admission rejects with
+   `EngineInvalidConfig`. The exact boundary succeeds after both gross funding
+   debt and maintenance, preserving 223 capital and a separate, unsupported
+   20-atom claim. Omitting either liability or using claim face as equity would
+   admit the rejected quantity. The generously funded, never-exposed admission
+   peer retains its documented deferred maintenance until its next live increase.
+2. A retained 0.1-unit increase needs one additional IM atom and also rejects.
+   Public settlement of the original asset-0 debtor supplies 21 backing atoms,
+   invalidates the trader's certificate, and makes independently recomputed equity
+   243 without touching the trader's account. The same increase still rejects
+   with `EngineLockActive` while the original asset-1 peer remains unsettled.
+3. Settling that last peer clears both funding cohorts without changing the
+   trader's bytes or the clock. The unchanged increase succeeds with exactly one
+   counterparty-backed lien atom. Twenty unreserved backing atoms still cover the
+   20-atom claim bound, satisfying the wrapper's full-rate-after-lien rule.
+   The trader's current certificate matches the independent oracle; the new lien
+   invalidates the other admission certificate while preserving its exact health
+   values. Neither claim nor backing is counted twice.
+
+All 48 rejections compare complete tracked and transaction Accounts, including
+matcher context and the exact runtime signature fee. Stock, reservation and
+source-credit censuses, exact positions/OI, fee cursors, owner-local capital/PnL,
+SPL custody and unrelated frames accompany the history. Same-slot close and all
+64 principal payouts preserve the independent entitlements
+`[223, 9979, 9958, 9979]`. Both 20-atom junior claims remain unconverted and owned
+by their original earners. Final capital is zero; 126 custody atoms remain as
+84 maintenance atoms plus the two 21-atom realized funding losses. Peak measured
+transaction CU is 558,367 under a 600,000 ceiling.
+
+This adds bounded INV-024/027/044/053/060/081 evidence. The adjacent funding
+selector has one old leg and admits the original counterparty, which settles the
+credit source in the same trade. The INV-044 cross-domain order control has no
+elapsed maintenance or admission boundary. Neither isolates a still-unsupported
+claim from the new admission peer, then composes credit restoration, an unsettled
+cohort, retained retry, exact lien creation and all owners' senior exits.
+
+**Row 413 remains OPEN.** No new public-interface LoF/DoS or production fix was
+found. This does not close first-ever admission at an uncollected-fee margin
+boundary, arbitrary histories, underfunded original debtors, changing premiums,
+fee-policy changes, backing expiry, terminal disposition or maximum shapes.
+No generic INV-010/062 or whole-invariant closure is claimed. Reward-only and
+flat-reopen route permutations were screened out as duplicate coverage. A
+full-claim-spending positive-control probe was discarded because it violates the
+existing full-rate-after-lien rule; no marginal probe was retained. Initial
+oracle assumptions about the ample-headroom peer's deferred fees and certificate
+freshness after lien creation were corrected to the documented contracts.
+
+Validation worktree: `/tmp/percolator-row413-risk-admission-20260912`, branch
+`codex/row413-risk-admission-coverage-20260912`, based on
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`76c9e7e834116ab5967c730403e58a0506c5a1c6`. The coordinator was not edited.
+Default-feature wrapper and authenticated matcher SBF were rebuilt in this
+worktree, locked/offline with platform-tools v1.52, against engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+Program SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row413-risk-admission-20260912/target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::joint_admission_liabilities::unfunded_credit_admission::v16_program_unfunded_cross_asset_credit_cannot_precede_admission_liabilities -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_027_protected_principal_seniority::joint_admission_liabilities::funding_admission::v16_program_funding_and_maintenance_precede_new_asset_after_route_rollback inv_027_protected_principal_seniority::joint_admission_liabilities::v16_program_joint_accrued_liabilities_precede_risk_admission inv_027_protected_principal_seniority::joint_admission_liabilities::standalone_first_admission::v16_program_standalone_first_admission_preserves_deferred_fee_owner_entitlement inv_044_no_phantom_value_from_indices_certificates_or_labels::v16_program_cross_domain_settlement_is_crank_and_leg_slot_order_independent
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-027 funding and maintenance before new-asset risk (row 413, 2026-09-12)
+
+Owner: [cu/inv_027_funding_admission.rs](cu/inv_027_funding_admission.rs), mounted
+under `inv_027_protected_principal_seniority::joint_admission_liabilities::funding_admission`.
+Selector: `v16_program_funding_and_maintenance_precede_new_asset_after_route_rollback`.
+
+Sixteen public LiteSVM histories cross the funding debtor as taker or unsigned CPI
+maker, all four rejected transports, and direct admission versus explicit public
+settlement. A rejected single/batch CPI/no-CPI request retries through the opposite
+batching and CPI family. All economic accounts use System/SPL/ATA/wrapper creation.
+
+Both owners first hold 10.1 units on asset 1 at price 100. An authenticated target
+of 99 starts at slot 2. Empty-keeper cranks advance through slot 4 without changing
+either portfolio, its capital, or its slot-1 fee cursor. The one-bps price cap
+accumulates exact remainder numerators 100/200/300 while effective price and K stay
+unchanged. The first segment has zero funding; each later segment applies the
+negative 10,000-e9 rate. Independent signed floor arithmetic gives minus one atom
+per lot per segment, then the cumulative 20.2-atom position amount rounds to a
+21-atom short debit and a 20-atom long claim. Maintenance independently costs
+`3 * 7 = 21` atoms per owner. These are real nonzero F indices and stale funding
+certificates, not marked-price losses or injected portfolio state.
+
+The debtor's 153-atom deposit leaves exactly 111 senior atoms after both liabilities:
+101 old-leg IM plus 10 first-asset-0 IM. One extra position quantum requires 112
+and rejects with `EngineInvalidConfig`; omitting either liability or flooring the
+funding debt would admit it. All tracked and transaction Accounts roll back,
+including matcher context, with only the independently calculated signature fee.
+The other route then admits the exact boundary. Explicit settlement includes a
+bounded follow-up refresh when booking the peer's claim invalidates the earlier
+certificate. Both admission certificates are current, match the independent health
+oracle, and are identical across the direct/settled schedules and route pairs.
+
+The test checks owner-local capital/PnL, fee cursors/debt, exact positions/OI,
+42 insurance atoms in canonical asset-0 budgets 20/22, custody and unrelated frames,
+plus stock, reservation and source-credit censuses. Funding indices and the
+300-unit carry remain exact through admission, same-slot two-asset close and both
+principal withdrawals. All 32 SPL payouts equal the separate senior entitlements
+111/9,979 (swapped with the debtor). The peer's 20-atom junior claim stays
+unconverted; final capital is zero and custody retains 63 atoms, the two maintenance
+fees plus the original debtor's 21-atom loss. Peak measured transaction CU is
+433,143 under a 600,000-CU ceiling.
+
+This adds bounded INV-024/027/044/053/060/081 evidence: the adjacent joint-liability
+matrix explicitly isolates funding at zero, while reward mapping and standalone
+first admission have never-exposed accounts and zero funding. The retained test
+adds the joint rounded-funding/maintenance boundary, stale-to-current certificates,
+cross-route retry and senior payout before junior conversion. A preliminary
+10,000,000-e9 configuration rejected at market initialization and was discarded;
+the initial two-crank control was corrected to account for peer-driven certificate
+invalidation. Reward-only and flat-first-open variants were screened out as
+duplicates; no production bug or fix is claimed.
+
+**Row 413 remains OPEN.** This is first risk on a new asset for already-exposed
+accounts, not standalone first-ever admission with uncollected flat fees. Positive
+premium, partitioned account settlement, nonzero price movement, shared owners,
+reward/policy changes, more assets, junior conversion/terminal disposal, maximum
+shapes and arbitrary histories remain outside this increment. INV-010/062 and
+whole-invariant verdicts gain no generic closure from it.
+
+Validation uses isolated worktree `/home/anatoly/percolator-inv027-astra-20260912`,
+branch `codex/astra-row413-principal-20260912`, from local base
+`1f1cbedccdefe89e09d5c9cb27f12897d7951319`. With no current program artifact in the
+main checkout, default-feature SBF and authenticated matcher artifacts were built
+locked/offline using platform-tools v1.52 and private target directories.
+Program SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row413-20260912-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::joint_admission_liabilities::funding_admission::v16_program_funding_and_maintenance_precede_new_asset_after_route_rollback -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_027_protected_principal_seniority::joint_admission_liabilities::v16_program_joint_accrued_liabilities_precede_risk_admission inv_027_protected_principal_seniority::joint_admission_liabilities::reward_mapping_admission::v16_program_reward_mapping_preserves_owner_local_first_risk_across_routes
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
+## INV-027 reward mapping before first risk (2026-09-12)
+
+Owner: [cu/inv_027_reward_mapping_admission.rs](cu/inv_027_reward_mapping_admission.rs),
+mounted under `inv_027_protected_principal_seniority::joint_admission_liabilities::reward_mapping_admission`.
+Selector: `v16_program_reward_mapping_preserves_owner_local_first_risk_across_routes`.
+
+Thirty-two public LiteSVM histories cross self/reciprocal maintenance rewards,
+both fee orders, the constrained owner as taker/maker, and all four single/batch
+CPI/no-CPI admission routes. System/SPL/ATA/wrapper instructions create all economic
+accounts and revoke mint authority after funding. A stale AuthMark report is
+renewed by its authorized publisher; two bounded cranks restore current effective
+price 100 without touching either never-exposed portfolio or its own fee cursor.
+
+Deposits 231/160, birth slots 1/3, admission slot 7 and rate 7 independently imply
+gross fees 42/28 and floor-rounded 3,333-bps rewards 13/9. Both reward mappings leave
+343 total capital, 48 insurance and domain budgets 23/25. Self rewards leave owner
+equity 202/141; reciprocal rewards leave 198/145. Each committed first fee checks
+the recipient's exact credit and unchanged own fee cursor when it has not paid.
+The second fee and both local refreshes precede admission in one transaction.
+
+An increase of one position quantum rejects at the independently calculated
+owner-local IM boundary, including when the constrained owner is an unsigned CPI
+maker. A valid admission followed by another owner's withdrawal request also
+rejects; all complete transaction/tracked Accounts roll back, including matcher
+context, fee/reward transfers and certificate updates, except the exact runtime
+signature fee. Identical-prefix retry succeeds. Same-slot rewarded-fee retries
+are byte-identical. Current certificates match the independent health oracle,
+and stock, reservation and source-credit censuses accompany every economic prefix.
+
+Each history closes through the other single/batch and CPI/no-CPI family, with
+fresh owner-signed matcher consent when the bilateral opening revoked it. All
+64 owner SPL payouts equal their separate net entitlements; only the 48 insurance
+atoms remain. The selector checks 64 exact rollbacks and peaks at 428,482 CU under
+its 600,000-CU bundle ceiling.
+
+Existing reward-recipient first-risk coverage has one donor reward and no-CPI
+admission. The joint-liability four-route matrix starts with an existing leg;
+maintenance self-reward/fragmentation and policy-entitlement histories stay flat.
+This increment distinguishes equal aggregate stocks with different first-risk
+entitlements and composes both reward branches with CPI admission and owner exit.
+No marginal or duplicate probe was retained. No production fix was needed.
+
+**Rows 413/422 remain OPEN.** This is bounded row-413 evidence after explicit fee
+settlement. Standalone admission with uncollected flat fees, nonzero target lag,
+funding and arbitrary histories remain outside the increment. It adds no row-422
+liquidation-reward provenance coverage; whole-invariant verdicts are unchanged.
+
+Validation uses base `82f44d1146a45f1f0cf07a76fb171a280d5c21e2` in isolated worktree
+`/tmp/percolator-astra-inv027-admission-20260912`. Default-feature SBF and the
+authenticated matcher were built locked/offline with platform-tools v1.52 after
+the shared program artifact changed and the cached matcher failed LiteSVM loading.
+Program SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The new selector and the two row-413 adjacent controls below pass; targeted
+formatting, whitespace and row-status checks pass. No full-suite run was performed.
+The adjacent INV-045 handoff control was attempted on this integration branch and
+currently exceeds its existing CU guardrail (348,484 CU observed against 325,000);
+it is not claimed as validation for this increment.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-astra-inv027-admission-20260912-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/tmp
+cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::joint_admission_liabilities::reward_mapping_admission::v16_program_reward_mapping_preserves_owner_local_first_risk_across_routes -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_027_protected_principal_seniority::joint_admission_liabilities::reward_recipient_first_risk::v16_program_never_exposed_reward_recipient_settles_own_fees_before_first_risk inv_027_protected_principal_seniority::joint_admission_liabilities::v16_program_joint_accrued_liabilities_precede_risk_admission
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_027_reward_mapping_admission.rs tests/invariants/cu/inv_027_joint_admission_liabilities.rs
+git diff --check
+```
+
+## INV-073 public terminal reserve disposition (2026-09-12)
+
+The [public reserve disposition audit](terminal_public_reserves_audit_20260912.md)
+records a bounded red/green wrapper conformance fix for rows 420/421/433.
+Two INV-073 selectors in [cu/inv_073_terminal_public_reserves.rs](cu/inv_073_terminal_public_reserves.rs)
+reuse the public earned-fee fixture. Twelve worlds cross all reserve payout orders
+with fresh or expired unpaid principal. They complete 66 keeper-only payments of
+principal, earned fees and insurance, preserve senior payouts and reserve recipients,
+check 138 exact rollbacks, and finish 12 separately admin-signed slab closures.
+An additional control preserves live consent and both resolved wind-down gates.
+
+Resolved reserve payments now accept an unsigned recorded beneficiary only with
+an unencumbered beneficiary-owned token destination and the existing full-wind-down
+and stock checks. Nearby signer-denial probes now check destination attribution;
+their signed payout and retry controls remain. Earlier audits documenting an
+unconditional terminal reserve signature barrier describe the pre-fix behavior.
+This finite SPL/asset-0 family does not establish generic missing-signer closure;
+rows 420/421/433 and whole-invariant verdicts remain OPEN/unchanged.
+## INV-020 interrupted refresh and fee entitlement (2026-09-12)
+
+The [interrupted-refresh audit](interrupted_refresh_fees_audit_20260912.md)
+records sixteen independently constructed public LiteSVM histories. Bounded
+market catchup, omitted/replayed/duplicate evidence, and a Clock advance compose
+with explicit `SyncMaintenanceFee` or crank-internal collection, full current
+certification, paid liquidation and the keeper's maintenance-adjusted SPL exit.
+The routes preserve independently calculated fees, rewards and domain attribution;
+incomplete successful discovery cannot pay or certify the account. This adds
+bounded row-426 evidence beyond the existing zero-maintenance staged test.
+**Row 426 remains OPEN**; no production defect or invariant-status promotion is claimed.
+
+## INV-039 Funded Pending Debt At Resolution (2026-09-12)
+
+The [funded pending-resolution audit](pending_loss_funded_resolution_audit_20260912.md)
+adds one selector under `inv_039_pending_loss_obligation_durability::resolved_histories::funded_resolution`.
+Sixteen public LiteSVM histories cross mirrored premium funding, debtor order,
+claimant order and delayed settlement. Input-derived price and funding debts remain
+attributed after both pending holders detach and the first debtor is paid and
+deleted. Exact retries preserve all Accounts, including a successful debtor SPL
+payout prefix; frozen funding indices and all five owner entitlements agree through
+80 payouts and 80 portfolio deletions. There are 96 exact rollbacks, with peak
+terminal transaction compute of 180,307 CU. This extends the zero-funding resolved
+cohort coverage; it does not close the generic obligation-history product.
+**Row 419 remains OPEN**, and every invariant verdict is unchanged.
+
+## Row 418 secondary custody repair after expiry (2026-09-12)
+
+Owner: [cu/inv_077_secondary_quote_completion.rs](cu/inv_077_secondary_quote_completion.rs).
+Exact selector:
+`inv_077_bounded_work_and_maximum_shape_compute::secondary_quote_completion::v16_program_secondary_quote_repair_after_expiry_has_atomic_bounded_disposition`.
+
+Six public LiteSVM histories cross secondary-vault freeze, secondary-destination
+freeze, or a late native-vault donation with bundled/separate completion. System,
+SPL, ATA and wrapper instructions create and fund every account. The existing
+canonical native-mint genesis fixture, wallet airdrops and authenticated Clock
+advancement are the only supplied environment state. No economic account bytes
+are injected; token packing constructs expected host snapshots only.
+
+All histories have fixed-supply SPL primary custody: 307 atoms of publicly funded
+backing expire, with 17 unbooked primary atoms and 19 secondary atoms. One
+`CloseSlab` normalizes backing while preserving every other tracked complete
+Account and market metadata. The independent stock and encumbrance censuses
+require 307 booked atoms, no capital/insurance/portfolios, and zero fresh backing
+reservations. Only then does the secondary custody change:
+
+- Freezable fixed-supply SPL: either secondary account is publicly frozen. Close
+  rejects with the exact vault/destination error and complete Account rollback.
+- Native secondary: 23 raw lamports arrive after normalization while the token
+  amount stays 19. Public `SyncNative` classifies all 42 atoms for the token sweep.
+
+Thaw/sync followed by the second successful slab call retires exactly 307 primary
+atoms and sweeps both rails. The owner transfers the 17 primary atoms into
+separate SPL custody, then closes the payout account. Secondary SPL similarly
+moves 19 atoms into separate custody before closing; native custody redeems 42
+lamports directly. Both canonical vaults close, and the market retains its exact
+typed tombstone and rent. The admin receives exactly market excess plus four
+token-account rents, plus 42 redeemed lamports only in the native worlds.
+Primary supply ends at 17; secondary SPL supply stays 19 and native supply stays
+zero. Full mint, sink, vault-authority, admin and payer Accounts are checked.
+
+Each world first submits the entire completion followed by an owner-authorized
+burn requesting 18 atoms from the 17-atom primary sink. The exact final
+`InsufficientFunds` error restores thaw/sync, primary retirement, both sweeps,
+four custody closes and tombstone creation, allowing only the calculated runtime
+signature fee. The identical valid prefix then succeeds. Across the matrix,
+four frozen-close checks and six late-prefix checks give ten exact rollbacks.
+Separate completion also checks the repair and slab-close custody boundaries.
+
+Net-new scope: the existing `terminal_quote_variants` freezable selector freezes
+primary custody and thaws separately; its dual-quote expiry selector has no
+secondary freeze or post-normalization native sync/disposal rollback.
+`terminal_destination_variants` checks existing primary destination capabilities
+on a single SPL rail. `prefunded_quote_custody` repairs user payout accounts before
+empty closure. This selector composes secondary repair after primary expiry with
+both rails' final disposal; none of those selectors is duplicated or modified.
+
+**Row 418 remains OPEN**, and invariant verdicts are unchanged. This is bounded
+INV-018/021/025/069/070/077/080/081 evidence and an administrative lifecycle
+boundary for INV-073/078. It is not a generic generator/oracle or a permissionless
+user-exit theorem. Native-primary booked retirement, absent/uncooperative
+authorities, nonzero user claims, provider earnings, insurance recredit,
+Token-2022, maximum capacity and arbitrary histories remain outside the matrix.
+
+Validation used isolated worktree
+`/home/anatoly/worktrees/astra-terminal-quote-variants-row418-20260912`, branch
+`codex/astra-terminal-quote-variants-row418-20260912`, based on local commit
+`f70a5d4e56dbce3b96c3d6cfdb67ad5db3fda944`. The main checkout was untouched.
+No GitHub PRs/issues/branches or sealed holdout contents were inspected. A fresh
+locked/offline default-feature platform-tools v1.52 build has SHA-256
+`d5f2d3d2c35842aab0979ab24fed415fe36b2b93ed6cc80998fee839ae76343f`.
+The exact selector passes 1/1 with six worlds. Peak measured lifecycle CU is
+**78,054** on the integrated artifact, including rejected bundles, below 150,000;
+measured terminal transactions fit 1,232 bytes. Shared ATA creation helpers do
+not report CU.
+
+No runtime probes were discarded and no implementation violation was observed.
+The first host compile required a temporary-borrow correction; an intermediate
+compile exhausted disk space. Clearing only this worktree's release intermediates
+allowed the unchanged test command to finish. Neither is conformance evidence.
+Native-primary residue and existing empty-native cases were excluded during
+overlap review, not executed or counted as new coverage.
+
+Exact validation commands from the isolated worktree:
+
+```sh
+cargo build-sbf --tools-version v1.52 --sbf-out-dir target/deploy --offline -- --locked
+sha256sum target/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::secondary_quote_completion::v16_program_secondary_quote_repair_after_expiry_has_atomic_bounded_disposition -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+The [shared-holder paid-reserve audit](shared_holder_paid_reserves_audit_20260912.md)
+adds one INV-073 selector with four public LiteSVM histories. Exposed portfolio
+owners also hold provider and insurance claims; live partial reserve payouts and
+spent provider earnings precede their departure. Keeper-only terminal steps reach
+exact 56,627/1,995,000-atom user payouts in two or three calls while preserving
+99,983 principal, 856 earned-fee and 24 insurance atoms. Sixty-six exact rollbacks
+include 24 successful SPL payout prefixes followed by unsigned reserve rejection.
+This adds bounded INV-018/021/024/027/064/067/071/073/080/081/082 evidence. Generic
+reserve disposition, mechanical retirement and reachability remain outside this
+increment; rows 420/421/433 remain OPEN and invariant verdicts are unchanged.
+
+## INV-014 retained fee prefix at grant expiry (rows 411/432, 2026-09-12)
+
+The [retained fee expiry audit](retained_fee_expiry_audit_20260912.md) adds one
+invariant-owned selector composing policy-authority succession, a 19-to-37-bps
+change, and exact/late LP-grant expiry. Both CPI transports occur before and at
+the rejected suffix; a retained bilateral alternative and the unaffected retained
+CPI subsequently realize exact owner and insurance-recipient payouts. A permitted
+7-bps policy prefix also rolls back with the earlier paid fill. The test reuses
+the existing INV-014 budget and complete-Account oracles. This is bounded
+INV-010/011/014/024/036/047/080/081 evidence; rows 411/432 remain OPEN.
+
+## INV-045 unilateral reduction with pending price carry (2026-09-12)
+
+Owner: [cu/inv_045_rebalance_cap_carry.rs](cu/inv_045_rebalance_cap_carry.rs),
+selector
+`inv_045_no_free_mark_movement::rebalance_cap_carry::v16_program_unilateral_reduction_preserves_fractional_cap_and_peer_entitlement`.
+
+This adds one public LiteSVM conformance selector for row 425,
+`all-economic-routes-preserve-canonical-fractional-accrual-carry`. Eight histories
+cross both price directions, the reducing owner, and reduction before/after
+canonical accrual. System, SPL, ATA and wrapper instructions create the market,
+portfolios and fixed-supply custody; signed AuthMark publication and authenticated
+Clock provide the price/time inputs. No economic account state is injected.
+
+| Invariant relation | Executing evidence |
+| --- | --- |
+| Pending price capacity survives unilateral reduction | Entry 100, cap 24 bps/slot, target 80 or 120, and eight lots create carry 2,400 at slot 1. At slot 4, `RebalanceReduce` removes four lots from either owner and halves the opposite ADL multiplier without writing the absent peer's complete Account. Stored carry plus unprocessed capacity remains 9,600 in both schedules. |
+| The remaining exposure owns subsequent movement | Canonical catchup to slot 6 reaches 99 or 101 with carry 4,400 and four effective lots on both sides. Independent input arithmetic requires owner value `[100003 + 4*d, 200009 - 4*d]`, where `d` is the price direction. Funding, social loss and insurance stay zero. |
+| Rejected prefixes preserve the same obligation | Missing owner signature, readonly portfolio, and a duplicate observation after successful reduction or catchup restore every tracked complete Account, with only the exact runtime signature fee subtracted from the payer. Four explicit same-slot `EngineNonProgress` controls also roll back exactly. Total: 36 rejections. |
+| Frozen fractional capacity cannot become terminal value | Resolution at slot 6 followed by signed closes at slot 100 preserves carry 4,400 and yields all 16 exact owner SPL payouts. Custody plus payouts remains 300,012 after every close; final vault, capital, PnL, insurance and OI are zero, and mint supply is unchanged with mint authority revoked. |
+
+Net-new scope relative to existing selectors:
+
+| Existing owner/selector | Existing boundary and new dimension |
+| --- | --- |
+| CU INV-045 `v16_program_pending_fractional_carry_survives_due_trade_and_resolution` and `public_carry_order::v16_program_row425_public_carry_entitlement_is_partition_and_order_equivalent` | Bilateral single/batch fills; this increment uses unilateral ADL against an absent peer while carry is already pending. |
+| CU INV-045 `custody_cap_carry::v16_program_custody_route_words_preserve_pending_fractional_carry` | Flat-owner custody and fee routes frame exposed owners; this increment changes effective exposure and then realizes the affected owners' price entitlement. |
+| Stateful INV-052 `v16_program_unilateral_rebalance_adl_keeps_followup_price_settlement_zero_sum` | Publishes a new 900,000 target after reduction and checks subsequent zero-sum settlement. This increment starts with nonzero fractional carry before reduction, compares due-crank ordering and completes owner payout. |
+| CU INV-073 `v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit` | Social-loss `b_rem` and dust; this increment covers the separate wrapper `price_move_remainder_bps_num`. |
+
+**Row 425 remains OPEN**, with this selector recorded as bounded evidence only.
+It covers one AuthMark asset, an exact half reduction, zero funding/fees, and one
+price atom before resolution. Arbitrary reduction ratios, carry histories, other
+oracle modes, multi-asset composition and the full economic-route product remain
+outside the witness. Rows 413/422 and all invariant/status TSVs are unchanged.
+No wrapper, engine or ABI fix was needed.
+
+Validation was integrated on the watch branch at `af97beea`. A fresh locked/offline,
+default-feature SBF build used platform-tools v1.52 and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; program SHA-256:
+`d5f2d3d2c35842aab0979ab24fed415fe36b2b93ed6cc80998fee839ae76343f`.
+The final watch-branch selector passes with peak successful transaction compute
+of 236,727 CU. Exact validation commands are:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-watch-verify-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm/percolator-watch-verify-tmp
+cargo build-sbf --no-default-features
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::rebalance_cap_carry::v16_program_unilateral_reduction_preserves_fractional_cap_and_peer_entitlement -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_045_no_free_mark_movement::v16_program_pending_fractional_carry_survives_due_trade_and_resolution inv_073_no_permanent_user_lock::v16_program_fractional_social_loss_exit_matrix_preserves_funded_owner_exit
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_052_split_merge_invariance::v16_program_unilateral_rebalance_adl_keeps_followup_price_settlement_zero_sum -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo check --locked --offline --tests
+cargo fmt --all -- --check
+git diff --check
+```
+
+## Other Recent Coverage
+
+The [retained redirect entitlement audit](retained_redirect_entitlement_audit_20260912.md)
+adds one INV-014 selector with twenty public LiteSVM histories. Four exact trade
+routes and an equivalent partial single-CPI fill cross direction and payout order.
+Retained 37-bps consent survives base-policy changes; distinct recipients exhaust
+opening fees before a retained close changes the redirect policy. A withdrawal
+that fits global insurance but includes the peer's final atom rolls back the
+successful policy, close and SPL payout prefix. Input-derived per-side rounding,
+twenty complete-Account rollbacks and all eighty final owner/recipient entitlements
+agree across routes, with fixed supply and empty custody. This adds bounded
+INV-010/011/014/024/036/047/080/081 evidence. Dynamic fees, multi-leg batches,
+underfunded collection, role succession and consumed withdrawal replay remain
+outside the increment; rows 411/432 stay OPEN. No production fix was needed.
+
+The [prefunded quote custody audit](prefunded_quote_custody_audit_20260912.md)
+adds one INV-070 selector with sixteen public LiteSVM histories. Native wSOL and
+fixed-supply SPL principal exits cross pre-funding below/above token-account rent,
+claimant order, and separate/combined custody repair. Native ATA reconstruction
+wraps excess lamports without consuming either owner's market claim. Keeper-only
+payouts return exactly 101/307 atoms; premature close and missing-custody retries
+restore the complete repair/payment prefix. Both variants reach one successful
+slab close, exact rent refunds and owner-authorized SPL disposal. Row 418 remains
+OPEN; booked native residue retirement, reserve claims and arbitrary histories
+remain outside this matrix. No invariant verdict or production code changes.
+
+The [native insurance exit audit](native_insurance_exit_audit_20260912.md)
+adds one INV-077 selector with four public LiteSVM histories. A separate terminal
+beneficiary withdraws 106 native-quote insurance atoms in two payments, redeems
+each payment to SOL, and publicly recreates custody between payments. Partial
+payments either stay within the long-domain allowance or cross into the short
+domain; exact remaining budgets give a strictly decreasing payout rank. Synced
+and unsynced surplus variants finish in one slab call with exact SOL and rent
+attribution. This adds sampled row-418 evidence for an available beneficiary's
+signed exit. Native stock retirement with insurance remaining, absent reserve
+keys, recredit, claims and maximum-capacity products remain outside this slice;
+rows 418/423 and invariant verdicts are unchanged.
+
+The [pending-loss backing-expiry audit](pending_loss_backing_expiry_audit_20260912.md)
+adds one INV-039 selector with sixteen public LiteSVM histories. Exact/late expiry
+preserves two pending obligations and the original owner debts; later debtor
+settlement creates new backing without reviving the expired 97 atoms. Both claimant
+orders reach exact payouts, debtor deletion, and bounded slab retirement. Thirty-two
+full-Account rollbacks include successful expiry, debtor SPL payment and holder
+detachment. This adds sampled row-419 expiry/order composition; retained receipt
+identity and persisted scan invalidation remain separate. Verdicts and holdout
+labels are unchanged.
+
+The [scanned insurance withdrawal audit](terminal_prefix_insurance_audit_20260912.md)
+adds one INV-071 selector with eight public LiteSVM histories. Two distinct
+beneficiaries withdraw 37 and 53 atoms from assets behind a persisted terminal
+prefix. Successful withdrawals preserve the cursor and the peer's allowance;
+exact/late expiry of 61 later backing atoms cannot replenish a paid allowance.
+Forty-eight exact rollbacks include successful payout and expiry prefixes, followed
+by identical-prefix retry and rent-exact slab retirement. This adds bounded
+INV-024/063/070/071/080/081/086/088 evidence. The tested mutations preserve residual;
+general cursor invalidation, earlier-slot insurance recredit, pending loss and
+receipt histories remain separate. Invariant verdicts and holdout labels are unchanged.
+
+The [funded fresh-report handoff audit](funded_fresh_handoff_audit_20260912.md)
+adds one INV-045 selector with two public LiteSVM histories. Separate and combined
+report publication preserve exact 100/1-atom funding transfers, owner capital/PnL,
+a 1,995-atom keeper reward and its complete SPL payout. Twelve rejected
+transactions restore complete Accounts, including funding and rewarded-liquidation
+prefixes. Backing-provider earnings remain zero and Pyth provider Accounts remain
+unchanged. The original sixteen zero-funding handoff worlds retain their selector.
+This adds bounded row-422 evidence; provider changes, arbitrary liquidation sizing
+and complete exposed-owner exits remain outside the increment, and all invariant
+and holdout dispositions are unchanged.
+
+The [terminal earned-fee expiry audit](terminal_earnings_expiry_audit_20260912.md)
+adds one INV-024 selector with four public LiteSVM histories. A partial principal
+payout precedes backing expiry with real utilization earnings still unpaid. Exact
+and one-slot-late normalization preserve those earnings and the separate insurance
+claim; both signed payout orders finish with precisely 99,899 expired atoms burned.
+Forty rejected transactions restore complete Accounts, including expiry, SPL payout
+and lazy-ledger prefixes. This adds bounded INV-024/063/070/073/080 evidence for
+terminal attribution and required reserve signatures. Rows 410/416/420/421/429/433
+remain OPEN; shutdown and funded handoff receive no new coverage from this selector.
+
+The [terminal reserve-backfill audit](terminal_reserve_backfill_audit_20260912.md)
+adds one INV-071 selector with four public LiteSVM histories. Live-valid backing
+and domain-insurance top-ups cannot introduce obligations behind a cached terminal
+prefix. Twenty exact rollbacks compose donated SPL surplus with authenticated
+expiry; identical-prefix retries preserve the 101-atom user payout and finish in
+three slab calls, burning 31 atoms and sweeping 7 with exact rent. This adds bounded
+INV-063/069/070/071/073/080/086/088 evidence. Successful cursor-invalidating mutations,
+claims, insurance recredit and maximum-capacity scans remain outside this increment;
+invariant verdicts and holdout labels are unchanged.
+
+The [complete-observation entitlement audit](complete_observation_entitlement_audit_20260912.md)
+adds one INV-045 selector with eight public LiteSVM histories. Two fresh Pyth-backed
+Hybrid assets retain unequal fractional price caps across observation order,
+observation grouping and elapsed-time partitions. Complete local refresh includes
+both accepted-price PnL and raw-target lag penalties before the same asset-0
+liquidation charges 2,095 atoms and pays 698 atoms to the keeper. Late duplicate
+observations restore complete Accounts; bounded quiescent retries cannot repeat
+fees. Owner and keeper SPL payouts are exactly 523,905 and 1,699 atoms. This adds
+bounded INV-020/024/038/041/045/052/056/061/071/081/086/088 evidence. Funding,
+provider changes, arbitrary liquidation sizing and full peer-claim realization
+remain outside this increment; invariant verdicts are unchanged.
+
+The [first-risk preexisting-lag audit](first_risk_preexisting_lag_audit_20260912.md)
+adds one INV-027 selector with sixteen public LiteSVM histories. Differently aged,
+never-risked portfolios cross shared/separate owners, both constrained parties,
+single/batch admission, and both fee/refresh orders. Preexisting traded-asset lag
+blocks first risk at and above the computed margin boundary with exact rollback.
+An authorized target repair permits a one-quantum margin rejection followed by
+exact admission, per-portfolio overdraw rejection and complete 112/160-atom owner
+payouts. This adds bounded INV-010/024/027/044/053/060/062/081 evidence, with 64 exact
+rollbacks and 32 payouts. Standalone uncollected flat fees, successful admission
+under nonzero lag and general histories remain outside this increment; invariant
+verdicts and reopening labels are unchanged.
+
+The [reassigned canonical-custody audit](terminal_reassigned_custody_audit_20260912.md)
+adds one INV-082 selector with eight public LiteSVM histories. Original ATAs remain
+occupied under an unavailable different SPL owner while absent portfolio owners
+receive exact net principal through keeper-created non-ATA custody. Both payout
+aliases and claimant orders preserve the transferee's existing tokens and separately
+attribute maintenance fees. Signed beneficiary withdrawal and portfolio cleanup
+compose with bounded backing expiry, burn, surplus sweep and rent-exact slab closure.
+Eighty rejected transactions restore complete Accounts. This adds bounded
+INV-018/021/024/027/067/069/070/071/073/078/081/082 evidence; administrative completion
+still requires its named signer. Nonzero receipts, pending losses, absent reserve
+beneficiaries and maximum-capacity histories remain outside this increment, and
+invariant verdicts are unchanged.
+
+The [funded insurer stale-resolution audit](funded_insurer_stale_resolution_audit_20260912.md)
+adds one INV-005 selector with four public LiteSVM histories. Insurance-beneficiary
+handoff at the authenticated stale deadline or one slot before preserves two live
+user positions, the unchanged oracle/operator/backing roles, and the original
+resolution deadline. Seventy-two rejected transactions restore complete Accounts,
+including handoff, resolution, SPL payout and portfolio-rent prefixes. Keeper user
+payouts and admin cleanup precede exact successor/provider reserve exits, with a
+fixed 994-atom supply. This adds bounded INV-005/020/024/027/055/081 evidence plus
+INV-021/080 rollback checks. Moving prices, nonzero claims, funding, reserve liens,
+retained signed ABA requests and slab retirement remain outside this increment;
+invariant verdicts and holdout labels are unchanged.
+
+The [terminal destination-authority variant audit](terminal_destination_variant_audit_20260912.md)
+adds one INV-077 selector with six public LiteSVM histories. A fixed-supply mint
+and an admin-owned non-ATA sweep account cross existing delegation, separate close
+authority and bundled/split disposal. Two bounded slab calls retire exactly 307
+backing atoms and sweep 17 atoms without expanding the existing 11-atom allowance;
+subsequent SPL spending and custody closure preserve exact token supply and rent
+recipients. Twelve rejected bundles restore complete Accounts, including a late
+failure after both custody closes. This adds bounded INV-018/021/025/069/070/077/080/081
+evidence and an administrative-lifecycle boundary for INV-073/078. User recovery,
+absent authorities and maximum-capacity products remain outside this increment;
+row 418 remains OPEN and invariant verdicts are unchanged.
+
+The [retained same-asset position-episode audit](retained_same_asset_episode_audit_20260912.md)
+adds one INV-012 selector with four public LiteSVM histories. A third portfolio
+closes and reopens the LP's same-asset exposure through its unchanged live matcher
+while the original taker's complete Account stays fixed. Both retained CPI exits
+reject with `EngineStale`, including eight rolled-back native-transfer prefixes;
+fresh consent changing only the LP episode restores both routes and complete owner
+principal payouts. This adds bounded INV-004/010/012/024/081 evidence and an
+unchanged-authority INV-005 control. Automatic revocation, authority rotation,
+asset replacement and general economic histories remain outside this increment;
+holdouts 412/414 and all invariant verdicts remain unchanged.
+
+The [timestamp renewal and fee-refresh admission audit](fee_refresh_admission_audit_20260912.md)
+adds one INV-020 selector with eight public LiteSVM histories. Both active-leg and
+Pyth observation orders cross explicit refresh with atomic deposit/refresh/admission
+retry. Stale evidence and one position quantum above the fee-adjusted margin limit
+restore complete economic Accounts; full observations admit exactly at the limit.
+All health lanes match input arithmetic and snapshot recomputation, healthy cranks
+preserve exposure, and owner SPL payouts are exactly 197/160 atoms. This adds bounded
+INV-020/024/053/054/056/061/071/072/081/086 evidence. Moving prices, funding, active
+claims, positive liquidation/rewards and economically pending omissions remain
+outside this increment; invariant verdicts and reopening labels are unchanged.
+
+The [shared-holder pending-loss audit](pending_loss_shared_holder_audit_20260912.md)
+adds one INV-039 selector with sixteen public LiteSVM histories. One portfolio
+retains two unequal pending domains across resolution, partial detachment and
+both debtor deletion orders. Early settlement creates junior receipt face; late
+settlement realizes source value. Exact owner entitlements agree across these
+payment classes, with transaction rollback and complete portfolio/slab retirement.
+This adds bounded INV-024/039/041/048/066/067/073/081/086 evidence and solvent,
+zero-residual INV-037/076 controls. Bankruptcy, adverse drift, funding and general
+histories remain outside this increment; invariant verdicts are unchanged.
+
+The [spent receipt conformance audit](receipt_spend_replay_audit_20260912.md) adds
+one INV-067 selector with four public LiteSVM histories. Two unequal claimants spend
+their initial payouts and each later top-up into a settled debtor's SPL account.
+Both claimant orders and direct/rollback continuations preserve exact entitlements,
+receipt identity, replay idempotence and terminal custody/rent disposition. This
+adds bounded INV-066/067/068/070/080/081 evidence for nonzero claim/receipt state;
+the zero-bound cleanup/static edge remains unresolved and invariant verdicts are unchanged.
+
+The [shutdown operator-departure audit](shutdown_operator_departure_audit_20260912.md)
+adds one INV-024 selector with four public LiteSVM histories. Funded operator
+succession before/after shutdown and cold-admin burn preserve both operators'
+paid amounts, the unchanged insurance beneficiary, base-asset maintenance fees,
+and separate backing principal. Both operator keypairs leave before resolution;
+24 exact rollbacks and authorized beneficiary/provider payouts compose through
+rent-exact slab retirement. This adds bounded INV-005/024/025/027/036/070/080/081
+evidence. Mature shutdown fallback, provider earnings and absent-beneficiary
+reserve disposal remain untested; labels 410/416/429/433 remain OPEN.
+
+The [terminal alternate-custody audit](terminal_custody_alternate_20260912.md) adds
+eight public LiteSVM histories under INV-082. Absent backing and insurance holders
+receive their portfolio principal through keeper-created SPL accounts while their
+original ATAs remain delegated or carry a separate close authority. Timeout and
+late payout errors preserve exact Accounts and creation rent; both terminal payout
+aliases reach the same owner entitlements. Reserve claims remain attributed, and
+unsigned reserve withdrawal and administrative retirement remain outside this witness.
+
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
+
+The [same-program role-switch generation audit](role_switch_generation_audit_20260912.md)
+adds one INV-012 selector with sixteen public LiteSVM histories. An LP signing as
+taker through another owner-bound context of the same matcher program loses its
+grant. Returning to flat and reusing a previously traded asset slot in either
+order cannot restore it. Separate episode, enabled-state, grant-sequence and asset
+generation denials compose with exact rollback, live peer controls, fresh owner
+consent and complete SPL payouts. Holdouts 412/414 remain OPEN; broader authority,
+object-replacement and lifecycle products remain residual gaps.
+
+The [2026-09-12 sibling-generation liveness audit](sibling_generation_liveness_audit_20260912.md)
+adds one INV-028 selector with eight public LiteSVM histories. Fourteen active legs
+and fourteen occupied source domains precede an unrelated asset append, optionally
+followed by sibling retirement and reuse. Bounded, rank-decreasing public refresh
+preserves the fourteen still-latent domains, which subsequently settle to the full
+28-domain shape. Every bilateral owner exit lowers exposure; complete SPL payouts
+are exactly 1,000,054 and 999,946 atoms. This adds partial
+INV-028/057/073/077/082/089 coverage beyond fixed-market latent-domain and market-growth
+reduction controls. INV-078 failure-class recovery, unilateral exits, arbitrary
+configuration histories and permissionless activation fees remain outside this
+increment. No invariant verdict or holdout status changes.
+
+The [2026-09-12 selected-provider assignment audit](selected_provider_assignment_audit_20260912.md)
+adds eight public LiteSVM worlds selecting Switchboard or Chainlink on either asset
+index with a Pyth sibling. Reversed observation order, exact provider-binding and
+late-action rollback, asset-local insurance attribution, and complete owner/keeper
+SPL payout compose in one mounted INV-020 child. Selection of asset 1 changes the
+liquidated quantity and insurance domains while preserving exact owner entitlements.
+This adds bounded evidence for labels 422/426; pending-observation omission and
+general selection histories remain open. Labels 413/422/423/425/426 remain OPEN.
+
+The [retained computed mark-fee cap audit](retained_mark_fee_cap_audit_20260912.md)
+adds `v16_program_retained_batch_atom_cap_includes_computed_mark_fees` under
+`stateful/inv_014_retained_mark_fee_cap.rs`, mounted as
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_mark_fee_cap`.
+Eight public LiteSVM worlds cross direction, leg order and a permitted base-policy
+detour after signing. An authorized quote change creates a nonzero EWMA movement
+fee: the retained exact-minus-one atom cap rejects after the matcher, while the
+independently retained exact cap admits both complete legs. Input-priced checks
+reconcile each owner's capital, quantities, marks, insurance, base-fee domain
+budgets, custody and full rollback frames. This adds INV-011/014/024/036/045/080
+evidence beyond the constant-price aggregate-cap test. It ends at the paid mark
+target with open positions; later catchup and payouts are outside this increment.
+Single-CPI fee-bps enforcement and asymmetric dynamic LP consent remain gaps;
+computed-fee partial fills, passive OI, underfunded collection and arbitrary
+histories are outside this increment.
+Holdout labels 411/432 remain OPEN.
+
+The [2026-09-12 pending terminal-fee audit](terminal_pending_fees_audit_20260912.md)
+adds `v16_program_pending_cohort_terminal_fees_stop_at_resolution_and_reach_insurance_exit`
+under `inv_039_pending_loss_obligation_durability::terminal_fees`. Eight public
+LiteSVM histories cross mirrored positions, debtor order and delayed settlement.
+Original cohort debts remain distinct from maintenance capped at resolution;
+fee/payout rollback, exact owner SPL totals and signed insurance extraction compose
+through slab closure. Funding, insolvency and general histories remain untested by
+this increment. Holdouts 417/418/419/424/433 remain OPEN.
+
+The [2026-09-12 funded owner roundtrip audit](funded_owner_roundtrip_audit_20260912.md)
+adds one INV-012 selector with four public LiteSVM histories. A funded, CPI-active
+B incarnation sits between two A incarnations at the same portfolio address.
+Restoring A's original matcher context/delegate and grant sequence cannot revive
+its old signed grant. Standalone rejection and a late rejection after a current
+CPI fill preserve complete Accounts, while fresh consent and all three owners'
+principal payouts remain live. This extends the existing empty A-B-A and failed
+reincarnation cases; rows 412/414/416/429 remain OPEN, including automatic-revocation
+grant admission, standing asset-generation scope and funded management/shutdown
+fallback beneficiary rules.
+
+The [2026-09-12 standalone first-admission audit](standalone_first_admission_audit_20260912.md)
+covers aged, never-exposed owners opening through a single wrapper instruction,
+without a fee/refresh prefix. Single/batch trades in both directions preserve
+deferred maintenance through exact rollback, reduction and owner SPL payout.
+This is a sufficiently funded conformance slice only: admission at the
+uncollected-fee margin boundary remains untested. Rows 413/422/423/425/426 remain OPEN.
+
+The [retained taker aggregate-cap audit](retained_taker_aggregate_cap_audit_20260912.md)
+adds `v16_program_retained_taker_aggregate_cap_rolls_back_deposit_and_policy_prefix`
+under `stateful/inv_014_retained_taker_aggregate_cap.rs`, mounted as
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_taker_aggregate_cap`.
+Four public LiteSVM histories isolate a retained two-leg batch CPI taker's signed
+atom cap with a permissive LP grant. Above-cap delivery restores a real SPL deposit
+and optional policy prefix; an independently pre-signed exact-cap continuation
+preserves quantities, fee allocation and complete owner SPL endpoints. This adds
+INV-011/014/024/036/080 evidence. Single-CPI enforcement and general policy/quantity
+histories remain gaps; holdout labels 411/432 remain OPEN.
+
+The [retained reserve expiry-stock audit](retained_reserve_stock_audit_20260912.md)
+adds twelve public LiteSVM histories under
+`inv_063_backing_expiry_normalization::retained_reserve_stock`. Retained principal
+and earned-fee payouts cross both instruction orders and authenticated
+`expiry-1`/`expiry`/`expiry+1` with a nonzero backing lien. An expired principal
+suffix restores the fee transfer and ledger exactly; the original standalone fee
+payout remains usable, and exhausted fee stock cannot debit remaining principal.
+This adds INV-024/031/036/063/080 stock-accounting evidence. It does not establish
+standalone reserve-intent consumption across replenishment. Expiry normalization,
+impairment, shutdown/resolution, asset reuse, replenished earnings, and nonzero
+insurance encumbrance remain outside this increment. Labels **415/428 stay OPEN**.
+
+The [retained reserve replenishment audit](retained_reserve_replenishment_20260912.md)
+adds eight public LiteSVM histories under INV-008. A retained insurance payout,
+replenishment and operator A-to-B-to-A handoff preserve exact signed-amount and
+domain accounting, including a rolled-back SPL top-up before a stale withdrawal.
+Fresh consent and an unaffected peer's retained consent drain only their own stock.
+This tests rejection after an authority update; standalone withdrawal consumption
+across replenishment without that update remains unproved. Labels 415/428 stay OPEN.
+
+The [retained permitted-policy history audit](retained_permitted_policy_history_20260912.md)
+adds 32 public LiteSVM histories for two independently retained CPI fills delivered at
+different permitted fees. Direct and nonmonotone histories preserve each owner's exact
+debit and SPL endpoint, including rollback of a policy/fill prefix. Above-consent taker
+execution and successful insurance/backing debit replay remain untested by this increment;
+holdout labels 411/415/428/432 remain OPEN.
+
+The [2026-09-12 mixed-provider liquidation audit](mixed_provider_liquidation_audit_20260912.md)
+adds eight fresh public LiteSVM histories comparing full observations with omission
+of the selected asset after complete two-asset refresh. Pyth/Switchboard and
+Pyth/Chainlink histories preserve exact owner, keeper and insurance attribution,
+including 40 exact rollbacks and eight keeper SPL payouts. Rows 422/426 gain
+partial coverage; 413/423/425 gain no new evidence. All five remain OPEN, including
+omissions before complete refresh, uncommitted reports and general asset selection.
+
+The [2026-09-12 terminal reserve destination audit](terminal_reserve_gap_audit_20260912.md)
+adds two public LiteSVM histories for backing principal, earned fees and insurance
+beneficiary custody repair. Six rejected bundles preserve exact Accounts and rent;
+signed continuations reconcile each reserve payout and final slab refunds. Repair
+does not remove the reserve signature requirement. Holdouts 417/418/419/424/433 remain OPEN.
+
+The [retained fee/insurance stock audit](retained_value_gap_20260912.md) adds 32 public
+LiteSVM worlds combining retained fee-bearing trades, insurance payouts, policy relaxation,
+fee/top-up replenishment and exact transaction rollback. Per-owner SPL outcomes agree across
+direction, payout order and single/batch transports. Rows 411/415/428/432 remain OPEN.
+
+The [2026-09-12 receipt and pending-destination audit](terminal_receipt_gap_audit_20260912.md)
+adds keeper-only custody repair across paid receipts, late expiry and pending-cohort
+detachment. Its 24 public worlds check owner attribution, exact rollback and rent.
+Rows 410/417/418/419/420/421/424/433 remain OPEN; 434 is outside the audit.
+
+The [2026-09-12 used-scope succession increment](used_scope_succession_20260912.md)
+adds eight public LiteSVM histories combining bilateral-close automatic revocation,
+two used-slot replacements with a live sibling, explicit owner reauthorization,
+and matcher-context/oracle-authority A-to-B-to-A succession. Current invocation
+records, incarnation counters, displaced contexts and complete owner SPL payouts
+are checked together. This is bounded positive coverage: **rows 412 and 414 remain
+OPEN**, with no standing-grant generation-confinement or retained-replay claim.
+
+The [2026-09-12 capability/incarnation gap audit](capability_incarnation_gap_audit_20260912.md)
+adds twenty public LiteSVM histories for activation/CPI rollback, portfolio/grant rollback,
+and funded oracle ABA across shutdown with separate reserve ledgers and SPL beneficiaries.
+Holdouts 412/414/416/429 remain OPEN.
+
+The [2026-09-12 whole-market retirement audit](market_retirement_gap_audit_20260912.md)
+adds four public LiteSVM histories under INV-012. A rejected same-address market
+initialization restores both funded portfolios, the live market, vault and retained
+signed CPI consent after a complete retirement prefix. Successful continuations check
+owner principal, market-authority rent refunds and fresh-market isolation exactly.
+This is bounded INV-001/007/012/021/024/080 evidence; holdouts 412/414/416/429 remain OPEN.
+
+The [2026-09-12 first-risk and authenticated reward audit](oracle_liquidation_gap_audit_20260912.md)
+adds never-exposed reward-recipient liability accounting and paid-mark/fresh-report
+liquidation handoff coverage, including independent certificates, exact rollback
+and owner payouts. Rows 413/422/426 gain partial coverage; 423/425 are adjacent
+controls. All five holdouts remain OPEN; the covered row-434 reopen history is unchanged.
+
+The [2026-09-12 oracle/source composition audit](oracle_source_composition_audit_20260912.md)
+records the INV-028 Hybrid capacity/carry increment: retained historical claims, fractional
+carry, current health certificates and exact owner payouts compose across eight public
+LiteSVM histories. Rows 423/425/426 gain partial coverage; 422 remains outside this increment.
+All four rows remain OPEN.
+
+The [2026-09-12 terminal/liveness gap audit](terminal_liveness_gap_audit_20260912.md)
+records the INV-082 shared-destination recovery increment: sixteen public LiteSVM worlds
+cover pre-funded custody, payout ordering, transaction partitions, exact rollback and
+single rent charging. Holdouts 417/418/419/424/433 remain OPEN.
+
+The [2026-09-12 retained capability, identity and replay audit](retained_identity_replay_audit_20260912.md)
+maps the remaining holdouts to main's generators and documents the INV-012 retained joint-grant
+atomicity increment. It adds partial coverage without changing invariant verdicts or closing a holdout.
+
+The [mixed retained-debit matrix](retained_debit_matrix_20260912.md) adds 36 public worlds
+crossing portfolio recreation and reserve-authority ABA with all landing orders of portfolio,
+insurance and backing withdrawals. It checks independent budgets, exact rollback, beneficiary
+attribution and complete principal exit. Retained authority/consent holdouts remain open.
+
+The [2026-09-12 historical missing-row audit](legacy_missing_gap_audit_20260912.md)
+maps labels 410/411/413/415/420/421 and adds INV-073 public coverage for absent reserve
+roles through insurance exhaustion, backing expiry and exact insurance recredit.
+The restored beneficiary claim stays protected; all six labels remain missing.
+
+## INV-024 terminal provider round trip (row 429, 2026-09-12)
+
+[`cu/inv_024_terminal_earnings_roundtrip.rs`](cu/inv_024_terminal_earnings_roundtrip.rs)
+adds one public LiteSVM selector beneath the existing terminal earnings owner:
+`inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_earnings_roundtrip::v16_program_terminal_provider_roundtrip_preserves_intervening_fee_payouts`.
+The sealed local base is `70d92368d275fd1f700f3893d2e1243294bde07e` from
+`origin/codex/astra-open-holdout-ledger-20260912`; work is isolated in
+`/tmp/percolator-wrapper-invariant-d64e`.
+
+| Existing selector | Additional relation in this test |
+| --- | --- |
+| `v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insurance` | The original provider returns after its successor receives part of the earned fees; the original, previously initialized ledger must resume against the diminished stock. |
+| `v16_program_retained_debit_permutations_preserve_independent_budgets_after_binding_changes` | Real terminal utilization earnings, intervening payout and ledger reuse, beyond the existing principal/insurance ABA product. |
+| `v16_program_terminal_expiry_preserves_earned_fees_and_bounded_signed_disposal` | Funded authority succession with an unchanged expiry, rather than principal expiry with unchanged holders. |
+
+Two histories publicly earn 875 fee atoms, return all 100,000 backing principal
+atoms, and pay the original provider 17 fees. Both holders consent to each step
+of `A -> B -> A`. B receives either 19 or 830 fees, leaving A a tail of 839 or 28.
+A 29-atom transaction retained and prevalidated before the handoffs rejects after
+return with `EngineStale`. Changing only its epoch either pays 29 or rejects the
+one-atom overclaim; final exact payouts preserve A/B attribution. A's reused
+ledger records only A's withdrawals, B's ledger remains unchanged after departure,
+and neither ledger treats previously existing fees as newly accrued earnings.
+The live insurance operator is B, while the separate terminal insurer receives
+exactly its own 31 atoms.
+
+A rejected bundle executes both handoffs and both fee payouts, including B's
+lazy ledger initialization, before the stale suffix restores every complete
+Account. Separate rejected one-atom insurance-payout prefixes cover overdraw,
+the other holder's ledger, missing provider signature and a readonly ledger.
+The remaining insurance liquidity lets the overdraw reach the earned-fee stock
+gate. The oracle checks exact error indices and completed wrapper/SPL prefixes,
+account presence, economic lamports (apart from actual signature fees),
+input-derived wallet amounts, role profiles, epochs, stock and insurance budgets,
+and fixed supply. Both histories finish with exact reserve payouts and
+rent-accounted slab closure. Construction uses System/SPL/ATA/wrapper instructions;
+account copies serve only as assertion frames.
+
+The new selector passes **1/1** (two histories, 13 exact rollbacks, 11 committed
+reserve transfers, two slab closures). The adjacent succession and expiry
+selectors in the matrix pass **2/2**. A fresh locked/offline default-feature SBF
+build uses platform-tools v1.52 and a private target; wrapper SHA-256:
+`d5f2d3d2c35842aab0979ab24fed415fe36b2b93ed6cc80998fee839ae76343f`.
+The new bundles verify signatures, fit 1,232-byte packets, and stay within their
+1,200,000-CU limit. Development corrected test-only ownership, CU-budget and
+full-state/preflight expectations; no implementation issue was found.
+
+This is bounded INV-005/024/036/080/081 evidence. **Row 429 remains OPEN**, and
+rows 412/433 and all invariant verdicts are unchanged. General role histories,
+new earnings during succession, time-expiry/impairment, alternate quote rails and
+absent-beneficiary economic completion remain outside this increment.
+## INV-045 fresh corroboration preserves previously retained fees (row 422, 2026-09-12)
+
+[`cu/inv_045_corroborated_mark_fees.rs`](cu/inv_045_corroborated_mark_fees.rs),
+mounted under `inv_045_no_free_mark_movement::trade_origin_catchup::corroborated_mark_fees`,
+adds `v16_program_corroborated_paid_mark_only_distributes_new_liquidation_fees`.
+Base: local invariant integration commit `ff987a9d0289a571707432fe9d3cb36334b8da17`.
+Worktree: `/tmp/percolator-astra-mark-provenance-row422-20260912`; branch:
+`codex/astra-mark-provenance-row422-20260912`. The requested main checkout and its
+local `main` commit lacked this directory, so the worktree uses the existing local
+invariant baseline. No GitHub PRs/issues/branches or sealed holdouts were inspected;
+the main checkout and existing worker worktrees were not modified.
+
+The new relation is **fresh corroboration cannot reclassify already-retained paid-mark
+fees into keeper rewards or domain budgets**. Four public LiteSVM histories cross
+separate/target-local publication with independent/common ownership of both mark
+traders and the keeper. A paid Hybrid trade stages 992,320 from 1,000,000 and charges
+1,540,072 discovery-fee atoms. A public market-only crank fully catches up before a
+fresh direct-price Pyth report corroborates exactly 992,320. Thus there is no remaining
+price lag at the handoff, and publication itself moves no owner value.
+
+A two-instruction bundle first completes that fresh publication, then rejects a
+duplicate observation suffix. The error index and one wrapper-success log prove the
+completed prefix. All tracked and compiled Accounts restore exactly, including the
+old oracle profile, portfolios, shared ATA, market, mint and vault; the distinct
+network payer is excluded. The valid report then commits separately or through target
+refresh. Bounded liquidation closes 12,817,640 quantity units, charges 6,360 atoms,
+pays the keeper 2,119, and assigns only the remaining 4,241 to the asset's two domains
+(2,120/2,121). The prior discovery fee stays outside those budgets. Independent
+two-stage rounding distinguishes the effective fee price from the initial price,
+accepted trade print and raw print. Peer settlement preserves each owner's PnL;
+common ownership yields the same normalized claims, fees, budgets and custody.
+Healthy retries reach an exact rollback fixed point without another reward. The
+keeper withdraws precisely 3,119 SPL atoms, even when its ATA is shared by the mark
+traders. Remaining claims plus insurance reconcile to engine and SPL vault balances,
+and the mint Account stays exact. All protocol and token accounts use public
+System/ATA/SPL/wrapper construction; harness inputs are signer SOL, Clock, blockhashes
+and valid external Pyth fixtures. The parent's funding helper now reuses an existing
+public ATA and funds an existing signer only once, allowing this shared-owner case.
+
+This is sampled INV-020/024/036/041/045/061/062 evidence. It differs from the selected
+provider test (initially report-origin), trade-origin catchup (no fresh report or
+reward), and fresh-report reward tests (no previously paid discovery fee). It adds no
+row-413 first-risk reward, row-425 precrank carry or terminal reserve selector.
+**Row 422 remains OPEN**: there is no generic generator/oracle, no invariant-status
+promotion, and no coverage of fresh-report arrival while a paid mark still lags.
+Multiple assets/providers, CPI, changing fee policy, funding/maintenance, source
+liens and full trader or terminal redemption are outside this increment.
+
+The new exact selector passes all four histories and four publication rollbacks.
+Peak CU: crank/liquidation **318,071**, paid trade **147,001**, rejected publication
+bundle **64,297**, keeper withdrawal **58,088**, within the existing per-operation
+limits (the two-instruction bundle uses twice the crank limit). Discarded development
+probes: the first fixture inherited inverse pricing, so its fresh input transformed
+to 1,007,739 instead of corroborating 992,320; direct pricing corrects the fixture.
+The next run's common-owner setup repeated a harness airdrop and got `AlreadyProcessed`;
+funding the signer once corrects construction. Neither was an invariant violation.
+An adjacent fresh-report control initially lacked its matcher SBF and stopped before
+protocol execution; the fixture was then built locally. No production inconsistency
+was observed in the completed histories.
+
+Validation uses a private host-cache copy in
+`/run/user/1001/astra-mark-provenance-row422-20260912-target`, copied from the local
+integration target. The copied default-feature SBF SHA-256 is
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`, matching the
+documented artifact; `git diff 30993c0b HEAD -- src Cargo.toml Cargo.lock
+tests/fixtures/auth_matcher` is empty. Engine pin:
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Host tests compile from this worktree;
+no fresh wrapper SBF build or broad-suite run is claimed. The adjacent fresh-report
+control additionally uses a locally built auth matcher, with a private copied cache
+at `/run/user/1001/astra-mark-provenance-row422-20260912-matcher-target`. Its SHA-256 is
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`. Production, Cargo
+inputs and invariant verdicts are unchanged.
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/astra-mark-provenance-row422-20260912-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export TMPDIR=/run/user/1001
+# Run this fixture build from tests/fixtures/auth_matcher, then return to the worktree root.
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_TARGET_DIR=/run/user/1001/astra-mark-provenance-row422-20260912-matcher-target cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/target/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::trade_origin_catchup::corroborated_mark_fees::v16_program_corroborated_paid_mark_only_distributes_new_liquidation_fees -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_045_no_free_mark_movement::trade_origin_catchup::v16_program_trade_origin_liquidation_prices_and_entitlements_survive_catchup_order \
+  inv_045_no_free_mark_movement::v16_program_caught_up_hybrid_reward_uses_selected_asset_provenance_in_both_hint_orders \
+  inv_045_no_free_mark_movement::accepted_price_reward::v16_program_fresh_report_liquidation_rewards_follow_accepted_price_through_spl_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-028 maximum latent settlement through terminal expiry (row 423, 2026-09-12)
+
+[`cu/inv_028_terminal_latent_capacity.rs`](cu/inv_028_terminal_latent_capacity.rs)
+adds one public LiteSVM selector beneath the existing concurrent-latent fixture:
+`inv_028_source_domain_realizability_cap::historical_latent_capacity::concurrent_latent_capacity::terminal_latent_capacity::v16_program_full_latent_settlement_survives_terminal_owner_window_expiry`.
+Exact base: `3abff5d2bc6d521d26768c386b847f2b014058e2`, the locally recorded
+`origin/codex/astra-open-holdout-ledger-20260912`. Worktree:
+`/tmp/percolator-astra-row423-lifecycle-20260912`; branch:
+`codex/astra-row423-lifecycle-20260912`. The coordinator checkouts are untouched.
+
+The distinct obligation is **source-table growth during maximum-active-shape terminal
+exit**, after the admitted owner stops participating. Fourteen mixed-sign positions
+earn 27 atoms on fourteen domains. Every existing leg then increases by one unit
+while occupied plus future domains already exhaust the 28-domain budget. Reversal
+and another favorable mark create 41 more atoms of deferred entitlement. Only the
+peer receives global-accrual cranks: the claimant retains fourteen source records
+and fourteen active legs, byte-for-byte unchanged, across public resolution.
+
+At owner-window expiry minus one, the peer signs one `CloseResolved`, settles its
+losses and detaches one leg. The claimant remains untouched with all fourteen new
+domains still latent. At exact expiry or one slot late, either direct `CloseResolved`
+or observation-free `PermissionlessCrank` grows the claimant's table **14 -> 28** on
+its first terminal call while detaching one leg. The two terminal transports finish
+with only the transaction payer signing. Both owners receive exactly
+**1,000,068 / 999,932 atoms**, then separately authorize portfolio deletion.
+
+The four worlds cross the two terminal transports and exact/late owner-window expiry.
+All use System/SPL/ATA/matcher/wrapper construction, with Clock, blockhash and signer
+SOL as harness controls. No program-owned state is edited out of band. Input-derived
+claim amounts, stock and encumbrance censuses, source-credit caps, unchanged peer and
+mint Accounts, and exact SPL/engine custody are checked through the suffix. Each call
+detaches one leg, retires one source, or completes payout. The final leg detach also
+retires one source, so each world requires exactly **55 terminal calls**: 28 leg
+detachments and 27 remaining source retirements. Intermediate leg exits cannot pay
+early; cumulative payouts cannot exceed either owner's entitlement. Final claims,
+backing, OI, capital, insurance, custody and materialized portfolios all clear.
+
+This adds bounded INV-028/057/073/077/078 evidence. The existing concurrent-cohort test
+settles all sources before bilateral exit; the existing latent-resolution test has
+two active legs; INV-077's maximum terminal tests begin with all 28 claims already
+materialized. The earlier owner-window test checks two partial detaches without
+deferred source growth or complete cohort payout. Same-shape admission permutations,
+single-leg reset variants and sibling-generation changes were excluded after reading
+their existing owners. **No runtime duplicate probes were added or discarded.**
+
+**Row 423 remains OPEN.** This is four passing finite histories, with no production
+bug found or generic admission/liveness proof. It does not cover backing expiry,
+liens, insolvency/Recovery, arbitrary partial-reset histories, missing configured
+oracle/resolve authorities, fees/funding/fractional positions, detached history on
+additional assets, market-byte/feed maxima, or generation reuse. No new INV-031
+reservation-reuse proof, INV-082 state-indexed theorem or INV-089 generation result
+is claimed. Admission uses bilateral trades; only terminal transports are compared.
+Production, engine pins, manifests, shared support and invariant statuses are unchanged.
+
+The new selector passes **4 worlds / 56 risk increases / 524 counted history calls**,
+including **220 terminal calls**. Peak CU for trade / crank / mark / resolution /
+terminal settlement and payout / deletion is
+**747,684 / 803,859 / 6,120 / 3,255 / 1,219,283 / 26,556**.
+The terminal peak leaves **155,717 CU** under the enforced 1,375,000 transaction
+budget; serialized terminal packets are at most **529 / 1,232 bytes**. These maxima
+exclude bootstrap, policy and matcher configuration; historical trade/readiness
+and final mark/accrual calls are included in their named lanes. This is the maximum
+14-active-leg/28-source union on a 14-asset market, not maximum market account size.
+
+The wrapper SBF was rebuilt offline with platform-tools v1.52 from this worktree;
+SHA-256 `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+The authenticated matcher is a private copy of the existing unchanged artifact,
+SHA-256 `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Engine remains `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Private host dependencies
+were copied from an existing cache, and the test binaries compile from this worktree.
+
+All **three affected selectors pass**: the new four-world history, the existing
+sixteen-world concurrent cohort control (peak 1,040,847 CU), and the existing
+four-world latent-resolution control (peak terminal 689,987 CU). The charter/index
+selector passes **1/1**; formatting and working/staged/committed whitespace checks
+pass. Existing shared-support dead-code warnings and the `solana-client v1.18.26`
+future-compatibility warning remain. There were no failed runtime probes.
+
+Focused validation commands (no broad suite or engine proof runs):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row423-lifecycle-20260912-host
+export PERCOLATOR_FUZZ_SBF=/dev/shm/astra-row423-lifecycle-20260912-sbf/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_028_source_domain_realizability_cap::historical_latent_capacity::concurrent_latent_capacity::terminal_latent_capacity::v16_program_full_latent_settlement_survives_terminal_owner_window_expiry \
+  inv_028_source_domain_realizability_cap::historical_latent_capacity::concurrent_latent_capacity::v16_program_concurrent_latent_cohorts_preserve_full_shape_settlement_and_exit \
+  inv_028_source_domain_realizability_cap::historical_latent_capacity::v16_program_latent_capacity_at_resolution_preserves_attribution_and_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+## INV-028 existing active-leg admission and owner exit (row 423, 2026-09-12)
+
+[`cu/inv_028_active_leg_admission.rs`](cu/inv_028_active_leg_admission.rs) adds
+`v16_program_active_leg_increases_preserve_latent_and_full_domain_owner_exit`, mounted
+under `inv_028_source_domain_realizability_cap::historical_latent_capacity::active_leg_admission`.
+Base: locally cached `2b1d025c004f92d3f89bac00113be90a0cbbcf63`; isolated worktree:
+`/tmp/percolator-astra-exit-resource-admission-row423-20260912`, branch
+`codex/astra-exit-resource-admission-row423-20260912`. Only public repository guidance,
+fixtures and histories informed this increment; no external PR/issue/branch or sealed
+holdout inspection was used.
+
+Sixteen public LiteSVM worlds cross all four single/batch CPI/no-CPI transports, both
+position signs and both settlement orders. Thirteen detached asset histories retain
+26 positive source records worth 50 atoms. A three-unit position on asset 13 earns three
+atoms, leaving 27 occupied domains and its opposite domain still latent. A same-sign
+increase to eight units preserves that resource union. A cross-zero resize keeps the
+leg active, and an opposite favorable mark materializes the last domain for eight atoms.
+At all 28 occupied domains, another same-sign increase to thirteen units admits and earns
+thirteen more atoms. Partial and final reductions preserve all historical claims until
+conversion. Both owners withdraw exactly **1,000,074 / 999,926 atoms** and separately sign
+deletion of their empty portfolios. There are 32 strict same-sign active-leg increases.
+
+The inherited input-history oracle checks exact per-domain claims and backing prefixes,
+credit caps, principal, PnL, positions/OI, SPL custody and fixed mint supply after every
+counted pre-conversion step. New assertions require the 28-domain historical/future union,
+one continuously active leg on each owner, no source growth during resizing, unchanged
+portfolio identity and exact input-derived claim increments. Each economic settlement
+crank decreases pending authenticated accrual plus unsettled economic value and finishes
+within four calls per owner per mark. Payout checks clear all claims, backing, OI, capital,
+insurance, custody and materialized portfolios. System/SPL/ATA/matcher/wrapper instructions
+construct all economic accounts; harness controls are signer SOL, Clock and blockhashes.
+
+This adds sampled INV-028/057/073/077 evidence for **existing active-leg risk increases**.
+The historical/latent parent opens new legs; retained-domain episodes reopen detached legs;
+concurrent cohorts admit all legs before source growth. None asserts these two same-sign
+increases at the 27/28 occupied-domain frontiers. The single-slot, Hybrid/carry and latent
+reset/exit candidates were excluded from this increment, as were INV-077 CU controls near
+the limit. No duplicate selectors were added or run.
+
+**Row 423 remains OPEN.** This is a finite positive conformance matrix, not a generic
+generator/oracle or an INV-082 state-indexed theorem. It assumes participating owners and
+available authenticated marks. Nonzero lien/insurance reservations and INV-031 double-use,
+fees/funding/fractional quantities, interleaved conversion, multiple active legs, absent
+signers, Recovery/terminal alternatives (INV-078), generation reuse (INV-089), maximum-N/feed
+composition and arbitrary histories remain outside this increment. Production, dependency
+pins, shared helpers and invariant verdicts are unchanged.
+
+The new exact selector passes **1/1: 16 worlds, 32 increases, 2,200 counted public calls**.
+Peak CU for trade / settlement crank / conversion / withdrawal / portfolio deletion is
+**961,768 / 525,915 / 712,276 / 47,954 / 26,540**. Trade/crank maxima include historical
+construction; bootstrap, mark writers and matcher reauthorization are not CU measurements
+in this helper (the latter two are included in its call count). Source routes enforce
+1,375,000 CU and custody/deletion enforce 300,000 CU. The adjacent retained-domain episode
+control passes **1/1: eight worlds**, peaking at 1,115,686 CU. No runtime probes were
+discarded, no failing public history was observed, and no production guard was changed.
+
+The required charter/index selector passes **1/1**; formatting and whitespace checks pass.
+The additional `v16_machine_invariant_status_is_authoritative_and_nonoverclaiming` check
+fails on the pre-existing **INV-058 / row 427** projection: recorded counterexamples `{}`
+versus expected `{427}`. At the base commit, row 427 is already `COVERED` and INV-058 has
+no counterexamples, while the unchanged checker includes covered rows in that projection.
+The checker and status TSV are byte-identical to the base, and this change adds only
+comments to the reopening TSV. This unrelated metadata failure is retained and reported;
+it is not a row-423 public conformance failure or a passing aggregate-status result.
+
+Both default-feature wrapper and authenticated matcher SBF artifacts were freshly rebuilt
+offline with platform-tools v1.52 and locked dependencies in private target directories.
+Engine pin: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Host binaries also compile in the private target. No broad suite or engine proofs were run;
+the existing `solana-client v1.18.26` future-incompatibility warning remains.
+
+Focused validation commands from this worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row423-20260912-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::active_leg_admission::v16_program_active_leg_increases_preserve_latent_and_full_domain_owner_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::retained_domain_episodes::v16_program_full_history_reused_episodes_preserve_claims_and_drain_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+# Additional check has the pre-existing INV-058 / row 427 failure described above.
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
 
 ## INV-024 terminal earned-fee succession (row 410, 2026-09-10)
 
@@ -217,6 +9526,149 @@ git diff --check
 git diff --exit-code 81f7dae8 -- src Cargo.toml Cargo.lock tests/support tests/fixtures tests/invariants/invariant_status.tsv
 git diff --cached --check
 ```
+
+## INV-012 shared-owner portfolio succession (rows 412/414, 2026-09-12)
+
+[`cu/inv_012_shared_owner_succession.rs`](cu/inv_012_shared_owner_succession.rs)
+adds one public LiteSVM/CU selector beneath `joint_incarnation_binding`:
+`shared_owner_succession::v16_program_shared_owner_succession_preserves_retained_sibling_exit`.
+Eight worlds cross single/batch CPI opening routes, single/batch bilateral revocation,
+and both position signs. Each owner holds two funded portfolios, uses one shared SPL
+wallet, and selects the same honest matcher program for the two distinct LP contexts
+and delegates. The pairs hold unequal, opposite-signed quantities on different assets.
+
+The sibling pair's complete signed CPI exit is retained before the target pair opens
+and closes bilaterally. Immediate assertions require the target grant to be disabled
+with zero expiry and unchanged tuple/fee cap, while the sibling portfolios, context
+and delegate remain byte-exact. Public withdrawal, close, System refund and same-address
+LP initialization assign a new portfolio ID and clear its grant/episode. Deposit and
+explicit owner authorization then admit target reentry and opposite-transport closure
+through its original, never-reinitialized matcher context. The unchanged sibling exit
+finally executes through the opposite CPI transport from its opening.
+
+An input/event-derived oracle checks each funded stage's portfolio IDs, position epochs,
+owner-control sequences (including deposits/withdrawals), grant fields, exact positions,
+matched OI, capital, zero PnL/insurance, mint supply and owner-indexed shared-wallet stock.
+Each CPI checks every typed return field against the current invocation, delegate,
+asset, supplied size and authenticated price; batch returns preserve the single-return
+context record. Target succession preserves the sibling Account frame. Portfolio rent
+goes exactly to the market slab, and System refunds the address using the existing
+fixture pattern. All four final withdrawals return exactly their portfolio's principal,
+leaving each shared wallet with 2,000,000 atoms and zero engine/SPL custody.
+
+This is distinct from `used_scope_succession`, whose live sibling is another leg of
+the same portfolio and requires renewed consent after portfolio-wide revocation.
+Here shared owner identities and wallets must neither propagate revocation/replacement
+to separate portfolios nor substitute for their grant sequences and delegates.
+`funded_owner_roundtrip` owns an A-B-A holder replacement and stale-grant rejection;
+the existing same-owner delegate substitutions own isolated admission rejection.
+Neither supplies this retained, still-live sibling exit through funded succession.
+
+**Rows 412/414 remain OPEN; invariant statuses are unchanged.** This is bounded
+positive scope isolation, with no stale-consumer rejection, rollback composition,
+standing-grant generation confinement, arbitrary lifecycle generator, maximum shape,
+vulnerable-pin experiment, independent finding discovery or production fix claimed.
+Prices, fees and funding are constant/zero; asset and whole-market replacement are
+outside this increment. All economic construction uses public System/SPL/wrapper
+instructions and the honest matcher's public initialization API; no state injection
+or snapshot repair is added.
+
+Validation: the new selector passed **8 worlds, 8 revocations/replacements, 40 CPI
+fills (including 8 byte-identical retained exits), and 32 final owner payouts**.
+Peak CPI/writer/custody CU was **435,733 / 216,710 / 143,267**, below the enforced
+750,000 / 300,000 / 300,000 bounds. Two initial executions failed on test-model
+assumptions (deposit sequence advancement and the rent beneficiary); both were
+corrected to the existing public contract, with no production property violation.
+The adjacent used-scope control passed **1/1 across 8 worlds**, and the invariant
+index passed **1/1**. Formatting, whitespace and the production/dependency/shared
+harness/status-file diff guard passed. Existing unused-support and Solana-client
+future-incompatibility warnings remain. No broad suite or Kani run is claimed.
+
+Base: `cd986347e02434c082042664431a76fd6b998045`.
+Branch: `codex/row412414-capability-scope-succession-20260912`.
+Worktree: `/tmp/percolator-row412414-20260912`; the parent worktree was not edited.
+Tests use private copies of the base's documented SBF artifacts, not a fresh SBF
+build. Wrapper source/dependencies are unchanged. Wrapper SHA-256:
+`5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`;
+auth matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The wrapper and host cache were copied from `/dev/shm/astra-capability-6d2a-target`;
+the matcher came from the parent checkout's ignored fixture build. Cargo compiled
+the test from this worktree. The private build directories are cleaned after checks.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-row412414-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row412414-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/percolator-row412414-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::shared_owner_succession::v16_program_shared_owner_succession_preserves_retained_sibling_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::used_generation_lifecycle::used_scope_succession::v16_program_used_scope_succession_preserves_revocation_and_current_authorized_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --exit-code cd986347e02434c082042664431a76fd6b998045 -- src Cargo.toml Cargo.lock tests/support tests/fixtures tests/invariants/invariant_status.tsv
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /dev/shm/percolator-row412414-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir /tmp/percolator-row412414-20260912/tests/fixtures/auth_matcher/target
+```
+
+## INV-012 grant and revoking-writer order (rows 412/414, 2026-09-12)
+
+[`cu/inv_012_grant_writer_order.rs`](cu/inv_012_grant_writer_order.rs) exhausts
+32 public LiteSVM worlds: both orders of an explicit owner grant and a bilateral
+position writer, both single/batch writer routes, both single/batch CPI consumers,
+and two independently chosen granted/consumed matcher program/context/delegate
+tuples. An event oracle predicts the enabled state, grant sequence and position
+epoch before the consumer. Its request binds those predicted current identities,
+so episode/sequence rejection cannot mask the ordered revocation or tuple checks.
+The existing grant-only words omit position writers; `revocation_atomicity` omits
+explicit reauthorization from its transaction. This increment owns their ordered
+composition, including transaction-wide owner signer privileges.
+
+Eight bundles commit only when reauthorization follows the position write and
+the consumer uses the selected tuple. Twenty-four bundles reject with
+`Unauthorized` after exactly two successful wrapper prefixes and before matcher
+invocation. Full transaction and protected Account comparisons restore both
+contexts, grant, episodes, positions, SPL custody and supply, with only the exact
+network fee charged to the separate payer. The original pre-signed CPI request
+then lands unchanged after every rollback; after every committed bundle it rejects
+before CPI. Input-derived position/OI/capital checks, 72 committed CPI fills and
+64 complete owner withdrawals establish funded entry and exit in all worlds.
+System/SPL/ATA, wrapper and external matcher instructions construct every account;
+there is no direct mutation of program-owned state.
+
+**Rows 412/414 remain OPEN.** This bounded order oracle adds conformance evidence
+at base `af97beeac08872b28103feb20b83cf615557f00a`; no production defect or
+vulnerable-pin red/green experiment is claimed. Asset/portfolio replacement,
+market/authority lifecycle, expiry boundaries, liquidation/recovery writers,
+longer words and nonzero fees/PnL retain their separate coverage obligations.
+No open PR/issue branch or diff informed this increment.
+
+Validation uses fresh default-feature SBF artifacts built with platform-tools
+v1.52, `--locked --offline`, and private target
+`/dev/shm/astra-inv012-c8f4-target`. The four exact CU selectors passed (4/4,
+31.11s); the new selector peaked at 668,756 CU per bundle, 463,340 per exit and
+146,267 per withdrawal. Wrapper SHA-256:
+`d5f2d3d2c35842aab0979ab24fed415fe36b2b93ed6cc80998fee839ae76343f`.
+Matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Exact selectors (using the private target and build artifacts above):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-inv012-c8f4-target
+export CARGO_BUILD_JOBS=8 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::matcher_program_generation::grant_writer_order::v16_program_grant_writer_order_binds_atomic_cpi_authority \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::matcher_program_generation::v16_program_matcher_program_roundtrips_compose_with_asset_reuse \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::revocation_atomicity::v16_program_retained_capability_tracks_committed_revocation_after_bundle_rollback \
+  inv_012_capability_and_delegate_scope::v16_program_matcher_capability_route_roster_binds_every_current_scope
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all --check
+git diff --check
+```
+
+The invariant index passed (1/1); formatting and diff checks passed. Production,
+shared support, fixtures and invariant status tables are unchanged.
 
 ## INV-012 committed revocation after bundle rollback (row 412, 2026-09-10)
 
@@ -5509,6 +14961,104 @@ selectors passed **2/2**, public-evidence selectors passed **4/4**, and formatti
 and diff checks passed in the source worktree. The omitted CU source-composition
 guard is the known current-engine-pin assertion, not a runtime regression.
 
+## INV-045 precrank carry and entitlement (row 425, 2026-09-12)
+
+[`cu/inv_045_precrank_carry.rs`](cu/inv_045_precrank_carry.rs) adds one selector
+under the existing `public_carry_order` owner. It reuses that owner's public SPL
+setup, input ledger, raw-account entitlement/stock/OI oracle, passive-account
+frames, and crank progress/rollback checks. The only helper change prints both
+the actual Clock slot and the committed market frontier in reduction traces.
+**Coverage only; no implementation mismatch. Row 425 remains OPEN.**
+
+The 32 deterministic histories cross two mark directions, early reductions on
+even or odd slots, one or two lots reduced before the observer crank, single
+versus two-asset batch no-CPI routes, and both asset/owner orders. At every slot
+the active pair reduces two lots per asset in total. When one lot precedes the crank,
+the other follows it. Each history submits at least two precrank reductions
+while both assets have nonzero carry. All positions stay live and integral.
+
+Unlike the earlier selector, a signed reduction can precede the first market
+crank at the new Clock. In this zero-funding AuthMark setup, trades preserve
+the old frontier and both complete oracle profiles; the public crank advances
+canonical accrual afterward. The ledger attributes each price atom to the lots
+still held when that crank occurs. The 125-atom asset first moves at slot 4,
+and the 100-atom asset at slot 5. Reducing early on even versus odd slots gives
+the active owner independently derived final PnL
+`direction * (-6 + early_lots)` versus `direction * (-6 - early_lots)`.
+The opposing active owner receives the exact negative, and passive owners retain
+`[-4, +4] * direction`. These timing schedules must differ economically from
+the older crank-first `-6 * direction` result. Routes and asset orders within
+each timing schedule must agree. Every final carry is `[2000, 5000]` and final
+positions are `[[3, 7], [-3, -7], [7, 11], [-7, -11]]` lots.
+
+This is bounded additional evidence for INV-024/038/041/045/052/071/085/086/088.
+It supplies no new retained-intent/replay evidence for related INV-010, no generic
+generator, and no full-width arithmetic or whole-transition proof. Trades that
+themselves advance due accrual, CPI/delegation, nonzero fees/funding, fractional
+position lots, target changes, catchup horizons, terminal/resource histories,
+and maximum shapes remain outside this increment. No existing selector was
+copied. No runtime probes were discarded. The initial design assumption that
+these zero-funding trades would advance the market was discarded after reading
+the public source, before execution; no failing oracle was weakened.
+
+The requested main checkout was at `39f08dba` and contained neither this invariant
+suite nor its history. The isolated branch therefore uses the clean local public
+coverage baseline `d8c1334d0d16c5a35f61463488397b5f45ddd53a`, which already contains
+the row-425 selector above. Branch: `codex/astra-fractional-carry-row425-20260912`;
+worktree: `/home/anatoly/worktrees/astra-fractional-carry-row425-20260912`.
+The main checkout was not edited. No GitHub PR/issue/branch or sealed holdout was
+accessed. System/SPL/ATA/wrapper instructions construct every economic account;
+only inherited program loading and payer/admin SOL bootstrap, Clock warps, and
+blockhash expiration use the harness. No program-owned account bytes are injected.
+
+Validation uses a fresh offline default-feature SBF build in this worktree with
+platform-tools v1.52 and engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+SBF SHA-256: `5029cc3419b928c0db2660d4da0f82f021cb3347bde14c32738c04c4b042e83e`.
+Each host command uses `env CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`; artifacts live in the
+worktree's own `target/`, with no shared target writes.
+
+```sh
+cargo build-sbf --offline --tools-version v1.52 --jobs 2 -- --locked
+sha256sum target/deploy/percolator_prog.so
+cargo test --locked --offline --test v16_cu --no-run
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::precrank_carry::v16_program_row425_precrank_reductions_preserve_carry_and_owner_entitlement -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::v16_program_row425_public_carry_entitlement_is_partition_and_order_equivalent -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --exit-code d8c1334d -- src Cargo.toml Cargo.lock tests/invariants/invariant_status.tsv tests/invariants/special_method_coverage.tsv
+```
+
+The new exact selector passes **1/1, 32 histories**, in **20.24s**, with peak
+measured transition CU **376,794** (setup excluded) under the enforced
+1,400,000-CU ceiling. The existing control passes **1/1, 48 histories**, in
+**31.44s**, with peak transition CU **376,801**. Both filter out 1,082 other
+tests. The charter/index selector passes **1/1**, 122 filtered; formatting,
+diff, and unchanged production/status/method-file checks pass.
+
+The extra machine-status selector **fails, exit 101**, at
+`public_sbf/inv_079_public_reachability_evidence.rs:1890`: INV-058 has an empty
+counterexample projection where the gate expects `{427}`. The same exact
+selector fails identically on clean baseline `d8c1334d`. Its source and the
+status table are unchanged; the reopening table's only edit is a comment
+linking this evidence. This inherited row-427 metadata failure is retained,
+not reclassified as a row-425 production finding. The baseline check used a
+temporary detached checkout and the same private target:
+
+```sh
+git worktree add --detach /home/anatoly/worktrees/astra-fractional-carry-row425-20260912/target/baseline d8c1334d0d16c5a35f61463488397b5f45ddd53a
+# From target/baseline:
+env CARGO_TARGET_DIR=/home/anatoly/worktrees/astra-fractional-carry-row425-20260912/target CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+# From the coverage worktree, after the baseline command completed:
+git worktree remove /home/anatoly/worktrees/astra-fractional-carry-row425-20260912/target/baseline
+```
+
+The existing 346 dead-code warnings in the regression harness and
+`solana-client v1.18.26` future-incompatibility warning remain. No broad suite
+or Kani proof run is claimed.
+
 ## INV-045 public carry and account-settlement order (row 425, 2026-09-09)
 
 [`cu/inv_045_public_carry_order.rs`](cu/inv_045_public_carry_order.rs), mounted by
@@ -7043,6 +16593,110 @@ rustfmt --edition 2021 --check tests/invariants/cu/inv_027_joint_admission_liabi
 git diff --check
 ```
 
+## INV-027 flat reopen fee history (row 434, 2026-09-12)
+
+[`cu/inv_027_joint_admission_liabilities.rs`](cu/inv_027_joint_admission_liabilities.rs)
+now also covers row 434's flat-account fee-history variant with the
+`v16_program_flat_reopen_fee_history_precedes_new_exposure` selector. The public history opens a
+small position, closes both parties flat, advances market time without mutating the flat accounts,
+then bundles explicit fee synchronization, permissionless refresh, and a reopening trade. A reopen
+one atom above post-fee margin rejects after the public prefix and rolls back every tracked account,
+while the exact-limit reopen succeeds with full stock, encumbrance, certificate, OI, custody, and
+unrelated-account checks. The module-level CU run passes both this selector and the older row-413
+joint-liability matrix, with peak row-434 CU **355,035**.
+
+This is invariant-owned coverage, not the row-434 PR test or fix. This original selector does not close row 413's
+first-risk history, CPI/batch reopen variants (extended below), standalone reopening without the public fee/refresh
+prefix, other liability classes, arbitrary histories, or maximum-shape claims. The covered row is
+therefore marked `independent-discovery` / `COVERED`, while the affected invariants stay REOPENED
+because other current counterexamples still name them.
+
+```sh
+cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::joint_admission_liabilities -- --nocapture
+```
+
+## INV-027 flat reopen route switch and senior exit (row 434, 2026-09-12)
+
+[`cu/inv_027_flat_reopen_routes.rs`](cu/inv_027_flat_reopen_routes.rs), mounted under
+`inv_027_protected_principal_seniority::joint_admission_liabilities::flat_reopen_routes`,
+adds `v16_program_flat_reopen_route_switch_preserves_fee_history_and_senior_exit`.
+Sixteen public LiteSVM histories cross either constrained party, all four trade
+transports, and atomic versus separately committed fee/refresh settlement. Each
+failed reopening retries through the opposite CPI and batching family, then closes
+through its original route and pays both owners' full post-fee senior principal.
+Matcher authorization is established after the initial owner-signed close and
+renewed publicly when switching from owner-signed reopening back to CPI closure.
+CPI fills themselves do not require the maker's signature.
+
+Both owners open at slot 1 and close flat at slot 2, paying 7 maintenance atoms
+each. An empty keeper advances market time to slot 4 while the closed portfolios
+remain byte-identical, leaving another 14 atoms due per owner. A transaction with
+both `SyncMaintenanceFee`/`PermissionlessCrank` prefixes and reopening at 101 IM
+rejects at instruction 6 with `EngineInvalidConfig`; every tracked and compiled
+transaction Account restores exactly, including economic lamports and matcher
+context, with only the exact runtime signature fee deducted from the payer.
+The opposite route admits at exactly 100 IM after the same fees, either atomically
+or following checked public settlement prefixes. Full current health certificates
+match the independent oracle and agree across transports and settlement schedules.
+
+After closure, the constrained owner and then its peer withdraw exactly 100 and
+200 SPL atoms. Every checked suffix state reconciles capital, zero PnL/claims,
+fee cursors/debt, positions/OI, mint supply, custody, insurance domains, stock,
+reservation encumbrances and source-credit rates, while framing unrelated Accounts.
+The final vault contains only 42 insurance atoms, attributed 20/22 to base domains;
+no historical fee is erased or collected twice. Submitted suffix transactions
+verify signatures and fit the 1,232-byte packet bound.
+
+This extends a distinct boundary: the original row-434 selector has only a no-CPI
+reopen and no payout suffix. Row 413's
+`v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled` and
+`v16_program_flat_withdrawal_fees_precede_first_admission_and_roll_back_custody`
+start with never-traded accounts. Its joint-liability and funding route matrices
+retain old positions at admission. None composes a previously closed fee episode
+with the route-switch retry, certificate equivalence and complete owner exit here.
+
+**Row 434 remains COVERED; all invariant statuses are unchanged.** This is bounded
+conformance coverage, with no production finding/fix or generic completeness claim.
+Standalone reopening with uncollected fees, implicit withdrawal-prefix reopening,
+nonzero trade fees, clipped/rewarded maintenance, policy changes, funding/marked
+losses, preexisting lag, multi-leg batches, arbitrary histories and maximum shapes
+remain outside this increment. Economic state is constructed only through public
+System/SPL/ATA/matcher/wrapper instructions; no program-owned economic bytes are
+mutated. No other reopening row gains evidence from this selector.
+
+Validation uses a fresh locked/offline default-feature wrapper and auth-matcher
+SBF build with platform-tools v1.52 from base
+`570414586f9a5c962c8fce625aae43134ad880b9`, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, in isolated worktree
+`/tmp/percolator-row434-coverage-audit-20260912-5704145`.
+Wrapper SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The final exact selector passes **1/1** (16 worlds, 8.01 s), with peak measured
+suffix cost **392,630 CU** under its 600,000-CU bound. All four adjacent controls
+pass **4/4** (10.27 s), and the charter/index passes **1/1**. Repository formatting
+and all three Git whitespace checks pass. No broad suite, maximum-shape benchmark
+or engine proof was run. Cargo reports existing dead-code and `solana-client`
+future-incompatibility warnings.
+The initial host compile corrected a bitmap count type; the first runtime attempt
+corrected setup that authorized a matcher before owner trades revoked its grant.
+Neither changed production or relaxed the economic assertions.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row434-reopen-5704145-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/tests/fixtures/auth_matcher/target/deploy" -- --locked
+export CARGO_TARGET_DIR=/dev/shm/row434-reopen-5704145-host
+cargo test --locked --offline --test v16_cu inv_027_protected_principal_seniority::joint_admission_liabilities::flat_reopen_routes::v16_program_flat_reopen_route_switch_preserves_fee_history_and_senior_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_027_protected_principal_seniority::joint_admission_liabilities::v16_program_flat_reopen_fee_history_precedes_new_exposure inv_027_protected_principal_seniority::v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled inv_027_protected_principal_seniority::v16_program_flat_withdrawal_fees_precede_first_admission_and_roll_back_custody inv_027_protected_principal_seniority::joint_admission_liabilities::v16_program_joint_accrued_liabilities_precede_risk_admission
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-008 passive reward stock (row 415, 2026-09-09)
 
 [`cu/inv_008_passive_reward_stock.rs`](cu/inv_008_passive_reward_stock.rs), mounted by
@@ -7212,6 +16866,91 @@ export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
 cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::custody_cap_carry::v16_program_custody_route_words_preserve_pending_fractional_carry -- --exact --nocapture
 rustfmt --edition 2021 --check tests/invariants/cu/inv_045_custody_cap_carry.rs
 git diff --check
+```
+
+## INV-012 used-slot response binding (row 414, 2026-09-12)
+
+[`cu/inv_012_reused_asset_return_binding.rs`](cu/inv_012_reused_asset_return_binding.rs)
+adds one bounded regression: a genuine close response survives two public asset-slot
+replacements at the same price under an unchanged matcher grant. Retained single and
+batch requests reject the old generation before CPI; repairing only `market_id` is
+admissible, but suppressing fresh matcher output rejects with exact account rollback.
+Single success changes only the response request ID; batch success uses fresh return
+data while preserving the old single record. Eight worlds cover two slots, both signs
+and both entry routes, with 16 replacements, 64 rejections, 48 fills and 16 complete
+owner SPL withdrawals. No authority-revoking transition occurs after request retention.
+
+This composes INV-002/007/012/019/089 at the used-object response boundary; it does not
+duplicate the existing fresh-output lifecycle, isolated generation guard, or row 412
+revocation histories. **Row 414 remains OPEN.** Standing-grant asset scope and arbitrary
+replacement histories are not established. Whole-market restart, changed-price or
+external-provider oracle composition, permissionless fee-bearing activation, active
+sibling obligations, maximum-shape counters and generic lifecycle histories remain
+outside this bounded selector.
+
+Validation was first run in isolated worktree `/tmp/percolator-row414`;
+coordinator integration reran the new selector, adjacent INV-012/019 controls,
+charter/index, formatting and Git whitespace checks on the current branch. New
+selector result: **1/1**, with eight worlds, 64 live previews, 16 replacements,
+64 committed rejections, 48 committed fills and 16 full withdrawals. CU maxima:
+generation rejection **99,625**, response rejection **219,713**, entry/exit or
+positive preview **438,665**, lifecycle/configuration **112,342**, owner
+withdrawal **147,768**. No production, dependency, invariant-status or full-suite
+claim is made.
+
+## INV-012 joint context/asset replacement rollback (row 414, 2026-09-12)
+
+[`cu/inv_012_context_generation_rollback.rs`](cu/inv_012_context_generation_rollback.rs)
+adds eight public histories: both CPI transports, both signs, and context recreation
+before/after used-asset activation. A committed close supplies the old context response.
+After retirement and cooldown, one transaction closes/refunds/recreates the same external
+context and activates the replacement asset before its CPI consumer. A silent matcher
+rejects at return validation; the identical economic bundle with fresh output is admissible.
+Exact `Account` snapshots include every transaction account, SPL custody and owner rent;
+only the separate payer's exact signature fee changes. The old response, request counter,
+generation frontier and pre-signed sibling trade all survive. That unchanged trade executes,
+then a fresh-response bundle commits both replacements without an owner regrant. Mixed
+two-leg batch returns bind the replacement and live sibling independently; opposite-transport
+exits and sixteen complete owner withdrawals reconcile positions, OI, capital and SPL.
+
+The activation-rollback parent already owns a stale management suffix after successful CPI;
+the used-slot response test leaves the context incarnation unchanged; INV-019's context
+incarnation matrix does not replace an asset. Those isolated probes were discarded as
+duplicate candidates. The new assertion concerns their joint replacement/rollback boundary.
+All setup uses public System/SPL/ATA/wrapper/fixture instructions, with no protocol state
+injection. **Row 414 remains OPEN.** No new public-interface LoF/DoS or production fix is
+claimed; standing-grant asset scope, arbitrary histories, nonzero fees and maximum shapes
+remain outside this bounded evidence.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`3daaf713e877bd18d431eeaf53d67f376f5f65ec`. Worktree:
+`/tmp/percolator-row414-20260912-capabilities`; local branch:
+`codex/row414-capability-asset-generation-20260912`. The coordinator was not edited.
+Fresh locked/offline default-feature SBF builds use platform-tools v1.52, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, and private host/build targets.
+Wrapper SHA-256: `c8b584ed01570396e1031a1d4566e2ebc3b48781056f1297e7bde40905f4694d`;
+auth matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`;
+return-policy fixture: `e0c20fad34a7822cc6ce42a3c77ff08a8591977102f0c497a339d66a9dd6240a`.
+The new exact selector passes 1/1: eight rejected bundles, eight unchanged retained fills,
+eight committed replacements and sixteen full owner withdrawals. Maximum bundle CU:
+528,329; maximum packet: 1,206 bytes. Initial setup corrected the SBF compiler PATH and
+reran the selector after fixture compilation finished; neither failure was a program finding.
+
+```sh
+export CARGO_TARGET_DIR=/tmp/percolator-row414-20260912-host
+export PERCOLATOR_FUZZ_SBF=/tmp/percolator-row414-20260912-target/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=8 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::generation_bundle_rollback::context_generation_rollback::v16_program_context_recreation_and_asset_activation_roll_back_at_cpi_return
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::generation_bundle_rollback::v16_program_failed_asset_activation_restores_retained_sibling_cpi_and_frontier \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::reused_asset_return_binding::v16_program_reused_asset_requires_current_generation_and_fresh_matcher_output \
+  inv_019_cpi_invocation_and_return_data_binding::v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
 ```
 
 ## INV-012 used-generation lifecycle (row 414, 2026-09-09)
@@ -7633,6 +17372,26 @@ cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact \
 rustfmt --edition 2021 --check tests/invariants/stateful/inv_012_owner_episode_revocation.rs
 git diff --check
 ```
+
+## INV-028 latent source through peer reset (row 423, 2026-09-12)
+
+[`cu/inv_028_latent_reset_exit.rs`](cu/inv_028_latent_reset_exit.rs) adds a finite
+four-admission-route x two-direction x Active/DrainOnly product. Twenty-six historical
+claims and one settled side remain occupied while the winner skips refresh across
+the peer's half-size owner-only reduction, a further price move at half ADL, and
+the peer's final reduction. Permissionless prior-epoch cleanup must create the last
+source record with exactly nine atoms, preserving the other twenty-seven claims.
+Both owners receive exactly **1,000,065 / 999,935 SPL atoms** and delete their portfolios;
+the unused side is finalized afterward. An input-derived accounting oracle checks
+every suffix call, source-resource unions, exact effective OI and custody. The
+cleanup rank reaches zero within four calls (one observed), without the peer's signature.
+
+This differs from already-materialized maximum-source owner reduction and from
+historical/latent bilateral or resolved exits. It does not certify earlier side
+finalization, arbitrary ADL ratios, missing observations, liens/fees/insolvency,
+maximum simultaneous legs or arbitrary resource histories. **Row 423 remains OPEN**;
+no production fix, vulnerable-pin comparison or invariant-status promotion is claimed.
+See [the audit](latent_reset_exit_audit_20260912.md) for exact selectors and validation.
 
 ## INV-028 retained-domain position episodes (row 423, 2026-09-09)
 
@@ -14978,7 +24737,7 @@ Verdicts used below are deliberately narrower than proof-harness result labels:
 - **N/A** - the feature is not exposed by this wrapper. It must remain absent or become
   `REOPENED` when the API is introduced.
 
-The current ledger is 27 **CONDITIONAL**, 60 **REOPENED**, and 2 **N/A**. It contains zero
+The current ledger is 26 **CONDITIONAL**, 61 **REOPENED**, and 2 **N/A**. It contains zero
 whole-system **PROVEN** rows. This does not downgrade the validity of exhaustive leaf proofs inside
 their declared harness domains; it prevents those results from being generalized to unmodeled
 public histories.
@@ -15128,7 +24887,7 @@ Verdicts mean:
 | AUDIT-055 | REOPENED | The 28-cell public normal-user matrix covers open, bilateral reduction, owner reduction, Recovery forfeit, deposit, withdraw, and resolved payout across Active, DrainOnly, Recovery, and Resolved with strict successful deltas or exact rollback. Dedicated public products cover all trade transports in ResetPending and Retired/reactivated generations, DrainOnly exit, irreversible close, terminal settlement, reserve and oracle lifecycle, permissionless progress, and the 546-world ResetPending ordering frontier. A new expired-close route reaches market Recovery without state injection and proves fresh portfolio initialization rejects exactly there and in Resolved. The source-complete admission roster assigns every one of the 49 current instructions to one of fifteen tested state-machine owners and verifies its executable witness. Sixteen high-risk wrapper handlers retain their direct mode guards; six delegated routes retain their canonical engine transition. Administrative/current-state controls compose with their authority, policy, reserve, oracle, and ledger invariant owners rather than receiving vacuous asset-lifecycle permutations. A route, owner family, handler gate, or dispatch target change reopens closure. |
 | AUDIT-056 | REOPENED | The source-complete input classification proves PermissionlessCrank is the only public route with caller-supplied discovery hints; withdrawal, conversion, claim, and trade routes therefore need stale-state/flatness/certificate/full-scan coverage, not invented hint permutations. All four trade routes settle stale related legs, all fourteen max-shape active-leg omissions reject exactly, all 40 three-asset zero-tail words through length three are covered, and matched/mismatched two-asset Pyth tail orders are normalized or atomic. Public traces cover Refresh, AdvanceClose, SettleB, expired-close recovery declaration, FinalizeRecovery, and ResolvedClose hint behavior. SettleB's public trace independently found the loss-atom/index-unit CU bug fixed in engine PR155, then composes its fixed action with an authenticated external tail. A max-shape liquidatable state rejects duplicate/permuted three-feed tails exactly before the canonical tail dispatches liquidation. A source-complete 49-route disposition gate now proves that the favorable account surface is exactly the four trade transports plus released-PnL conversion, flat-only withdrawal, two immutable terminal payout rails, refreshing cure, and three stale-safe reductions. Every route in that portfolio-favorable or risk-reduction obligation points to an executable public witness; inbound-only, scoped non-portfolio value, and control/bookkeeping routes are explicit rather than wildcarded. A new public variant fails both this gate and the canonical registry before it can inherit a favorable-action exemption. This closes the current wrapper surface; a new route, hint field, favorable engine callsite, or certificate rule reopens it. |
 | AUDIT-057 | REOPENED | Public matrices cover ordinary owner reduction, bilateral DrainOnly exit, Recovery forfeit and third-party force-close, close-locality, all generated failure frontiers, and exact funded SPL exit. The INV-071 source roster binds every progress class to exact-pin engine continuation postconditions and executable public witnesses. The new assumption-free INV-082 Kani composition executes the actual selector over arbitrary full-width class magnitudes, proves a strict lexicographic decrement for every selected class, and exhausts all `2^8` summary overlaps; INV-077 supplies maximum-shape CU bounds. This closes the current validated-state surface under authenticated-input, fair-submission, rollback, and arithmetic assumptions. A new exposure mode, progress class, exit route, engine pin, or supported shape reopens it. |
-| AUDIT-058 | CONDITIONAL | All sixteen public first/final transport pairs reach the shared position/OI ceiling by split fills on one owner pair; every transport rejects one more same-pair atom with complete rollback and the exact-max position exits. The 2026-09-08 disjoint-owner trace first failed on engine `495a5590`: after two independent owner pairs filled the aggregate side OI to `MAX_OI_SIDE_Q` while all accounts stayed below account cap, a third public trade pushed both side counters to `MAX_OI_SIDE_Q + 1`. Engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336` adds the attach-side cap guard, and the unchanged generic regression now rejects the third trade through every transport with exact rollback. This is bounded conformance evidence, not a proven LoF, persistent DoS, CU failure, or full transition-system proof. Compile-time relationships bind trade, account, side-OI, maximum-price, and account-notional domains. TVL and batch shape boundaries are public and exact. Cross-zero, fee/funding partition, config-rate, arithmetic, and writer-surface obligations compose from INV-009/011/045/049/050/052/059/083/085 without duplicate tests. A new position writer, cap predicate, or distinct hard bound reopens this row. |
+| AUDIT-058 | REOPENED | All sixteen public first/final transport pairs reach the shared position/OI ceiling by split fills on one owner pair; every transport rejects one more same-pair atom with complete rollback and the exact-max position exits. The 2026-09-08 disjoint-owner trace first failed on engine `495a5590`: after two independent owner pairs filled the aggregate side OI to `MAX_OI_SIDE_Q` while all accounts stayed below account cap, a third public trade pushed both side counters to `MAX_OI_SIDE_Q + 1`. Engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336` adds the attach-side cap guard, and the unchanged generic regression now rejects the third trade through every transport with exact rollback. Row427 keeps INV-058 reopened: the latest multi-asset OI/fee handoff coverage remains bounded conformance and explicitly leaves existing-leg admission, nonunit ADL, nonzero PnL/funding, elapsed liabilities/rates, and maximum shapes outside the witness. Compile-time relationships bind trade, account, side-OI, maximum-price, and account-notional domains, but they are not a full transition-system proof. A new position writer, cap predicate, hard bound, or unresolved row427 dimension reopens this row. |
 | AUDIT-059 | CONDITIONAL | `PermissionlessCrank` exposes no close quantity; selection and arithmetic remain pinned-engine obligations. Existing fixed liquidation campaigns check a full-residual minimum, one partial close with sixteen exact-frame retries, and two authenticated deficit episodes across four trade transports with independent per-charge/cumulative fees and projected outcome equality. INV-009 delegates finite execution partitions under consumed one-shot consent and newly signed residuals; exact-fill batch CPI aggregate caps remain INV-011-owned. The [executing evidence and F plan](#inv-059-executing-evidence-and-f-plan) leaves randomized liquidation episode histories and mixed-flow attribution unowned in the scoped evidence. This traceability repair adds no runtime/proof result or status promotion; persistent partial authorization, caller-sized liquidation, or durable-nonce economic consent requires review. |
 | AUDIT-060 | REOPENED | Public IM/MM and lag gates are joined by a four-world metamorphic decomposition and a raw-state independent fresh-certificate model that executes after every generated public transition. The model does not invoke engine refresh and reconstructs every deployed lane from ADL-effective legs, ceil notional, margin floors, target lag, source-credit and lien state, fee debt, PnL, bitmap, and epochs. Cloned engine refresh must match it exactly. A current untouched cache must have the same identity and epochs and may differ only conservatively; the one-lane mutation matrix rejects every healthier direction. Directed all-route/both-side worlds retain exact equality for explicit recertification and nonvacuously cover valid and exact-expiry impaired liens, final-leg pending bankruptcy, and mixed Recovery/Live state. They prove pending residual and impairment alter equity once without becoming duplicate requirement penalties. Terminal `reserved_pnl` and the publicly unwritable cancel escrow are disposition/encumbrance fields owned by INV-067/068 and INV-026/087, not omitted health lanes. A new certificate field or public reserve writer reopens this row. |
 | AUDIT-061 | REOPENED | The current account-local liquidation surface is closed by seven-class composition over eighteen exact-pin engine proofs: total priority dispatch, deterministic first actionable slot, minimum health-restoring sizing, effective-OI mutation, fee/minimum-fee bounds, durable residual admission, Recovery fallback, and cleanup priority. Public evidence independently reconstructs selector arithmetic, crosses three authenticated episodes and unequal multi-asset losses, proves both terminal landing orders, and composes liquidation into a partial receipt and exact terminal custody. `PermissionlessCrank` is the sole ingress and carries discovery hints only; direct or caller-sized liquidation is source-excluded. Maximum-shape worlds cover fourteen legs, twenty-eight sources, both leg/observation orders, and a separate forty-two-feed Hybrid tail below the SVM ceiling. A pin, ingress, selector branch, supported shape, or witness change reopens the row. |
@@ -15150,7 +24909,7 @@ Verdicts mean:
 | AUDIT-077 | REOPENED | The [route-to-shape CU index](#inv-077-route-to-shape-cu-evidence) separates successful public progress at explicit shapes from ordinary CU controls, host-shaped scale fixtures, and rejection-only boundaries. Public maximum-N owner exit, maximum-source resolved crank, lien release, Hybrid and Recovery witnesses retain their own ceilings and oracles; none transfers its result to another route or unexecuted product. Direct `CloseResolved` with fourteen legs/twenty-eight source records is now measured by the direct-route witness and selected by the CU registry. Remaining bindings include full-shape force close and rewarded maintenance, maximum-work B settlement, combined market/feed/backlog/terminal occupancy products, owner-window signatures, and simultaneous source-lien maxima. This fresh SBF measurement does not prove all bounded continuations or promote this verdict. |
 | AUDIT-078 | REOPENED | The current permissionless terminal-failure lattice is complete by proof/public-route composition. Public products cover unavailable or stale oracle input, absent/expired backing, absent/exhausted insurance, B saturation, impaired liens, domain-local locks, close expiry, payout conflict, ResetPending, Recovery, and retirement/restart; every seed retains a bounded value-moving senior-preserving exit with exact stock, encumbrance, OI, and SPL reconciliation. The shared liveness gate binds those routes to selector totality, residual partition, declared-Recovery, rank-decrease, and terminal scanner proofs and the supported maximum account/source/oracle shapes. A new failure class, terminal mode, pin, or shape reopens closure. |
 | AUDIT-079 | CONDITIONAL | The LiteSVM trace schema records actual transaction signers, compiled account metas, exact authority-attributed tracked token/lamport deltas, rejected writable-account rollback with the fee-payer network charge separated from program effects, between-transaction economic mutation, and exact mint-supply deltas for terminal burns. The shared validator requires an allowlisted public construction sequence containing a real wrapper call and rejects malformed success, rollback, signer, account, payload, program, CU, token-owner, vault-participation, and quote-balance evidence. A recursive scan source-locks all 75 current trace consumers to validate or classify immediately, and both route and special-method registries now require actual `#[test]` functions. The normalized terminal classifier agrees with an independent decision model in all 663,552 representative cells spanning successful/rejected public traces, zero/one/full-width economic amounts, every terminal flag combination, and all required/attempted/progressing masks over three independent exit routes. Twenty-two of 32 finding-blind violation oracles carry classifier-bound exact LoF evidence; all 32 oracles, all 11 retained-retry kinds, all 15 same-incarnation supersession kinds, all 126 qualifying benchmark rows, and all seventeen nonqualifying rows have source-complete executable dispositions. The dated benchmark is evidence for the current finite surface, not a completeness claim against unknown findings; a new trace consumer, route, evidence class, retry/control kind, or benchmark row reopens this row. |
-| AUDIT-080 | CONDITIONAL | The wrapper-specific obligation is complete propagation, while exact transaction rollback is a named SVM semantic assumption. Assumption-free Kani checks all twelve engine error variants. Source-complete guards own every explicit engine disposition, all 133 ordinary mapping sites, all 49 variant-to-handler returns over 43 canonical implementations, every shared handler family, both entrypoint adapters, and the sole authenticated hybrid parser-error fallback. The canonical Recovery-pair result is explicitly required to flow through `map_v16_error` rather than a safe-success branch. The only engine safe-success dispositions are optional deregistration that keeps the live user account and `NonProgress` after independently observed market progress, each with a public witness. Thirty exact-SBF tests sample late failures across engine mutation, realloc, oracle, matcher CPI, SPL CPI, resolved payout, insurance, and backing paths with exact persistent frames and live retries. Two multi-instruction transactions additionally prove a nonzero engine result prevents later SPL-deposit and matcher-return consumers from executing. A new disposition, handler, adapter, or swallowed engine result reopens this row. |
+| AUDIT-080 | REOPENED | The wrapper-specific obligation is complete propagation, while exact transaction rollback is a named SVM semantic assumption. Assumption-free Kani checks all twelve engine error variants. Source-complete guards own every explicit engine disposition, all 133 ordinary mapping sites, all 49 variant-to-handler returns over 43 canonical implementations, every shared handler family, both entrypoint adapters, and the sole authenticated hybrid parser-error fallback. The canonical Recovery-pair result is explicitly required to flow through `map_v16_error` rather than a safe-success branch. The only engine safe-success dispositions are optional deregistration that keeps the live user account and `NonProgress` after independently observed market progress, each with a public witness. Thirty exact-SBF tests sample late failures across engine mutation, realloc, oracle, matcher CPI, SPL CPI, resolved payout, insurance, and backing paths with exact persistent frames and live retries. Two multi-instruction transactions additionally prove a nonzero engine result prevents later SPL-deposit and matcher-return consumers from executing. Current holdout rows #428 and #432 keep this row reopened until retained value-debit and CPI-fee consent histories have generic error/success composition evidence. A new disposition, handler, adapter, or swallowed engine result reopens this row. |
 | AUDIT-081 | REOPENED | The shared public model directly applies independent success/rollback, value, OI, episode, lifecycle, certificate, terminal, and funded-exit oracles to 25 decoder variants and all generated action/frontier schedules. The remaining 24 variants are not inferred from examples: a fail-closed gate composes twenty-two independently executable source owners over the exact 49-route registry. Those layers own canonical decoding and transaction domain, all identity/authority/account/PDA/caller-field checks, state admission, every wrapper-to-engine call and wrapper persisted field, position/OI plus typed matched-book obligations and scope induction, all external-token/internal-quote routes, adversarial-role containment, the independent transition model, and every error boundary. Five mounted Kani theorems supply arbitrary value-flow, owner-episode entitlement, exact-stock, certificate-commit, and engine-error composition. The gate rejects a route omission and pins engine `495a5590`. This is current-surface proof-equivalence under each owner's named assumptions, not one arbitrary-byte monolithic query; a route, role, state/effect class, callsite, field, theorem, witness, or pin change reopens it. |
 | AUDIT-082 | REOPENED | The public graph independently reconstructs and decreases close, B, K/F, obligation, reset, source-lien, health, Recovery, and resolved ranks across every seeded ordering and documented overlap. Three assumption-free Kani proofs remove the finite-depth limitation: the first executes the actual pinned selector over arbitrary full-width magnitudes and proves every non-fixed-point result strictly lowers the seven-class lexicographic rank under the exact named continuation postcondition; the second exhausts all `2^8` actionable summaries and proves class-priority convergence to `NoAction`; the third proves the separate terminal-administration rank strictly decreases while classifying every post-economic phase as signer-dependent. The source-complete INV-071 and INV-073 gates connect those theorems to all plan shapes, cleanup phases and authorities, engine contracts, wrapper dispatch witnesses, and supported maximum shapes. Closure is conditional on classifier/postcondition fidelity for validated state, authenticated inputs, configured terminal policy, fair submission, named authority participation, SVM rollback, and the named arithmetic boundary. A new actionable flag, rank class, cleanup authority, plan/dispatch path, pin, or supported shape reopens it. |
 | AUDIT-083 | CONDITIONAL | The class roster requires executable invariant owners for zero, one, max-1, max, expiry-1/equal/+1, cross-zero, empty/full, and near-overflow. A second source-locked census maps all 234 fields across all 52 public input types into exactly 20 semantic boundary profiles, validates each field's specific executable owner, validates each profile's boundary witness, and pins exact profile counts so API drift fails closed. The public `InitMarket` matrix now exercises all 25 invalid scalar partitions with exact pristine-account rollback and proves every rejected account remains usable by a valid retry. Mounted INV-022 Kani proves full-width wire preservation; economic owners cover admitted/excluded public behavior; INV-085 separately owns deployed wide-arithmetic equivalence. A new field/type, profile count, scalar validation predicate, or supported shape reopens the row. |
@@ -15163,7 +24922,7 @@ Verdicts mean:
 
 ## Known-finding benchmark
 
-The current TSV has 160 rows: 126 `independent-discovery`, 17 `nonqualifying`, and 17 `missing`.
+The current TSV has 165 rows: 127 `independent-discovery`, 17 `nonqualifying`, and 21 `missing`.
 These are recorded evidence dispositions, not new impact or severity acceptance under
 `scripts/loop.md`. Historical severity strings, including `REAL`, are not current classification
 labels; this documentation audit does not reclassify or promote any finding.
@@ -15171,8 +24930,9 @@ labels; this documentation audit does not reclassify or promote any finding.
 `open_findings.tsv` includes the historical 2026-08-03 snapshot of 143 open PRs whose titles identify
 a public-route LoF or DoS class. It maps every row to a primary invariant. That dated snapshot has 0
 **Direct regression** rows, 0 **Missing** rows, 126 **Independent discovery** rows, and seventeen
-**Nonqualifying** rows. PRs 410 through 426 were appended later as 17 **Missing** rows: post-hoc
-holdout misses, not independent discoveries. The 126 independent
+**Nonqualifying** rows. PRs 410 through 426, 428, 429, 432, and 433 remain appended as 21
+**Missing** rows: post-hoc holdout misses, not independent discoveries. PR 434 is now covered by
+the independent INV-027 flat-reopen fee-history selector. The 127 independent
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older
 `tests/support/open_lof_manifest.rs` retains the executable adapter mapping for its 99-LoF snapshot:

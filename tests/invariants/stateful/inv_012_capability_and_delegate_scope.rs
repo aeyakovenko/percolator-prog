@@ -52,6 +52,12 @@ mod liquidation_revocation;
 #[path = "inv_012_retained_grant_expiry.rs"]
 mod retained_grant_expiry;
 
+#[path = "inv_012_retained_grant_atomicity.rs"]
+mod retained_grant_atomicity;
+
+#[path = "inv_012_revocation_words.rs"]
+mod revocation_words;
+
 #[derive(Clone, Copy, Debug)]
 enum CpiRoute {
     Single,

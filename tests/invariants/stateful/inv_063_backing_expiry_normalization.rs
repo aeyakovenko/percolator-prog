@@ -68,6 +68,9 @@ use solana_sdk::{
     transaction::{Transaction, TransactionError},
 };
 
+#[path = "inv_063_retained_reserve_stock.rs"]
+mod retained_reserve_stock;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EconomicSnapshot {
     markets: [Vec<u8>; 2],

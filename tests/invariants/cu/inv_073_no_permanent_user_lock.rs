@@ -73,14 +73,79 @@ mod absent_insurer_spent_retirement;
 #[path = "inv_073_absent_provider_expiry_retirement.rs"]
 mod absent_provider_expiry_retirement;
 
+#[path = "inv_073_frozen_insurance_remainder.rs"]
+mod frozen_insurance_remainder;
+
 #[path = "inv_073_mixed_backing_expiry_exit.rs"]
 mod mixed_backing_expiry_exit;
+
+#[path = "inv_073_native_insurance_ledger_progress.rs"]
+mod native_insurance_ledger_progress;
+
+#[path = "inv_073_dual_quote_reserve_progress.rs"]
+mod dual_quote_reserve_progress;
 
 #[path = "inv_073_recovery_claim_liability_exit.rs"]
 mod recovery_claim_liability_exit;
 
 #[path = "inv_073_spent_insurance_terminal_exit.rs"]
 mod spent_insurance_terminal_exit;
+
+#[path = "inv_073_shared_holder_paid_reserves.rs"]
+mod shared_holder_paid_reserves;
+
+#[test]
+fn v16_program_recovery_reserve_repair_crosses_last_portfolio_cleanup_without_beneficiary_signatures(
+) {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_recovery_reserve_cleanup();
+}
+
+#[test]
+fn v16_program_frozen_reserve_destinations_allow_public_replacement_without_thaw_or_beneficiary_signatures(
+) {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_frozen_reserve_replacement();
+}
+
+#[test]
+fn v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_provider_custody_replacement();
+}
+
+#[test]
+fn v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_provider_keeper_ledger_handoff();
+}
+
+#[test]
+fn v16_program_distinct_absent_providers_preserve_each_others_terminal_fee_claims() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_distinct_provider_disposition();
+}
+
+#[test]
+fn v16_program_absent_native_provider_redeemed_prefix_preserves_public_remainder_and_close() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_native_provider_redemption();
+}
+
+#[test]
+fn v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry(
+) {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_terminal_reserve_close_retry();
+}
+
+#[test]
+fn v16_program_recreated_reserve_custody_preserves_spent_prefix_through_close_retry() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_recreated_reserve_close();
+}
+
+#[test]
+fn v16_program_terminal_public_reserve_disposition_preserves_value_across_orders() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_terminal_public_reserve_disposition();
+}
+
+#[test]
+fn v16_program_public_reserve_payments_wait_for_resolved_senior_disposition() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_terminal_public_reserve_seniority();
+}
 
 #[test]
 fn v16_program_terminal_provider_earnings_and_lazy_ledger_reach_exact_slab_close() {

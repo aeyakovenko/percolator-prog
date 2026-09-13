@@ -1770,10 +1770,17 @@ fn v16_program_reserve_custody_account_pairs_and_required_privileges_are_exhaust
 
         let mut control = reserve_custody_alias_fixture(route);
         let before = reserve_custody_alias_snapshot(&control);
+        let terminal = control.env.market_state().1.mode == MarketModeV16::Resolved;
+        let mut control_accounts = reserve_custody_alias_accounts(&control, route);
+        control_accounts[0].is_signer = !terminal;
+        let control_signers = (!terminal)
+            .then_some(&control.authority)
+            .into_iter()
+            .collect::<Vec<_>>();
         let accepted = control.env.send(
             reserve_custody_alias_instruction(&control, route),
-            reserve_custody_alias_accounts(&control, route),
-            &[&control.authority],
+            control_accounts,
+            &control_signers,
         );
         assert!(
             accepted.is_ok(),
@@ -1809,11 +1816,13 @@ fn v16_program_reserve_custody_account_pairs_and_required_privileges_are_exhaust
             "pair matrix must be complete"
         );
 
-        assert_reserve_custody_alias_rejects_atomically(
-            route,
-            "authority signer downgrade",
-            |accounts| accounts[0].is_signer = false,
-        );
+        if !terminal {
+            assert_reserve_custody_alias_rejects_atomically(
+                route,
+                "authority signer downgrade",
+                |accounts| accounts[0].is_signer = false,
+            );
+        }
         let required_writable_roles: &[usize] = match route {
             ReserveCustodyAliasRoute::TopUpInsuranceWithLedger
             | ReserveCustodyAliasRoute::TopUpInsuranceDomainWithLedger

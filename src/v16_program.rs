@@ -8128,6 +8128,7 @@ pub mod processor {
                     )
                     .map_err(map_v16_error)?
             };
+            ensure_trade_side_oi_cap_view(&group, asset_index_usize)?;
             ensure_new_counterparty_backed_liens_fresh_for_trade_view(
                 &group,
                 authenticated_market_slot_or_fallback_view(&group),
@@ -8494,6 +8495,9 @@ pub mod processor {
                     &requests,
                 )
                 .map_err(map_v16_error)?;
+            for request in &requests {
+                ensure_trade_side_oi_cap_view(&group, request.asset_index)?;
+            }
             if max_account_a_fee_atoms.is_some_and(|cap| outcome.fee_a > cap) {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
@@ -9241,6 +9245,10 @@ pub mod processor {
         );
         if stale_matured {
             return Err(PercolatorError::OracleStale.into());
+        }
+        // The taker signs fee_bps independently of the LP's matcher capability cap.
+        if cfg_pre.trade_fee_base_bps > fee_bps {
+            return Err(PercolatorError::InvalidInstruction.into());
         }
         let fee_floor_pre = core::cmp::max(fee_bps, cfg_pre.trade_fee_base_bps);
         if fee_floor_pre > max_trading_fee_bps {
@@ -10282,6 +10290,11 @@ pub mod processor {
         let market_data = market_ai.try_borrow_data()?;
         let (cfg, mode, configured_slots, _) =
             state::read_market_config_mode_and_capacity(&market_data)?;
+        // Resolved reserve payments still require full wind-down below and can only
+        // reach the recorded beneficiary. Live reserve management requires consent.
+        if mode != MarketModeV16::Resolved {
+            expect_signer(authority)?;
+        }
         let asset_index = domain / 2;
         if (require_live_mode && mode != MarketModeV16::Live)
             || domain >= configured_slots.saturating_mul(2)
@@ -10316,7 +10329,7 @@ pub mod processor {
             vault_token,
             &vault_authority,
             &cfg,
-            false,
+            !authority.is_signer,
         )?;
         let amount_u64 = amount_to_u64(amount)?;
         require_token_balance(vault_balance, amount_u64)?;
@@ -10493,7 +10506,6 @@ pub mod processor {
         let vault_authority_ai = account(accounts, 4)?;
         let token_program = account(accounts, 5)?;
         let ledger_ai = accounts.get(6);
-        expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_writable(dest_token)?;
         expect_writable(vault_token)?;
@@ -10636,7 +10648,6 @@ pub mod processor {
         let vault_token = account(accounts, 4)?;
         let vault_authority_ai = account(accounts, 5)?;
         let token_program = account(accounts, 6)?;
-        expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_writable(ledger_ai)?;
         expect_writable(dest_token)?;
@@ -10820,7 +10831,6 @@ pub mod processor {
         let vault_authority_ai = account(accounts, 4)?;
         let token_program = account(accounts, 5)?;
         let ledger_ai = accounts.get(6);
-        expect_signer(operator)?;
         expect_writable(market_ai)?;
         expect_writable(dest_token)?;
         expect_writable(vault_token)?;
@@ -10842,6 +10852,9 @@ pub mod processor {
             let market_data = market_ai.try_borrow_data()?;
             let (cfg, mode, _, market_id, _, _) =
                 state::read_market_trade_preflight(&market_data, asset_index)?;
+            if mode != MarketModeV16::Resolved {
+                expect_signer(operator)?;
+            }
             if market_id != expected_market_id {
                 return Err(PercolatorError::AssetGenerationMismatch.into());
             }
@@ -10856,7 +10869,7 @@ pub mod processor {
                 vault_token,
                 &vault_authority,
                 &cfg,
-                false,
+                !operator.is_signer,
             )?;
             require_token_balance(vault_balance, amount_u64)?;
         }
@@ -14496,6 +14509,25 @@ pub mod processor {
             || cert.active_bitmap_at_cert != active_bitmap
         {
             return Err(PercolatorError::EngineStale.into());
+        }
+        Ok(())
+    }
+
+    fn ensure_trade_side_oi_cap_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> ProgramResult {
+        let asset = &group
+            .markets
+            .get(asset_index)
+            .ok_or(PercolatorError::EngineInvalidLeg)?
+            .engine
+            .asset;
+        // Enforce the aggregate post-state bound for both attachments and resizes.
+        if asset.oi_eff_long_q.get() > percolator::MAX_OI_SIDE_Q
+            || asset.oi_eff_short_q.get() > percolator::MAX_OI_SIDE_Q
+        {
+            return Err(PercolatorError::EngineInvalidLeg.into());
         }
         Ok(())
     }

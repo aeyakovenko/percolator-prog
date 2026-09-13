@@ -34,6 +34,30 @@ mod mixed_maturity;
 #[path = "inv_070_terminal_prefix_reuse.rs"]
 mod terminal_prefix_reuse;
 
+#[path = "inv_070_prefunded_quote_custody.rs"]
+mod prefunded_quote_custody;
+
+#[path = "inv_070_frozen_destination_exit.rs"]
+mod frozen_destination_exit;
+
+#[path = "inv_070_native_pnl_sync_retry.rs"]
+mod native_pnl_sync_retry;
+
+#[path = "inv_070_native_recovery_disposition.rs"]
+mod native_recovery_disposition;
+
+#[path = "inv_070_terminal_native_reclassification.rs"]
+mod terminal_native_reclassification;
+
+#[path = "inv_070_generated_prefix_actionability.rs"]
+mod generated_prefix_actionability;
+
+#[path = "inv_070_shared_custody_terminal_history.rs"]
+mod shared_custody_terminal_history;
+
+#[path = "inv_070_multisig_terminal_custody.rs"]
+mod multisig_terminal_custody;
+
 #[test]
 fn v16_program_terminal_scan_reconciles_external_surplus_arriving_after_cached_prefix() {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_capacity;

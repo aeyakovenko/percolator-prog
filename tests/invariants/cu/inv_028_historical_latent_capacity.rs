@@ -6,7 +6,7 @@
 //! still latent at resolution, then accounts for their settlement and owner payout.
 
 use super::*;
-use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_capacity;
 use std::collections::BTreeSet;
 
 #[path = "inv_028_concurrent_latent_capacity.rs"]
@@ -14,6 +14,27 @@ mod concurrent_latent_capacity;
 
 #[path = "inv_028_retained_domain_episodes.rs"]
 mod retained_domain_episodes;
+
+#[path = "inv_028_hybrid_capacity_carry.rs"]
+mod hybrid_capacity_carry;
+
+#[path = "inv_028_sibling_generation_liveness.rs"]
+mod sibling_generation_liveness;
+
+#[path = "inv_028_latent_reset_exit.rs"]
+mod latent_reset_exit;
+
+#[path = "inv_028_active_leg_admission.rs"]
+mod active_leg_admission;
+
+#[path = "inv_028_reserved_domain_renewal.rs"]
+mod reserved_domain_renewal;
+
+#[path = "inv_028_exit_resource_reservation.rs"]
+mod exit_resource_reservation;
+
+#[path = "inv_028_recovery_latent_capacity.rs"]
+mod recovery_latent_capacity;
 
 const ASSETS: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
 const DOMAINS: usize = percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS;
@@ -43,8 +64,12 @@ struct History {
 
 impl History {
     fn new() -> Self {
+        Self::with_market_capacity(ASSETS)
+    }
+
+    fn with_market_capacity(capacity: usize) -> Self {
         assert_eq!(DOMAINS, ASSETS * 2);
-        let mut env = inv018_public_spl_market_with_params(
+        let mut env = inv018_public_spl_market_with_capacity(
             0,
             V16CuMarketParams {
                 max_portfolio_assets: ASSETS as u16,
@@ -54,6 +79,7 @@ impl History {
                 min_funding_lifetime_slots: 64,
                 ..V16CuMarketParams::default()
             },
+            capacity,
         );
         for asset in 0..ASSETS {
             env.configure_auth_mark_for_asset_as_admin(asset as u16, 0, PRICE);

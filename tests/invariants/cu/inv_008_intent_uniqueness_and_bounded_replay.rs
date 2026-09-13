@@ -39,6 +39,24 @@ mod passive_reward_stock;
 #[path = "inv_008_withdrawal_stock_history.rs"]
 mod withdrawal_stock_history;
 
+#[path = "inv_008_underfunded_rail_retry.rs"]
+mod underfunded_rail_retry;
+
+#[path = "inv_008_insurance_round_trip_retry.rs"]
+mod insurance_round_trip_retry;
+
+#[path = "inv_008_insurance_destination_epoch_retry.rs"]
+mod insurance_destination_epoch_retry;
+
+#[path = "inv_008_insurance_native_recreation.rs"]
+mod insurance_native_recreation;
+
+#[path = "inv_008_recreated_withdrawal_stock.rs"]
+mod recreated_withdrawal_stock;
+
+#[path = "inv_008_coowned_withdrawal_stock.rs"]
+mod coowned_withdrawal_stock;
+
 fn braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
         .find(marker)

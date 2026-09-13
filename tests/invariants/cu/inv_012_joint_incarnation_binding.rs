@@ -19,6 +19,33 @@ mod retained_scope_product;
 #[path = "inv_012_revocation_atomicity.rs"]
 mod revocation_atomicity;
 
+#[path = "inv_012_mixed_batch_revocation.rs"]
+mod mixed_batch_revocation;
+
+#[path = "inv_012_prior_epoch_cleanup_revocation.rs"]
+mod prior_epoch_cleanup_revocation;
+
+#[path = "inv_012_generation_bundle_rollback.rs"]
+mod generation_bundle_rollback;
+
+#[path = "inv_012_portfolio_grant_rollback.rs"]
+mod portfolio_grant_rollback;
+
+#[path = "inv_012_market_retirement_rollback.rs"]
+mod market_retirement_rollback;
+
+#[path = "inv_012_funded_owner_roundtrip.rs"]
+mod funded_owner_roundtrip;
+
+#[path = "inv_012_role_switch_generation.rs"]
+mod role_switch_generation;
+
+#[path = "inv_012_shared_owner_succession.rs"]
+mod shared_owner_succession;
+
+#[path = "inv_012_reused_asset_return_binding.rs"]
+mod reused_asset_return_binding;
+
 const CAPITAL: u128 = 1_000_000;
 const PRICE: u64 = 100;
 const SLOT: u64 = 1;

@@ -10,6 +10,21 @@
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 
+#[path = "inv_020_mixed_provider_liquidation.rs"]
+mod mixed_provider_liquidation;
+
+#[path = "inv_020_interrupted_refresh_fees.rs"]
+mod interrupted_refresh_fees;
+
+#[path = "inv_020_partial_observation_routes.rs"]
+mod partial_observation_routes;
+
+#[path = "inv_020_active_keeper_observations.rs"]
+mod active_keeper_observations;
+
+#[path = "inv_020_renewed_liquidation.rs"]
+mod renewed_liquidation;
+
 const PRICE: u64 = 1_000_000;
 const CURRENT: [u64; 2] = [1_040_000, 1_050_000];
 const DEPOSITS: [u128; 3] = [10_000_000, 220_000, 1_000];

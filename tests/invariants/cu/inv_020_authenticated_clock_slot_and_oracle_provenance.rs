@@ -68,6 +68,9 @@ mod staged_action_observations;
 #[path = "inv_020_retained_resolution_clock.rs"]
 mod retained_resolution_clock;
 
+#[path = "inv_020_fee_refresh_admission.rs"]
+mod fee_refresh_admission;
+
 #[test]
 fn v16_attack_recovery_oracle_push_cannot_extend_force_close_deadline() {
     const SHUTDOWN_SLOT: u64 = 2;

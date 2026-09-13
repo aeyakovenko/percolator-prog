@@ -26,11 +26,22 @@
 //! atomic payout rollback against still-funded unrelated insurance, and reconciles every SPL atom.
 //! `v16_program_receipt_terminal_suffix_partitions_rounding_burn_surplus_and_rent` carries
 //! completed receipt floors through the actual mint burn, raw-surplus sweep and slab tombstone.
+//! `v16_program_spent_payouts_do_not_replenish_receipts_across_order_and_atomic_retry`
+//! spends paid value into a zero-claim peer's wallet before replaying the same receipt,
+//! comparing both claimant orders and exact rollback through final custody/rent disposition.
+//! `v16_program_committed_conversion_then_late_expiry_preserves_receipt_attribution`
+//! commits one source conversion and older-receipt top-ups before a different source expires.
+//! Six claimant permutations at exact/late expiry preserve the refined claim denominator,
+//! consumed-provider attribution, exact rollback, and final payout/burn/rent disposition.
+//! This mixed conversion-then-expiry history adds bounded evidence; row 417 remains OPEN.
 //!
 //! Guarantee boundary: this is one adversarial public lifecycle matrix, not an exhaustive proof of
 //! every terminal residual partition.
 
 use super::*;
+
+#[path = "inv_067_receipt_spend_replay.rs"]
+mod receipt_spend_replay;
 
 #[path = "inv_067_receipt_partition_confluence.rs"]
 mod receipt_partition_confluence;
@@ -52,6 +63,27 @@ mod receipt_expiry_interleavings;
 
 #[path = "inv_067_receipt_source_realization.rs"]
 mod receipt_source_realization;
+
+#[path = "inv_067_receipt_rounding_threshold.rs"]
+mod receipt_rounding_threshold;
+
+#[path = "inv_067_receipt_repeated_stock.rs"]
+mod receipt_repeated_stock;
+
+#[path = "inv_067_receipt_aborted_realization.rs"]
+mod receipt_aborted_realization;
+
+#[path = "inv_067_receipt_conversion_then_expiry.rs"]
+mod receipt_conversion_then_expiry;
+
+#[path = "inv_067_receipt_overdue_history.rs"]
+mod receipt_overdue_history;
+
+#[path = "inv_067_receipt_fractional_source.rs"]
+mod receipt_fractional_source;
+
+#[path = "inv_067_receipt_late_fee_reclassification.rs"]
+mod receipt_late_fee_reclassification;
 
 #[test]
 fn v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once() {

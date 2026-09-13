@@ -681,7 +681,7 @@ fn verify_absent_provider_suffix(
                   signers: &[&Keypair],
                   index,
                   expected: PercolatorError| {
-        let failure = land(env, batch, signers).expect_err("provider consent remains required");
+        let failure = land(env, batch, signers).expect_err("reserve preconditions remain required");
         assert_eq!(
             failure.err,
             TransactionError::InstructionError(index, InstructionError::Custom(expected as u32))
@@ -702,7 +702,7 @@ fn verify_absent_provider_suffix(
         &[unsigned_provider.clone()],
         &[],
         2,
-        PercolatorError::ExpectedSigner,
+        PercolatorError::EngineLockActive,
     );
 
     env.svm.warp_to_slot(7);
@@ -826,11 +826,13 @@ fn verify_absent_provider_suffix(
     let mut wrong_provider = unsigned_provider.clone();
     wrong_provider.accounts[0] = AccountMeta::new(admin.pubkey(), true);
     wrong_provider.accounts[2] = AccountMeta::new(tokens[4], false);
+    let mut misdirected_provider = unsigned_provider;
+    misdirected_provider.accounts[2].pubkey = tokens[4];
     for (suffix, signers, error) in [
         (
-            unsigned_provider,
+            misdirected_provider,
             vec![insurer],
-            PercolatorError::ExpectedSigner,
+            PercolatorError::InvalidTokenAccount,
         ),
         (
             wrong_provider,
@@ -846,7 +848,7 @@ fn verify_absent_provider_suffix(
                     .filter(|line| **line == format!("Program {program} success"))
                     .count(),
                 1,
-                "insurance payment must execute before signer rejection"
+                "insurance payment must execute before reserve rejection"
             );
         }
         peak_cu = peak_cu.max(meta.compute_units_consumed);

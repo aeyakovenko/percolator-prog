@@ -5192,6 +5192,16 @@ pub(super) fn inv018_create_public_spl_mint(
     authority: Pubkey,
     decimals: u8,
 ) -> Pubkey {
+    inv018_create_public_spl_mint_with_freeze_authority(svm, payer, authority, decimals, None)
+}
+
+fn inv018_create_public_spl_mint_with_freeze_authority(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    authority: Pubkey,
+    decimals: u8,
+    freeze_authority: Option<Pubkey>,
+) -> Pubkey {
     let mint = Keypair::new();
     send_raw_ixs(
         svm,
@@ -5208,7 +5218,7 @@ pub(super) fn inv018_create_public_spl_mint(
                 &spl_token::ID,
                 &mint.pubkey(),
                 &authority,
-                None,
+                freeze_authority.as_ref(),
                 decimals,
             )
             .unwrap(),
@@ -5235,6 +5245,15 @@ pub(super) fn inv018_public_spl_market_with_capacity(
     params: V16CuMarketParams,
     capacity: usize,
 ) -> V16CuEnv {
+    inv018_public_spl_market_with_freeze_authority(decimals, params, capacity, None)
+}
+
+pub(super) fn inv018_public_spl_market_with_freeze_authority(
+    decimals: u8,
+    params: V16CuMarketParams,
+    capacity: usize,
+    freeze_authority: Option<Pubkey>,
+) -> V16CuEnv {
     assert!(capacity >= params.max_portfolio_assets as usize);
     let mut svm = LiteSVM::new();
     let program_id = percolator_prog::id();
@@ -5256,7 +5275,13 @@ pub(super) fn inv018_public_spl_market_with_capacity(
     svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
     svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
 
-    let mint = inv018_create_public_spl_mint(&mut svm, &payer, admin.pubkey(), decimals);
+    let mint = inv018_create_public_spl_mint_with_freeze_authority(
+        &mut svm,
+        &payer,
+        admin.pubkey(),
+        decimals,
+        freeze_authority,
+    );
 
     let market = Keypair::new();
     let market_len = state::market_account_len_for_capacity(capacity).unwrap();
