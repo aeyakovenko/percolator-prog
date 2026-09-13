@@ -1,5 +1,109 @@
 # Invariant-owned test coverage
 
+## INV-028 historical liens and future exit resources (row 423, 2026-09-13)
+
+Owner: [cu/inv_028_exit_resource_reservation.rs](cu/inv_028_exit_resource_reservation.rs),
+mounted under `inv_028_source_domain_realizability_cap::historical_latent_capacity::exit_resource_reservation`.
+Exact selector: `v16_program_historical_liens_preserve_future_domains_and_owner_exit`.
+
+Eight public LiteSVM worlds cross both position signs, single/batch bilateral trades,
+and provider-surplus withdrawal before or after latent settlement. Both settlement
+orders are exercised, coupled to the trade route. Public trades retain 16 historical
+source claims across eight assets, totaling 3,000 atoms. Public SPL top-ups add 400
+atoms per historical domain using each existing bucket's expiry. The winner withdraws
+all senior capital, then admits 30 lots on another asset at price 100: the entire
+3,000-atom margin requirement is backed by 16 nonzero historical liens. Two favorable
+settlements, separated by a cross-zero trade, materialize both new domains and bring
+the input-derived claim total to 3,060 atoms.
+
+This adds simultaneous historical reservations, provider withdrawal boundaries,
+new-domain growth and owner-only exit to the earlier one-historical-domain lien
+probe. The earlier historical/concurrent/active-leg capacity matrices require zero
+liens. This family uses **18 of the fixed 28 supported source slots**, not maximum
+source occupancy. All economic state is built through System/SPL/ATA/matcher/wrapper
+instructions. SOL funding and Clock use existing fixtures; no program-owned bytes,
+snapshot restores, production code or engine pin are changed. The existing history
+constructor is reused unchanged; its parent module only gains the new test mount.
+
+Every suffix transaction runs the shared stock, reservation and independently
+computed source-credit-rate censuses. Additional input-derived checks reconstruct
+claims, capital, signed positions, side OI, the historical/future domain union and
+each bucket's exact funded claim plus unreturned provider contribution. Settlement
+preserves complete historical source records and the absent portfolio Account.
+Provider withdrawals leave every portfolio Account unchanged, retain live liens
+and reject one atom beyond the independently constructed surplus boundary.
+
+Four exact rollback checks run per world: a successful admission followed by the
+active-portfolio withdrawal guard (`EngineStale`); an unfunded risk increase
+(`EngineLockActive`); the provider surplus-plus-one request (`EngineLockActive`);
+and conversion after final provider withdrawals invalidate its certificate
+(`EngineStale`). Prefix success logs prove the first admission actually executed;
+the unchanged admission retries successfully. All tracked and compiled-message
+Accounts, including metadata, absence, matcher context and SPL custody, roll back
+exactly; only the payer's exact signature fee changes. Conversion likewise retries
+unchanged after one public refresh.
+
+The risk owner alone calls `RebalanceReduce`. Permissionless cranks then strictly
+decrease the active-leg/lien-debt rank in **17 calls**, within a combined 20-call bound,
+without the counterparty's signature. Released provider principal becomes withdrawable;
+both owners receive exactly **1,003,060 / 996,940** atoms, and the provider recovers all
+**6,400** contributed atoms. Both portfolio Accounts close with empty data and zero
+lamports. Public side finalization restores Normal mode; vault, capital, live claims,
+live reservations and materialized portfolio count are zero. Per-domain consumed-backing
+and provider-receivable labels equal the corresponding converted claim exactly,
+totaling 3,060 atoms; retirement of those historical labels is not claimed. SPL mint
+supply remains exactly 2,006,400 atoms throughout the suffix.
+
+**Row 423 remains OPEN.** This is finite invariant-owned conformance, not a generic
+resource/liveness generator or theorem. The 26-history/two-latent variants explored
+during development exhausted 1.4 million CU before admission succeeded, including
+after public pre-refresh; they do not establish an admitted-risk exit violation or
+a maximum-shape result. Initial iterations also corrected bucket-expiry matching,
+the active-withdraw guard, conversion recertification and closed-account decoding.
+No implementation violation was proved. Partial claim-funded admission at maximum
+occupancy, CPI, fractional reservations, fees/funding, expiry, Recovery/Resolved
+market paths, arbitrary histories and generic INV-082/089 closure remain open.
+Rows 411/415/416/417/419/424/425/426/427/433 receive no new claims or edits.
+
+Validation uses branch `codex/row423-exit-resource-reservation-20260912` and worktree
+`/home/anatoly/percolator-prog-row423-exit-resource-reservation-20260912`, rebased onto
+`origin/codex/astra-open-holdout-ledger-20260912` at `a47abd05`, including `3496acf0`.
+The default-feature wrapper was rebuilt after the row427 production change using
+platform-tools v1.52; row411 changes only tests/documentation. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The privately rebuilt auth matcher has SHA-256
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The final behavioral run passes **8 worlds, 576 suffix calls, 32 exact rollbacks**,
+with peak transaction **1,187,334 CU** and maximum packet **758 bytes**.
+Only the new behavioral selector and the two requested metadata selectors are run.
+
+Exact verification commands from this worktree (build/test logs reside in the private
+TMPDIR; target directories are cleaned after verification):
+
+```bash
+export CARGO_TARGET_DIR=/tmp/row423-exit-reservation-20260912-target
+export TMPDIR=/tmp/row423-exit-reservation-20260912-tmp
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+# Run this matcher build from tests/fixtures/auth_matcher:
+env CARGO_TARGET_DIR=/tmp/row423-exit-reservation-20260912-matcher-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /home/anatoly/percolator-prog-row423-exit-resource-reservation-20260912/tests/fixtures/auth_matcher/target/deploy -- --locked
+# Return to the worktree root:
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+git diff --exit-code 3496acf0 HEAD -- src Cargo.toml Cargo.lock
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::exit_resource_reservation::v16_program_historical_liens_preserve_future_domains_and_owner_exit -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+cargo clean --target-dir /tmp/row423-exit-reservation-20260912-matcher-target
+cargo clean --target-dir tests/fixtures/auth_matcher/target
+```
+
 ## INV-014 retained policy and route budgets (row 411, 2026-09-13)
 
 Owner: [cu/inv_014_retained_policy_route_budgets.rs](cu/inv_014_retained_policy_route_budgets.rs).

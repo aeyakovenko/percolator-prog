@@ -27,6 +27,9 @@ mod latent_reset_exit;
 #[path = "inv_028_active_leg_admission.rs"]
 mod active_leg_admission;
 
+#[path = "inv_028_exit_resource_reservation.rs"]
+mod exit_resource_reservation;
+
 const ASSETS: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
 const DOMAINS: usize = percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS;
 const CAPITAL: u128 = 1_000_000;
