@@ -103,6 +103,84 @@ cargo clean --target-dir "$CARGO_TARGET_DIR"
 rmdir "$CARGO_TARGET_DIR" "$TMPDIR"
 ```
 
+## INV-020 observation abort after reward payout (row 426, 2026-09-13)
+
+Owner: [cu/inv_020_reward_payout_rollback.rs](cu/inv_020_reward_payout_rollback.rs),
+mounted by `cu/inv_020_renewed_liquidation.rs`. Exact selector:
+`inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::renewed_liquidation::reward_payout_rollback::v16_program_observation_abort_restores_liquidation_reward_payout_and_intent`.
+Requirement: `favorable-account-actions-require-complete-current-authenticated-observations`.
+
+Four independent public LiteSVM worlds cross forward/reverse observation order
+and separate/interrupted transaction schedules. A two-leg Hybrid/AuthMark short
+starts healthy. Authenticated price changes and slot-64 catchup first advance
+both assets only to slot 32, leaving portfolio Accounts unchanged and the target
+without current health. Complete catchup then certifies equity 130000 against
+maintenance 209000, authorizing one liquidation. Its 8778-atom penalty creates
+4389 atoms of keeper reward and 4389 atoms of insurance. The flat keeper can
+withdraw its 1000-atom deposit plus that reward: exactly 5389 SPL atoms.
+
+The interrupted worlds prepare the withdrawal instruction before reward creation.
+At the partial-refresh boundary, a transaction completes observation catchup,
+liquidates with empty hints, withdraws the reward, then rejects the original Pyth
+report as `OracleStale` at instruction index 5. A second transaction after public
+recertification executes the same liquidation and withdrawal, then rejects the
+same report at index 4. Logs require all expected wrapper successes and one SPL
+success before each error. Both attempts restore every tracked and compiled
+Account, including metadata/absence, market provenance, target certificate and
+position epoch, keeper capital/sequence, vault and token destination. The separate
+payer loses exactly its signature fees. Rejected transactions fit the 1232-byte
+packet limit; peak observed cost is 742586 CU, under the local 900000-CU ceiling.
+
+Recovery commits complete observations separately, then the unchanged no-tail
+liquidation and retained withdrawal together. The keeper sequence advances once;
+the consumed withdrawal rejects `EngineStale` with exact rollback. The clean and
+interrupted worlds match at partial catchup, complete certification and paid exit:
+asset state, certificates, owner capital/PnL/tokens and market stock. Detached
+full-refresh checks, reservation and stock censuses, matched OI reduction, penalty
+partition and physical/internal vault reconciliation supplement that comparison.
+
+This adds **rollback of an already executed observation-derived reward payout**.
+Existing renewed-liquidation tests abort liquidation prefixes and pay later;
+active/CPI-recipient tests abort liquidation/admission or owner-exit prefixes and
+also withdraw later. None includes the reward's actual SPL withdrawal and intent
+consumption before the stale-observation suffix. Passive-reward stock tests abort
+a stale withdrawal before SPL, using maintenance rewards without this observation
+renewal/liquidation history. This increment reuses parent helpers, not snapshots.
+System/SPL/ATA/wrapper instructions construct every economic Account; the mint
+authority is revoked after deposits. Only Clock/Pyth fixtures, loading programs
+and ordinary SOL airdrops use the harness. No initialized program bytes are set
+or replayed, and no production source or dependency pin changes.
+
+**Row 426 remains OPEN.** This finite case does not cover active recipients, CPI
+trades, nonzero funding/maintenance/trade fees, repeated liquidation episodes,
+omitted-Hybrid certification, provider/authority changes, arbitrary histories or
+maximum account shapes. No generic completeness claim or status promotion is made.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at `97356d1a`.
+Branch: `codex/astra-row426-observation-rollback-20260913`.
+Worktree: `/home/anatoly/percolator-row426-observation-rollback-20260913`.
+Private cache files were copied without hardlinks from `/dev/shm/percolator-row426-target`;
+default-feature wrapper SBF was rebuilt from this worktree with platform-tools
+v1.52, locked/offline. Its SHA-256 is
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact new selector passed 1/1 in 1.96s: four worlds, four post-SPL aborts,
+eight exact rollbacks and eight current-certificate/full-refresh comparisons.
+No production violation was observed. Validation commands from this worktree:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/astra-row426-observation-rollback-20260913/target
+export TMPDIR=/run/user/1001/astra-row426-observation-rollback-20260913/tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::renewed_liquidation::reward_payout_rollback::v16_program_observation_abort_restores_liquidation_reward_payout_and_intent -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --quiet --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD # after the single local commit
+```
+
 ## INV-005 zero-role suffix after funded handoff (row 416, 2026-09-13)
 
 Owner: [cu/inv_005_funded_role_zero_transition.rs](cu/inv_005_funded_role_zero_transition.rs),

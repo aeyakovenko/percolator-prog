@@ -8,6 +8,9 @@ use crate::support::fuzz_model::{
 };
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_020_reward_payout_rollback.rs"]
+mod reward_payout_rollback;
+
 fn crank_ix(
     env: &V16CuEnv,
     portfolios: [Pubkey; 3],

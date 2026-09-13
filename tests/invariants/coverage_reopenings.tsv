@@ -1000,6 +1000,19 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Funding/fees, repeated active rewards, recipient Hybrid+CPI, omitted-Hybrid active
 # certification, arbitrary histories and maximum shapes remain open. No generic
 # oracle, production change or status promotion; see README for exact commands.
+# Row 426 bounded reward-payout rollback conformance (2026-09-13):
+# cu/inv_020_reward_payout_rollback.rs, mounted under renewed_liquidation;
+# v16_program_observation_abort_restores_liquidation_reward_payout_and_intent.
+# Four public worlds cross evidence order and separate/interrupted routes. At both
+# partial catchup and current certification, a stale observation suffix aborts
+# completed liquidation AND reward SPL withdrawal: four post-SPL failures restore
+# provenance, health, reward, custody and the retained withdrawal sequence exactly.
+# Public recertification plus the same no-tail action/intent pays 5389 atoms once;
+# clean/interrupted checkpoints, stock/health censuses and consumed retries agree.
+# Eight exact rollbacks, eight full-refresh comparisons; peak 742586 CU. Existing
+# renewal/active/CPI tests withdraw after their aborted prefixes, not inside them.
+# Finite flat-recipient, one-liquidation evidence only; no generic completeness or
+# production change. Limits and exact validation commands in README. Row stays OPEN.
 426	LoF	BLOCKER	INV-020	INV-020,INV-024,INV-053,INV-054,INV-056,INV-061,INV-071,INV-072,INV-081,INV-086	missing-evidence+x-multi-step-refresh+x-liquidation	favorable-account-actions-require-complete-current-authenticated-observations	OPEN
 # Row 427 additional bounded conformance (2026-09-12): cu/inv_058_atomic_oi_fee_handoff.rs,
 # v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes.
