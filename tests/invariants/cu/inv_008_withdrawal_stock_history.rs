@@ -15,6 +15,9 @@ use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::
 #[path = "inv_008_reciprocal_reward_stock.rs"]
 mod reciprocal_reward_stock;
 
+#[path = "inv_008_liquidation_reward_stock.rs"]
+mod liquidation_reward_stock;
+
 const SLOT: u64 = 8;
 const RATE: u64 = 11;
 const WALLET: u64 = 4_096;
@@ -96,6 +99,17 @@ fn checked_send(
     expected: Option<(usize, InstructionError, [usize; 2])>,
     evidence: &mut Evidence,
 ) {
+    checked_send_with_limit(env, tx, frame, expected, evidence, CUSTODY_CU_LIMIT);
+}
+
+fn checked_send_with_limit(
+    env: &mut V16CuEnv,
+    tx: Transaction,
+    frame: &[Pubkey],
+    expected: Option<(usize, InstructionError, [usize; 2])>,
+    evidence: &mut Evidence,
+    cu_limit: u64,
+) {
     let keys: BTreeSet<_> = frame
         .iter()
         .chain(&tx.message.account_keys)
@@ -141,7 +155,7 @@ fn checked_send(
     assert_cu_within(
         "INV-008 stock history",
         meta.compute_units_consumed,
-        CUSTODY_CU_LIMIT,
+        cu_limit,
     );
     evidence.max_cu = evidence.max_cu.max(meta.compute_units_consumed);
     evidence.transactions += 1;

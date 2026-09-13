@@ -75,6 +75,94 @@ cargo fmt --all -- --check
 git diff --check && git diff --cached --check && git show --format= --check HEAD
 ```
 
+## INV-008 liquidation reward stock and retained withdrawal (row 415, 2026-09-13)
+
+Owner: [cu/inv_008_liquidation_reward_stock.rs](cu/inv_008_liquidation_reward_stock.rs),
+mounted under `inv_008_intent_uniqueness_and_bounded_replay::withdrawal_stock_history::liquidation_reward_stock`.
+Selector: `v16_consumed_withdrawal_cannot_spend_liquidation_rewards_across_quote_rails`.
+
+Four public LiteSVM histories cross 3,333/10,000-bps liquidation reward shares
+with both initial SPL quote rails. An authenticated move from 1,000,000 to
+997,600 settles 240,000 atoms of loss on a 100-contract long. After public
+recertification, a flat keeper withdraws all 37 original atoms. A subsequent
+`PermissionlessCrank` partially liquidates the long, charging that owner's
+capital and creating new keeper capital without changing the keeper's owner
+sequence or position epoch. The original withdrawal stays consumed on both
+rails; separate sequence-bound consent pays 37 reward atoms through the other
+rail and then the remaining reward through the first rail.
+
+Before the first payout, all delivery alternatives are signed and serialized
+with distinct CU envelopes in one blockhash window. A first-payout/liquidation/
+stale-withdrawal bundle restores both the original intent and the unliquidated
+position. After the original payout commits, two liquidation/fresh-payout bundles
+roll back on either stale withdrawal consent or a late SPL insufficient-funds
+suffix. The unchanged liquidation and fresh payout subsequently commit. Full
+tracked and compiled non-payer Accounts compare exactly, including lamports and
+metadata; the payer loses only its exact signature fee. Exact failing instruction
+indices and wrapper/SPL success logs establish that the prefixes executed.
+
+The book checks each owner's capital/PnL, per-rail receipts, consent sequences,
+keeper identity/epoch, both OI sides, untouched counterparty Account, insurance
+splits, accounting vault, complete SPL custody Accounts and both fixed supplies
+after every submitted history transaction. Fee/reward amounts are computed as
+`ceil(ceil(closed_q * 997600 / POS_SCALE) * 5 / 10000)` and the rounded policy
+share, independently of observed capital/reward deltas. The committed close
+quantity is then held fixed through all payout/retry checks. Stock and
+encumbrance censuses also run; the stock census excludes the independently known
+100,000-atom secondary custody prefund, which never creates owner capital.
+Economic endpoints agree across quote-rail order. System/SPL/ATA/wrapper calls
+construct all economic state and revoke both mint authorities before the history;
+only Clock, signer SOL and program loading are supplied by the harness.
+
+Net new: **consumed withdrawal plus capital created by another owner's partial
+liquidation, with joint OI/fee/reward/SPL rollback and alternate-rail retry**.
+Existing row415 rewards come from maintenance fees; its rail test replenishes
+deposits/backing/custody, and its PnL test converts a junior claim. This increment
+does not add row428 insurance-epoch evidence or row422 price-provenance claims.
+**Row 415 remains OPEN and invariant statuses are unchanged.** This finite
+three-portfolio, one-asset AuthMark schedule is not a generic stock generator or
+liquidation-size oracle: the engine-selected quantity is observed, not independently
+solved. Insurance/backing withdrawals, arbitrary histories, other oracle modes,
+exposed keepers, maintenance/funding, terminal payouts and durable nonces remain
+outside the increment. Withdrawals fully execute their signed amounts; partial
+liquidation does not test persistent partially spent withdrawal authorizations.
+No production change or public-route bug is claimed.
+
+Worktree: `/home/anatoly/percolator-row415-astra-20260913`; branch:
+`codex/astra-row415-retained-stock-retry-20260913`; base:
+`origin/codex/astra-open-holdout-ledger-20260912` at `8e5aa507`.
+The private target was copied without hard links from
+`/dev/shm/row415-retained-withdrawal-20260912-target`, then default-feature SBF
+was rebuilt locked/offline with platform-tools v1.52. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The shared stock-history checker retains its existing 300,000-CU default;
+this child supplies 325,000 for a standalone crank and 625,000 for a combined
+liquidation/payout bundle, the sum of the existing route allowances.
+Validation: new selector **1/1** (2.08s), four histories, 40 transactions,
+24 complete rollbacks, 12 rolled-back SPL payouts and 12 committed payouts;
+final-run peak **374,941 CU**. The related fee-shortened maintenance-reward
+selector passed **1/1** (three worlds, 30 transactions, 18 rollbacks, peak
+112,136 CU), checking the original shared-helper behavior on a different stock
+source. Both INV-079 metadata gates passed **1/1**; formatting and all three
+Git whitespace checks passed. Existing dead-code and Solana future-compatibility
+warnings remain. No broad suite or vulnerable/fixed-pin comparison was run.
+Exact validation commands (from the isolated worktree):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row415-retained-stock-retry-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/dev/shm/row415-retained-stock-retry-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::withdrawal_stock_history::liquidation_reward_stock::v16_consumed_withdrawal_cannot_spend_liquidation_rewards_across_quote_rails -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::withdrawal_stock_history::v16_program_fee_shortened_withdrawal_consumes_intent_before_passive_replenishment -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-005 cold-admin oracle replacement with funded coholder (row 416, 2026-09-13)
 
 Owner: [cu/inv_005_cold_oracle_funded_containment.rs](cu/inv_005_cold_oracle_funded_containment.rs),

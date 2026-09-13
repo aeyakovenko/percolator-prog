@@ -443,6 +443,26 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # remain OPEN, with no production change, bug claim or invariant status promotion.
 # Base b7ccff2a; exact selector, private build and required gates in README section
 # "INV-008 reciprocal fee stock and retained withdrawal".
+# 415 liquidation reward stock and retained withdrawal (2026-09-13):
+# cu/inv_008_liquidation_reward_stock.rs, mounted under INV-008 withdrawal_stock_history.
+# Four public SPL histories cross 3333/10000-bps reward shares and both quote rails.
+# A 37-atom payout consumes keeper consent before partial liquidation creates reward
+# capital without a keeper sequence/epoch advance. Joint liquidation/SPL prefixes
+# roll back on stale consent or late token failure, then unchanged fresh consent pays.
+# Independent fee/reward arithmetic, per-owner books, complete Account rollback,
+# payer fees, fixed supplies, both OI sides and stock/encumbrance censuses are checked.
+# Net new liquidation-created capital and joint OI/fee/reward rollback; distinct from
+# maintenance rewards, PnL conversion and deposit/backing/custody rail replenishment.
+# Finite AuthMark conformance: liquidation size is observed, not independently solved;
+# generic oracle, insurance/backing binding, arbitrary histories and terminal modes
+# remain open. Row415 stays OPEN; no row428/422 claim, production or status change.
+# Exact selector: cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::withdrawal_stock_history::liquidation_reward_stock::v16_consumed_withdrawal_cannot_spend_liquidation_rewards_across_quote_rails -- --exact --nocapture --test-threads=1
+# Related selector: cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::withdrawal_stock_history::v16_program_fee_shortened_withdrawal_consumes_intent_before_passive_replenishment -- --exact --nocapture --test-threads=1
+# README section "INV-008 liquidation reward stock and retained withdrawal" records
+# base 8e5aa507, isolated paths, SBF build/hash, limits and exact metadata/fmt/diff commands.
+# New/related selectors and both metadata gates passed 1/1 each; new 40 transactions,
+# 24 full rollbacks, 12 rolled-back and 12 committed SPL payouts; final peak 374941 CU.
+# Formatting and Git whitespace checks passed; no broad-suite or closure claim.
 415	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-011,INV-024,INV-031,INV-064	retained-withdrawal+x-stock-replenishment+x-retry	a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution	OPEN
 # 416/429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_coalescence.rs,
 # v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements.
