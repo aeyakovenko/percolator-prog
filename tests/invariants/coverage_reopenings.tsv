@@ -498,6 +498,28 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # selectors, private cached-SBF provenance and limits. Recredit/economic-loss depletion,
 # active claims, Recovery, other rails and generic progress remain outside this witness.
 # No production fix or status promotion; row 420 remains OPEN.
+# Row 420 bounded conformance (2026-09-13): cu/inv_073_provider_keeper_ledger_handoff.rs.
+# Selector: inv_073_no_permanent_user_lock::v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature.
+# Four public histories cross expiry-1/expiry and old/new earnings ledgers after
+# a provider's ATA closure, full wallet drain and key removal. Keeper A funds and
+# pays a 101-principal/17-fee prefix; keeper B pays the tail without A's signature,
+# prior-ledger access or signed SyncBackingDomainLedger in replacement worlds.
+# Exact provider payouts 100875/976, earned fees 875, principal burn 0/99899;
+# 20 successful transactions, four exact creation/payment/close rollbacks, four
+# rent-exact closures; final selector 1/1 in 2.12s, peak 479229 CU <= 500000.
+# Empty wallet and abandoned ledger frames remain exact. New mandatory-ledger
+# handoff, not prior custody repair.
+# Run from /tmp/percolator-astra-row420-provider-progress-20260913:
+# export CARGO_TARGET_DIR="$PWD/target/build" TMPDIR="$PWD/target/tmp" CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+# export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+# cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature -- --exact --nocapture --test-threads=1
+# Rebuilt locked/offline default-feature wrapper, platform-tools v1.52, base c4da24a2:
+# SBF SHA-256 dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52;
+# rebuilt auth matcher SHA-256 50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93.
+# README records exact build/metadata/check commands and the corrected empty-wallet
+# fixture assertion. No production change or implementation violation. OPEN limits:
+# active claims, economic loss/recredit, Recovery, other rails, multiple providers,
+# absent market authority/portfolio deletion signers and arbitrary histories.
 420	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-026,INV-027,INV-032,INV-063,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	provider-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-provider-signature	OPEN
 # Row 421 bounded conformance (2026-09-12): cu/inv_073_frozen_insurance_remainder.rs,
 # v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement.

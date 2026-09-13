@@ -109,6 +109,11 @@ fn v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_e
 }
 
 #[test]
+fn v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_provider_keeper_ledger_handoff();
+}
+
+#[test]
 fn v16_program_absent_native_provider_redeemed_prefix_preserves_public_remainder_and_close() {
     crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_native_provider_redemption();
 }

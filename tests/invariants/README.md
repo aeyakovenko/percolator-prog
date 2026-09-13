@@ -86,6 +86,83 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-073 provider keeper and ledger handoff (row 420, 2026-09-13)
+
+Owner: [cu/inv_073_provider_keeper_ledger_handoff.rs](cu/inv_073_provider_keeper_ledger_handoff.rs).
+The INV-073 entrypoint uses the existing public `terminal_earnings_world` fixture
+and reserve transaction checker mounted under INV-024. Exact selector:
+`inv_073_no_permanent_user_lock::v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature`.
+
+Four public LiteSVM histories cross a resumed payout at expiry-1/expiry with reuse
+of the first keeper's ledger or creation of a second keeper's ledger. After the
+fixture's public trades, earned fees, unsigned user payouts and owner-signed
+portfolio deletion, the provider publicly closes its empty SPL ATA and drains its
+System wallet. Its key and the insurance operator's key are dropped. Keeper A
+recreates custody, funds a seeded program-owned ledger through System instructions,
+and pays 101 principal atoms plus 17 of the 875 earned-fee atoms. Keeper B then
+takes over the fee payer; A's key is dropped. B pays the remaining earnings using
+either A's ledger or its own newly created ledger, without a provider signature
+or `SyncBackingDomainLedger`. The fresh-ledger suffix omits A's ledger entirely.
+
+An input-derived oracle checks each committed payment's owner amounts, complete
+SPL Account images, mint supply, vault/stock and reservation censuses, unchanged
+beneficiaries/configuration/epochs, exact payer rent and fees, and the drained
+provider wallet. LiteSVM retains that wallet as an empty zero-lamport System
+Account, whose full image stays unchanged. Insurance is paid independently to its
+existing beneficiary. Before expiry, the provider receives exactly 100,875 atoms;
+at expiry it receives 976, while the unpaid 99,899 principal atoms lose their
+claim and burn at final close. Every earned-fee atom remains provider-attributed.
+Ledger-local withdrawn totals differ (875 in one ledger versus 17 plus 858 in
+two), but aggregate custody and retirement agree. The abandoned ledger's stale
+858-atom observation cannot require signed synchronization before closure.
+
+Each history also rejects a partial earnings payment followed by premature slab
+close, with complete Account rollback including new-ledger creation in the two
+replacement worlds. Retry pays the exact tail; an administrator then closes the
+market with an exact tombstone, rent refund and mint-supply check. Each world has
+five successful transactions after provider disappearance and one rejected bundle.
+The final selector passed 1/1 in 2.12s. Its observed peak is 479,229 CU, below the
+test's 500,000-CU assertion and the shared transaction checker's 1,200,000-CU limit.
+
+The new relation is keeper/ledger handoff after a paid prefix while the provider
+wallet is drained. Earlier row420 custody replacement and native redemption keep
+the payment ledger fixed or do not exercise earnings; row421 wallet repair concerns
+insurance recredit, and row433 close retries do not replace the mandatory earnings
+ledger. Open PR metadata was inspected as holdout context; no PR patch was copied.
+Only row 420 is targeted. **Row 420 remains OPEN; invariant statuses are unchanged.**
+This finite family does not cover active claims, economic loss/recredit, Recovery,
+other quote rails, multiple provider domains, missing market authority, missing
+portfolio owners during mechanical deletion, or arbitrary histories. There are no
+new program-owned byte writes, production changes, or observed implementation
+violations. The initial development run corrected a fixture assertion that expected
+LiteSVM to remove a drained Account rather than retain its zero-lamport image.
+
+Base: `c4da24a211722bcb1cd32d18781217850034210e`; engine pin
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Worktree:
+`/tmp/percolator-astra-row420-provider-progress-20260913`; branch:
+`codex/astra-row420-provider-progress-20260913`. Host/build caches were copied
+(not hard-linked) from `/tmp/percolator-astra-row429-target-20260912` into this
+worktree's ignored `target/build`. Both SBF artifacts were freshly rebuilt here
+with locked/offline platform-tools v1.52; the wrapper uses default features.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Exact commands, run from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target/build" TMPDIR="$PWD/target/tmp"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir target/build/deploy -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-012 interleaved revocation words (row 412, 2026-09-13)
 
 Owner: [stateful/inv_012_revocation_words.rs](stateful/inv_012_revocation_words.rs),

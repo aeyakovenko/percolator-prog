@@ -51,6 +51,10 @@ pub(crate) use frozen_reserve_replacement::verify_frozen_reserve_replacement;
 mod provider_custody_replacement;
 pub(crate) use provider_custody_replacement::verify_provider_custody_replacement;
 
+#[path = "inv_073_provider_keeper_ledger_handoff.rs"]
+mod provider_keeper_ledger_handoff;
+pub(crate) use provider_keeper_ledger_handoff::verify_provider_keeper_ledger_handoff;
+
 #[path = "inv_073_native_provider_redemption.rs"]
 mod native_provider_redemption;
 pub(crate) use native_provider_redemption::verify_native_provider_redemption;
