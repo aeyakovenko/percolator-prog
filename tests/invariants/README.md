@@ -1,5 +1,79 @@
 # Invariant-owned test coverage
 
+## INV-073 native insurance redemption rollback (row 421, 2026-09-13)
+
+Owner: [cu/inv_073_native_insurance_ledger_progress.rs](cu/inv_073_native_insurance_ledger_progress.rs).
+One new selector:
+`inv_073_no_permanent_user_lock::native_insurance_ledger_progress::v16_program_native_insurance_paid_prefix_survives_operator_free_redemption_retry`.
+
+Two public LiteSVM histories cross a ledger initialized by `TopUpInsurance` with
+98 recorded principal/deposit atoms and a blank optional ledger initialized on
+terminal payout. Both fund long/short budgets of 49/49. A distinct insurance
+operator's key is dropped before resolution. The first payout commits 41 atoms
+with only the keeper signing, leaving 57 owed and the corresponding ledger record.
+Two unencumbered native token accounts each also hold 19 unsynchronized donation
+lamports that never enter the insurance claim.
+
+The beneficiary then signs a public bundle that redeems the already paid native
+prefix to SOL, withdraws the remaining 57 insurance atoms into the second account,
+and redeems that account. An ordinary insufficient-funds System suffix rejects
+after all three SPL calls and the wrapper withdrawal have succeeded. Every tracked
+and compiled Account rolls back exactly, including native token bytes, wallet and
+custody lamports, market budgets, telemetry and the prior committed 41-atom prefix.
+The separate payer loses exactly its two-signature network fee. The identical
+three-instruction prefix commits on a fresh blockhash without the operator.
+
+Complete market state, native vault images, both domain budgets, ledger principal/
+deposit/withdrawal/profit/loss fields, authority/control frames and stock/encumbrance
+censuses are checked after each payment. Both histories converge to 98 insurance
+atoms redeemed into the beneficiary's System wallet, plus exactly the two custody
+rents and 38 independently donated lamports. Insurance, logical/native vault stock
+and both allowances reach zero. A third, administrator-signed public transaction
+closes the empty vault and leaves the rent-exact slab tombstone while preserving
+the final ledger and beneficiary SOL.
+
+Novelty: **a retained unsigned insurance payment and ledger principal across
+redemption to SOL, rollback of the remaining payout, and exact retry**. Existing
+row421 native-ledger coverage retains wrapped custody and has no redemption or
+rejected transaction. INV-077's signed native-insurance redemption test has no
+insurance ledger or redemption rollback. Row420's native provider test checks
+principal custody recreation without this insurance ledger boundary. Exactly one
+selector is added, not another donation or payout-order matrix.
+
+**Row421 remains OPEN; invariant dispositions are unchanged.** This finite
+conformance requires the beneficiary for SPL redemption and the administrator for
+resolution/mechanical close. It proves operator absence through the full path and
+beneficiary absence from the first payment's signers, not beneficiary-independent
+SOL redemption. Active liabilities, spend/recredit, arbitrary histories, other
+assets/quote rails, ledger disposal and maximum shapes remain outside this slice.
+No production change or bug is claimed. System/SPL/ATA/wrapper instructions
+construct all economic state; only the existing native-mint genesis fixture,
+signer funding and Clock are harness inputs.
+
+Worktree: `/home/anatoly/percolator-astra-row421-public-progress-20260913`;
+branch: `codex/astra-row421-public-progress-20260913`. Rebased from `2df9d824` onto
+supervisor `c8b6483f` before the passing selector run. The private target was copied
+from the previous native-ledger target and default-feature SBF rebuilt locally
+with platform-tools v1.52, locked/offline. Supervisor advancement changed no
+production source or pin. Engine: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`;
+SBF SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The exact selector passed 1/1 in 0.76s; peak rejection, payment/redemption and
+slab-close CU was `[42298,42148,21846]`, below 150,000. Initial fixture assumptions
+were corrected: native custody uses actual rent funding, and terminal payout
+custody has no external close authority. No diagnostic-only probe remains.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/astra-row421-redemption-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::native_insurance_ledger_progress::v16_program_native_insurance_paid_prefix_survives_operator_free_redemption_retry -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-067 late fee reclassification and retained receipts (row 417, 2026-09-13)
 
 Owner: [cu/inv_067_receipt_late_fee_reclassification.rs](cu/inv_067_receipt_late_fee_reclassification.rs),

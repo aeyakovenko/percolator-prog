@@ -777,6 +777,19 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::native_insurance_ledger_progress::v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close -- --exact --nocapture --test-threads=1
 # cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
 # cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+# Row421 bounded conformance (2026-09-13): cu/inv_073_native_insurance_ledger_progress.rs,
+# v16_program_native_insurance_paid_prefix_survives_operator_free_redemption_retry.
+# Two native histories cross funded-principal and lazy payout ledgers. A keeper-only
+# 41-atom payment commits before both populated custody accounts are redeemed to SOL
+# around the final 57-atom insurance payout. A rejected System suffix restores the
+# paid prefix, remaining claim, complete ledger, SPL bytes and every tracked lamport;
+# identical-prefix retry pays exactly 98 plus only donated lamports and custody rent.
+# The operator key is dropped before resolution; the beneficiary signs SPL redemption.
+# Distinct from wrapped-only native ledgers and ledger-free insurance/provider redemption.
+# Two exact rollbacks and two rent-exact slab closes; peak 42298 CU below 150000.
+# No production change, generic oracle/proof or status promotion. Beneficiary-independent
+# redemption, liabilities, spend/recredit, other rails and absent-admin closure stay OPEN.
+# README section "INV-073 native insurance redemption rollback" records exact commands.
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
 # Row 422 bounded policy-succession conformance (2026-09-12):
 # cu/inv_045_reward_policy_catchup.rs,

@@ -19,7 +19,9 @@
 //! SPL custody and row420/433 provider/reserve repair. It does not prove arbitrary
 //! histories, active user liabilities, insurance consumption/recredit, other
 //! assets/quote rails, authority succession, maximum shapes or absent-admin
-//! retirement. Recipient redemption and separate ledger disposal remain unproven.
+//! retirement. The redemption test below additionally checks an unsigned paid
+//! prefix through atomic insurance/SOL settlement without the insurance operator.
+//! The beneficiary signs SPL redemption; separate ledger disposal remains unproven.
 
 use super::*;
 use crate::support::fuzz_model::{
@@ -502,4 +504,386 @@ fn v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close
     }
     assert_eq!((worlds, payments), (4, 8));
     println!("INV-073 native insurance ledger: worlds={worlds}, keeper_payments={payments}, paid_per_world={FUNDED}, peak_CU(ledger,donation_sync,payment,close)={peak:?}");
+}
+
+#[test]
+fn v16_program_native_insurance_paid_prefix_survives_operator_free_redemption_retry() {
+    use inv_081_success_state_validity_over_complete_public_routes::inv081_public_native_market;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut peak = [0; 3];
+    let mut rollbacks = 0;
+    for funded_ledger in [false, true] {
+        let mut env = inv081_public_native_market();
+        let admin = env.admin.insecure_clone();
+        let beneficiary = Keypair::new();
+        let operator = Keypair::new();
+        let wallets = [beneficiary.pubkey(), operator.pubkey()];
+        for (role, holder) in [
+            (processor::ASSET_AUTH_INSURANCE, &beneficiary),
+            (processor::ASSET_AUTH_INSURANCE_OPERATOR, &operator),
+        ] {
+            env.svm.airdrop(&holder.pubkey(), 1_000_000_000).unwrap();
+            env.try_update_per_asset_authority_with_cu(
+                &admin,
+                Some(holder),
+                0,
+                role,
+                holder.pubkey().to_bytes(),
+            )
+            .unwrap();
+        }
+        let ledger_key = Keypair::new();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &ledger_key,
+            state::insurance_ledger_account_len(),
+            env.program_id,
+        );
+        let ledger = ledger_key.pubkey();
+        let destinations = [Keypair::new(), Keypair::new()];
+        let custody = destinations.each_ref().map(Signer::pubkey);
+        let custody_rent = env
+            .svm
+            .minimum_balance_for_rent_exemption(TokenAccount::LEN);
+        for destination in &destinations {
+            send_raw_tx(
+                &mut env.svm,
+                &env.payer,
+                system_instruction::create_account(
+                    &env.payer.pubkey(),
+                    &destination.pubkey(),
+                    custody_rent,
+                    TokenAccount::LEN as u64,
+                    &spl_token::ID,
+                ),
+                &[destination],
+            )
+            .unwrap();
+            send_raw_ixs(
+                &mut env.svm,
+                &env.payer,
+                vec![spl_token::instruction::initialize_account3(
+                    &spl_token::ID,
+                    &destination.pubkey(),
+                    &env.mint,
+                    &wallets[0],
+                )
+                .unwrap()],
+                &[],
+            )
+            .unwrap();
+        }
+        let admin_token = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
+        let empty_vault = env.svm.get_account(&env.vault).unwrap();
+        send_raw_ixs(
+            &mut env.svm,
+            &env.payer,
+            vec![
+                system_instruction::transfer(&wallets[0], &custody[0], FUNDED),
+                spl_token::instruction::sync_native(&spl_token::ID, &custody[0]).unwrap(),
+            ],
+            &[&beneficiary],
+        )
+        .unwrap();
+        let mut funding_accounts = vec![
+            AccountMeta::new(wallets[0], true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(custody[0], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        if funded_ledger {
+            funding_accounts.push(AccountMeta::new(ledger, false));
+        }
+        env.send(
+            ProgInstruction::TopUpInsurance {
+                market_id: env.asset_market_id(0),
+                authority_epoch: env.control_sequences(0).authority_epoch,
+                intent_id: env.control_sequences(0).insurance_top_up + 1,
+                amount: FUNDED.into(),
+            },
+            funding_accounts,
+            &[&beneficiary],
+        )
+        .unwrap();
+        drop((operator, destinations, ledger_key));
+        env.resolve();
+
+        // Unsynchronized recipient lamports are redeemed with rent, never debited
+        // from insurance or counted as a ledger deposit, withdrawal, profit or loss.
+        send_raw_ixs(
+            &mut env.svm,
+            &env.payer,
+            custody
+                .iter()
+                .map(|key| {
+                    system_instruction::transfer(&env.payer.pubkey(), key, RECIPIENT_DONATION)
+                })
+                .collect(),
+            &[],
+        )
+        .unwrap();
+        let resolved = env.svm.get_account(&env.market).unwrap();
+        let initial = env.market_state();
+        assert_eq!(&initial.1.insurance_domain_budget[..2], &[49, 49]);
+        assert_eq!(initial.1.insurance, FUNDED.into());
+        let sequences = env.control_sequences(0);
+        let profile = state::read_asset_oracle_profile(&resolved.data, 0).unwrap();
+        let ledger_frame = env.svm.get_account(&ledger).unwrap();
+        let beneficiary_frame = env.svm.get_account(&wallets[0]).unwrap();
+        let original_custody = custody.map(|key| env.svm.get_account(&key).unwrap());
+        for account in &original_custody {
+            let token = TokenAccount::unpack(&account.data).unwrap();
+            assert_eq!((token.owner, token.amount), (wallets[0], 0));
+            assert_eq!(token.close_authority, COption::None);
+            assert_eq!(token.delegate, COption::None);
+            assert_eq!(
+                token.is_native,
+                COption::Some(account.lamports - RECIPIENT_DONATION)
+            );
+        }
+        let tracked = [
+            env.market,
+            env.vault,
+            env.vault_authority,
+            env.mint,
+            ledger,
+            wallets[0],
+            wallets[1],
+            custody[0],
+            custody[1],
+            admin.pubkey(),
+            admin_token,
+        ];
+        let mut paid = 0;
+        for (index, amount) in [FIRST, FUNDED - FIRST].into_iter().enumerate() {
+            let withdrawal = Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new_readonly(wallets[0], false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(custody[index], false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ],
+                data: ProgInstruction::WithdrawInsuranceAsset {
+                    asset_index: 0,
+                    market_id: env.asset_market_id(0),
+                    authority_epoch: sequences.authority_epoch,
+                    amount: amount.into(),
+                }
+                .encode(),
+            };
+            assert!(withdrawal.accounts.iter().all(|meta| !meta.is_signer));
+            let redeem = |token| {
+                spl_token::instruction::close_account(
+                    &spl_token::ID,
+                    &token,
+                    &wallets[0],
+                    &wallets[0],
+                    &[],
+                )
+                .unwrap()
+            };
+            let prefix = if index == 0 {
+                vec![withdrawal]
+            } else {
+                vec![redeem(custody[0]), withdrawal, redeem(custody[1])]
+            };
+            if index == 1 {
+                env.svm.expire_blockhash();
+                let mut instructions = vec![
+                    heap_ix(),
+                    ComputeBudgetInstruction::set_compute_unit_limit(CU_LIMIT as u32),
+                ];
+                instructions.extend_from_slice(&prefix);
+                instructions.push(system_instruction::transfer(
+                    &env.payer.pubkey(),
+                    &admin.pubkey(),
+                    u64::MAX,
+                ));
+                let tx = Transaction::new_signed_with_payer(
+                    &instructions,
+                    Some(&env.payer.pubkey()),
+                    &[&env.payer, &beneficiary],
+                    env.svm.latest_blockhash(),
+                );
+                assert_eq!(tx.message.header.num_required_signatures, 2);
+                assert!(!tx.message.account_keys[..2].contains(&wallets[1]));
+                assert!(!wallets.contains(&env.payer.pubkey()));
+                tx.verify().unwrap();
+                assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
+                let mut keys = tx.message.account_keys.clone();
+                keys.extend_from_slice(&tracked);
+                keys.sort_unstable();
+                keys.dedup();
+                let before: Vec<_> = keys.iter().map(|key| env.svm.get_account(key)).collect();
+                let failure = env.svm.send_transaction(tx).unwrap_err();
+                assert_eq!(
+                    failure.err,
+                    TransactionError::InstructionError(5, InstructionError::Custom(1))
+                );
+                for (program, successes) in [(env.program_id, 1), (spl_token::ID, 3)] {
+                    assert_eq!(
+                    failure
+                        .meta
+                        .logs
+                        .iter()
+                        .filter(|line| **line == format!("Program {program} success"))
+                        .count(),
+                    successes,
+                    "both native redemptions and the final insurance transfer precede rejection"
+                );
+                }
+                for (key, mut expected) in keys.iter().zip(before) {
+                    if *key == env.payer.pubkey() {
+                        expected.as_mut().unwrap().lamports -=
+                            2 * FeeStructure::default().lamports_per_signature;
+                    }
+                    assert_eq!(env.svm.get_account(key), expected, "exact rollback {key}");
+                }
+                assert_cu_within(
+                    "native redemption rollback",
+                    failure.meta.compute_units_consumed,
+                    CU_LIMIT,
+                );
+                peak[0] = peak[0].max(failure.meta.compute_units_consumed);
+                rollbacks += 1;
+            }
+            let mut changes = vec![env.market, env.vault, ledger, custody[index]];
+            let signers = if index == 0 {
+                vec![]
+            } else {
+                vec![&beneficiary]
+            };
+            if index == 1 {
+                changes.extend_from_slice(&[custody[0], wallets[0]]);
+            }
+            peak[1] = peak[1].max(execute(&mut env, &prefix, &signers, &tracked, &changes, 0));
+            paid += amount;
+            let remaining = FUNDED - paid;
+            assert!(remaining < FUNDED - (paid - amount));
+            let mut expected_market = initial.clone();
+            expected_market.1.insurance = remaining.into();
+            expected_market.1.vault = remaining.into();
+            expected_market.1.insurance_domain_budget[0] = u128::from(49u64.saturating_sub(paid));
+            expected_market.1.insurance_domain_budget[1] = u128::from(49 - paid.saturating_sub(49));
+            expected_market.1.insurance_domain_budget_remaining_total = remaining.into();
+            assert_eq!(env.market_state(), expected_market);
+            let market = env.svm.get_account(&env.market).unwrap();
+            assert_eq!(market.lamports, resolved.lamports);
+            assert_eq!(env.control_sequences(0), sequences);
+            assert_eq!(
+                state::read_asset_oracle_profile(&market.data, 0).unwrap(),
+                profile
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault),
+                Some(native_image(&empty_vault, remaining, 0))
+            );
+            let mut expected_beneficiary = beneficiary_frame.clone();
+            if index == 0 {
+                let mut expected_custody = original_custody[0].clone();
+                let mut token = TokenAccount::unpack(&expected_custody.data).unwrap();
+                token.amount = FIRST;
+                TokenAccount::pack(token, &mut expected_custody.data).unwrap();
+                expected_custody.lamports += FIRST;
+                assert_eq!(env.svm.get_account(&custody[0]), Some(expected_custody));
+            } else {
+                for key in custody {
+                    assert!(env
+                        .svm
+                        .get_account(&key)
+                        .is_none_or(|account| account.lamports == 0 && account.data.is_empty()));
+                }
+                expected_beneficiary.lamports += FUNDED
+                    + original_custody
+                        .iter()
+                        .map(|account| account.lamports)
+                        .sum::<u64>();
+            }
+            assert_eq!(env.svm.get_account(&wallets[0]), Some(expected_beneficiary));
+            let record_account = env.svm.get_account(&ledger).unwrap();
+            assert_eq!(
+                state::read_insurance_ledger(&record_account.data).unwrap(),
+                state::InsuranceLedgerAccountV16 {
+                    market_group: env.market.to_bytes(),
+                    authority: wallets[0].to_bytes(),
+                    total_principal_atoms: if funded_ledger { remaining.into() } else { 0 },
+                    total_deposited_atoms: if funded_ledger { FUNDED.into() } else { 0 },
+                    total_withdrawn_atoms: paid.into(),
+                    cumulative_profit_atoms: 0,
+                    cumulative_loss_atoms: 0,
+                    last_observed_insurance_atoms: remaining.into(),
+                }
+            );
+            assert_eq!(
+                (
+                    record_account.owner,
+                    record_account.lamports,
+                    record_account.executable,
+                    record_account.rent_epoch
+                ),
+                (
+                    ledger_frame.owner,
+                    ledger_frame.lamports,
+                    ledger_frame.executable,
+                    ledger_frame.rent_epoch
+                )
+            );
+            assert_market_stock_census(
+                "redeemed insurance",
+                &expected_market.1,
+                &market.data,
+                &[],
+                remaining.into(),
+            )
+            .unwrap();
+            assert_reservation_encumbrance_census("redeemed insurance", &expected_market.1, &[])
+                .unwrap();
+        }
+        let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();
+        let tombstone_rent = env
+            .svm
+            .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN);
+        expected_admin.lamports += resolved.lamports + empty_vault.lamports - tombstone_rent;
+        let close = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(admin_token, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: ProgInstruction::CloseSlab {
+                authority_epoch: sequences.authority_epoch,
+            }
+            .encode(),
+        };
+        let changes = [env.market, env.vault, admin.pubkey()];
+        peak[2] = peak[2].max(execute(
+            &mut env,
+            &[close],
+            &[&admin],
+            &tracked,
+            &changes,
+            0,
+        ));
+        let tombstone = env.svm.get_account(&env.market).unwrap();
+        assert_closed_market_tombstone(&tombstone);
+        assert_eq!(tombstone.lamports, tombstone_rent);
+        assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
+        assert!(env
+            .svm
+            .get_account(&env.vault)
+            .is_none_or(|account| account.lamports == 0 && account.data.is_empty()));
+    }
+    assert_eq!(rollbacks, 2);
+    println!("INV-073 native insurance redemption: worlds=2, unsigned_prefixes=2, operator_free_redemptions=4, exact_rollbacks={rollbacks}, peak_CU(rollback,payment_redemption,slab_close)={peak:?}");
 }
