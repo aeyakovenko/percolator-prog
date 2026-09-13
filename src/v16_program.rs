@@ -8117,9 +8117,19 @@ pub mod processor {
                 trade_delta_may_require_source_domain_capacity(account_b_position, -size_q)?;
             if account_a_needs_source_capacity || account_b_needs_source_capacity {
                 let mut admitted_source_domains_a =
-                    occupied_source_domains_snapshot_for_trade_view(&account_a)?;
+                    reserved_source_domains_snapshot_for_trade_view(
+                        &group,
+                        &account_a,
+                        core::slice::from_ref(&req),
+                        size_q < 0,
+                    )?;
                 let mut admitted_source_domains_b =
-                    occupied_source_domains_snapshot_for_trade_view(&account_b)?;
+                    reserved_source_domains_snapshot_for_trade_view(
+                        &group,
+                        &account_b,
+                        core::slice::from_ref(&req),
+                        size_q > 0,
+                    )?;
                 ensure_trade_delta_source_domain_capacity_view(
                     &mut admitted_source_domains_a,
                     asset_index as usize,
@@ -8477,9 +8487,13 @@ pub mod processor {
             collect_maintenance_fee_before_trade_view(&cfg, &mut group, &mut account_b)?;
             if needs_source_domain_capacity {
                 let mut admitted_source_domains_a =
-                    occupied_source_domains_snapshot_for_trade_view(&account_a)?;
+                    reserved_source_domains_snapshot_for_trade_view(
+                        &group, &account_a, &requests, false,
+                    )?;
                 let mut admitted_source_domains_b =
-                    occupied_source_domains_snapshot_for_trade_view(&account_b)?;
+                    reserved_source_domains_snapshot_for_trade_view(
+                        &group, &account_b, &requests, true,
+                    )?;
                 for (
                     asset_index,
                     _oracle_profile,
@@ -8927,8 +8941,11 @@ pub mod processor {
         }
     }
 
-    fn occupied_source_domains_snapshot_for_trade_view(
+    fn reserved_source_domains_snapshot_for_trade_view(
+        group: &state::MarketViewMutV16<'_>,
         account: &percolator::PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+        invert_requests: bool,
     ) -> Result<SourceDomainAdmissionSnapshot, ProgramError> {
         let mut out = SourceDomainAdmissionSnapshot {
             domains: [0u32; percolator::PORTFOLIO_SOURCE_DOMAIN_CAP],
@@ -8942,6 +8959,30 @@ pub mod processor {
                 out.domains[out.len] = slot.domain.get();
                 out.len += 1;
             }
+        }
+        // Other active legs retain both future settlement domains. A leg fully closed
+        // by this trade can release its latent pair, but never its occupied claims.
+        for pod in &account.header.legs {
+            let leg = pod.try_to_runtime().map_err(map_v16_error)?;
+            if !leg.active {
+                continue;
+            }
+            let asset_index = leg.asset_index as usize;
+            if let Some(request) = requests.iter().find(|r| r.asset_index == asset_index) {
+                let current_q = signed_position_for_asset_view(group, account, asset_index)?;
+                let delta = if invert_requests {
+                    -request.size_q
+                } else {
+                    request.size_q
+                };
+                if current_q.checked_add(delta) == Some(0) {
+                    continue;
+                }
+            }
+            let (long_domain, short_domain) =
+                percolator::v16_domain_pair_for_asset_index(asset_index).map_err(map_v16_error)?;
+            out.push_reserved(long_domain as u32)?;
+            out.push_reserved(short_domain as u32)?;
         }
         Ok(out)
     }
