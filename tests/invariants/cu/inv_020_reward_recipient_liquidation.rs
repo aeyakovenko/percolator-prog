@@ -84,8 +84,120 @@ fn penalty(remaining: u128, price: u64) -> u128 {
         .min(10_000)
 }
 
-#[test]
-fn v16_program_reward_recipient_becomes_liquidation_target_after_composite_refresh() {
+type Outcome = (u128, u128, u128, u128, u128, u128, u128, [(u128, i128); 4]);
+
+fn recipient_trade(
+    env: &V16CuEnv,
+    owners: &[Keypair; 4],
+    portfolios: [Pubkey; 4],
+    size: i128,
+    price: u64,
+    batch: bool,
+    matcher: Option<(Pubkey, Pubkey, Pubkey)>,
+) -> Instruction {
+    let Some((program, context, delegate)) = matcher else {
+        return trade(env, owners, portfolios, &[2], size, batch);
+    };
+    let data = if batch {
+        env.batch_trade_cpi_ix(
+            portfolios[2],
+            portfolios[3],
+            vec![BatchTradeCpiLeg {
+                asset_index: 2,
+                market_id: env.asset_market_id(2),
+                size_q: size,
+                fee_bps: 0,
+                limit_price: price,
+            }],
+        )
+    } else {
+        env.trade_cpi_ix(portfolios[2], portfolios[3], 2, size, 0, price)
+    };
+    Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(owners[2].pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolios[2], false),
+            AccountMeta::new(portfolios[3], false),
+            AccountMeta::new_readonly(program, false),
+            AccountMeta::new(context, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        data: data.encode(),
+    }
+}
+
+fn reject_incomplete_prefix(
+    env: &mut V16CuEnv,
+    signers: &[&Keypair],
+    prefix: &[Instruction],
+    mut observation: Instruction,
+    tracked: &[Pubkey],
+    spl_prefix: bool,
+) -> u64 {
+    // The composite hint still declares two providers after one account is omitted.
+    observation.accounts.pop().unwrap();
+    env.svm.expire_blockhash();
+    let mut instructions = vec![heap_ix(), cu_ix()];
+    instructions.extend_from_slice(prefix);
+    instructions.push(observation);
+    let mut all_signers = vec![&env.payer];
+    all_signers.extend_from_slice(signers);
+    let tx = Transaction::new_signed_with_payer(
+        &instructions,
+        Some(&env.payer.pubkey()),
+        &all_signers,
+        env.svm.latest_blockhash(),
+    );
+    tx.verify().unwrap();
+    assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
+    let mut keys = tracked.to_vec();
+    keys.extend(tx.message.account_keys.iter().copied());
+    keys.sort_unstable();
+    keys.dedup();
+    let mut before: Vec<_> = keys.iter().map(|key| env.svm.get_account(key)).collect();
+    let payer = keys
+        .iter()
+        .position(|key| *key == env.payer.pubkey())
+        .unwrap();
+    before[payer].as_mut().unwrap().lamports -=
+        tx.signatures.len() as u64 * FeeStructure::default().lamports_per_signature;
+    let failure = env.svm.send_transaction(tx).unwrap_err();
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(
+            (prefix.len() + 2) as u8,
+            InstructionError::NotEnoughAccountKeys,
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(
+        failure
+            .meta
+            .logs
+            .iter()
+            .filter(|line| **line == format!("Program {} success", env.program_id))
+            .count(),
+        prefix.len()
+    );
+    if spl_prefix {
+        assert!(failure
+            .meta
+            .logs
+            .iter()
+            .any(|line| *line == format!("Program {} success", spl_token::ID)));
+    }
+    assert_eq!(
+        keys.iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>(),
+        before
+    );
+    failure.meta.compute_units_consumed
+}
+
+fn recipient_routes(cpi: bool, interrupted: bool) -> (Outcome, u64, usize) {
     let mut reference = None;
     let mut peak = 0;
     let mut rollbacks = 0;
@@ -136,6 +248,20 @@ fn v16_program_reward_recipient_becomes_liquidation_target_after_composite_refre
             let portfolios = funded.map(|pair| pair.0);
             let tokens = funded.map(|pair| pair.1);
             let [peer, target, keeper, keeper_peer] = portfolios;
+            let matcher = cpi.then(|| {
+                let matcher =
+                    auth_matcher_for_lp_via_system_create(&mut env, &owners[3], keeper_peer);
+                env.set_matcher_config_with_trade_fee_cap(
+                    matcher.0,
+                    &owners[3],
+                    keeper_peer,
+                    matcher.1,
+                    matcher.2,
+                    1,
+                    0,
+                );
+                matcher
+            });
             send_raw_tx(
                 &mut env.svm,
                 &env.payer,
@@ -151,7 +277,7 @@ fn v16_program_reward_recipient_becomes_liquidation_target_after_composite_refre
                 &[&env.admin],
             )
             .unwrap();
-            for (asset, long, short) in [(0, 0, 1), (1, 0, 1), (2, 3, 2)] {
+            for (asset, long, short) in [(0, 0, 1), (1, 0, 1)] {
                 env.trade_asset_with_cu(
                     asset,
                     &owners[long],
@@ -174,6 +300,30 @@ fn v16_program_reward_recipient_becomes_liquidation_target_after_composite_refre
             tracked.extend(tokens);
             tracked.extend(owners.each_ref().map(Signer::pubkey));
             tracked.extend(initial);
+            if let Some(matcher) = matcher {
+                tracked.extend([matcher.0, matcher.1, matcher.2]);
+                let open = recipient_trade(
+                    &env,
+                    &owners,
+                    portfolios,
+                    -(POS_SCALE as i128),
+                    PRICE,
+                    batch_exit,
+                    Some(matcher),
+                );
+                peak = peak.max(transact(&mut env, &[&owners[2]], &[open], &tracked, None));
+            } else {
+                env.trade_asset_with_cu(
+                    2,
+                    &owners[3],
+                    keeper_peer,
+                    &owners[2],
+                    keeper,
+                    POS_SCALE as i128,
+                    PRICE,
+                    0,
+                );
+            }
             set_test_clock(&mut env, 0, 101);
             env.push_auth_mark_for_asset_as_admin(1, u64::MAX, CURRENT[1]);
             let reports = [0, 1, 2].map(|i| {
@@ -266,6 +416,22 @@ fn v16_program_reward_recipient_becomes_liquidation_target_after_composite_refre
                     // consumes it without any oracle-account tail of its own.
                     let recipient_before = env.svm.get_account(&keeper);
                     let update = observation(&env, keeper_peer, &owners[3], None, coherent, &[2]);
+                    if interrupted {
+                        for prefix in [vec![], vec![update.clone()]] {
+                            let missing =
+                                observation(&env, keeper, &owners[3], None, coherent, &[2]);
+                            peak = peak.max(reject_incomplete_prefix(
+                                &mut env,
+                                &[&owners[3]],
+                                &prefix,
+                                missing,
+                                &tracked,
+                                false,
+                            ));
+                            rollbacks += 1;
+                            census(&env, portfolios, tokens);
+                        }
+                    }
                     peak = peak.max(transact(&mut env, &[&owners[3]], &[update], &tracked, None));
                     assert_eq!(env.svm.get_account(&keeper), recipient_before);
                     let market = env.svm.get_account(&env.market).unwrap();
@@ -275,6 +441,18 @@ fn v16_program_reward_recipient_becomes_liquidation_target_after_composite_refre
                     assert_eq!(profile.last_good_oracle_slot, 64);
                     assert_eq!(env.market_state().1.assets[2].slot_last, 64);
                     let refresh = observation(&env, keeper, &owners[3], None, coherent, &[]);
+                    if interrupted {
+                        let missing = observation(&env, keeper, &owners[3], None, coherent, &[2]);
+                        peak = peak.max(reject_incomplete_prefix(
+                            &mut env,
+                            &[&owners[3]],
+                            std::slice::from_ref(&refresh),
+                            missing,
+                            &tracked,
+                            false,
+                        ));
+                        rollbacks += 1;
+                    }
                     peak = peak.max(transact(
                         &mut env,
                         &[&owners[3]],
@@ -315,6 +493,19 @@ fn v16_program_reward_recipient_becomes_liquidation_target_after_composite_refre
                 coherent,
                 if omit_after_refresh { &[] } else { &[2] },
             );
+            if interrupted {
+                let missing = observation(&env, keeper, &owners[3], None, coherent, &[2]);
+                peak = peak.max(reject_incomplete_prefix(
+                    &mut env,
+                    &[&owners[3]],
+                    std::slice::from_ref(&liquidate),
+                    missing,
+                    &tracked,
+                    false,
+                ));
+                rollbacks += 1;
+                census(&env, portfolios, tokens);
+            }
             peak = peak.max(transact(
                 &mut env,
                 &[&owners[3]],
@@ -360,26 +551,15 @@ fn v16_program_reward_recipient_becomes_liquidation_target_after_composite_refre
             assert_eq!(env.svm.get_account(&target), first_target);
             census(&env, portfolios, tokens);
 
-            let close = trade(
+            let close = recipient_trade(
                 &env,
                 &owners,
                 portfolios,
-                &[2],
                 remaining as i128,
+                KEEPER_PRICE,
                 batch_exit,
+                matcher,
             );
-            peak = peak.max(transact(
-                &mut env,
-                &[&owners[2], &owners[3]],
-                &[close],
-                &tracked,
-                None,
-            ));
-            assert!(!has_active_leg_for_asset(&env.portfolio_state(keeper), 2));
-            assert!(!has_active_leg_for_asset(
-                &env.portfolio_state(keeper_peer),
-                2
-            ));
             let withdrawal = Instruction {
                 program_id: env.program_id,
                 accounts: vec![
@@ -393,6 +573,31 @@ fn v16_program_reward_recipient_becomes_liquidation_target_after_composite_refre
                 ],
                 data: env.withdraw_ix(keeper, expected).encode(),
             };
+            let close_signers = if cpi {
+                vec![&owners[2]]
+            } else {
+                vec![&owners[2], &owners[3]]
+            };
+            if interrupted {
+                let missing = observation(&env, keeper, &owners[2], None, coherent, &[2]);
+                peak = peak.max(reject_incomplete_prefix(
+                    &mut env,
+                    &close_signers,
+                    &[close.clone(), withdrawal.clone()],
+                    missing,
+                    &tracked,
+                    true,
+                ));
+                rollbacks += 1;
+                assert_eq!(env.token_amount(tokens[2]), 0);
+                census(&env, portfolios, tokens);
+            }
+            peak = peak.max(transact(&mut env, &close_signers, &[close], &tracked, None));
+            assert!(!has_active_leg_for_asset(&env.portfolio_state(keeper), 2));
+            assert!(!has_active_leg_for_asset(
+                &env.portfolio_state(keeper_peer),
+                2
+            ));
             peak = peak.max(transact(
                 &mut env,
                 &[&owners[2]],
@@ -425,7 +630,34 @@ fn v16_program_reward_recipient_becomes_liquidation_target_after_composite_refre
             assert!(env.portfolio_state(peer).capital.get() >= ENDOWMENTS[0]);
         }
     }
-    assert_eq!(rollbacks, 8);
+    assert_eq!(rollbacks, if interrupted { 28 } else { 8 });
     assert_cu_within("composite recipient liquidation history", peak, 500_000);
-    println!("recipient becomes target: 4 worlds, {rollbacks} complete rollbacks; peak {peak} CU; economics={reference:?}");
+    println!("recipient becomes target: cpi={cpi}, interrupted={interrupted}, 4 worlds, {rollbacks} complete rollbacks; peak {peak} CU; economics={reference:?}");
+    (reference.unwrap(), peak, rollbacks)
+}
+
+#[test]
+fn v16_program_reward_recipient_becomes_liquidation_target_after_composite_refresh() {
+    recipient_routes(false, false);
+}
+
+#[test]
+fn v16_program_composite_recipient_target_routes_restore_missing_evidence_prefixes_and_payout() {
+    let mut reference = None;
+    let mut peak = 0;
+    let mut rollbacks = 0;
+    for cpi in [false, true] {
+        for interrupted in [false, true] {
+            let (outcome, cu, rejected) = recipient_routes(cpi, interrupted);
+            if let Some(reference) = &reference {
+                assert_eq!(&outcome, reference);
+            } else {
+                reference = Some(outcome);
+            }
+            peak = peak.max(cu);
+            rollbacks += rejected;
+        }
+    }
+    assert_eq!(rollbacks, 72);
+    println!("Scope C observations: 16 worlds, {rollbacks} exact rollbacks, 8 restored SPL payout prefixes, peak {peak} CU");
 }

@@ -6,6 +6,9 @@ use carry_transport_exit::{pay_resolved_with_residue, profiles};
 use num_bigint::BigUint;
 use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_045_moving_reset_routes.rs"]
+mod moving_reset_routes;
+
 struct Book {
     economics: Economics,
     target: [u64; 2],
