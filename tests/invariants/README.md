@@ -1,5 +1,26 @@
 # Invariant-owned test coverage
 
+## PR135 Scope T generated funded-role epochs (2026-09-13)
+
+Owner: [cu/inv_005_generated_funded_role_epochs.rs](cu/inv_005_generated_funded_role_epochs.rs),
+mounted below INV-005's `cold_admin_handoff_scope::funded_role_zero_transition`.
+Ninety interleaved oracle/backing/insurance A -> B -> A words cross both assets
+and two funded coholder shapes. The 360 public LiteSVM histories add cold-admin
+round trips, generated partial payouts, current observations and final senior
+exits. An input-derived recipient/domain ledger checks every tested transition;
+retained management, current funded non-oracle observations and cold-admin
+economic-role replacements receive exact SPL-prefix rollback checks.
+The exact selector passes 360 worlds and 16,920 checked transactions, including
+4,320 exact rollback/SPL prefixes, with a peak of 56,882 CU. All four metadata
+gates and formatting/whitespace checks pass.
+
+This is bounded INV-005/020/024/027/055/081 evidence. Row 416 remains OPEN and
+all finding/status classifications are unchanged. Four older adjacent controls
+have insurance-debit epoch expectations that also fail on the untouched base.
+The [Scope T audit](pr135_scope_t_funded_role_authority_containment_20260913.md)
+records prior coverage, exact scope and limits, artifact provenance, selectors
+and validation results. No production change.
+
 ## PR135 Scope S generated expiring reserve roles (2026-09-13)
 
 Owner: [cu/inv_024_generated_expiring_roles.rs](cu/inv_024_generated_expiring_roles.rs),

@@ -627,6 +627,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # cargo fmt --all -- --check
 # git diff --check && git diff --cached --check && git show --format= --check HEAD
 # Row 416 remains OPEN; no production changes or invariant status promotion.
+# Scope T (2026-09-13): inv_005_generated_funded_role_epochs adds 360 public
+# Live/Active histories over 90 interleaved funded-role ABA words, both assets
+# and two oracle/backing/insurance coholder shapes. Partial payouts, admin ABA,
+# current observation scope, retained management and exact SPL-prefix rollback
+# compose with an input-derived entitlement ledger and full senior exit.
+# Finite same-price/flat coverage only; row 416 is a label and remains OPEN.
+# See pr135_scope_t_funded_role_authority_containment_20260913.md for limits and
+# validation, including four unchanged adjacent failures reproduced on the base.
 416	LoF	PRIVILEGED	INV-005	INV-005,INV-020,INV-024,INV-027,INV-055	cold-admin+x-funded-role+x-authority-containment	correctly-signed-role-management-cannot-seize-an-incumbent-funded-role	OPEN
 # 417 partial conformance (2026-09-10): cu/inv_067_receipt_source_realization.rs::v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry.
 # Partial source realization plus an older receipt payout rolls back; retained claims survive

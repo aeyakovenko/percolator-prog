@@ -5,6 +5,9 @@ use super::{handoff, land, profile, set_holder, signed};
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 use crate::*;
 
+#[path = "inv_005_generated_funded_role_epochs.rs"]
+mod generated_funded_role_epochs;
+
 const BACKING: [u128; 4] = [31, 43, 59, 71];
 const INSURANCE: [u128; 4] = [17, 23, 29, 37];
 const CAPITAL: u128 = 101;
