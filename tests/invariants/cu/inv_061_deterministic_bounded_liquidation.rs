@@ -37,6 +37,9 @@
 
 use super::*;
 
+#[path = "inv_061_enumerated_public_sizing.rs"]
+mod enumerated_public_sizing;
+
 #[test]
 fn v16_program_queued_liquidation_recertifies_after_partitioned_opposing_adl() {
     const ASSET: usize = 1;
