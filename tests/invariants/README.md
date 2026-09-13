@@ -1,5 +1,23 @@
 # Invariant-owned test coverage
 
+## Astra Scope F capped PnL terminal composition (2026-09-13)
+
+Owner: [cu/inv_058_pnl_terminal_handoff.rs](cu/inv_058_pnl_terminal_handoff.rs),
+mounted under INV-058's `atomic_oi_fee_handoff::multi_asset::pnl_terminal_handoff`.
+Eight public LiteSVM histories combine a shared side-OI cap, three unequal
+owner-pair PnL claims, existing-leg headroom transfer, and resolution with all
+six positions still open. Input-derived owner claims remain distinct from the
+new exposure quantities through ranked permissionless payouts. Complete Account
+rollback covers successful handoff and SPL-paying prefixes before unchanged
+instruction retries. The selector passes 8 worlds, 76 exact rollbacks, 68 terminal
+calls and 48 committed payouts; peak measured CU is 453650.
+
+This adds bounded nonzero-PnL terminal evidence beyond the fixed-mark cap and
+fee selectors. Rows 417/423/424/427 remain OPEN; machine statuses and production
+are unchanged. It adds no expiry/scan, generic capacity, haircut-receipt or
+maximum-shape closure. The [Scope F audit](astra_scope_f_capped_pnl_terminal_20260913.md)
+records prior coverage, exact commands, fixed artifact provenance and limits.
+
 ## Astra Scope B native recredit custody (2026-09-13)
 
 Owner: [cu/inv_073_native_recredit_custody.rs](cu/inv_073_native_recredit_custody.rs),

@@ -16,6 +16,9 @@ mod generated_side_oi_composition;
 #[path = "inv_058_existing_leg_fee_competition.rs"]
 mod existing_leg_fee_competition;
 
+#[path = "inv_058_pnl_terminal_handoff.rs"]
+mod pnl_terminal_handoff;
+
 const ASSETS: usize = 2;
 const HANDOFF_FEE_BPS: u64 = 100;
 type Legs = Vec<(u16, i128)>;
