@@ -384,6 +384,17 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # and first admission. Explicit fee sync only; standalone uncollected fees, CPI,
 # nonzero trading/funding fees and arbitrary histories remain open. README records
 # build, selector and metadata commands. No production change or status promotion.
+# Scope F generated fee entitlement (2026-09-13):
+# cu/inv_027_generated_flat_fee_entitlement.rs,
+# v16_program_generated_flat_fee_collection_preserves_first_admission_entitlement.
+# Eight input cases x four transports x two collection routes: 64 public worlds
+# jointly check elapsed maintenance, rounded trading fees, exact admission equity,
+# insurance splits, prior flat fee history and complete owner payouts. An unrelated
+# senior owner exits before either trader's fee collection. Input-derived history
+# checks 1120 attempts, 64 margin rollbacks and 128 same-slot fee no-ops. Fixed prices,
+# zero funding/claims and one-leg batches; no standalone deferred-fee boundary claim.
+# Scope A/B products and all status classifications stay unchanged; audit and exact
+# commands: scope_f_first_admission_audit_20260913.md. Row 413 remains OPEN.
 413	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-first-risk	all-accrued-liabilities-precede-every-risk-increasing-admission	OPEN
 # Row 414 bounded response conformance (2026-09-12): cu/inv_012_reused_asset_return_binding.rs,
 # v16_program_reused_asset_requires_current_generation_and_fresh_matcher_output.
@@ -1837,4 +1848,8 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # an exposure episode. Standalone deferred-fee admission, other liabilities, fee
 # policies, multi-leg batches and arbitrary histories remain gaps; see README for
 # exact selector, commands and scope. No production fix or status promotion.
+# Scope F (2026-09-13): the row 413 generated fee-entitlement selector also retains
+# a completed fee-bearing episode through later flat accrual and risk admission.
+# Nonzero fees and input-derived payouts compose across collection/trade routes.
+# See scope_f_first_admission_audit_20260913.md; row 434 stays COVERED.
 434	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-055,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-risk-admission	all-accrued-liabilities-precede-every-risk-increasing-admission-even-after-flat-account-history	COVERED

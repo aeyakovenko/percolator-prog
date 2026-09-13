@@ -19,6 +19,29 @@ INV-024/036/041, with principal-preservation evidence for INV-027. Rows
 change or Scope A/B/C closure is claimed. The [Scope D audit](pr135_scope_d_audit_20260913.md)
 records the row mapping, non-vacuity, limits, exact selectors and build provenance.
 
+## Scope F generated flat fee entitlement (rows 413/434, 2026-09-13)
+
+Owner: [cu/inv_027_generated_flat_fee_entitlement.rs](cu/inv_027_generated_flat_fee_entitlement.rs),
+mounted under `inv_027_protected_principal_seniority::joint_admission_liabilities::generated_flat_fee_entitlement`.
+Exact selector: `v16_program_generated_flat_fee_collection_preserves_first_admission_entitlement`.
+
+Eight reproducible input cases cross four trade transports and explicit-sync versus
+implicit-withdrawal fee collection in 64 public LiteSVM worlds. A continuing input
+ledger checks maintenance, separately rounded trading charges, partial and final
+owner payouts, insurance attribution, OI and every current certificate. Never-opened
+and previously closed accounts both reach their exact post-fee admission boundary;
+an unrelated senior owner first exits while the traders' fees remain uncollected.
+The increment combines generated nonzero fee policies and quantities with two fee
+collection routes, prior fee episodes and opposite-transport closing. Prices are
+fixed, funding and junior claims are zero, and batches have one leg.
+
+This is bounded INV-027/044/053/060/081 conformance evidence. Row 413 remains OPEN,
+row 434 remains COVERED and all invariant statuses are unchanged. Standalone
+deferred-fee admission, arbitrary histories, shared owners, clipped/debt cases and
+multi-asset batches remain outside this increment. Scope A observation and Scope B
+residual work are not extended. See the [Scope F audit](scope_f_first_admission_audit_20260913.md)
+for the oracle, exact commands, results and artifact hashes.
+
 ## INV-024 atomic resolution and submitter reserves (row 410, 2026-09-13)
 
 Owner: [cu/inv_024_resolution_submitter_reserve.rs](cu/inv_024_resolution_submitter_reserve.rs),

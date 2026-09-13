@@ -44,6 +44,9 @@ mod first_batch_fee_boundary;
 #[path = "inv_027_refilled_first_admission.rs"]
 mod refilled_first_admission;
 
+#[path = "inv_027_generated_flat_fee_entitlement.rs"]
+mod generated_flat_fee_entitlement;
+
 const PRICE: u64 = 100;
 const START: u64 = 1;
 const ADMISSION: u64 = 4;
