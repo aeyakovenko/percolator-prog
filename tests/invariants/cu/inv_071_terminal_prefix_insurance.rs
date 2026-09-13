@@ -86,7 +86,7 @@ fn land(
 
 fn check(env: &V16CuEnv, tokens: [Pubkey; 2], paid: [bool; 2], domain: usize, expired: bool) {
     let (cfg, group) = env.market_state();
-    assert_eq!(cfg.terminal_slab_scan_progress, 3);
+    assert_eq!(cfg.terminal_slab_scan_progress, if expired { 0 } else { 3 });
     assert_eq!(group.mode, MarketModeV16::Resolved);
     assert_eq!(
         (

@@ -824,7 +824,7 @@ impl Oracle {
         }
     }
 
-    fn apply(&mut self, h: &History, action: &Action) {
+    fn apply(&mut self, _h: &History, action: &Action) {
         match *action {
             Action::Provider(amount) => self.provider_paid += amount,
             Action::Insurance { restore, pay } => {
@@ -834,7 +834,7 @@ impl Oracle {
             Action::Wait(slot) => self.clock = slot,
             Action::Expire(i) => {
                 self.expired[i] = true;
-                self.cursor = [h.first, h.last][i];
+                self.cursor = 0;
             }
             Action::Scan(cursor) => self.cursor = cursor,
             Action::Close => self.closed = true,
@@ -999,8 +999,8 @@ fn run(h: &History) -> (usize, usize, u64) {
     settle_receipts(&mut world, h);
     let mut oracle = Oracle::new();
     oracle.check(&world, h);
-    let mut behind_prefix = 0;
-    let bound = h.slots().div_ceil(CHUNK) + INSURANCE.div_ceil(h.chunk) as usize + 12;
+    let mut expiry_recredits = 0;
+    let bound = 3 * h.slots().div_ceil(CHUNK) + INSURANCE.div_ceil(h.chunk) as usize + 12;
     for _ in 0..bound {
         let action = oracle.next(h);
         let rank = oracle.rank(h);
@@ -1036,7 +1036,8 @@ fn run(h: &History) -> (usize, usize, u64) {
                     ],
                 ),
                 Action::Insurance { restore, pay } => {
-                    behind_prefix += usize::from(restore > 0 && oracle.cursor > 0);
+                    expiry_recredits +=
+                        usize::from(restore > 0 && oracle.expired.iter().any(|expired| *expired));
                     world.insurance(pay)
                 }
                 _ => scan,
@@ -1050,7 +1051,8 @@ fn run(h: &History) -> (usize, usize, u64) {
                 .get_account(&world.env.admin.pubkey())
                 .unwrap();
             if matches!(action, Action::Close)
-                || matches!(action, Action::Insurance { restore, .. } if restore > 0 && oracle.cursor > 0)
+                || matches!(action, Action::Insurance { restore, .. }
+                    if restore > 0 && oracle.expired.iter().any(|expired| *expired))
             {
                 let fail = system_instruction::transfer(
                     &world.env.admin.pubkey(),
@@ -1084,7 +1086,7 @@ fn run(h: &History) -> (usize, usize, u64) {
         assert!(oracle.rank(h) < rank, "{action:?} must lower rank {rank:?}");
         if oracle.closed {
             assert!(
-                behind_prefix == 2,
+                expiry_recredits == 2,
                 "both expiries must fund an earlier absent insurer"
             );
             return (world.steps, world.rollbacks, world.peak);

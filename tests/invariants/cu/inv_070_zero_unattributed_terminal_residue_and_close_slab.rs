@@ -52,6 +52,9 @@ mod terminal_native_reclassification;
 #[path = "inv_070_generated_prefix_actionability.rs"]
 mod generated_prefix_actionability;
 
+#[path = "inv_070_terminal_scan_recredit.rs"]
+mod terminal_scan_recredit;
+
 #[path = "inv_070_shared_custody_terminal_history.rs"]
 mod shared_custody_terminal_history;
 
@@ -586,7 +589,7 @@ fn v16_program_retained_terminal_withdrawal_revalidates_expiry_after_scan_and_pa
             let vault_before_expiry = env.svm.get_account(&env.vault);
             let mint_before_expiry = env.svm.get_account(&env.mint);
             peak_cu = peak_cu.max(send_close(&mut env));
-            stock(&env, [0, 0], PAID, 1);
+            stock(&env, [0, 0], PAID, 0);
             assert_eq!(env.market_state().1.current_slot, EXPIRY);
             assert_eq!(
                 env.market_state().1.source_backing_buckets[3].status,

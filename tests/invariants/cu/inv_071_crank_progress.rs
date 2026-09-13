@@ -28,7 +28,7 @@ mod terminal_reserve_backfill;
 mod terminal_prefix_insurance;
 
 #[path = "inv_071_terminal_prefix_recredit.rs"]
-mod terminal_prefix_recredit;
+pub(crate) mod terminal_prefix_recredit;
 
 #[path = "inv_071_generated_terminal_actionability.rs"]
 mod generated_terminal_actionability;

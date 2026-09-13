@@ -89,10 +89,12 @@ impl Oracle {
             });
             if let Some(due) = due {
                 self.expired[due] = true;
+                self.cursor = 0;
             } else if asset == self.cursor {
                 return false;
+            } else {
+                self.cursor = asset;
             }
-            self.cursor = asset;
         } else if end < history.slots() {
             self.cursor = end;
         } else {
@@ -435,7 +437,7 @@ fn drive(
 ) {
     let clock = world.env.svm.get_sysvar::<Clock>().slot;
     let close = world.close();
-    for _ in 0..(history.slots().div_ceil(CHUNK) + 10) {
+    for _ in 0..(5 * history.slots().div_ceil(CHUNK) + 10) {
         let mut next = oracle.clone();
         let mut count = 0;
         let mut waits = false;

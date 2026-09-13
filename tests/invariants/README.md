@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## PR135 Scope R terminal scan rediscovery (2026-09-13)
+
+Owner: [cu/inv_070_terminal_scan_recredit.rs](cu/inv_070_terminal_scan_recredit.rs),
+mounted under `inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_scan_recredit`.
+Sixteen public LiteSVM histories compare scanner-first and withdrawal-first
+recredit after later backing expiry makes earlier spent insurance actionable.
+The oracle checks prefix invalidation, eight scanner rediscoveries, exact 61/100
+insurance entitlement, source and custody reconciliation, 104 complete Account
+rollbacks, and exact residue burn/rent closure. The public INV-071 fixture and
+stock checker are shared; the scanner continuation is new.
+
+The requested base fails the new invalidation assertion. Separate production
+commit `94f90071` resets the saved cursor after backing expiry; related cursor
+controls account for the additional bounded rescans. Row 424 remains OPEN and
+all machine invariant statuses are unchanged. This is bounded INV-070 evidence
+with adjacent INV-024/025/033/041/063/069/071/086/088 checks, not generic closure.
+The [Scope R audit](pr135_scope_r_terminal_scan_conformance_20260913.md) records
+prior families, guarantee, implementation change, limits and exact commands.
+
 ## PR135 Scope P generated first-risk liabilities (2026-09-13)
 
 Owner: [cu/inv_027_generated_first_risk_liabilities.rs](cu/inv_027_generated_first_risk_liabilities.rs),

@@ -1268,6 +1268,16 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Finite actionability-summary evidence only: persisted scan restart/recredit discovery,
 # Recovery, backing/reserve changes, receipts, fractional/underfunded claims, alternate
 # rails, maximum shapes and generic environmental invalidation remain OPEN. Tests only.
+# 424 Scope R scanner coverage (2026-09-13): cu/inv_070_terminal_scan_recredit.rs,
+# v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry.
+# Sixteen public histories cross source side, residual bound, expiry boundary and
+# scanner/withdrawal order. Eight scanner rediscoveries preserve exact 61/100-atom
+# earlier insurance entitlement; 88 commits and 104 complete Account rollbacks
+# reconcile source stocks, fixed mint supply, residue burn and tombstone rent.
+# Base invalidation assertion fails; separate production commit 94f90071 resets
+# the cursor after BackingExpired. Other environmental writers remain outside
+# this bounded increment. See pr135_scope_r_terminal_scan_conformance_20260913.md.
+# Row 424 is only a coverage label; its data fields and all statuses are unchanged.
 424	LoF	PRIVILEGED	INV-070	INV-024,INV-025,INV-033,INV-041,INV-063,INV-069,INV-070,INV-071,INV-086,INV-088	persisted-cursor+x-time-reclassification+x-earlier-slot	any-environmental-transition-that-changes-actionability-invalidates-scanned-prefixes	OPEN
 # Row 425 bounded precrank coverage (2026-09-12): README.md#inv-045-precrank-carry-and-entitlement-row-425-2026-09-12.
 # Thirty-two public histories reduce positions before a market crank while carry is nonzero,

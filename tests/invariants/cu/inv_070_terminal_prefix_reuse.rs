@@ -330,7 +330,7 @@ fn v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback() 
 
     // Two committed calls suffice after maturity: normalize the blocker, then close.
     check_cu(send_close(&mut env));
-    stock(&env, false, 2);
+    stock(&env, false, 0);
     assert_eq!(env.market_state().1.current_slot, EXPIRY);
     assert_eq!(
         &env.svm.get_account(&env.market).unwrap().data[start..end],

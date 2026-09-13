@@ -1,18 +1,18 @@
 //! Row 424: later-slot expiry makes spent insurance on a scanned asset payable.
-//! The asset-local withdrawal must recompute from current stocks despite cursor 1.
+//! The asset-local withdrawal must recompute after the persisted prefix is invalidated.
 //! Public construction only; this does not certify the scanner's own rediscovery.
 
 use super::*;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
-const CAPITAL: [u64; 3] = [1_000, 100, 137];
-const GAIN: u64 = 10 * 20;
-const SPENT: u64 = GAIN - CAPITAL[1];
-const PAYOUTS: [u64; 3] = [CAPITAL[0] + GAIN, 0, CAPITAL[2]];
-const EXPIRY: u64 = 44;
-const LIMIT: u64 = 400_000;
+pub(crate) const CAPITAL: [u64; 3] = [1_000, 100, 137];
+pub(crate) const GAIN: u64 = 10 * 20;
+pub(crate) const SPENT: u64 = GAIN - CAPITAL[1];
+pub(crate) const PAYOUTS: [u64; 3] = [CAPITAL[0] + GAIN, 0, CAPITAL[2]];
+pub(crate) const EXPIRY: u64 = 44;
+pub(crate) const LIMIT: u64 = 400_000;
 
-fn wrap(env: &V16CuEnv, ix: ProgInstruction, accounts: Vec<AccountMeta>) -> Instruction {
+pub(crate) fn wrap(env: &V16CuEnv, ix: ProgInstruction, accounts: Vec<AccountMeta>) -> Instruction {
     Instruction {
         program_id: env.program_id,
         accounts,
@@ -20,13 +20,13 @@ fn wrap(env: &V16CuEnv, ix: ProgInstruction, accounts: Vec<AccountMeta>) -> Inst
     }
 }
 
-fn land(
+pub(crate) fn land(
     env: &mut V16CuEnv,
     ixs: &[Instruction],
     signers: &[&Keypair],
     tracked: &[Pubkey],
     changed: &[Pubkey],
-    rejection: Option<u8>,
+    rejection: Option<(u8, InstructionError)>,
     successes: (usize, usize),
 ) -> u64 {
     env.svm.expire_blockhash();
@@ -62,15 +62,12 @@ fn land(
         u64::from(tx.message.header.num_required_signatures)
             * FeeStructure::default().lamports_per_signature;
     let result = env.svm.send_transaction(tx);
-    let meta = if let Some(index) = rejection {
+    let meta = if let Some((index, error)) = rejection {
         assert!(changed.is_empty());
-        let failure = result.expect_err("unpaid insurance or unnormalized backing remains");
+        let failure = result.expect_err("specified public continuation rejects atomically");
         assert_eq!(
             failure.err,
-            TransactionError::InstructionError(
-                index,
-                InstructionError::Custom(PercolatorError::EngineLockActive as u32)
-            )
+            TransactionError::InstructionError(index, error)
         );
         failure.meta
     } else {
@@ -112,6 +109,30 @@ fn stocks(
     tokens: [Pubkey; 3],
     beneficiary_token: Pubkey,
 ) {
+    stocks_at_cursor(
+        env,
+        side,
+        backing,
+        normalized,
+        restored,
+        paid,
+        tokens,
+        beneficiary_token,
+        if normalized { 0 } else { 1 },
+    );
+}
+
+pub(crate) fn stocks_at_cursor(
+    env: &V16CuEnv,
+    side: usize,
+    backing: u64,
+    normalized: bool,
+    restored: u64,
+    paid: u64,
+    tokens: [Pubkey; 3],
+    beneficiary_token: Pubkey,
+    cursor: u128,
+) {
     let (cfg, group) = env.market_state();
     let market = env.svm.get_account(&env.market).unwrap();
     let header = market_group_header_bytes(&market.data);
@@ -121,7 +142,7 @@ fn stocks(
         u128::from(backing) * BOUND_SCALE
     };
     let insurance = u128::from(restored - paid);
-    assert_eq!(cfg.terminal_slab_scan_progress, 1);
+    assert_eq!(cfg.terminal_slab_scan_progress, cursor);
     assert_eq!(group.mode, MarketModeV16::Resolved);
     assert_eq!(
         (
@@ -257,242 +278,275 @@ fn stocks(
     .unwrap();
 }
 
-#[test]
-fn v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement() {
+pub(crate) struct RecreditFixture {
+    pub(crate) env: V16CuEnv,
+    pub(crate) admin: Keypair,
+    pub(crate) beneficiary: Keypair,
+    pub(crate) owners: [Keypair; 3],
+    pub(crate) portfolios: [Pubkey; 3],
+    pub(crate) tokens: [Pubkey; 3],
+    pub(crate) reserve: Pubkey,
+    pub(crate) destination: Pubkey,
+    pub(crate) peak: u64,
+}
+
+pub(crate) fn fixture(side: usize, backing: u64) -> RecreditFixture {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 
+    let mut peak = 0;
+    let mut env = inv018_public_spl_market_with_params(
+        0,
+        V16CuMarketParams {
+            max_portfolio_assets: 2,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            ..V16CuMarketParams::default()
+        },
+    );
+    let admin = env.admin.insecure_clone();
+    let beneficiary = Keypair::new();
+    env.svm
+        .airdrop(&beneficiary.pubkey(), 1_000_000_000)
+        .unwrap();
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&beneficiary),
+        0,
+        processor::ASSET_AUTH_INSURANCE,
+        beneficiary.pubkey().to_bytes(),
+    )
+    .unwrap();
+    env.svm.warp_to_slot(1);
+    for asset in [0, 1] {
+        env.configure_auth_mark_for_asset_as_admin(asset, 1, 100);
+    }
+    let owners: [Keypair; 3] = std::array::from_fn(|_| Keypair::new());
+    let portfolios = owners.each_ref().map(|owner| {
+        env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        let key = Keypair::new();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &key,
+            env.portfolio_account_len,
+            env.program_id,
+        );
+        env.send(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(key.pubkey(), false),
+            ],
+            &[owner],
+        )
+        .unwrap();
+        env.portfolios.push(key.pubkey());
+        key.pubkey()
+    });
+    let tokens = owners
+        .each_ref()
+        .map(|owner| create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint));
+    let reserve = create_ata_for_test(&mut env.svm, &env.payer, beneficiary.pubkey(), env.mint);
+    let destination = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
+    for (token, amount) in tokens
+        .into_iter()
+        .zip(CAPITAL)
+        .chain([(reserve, SPENT), (destination, backing)])
+    {
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &token,
+                &admin.pubkey(),
+                &[],
+                amount,
+            )
+            .unwrap(),
+            &[&admin],
+        )
+        .unwrap();
+    }
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::set_authority(
+            &spl_token::ID,
+            &env.mint,
+            None,
+            spl_token::instruction::AuthorityType::MintTokens,
+            &admin.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .unwrap();
+    for actor in 0..3 {
+        env.send(
+            env.deposit_ix(portfolios[actor], CAPITAL[actor].into()),
+            vec![
+                AccountMeta::new(owners[actor].pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolios[actor], false),
+                AccountMeta::new(tokens[actor], false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owners[actor]],
+        )
+        .unwrap();
+    }
+    env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: side as u16,
+            market_id: env.asset_market_id(0),
+            authority_epoch: env.control_sequences(0).authority_epoch,
+            intent_id: 0,
+            amount: SPENT.into(),
+        },
+        vec![
+            AccountMeta::new(beneficiary.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(reserve, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&beneficiary],
+    )
+    .unwrap();
+    env.top_up_backing_bucket_from_admin_token_with_cu(
+        destination,
+        (2 + side) as u16,
+        backing.into(),
+        EXPIRY,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        portfolios[0],
+        &owners[1],
+        portfolios[1],
+        (10 * POS_SCALE) as i128 * if side == 0 { 1 } else { -1 },
+        100,
+        0,
+    );
+    for offset in 0..5 {
+        let slot = offset + 2;
+        let mark = if side == 0 {
+            100 + 5 * (offset + 1).min(4)
+        } else {
+            100 - 5 * (offset + 1).min(4)
+        };
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(0, slot, mark);
+        env.crank(
+            portfolios[2],
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    for actor in [0, 1] {
+        env.crank(
+            portfolios[actor],
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 6,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert_eq!(
+        env.portfolio_state(portfolios[0]).pnl.get(),
+        i128::from(GAIN)
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        if side == 0 { 120 } else { 80 }
+    );
+    assert_eq!(
+        env.portfolio_state(portfolios[1]).pnl.get(),
+        -i128::from(SPENT)
+    );
+    env.svm.warp_to_slot(40);
+    env.resolve();
+    env.svm.warp_to_slot(43);
+    for actor in [1, 0, 2] {
+        for _ in 0..8 {
+            if resolved_portfolio_is_terminal(&env, portfolios[actor]) {
+                break;
+            }
+            env.svm.expire_blockhash();
+            let cu = env
+                .send(
+                    ProgInstruction::CloseResolved {
+                        fee_rate_per_slot: 0,
+                    },
+                    vec![
+                        AccountMeta::new_readonly(owners[actor].pubkey(), false),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolios[actor], false),
+                        AccountMeta::new(tokens[actor], false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[],
+                )
+                .unwrap();
+            assert_cu_within("earlier-asset user payout", cu, LIMIT);
+            peak = peak.max(cu);
+        }
+        assert!(resolved_portfolio_is_terminal(&env, portfolios[actor]));
+        assert_eq!(env.token_amount(tokens[actor]), PAYOUTS[actor]);
+        env.send(
+            env.close_portfolio_ix(portfolios[actor]),
+            vec![
+                AccountMeta::new(owners[actor].pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolios[actor], false),
+            ],
+            &[&owners[actor]],
+        )
+        .unwrap();
+    }
+    RecreditFixture {
+        env,
+        admin,
+        beneficiary,
+        owners,
+        portfolios,
+        tokens,
+        reserve,
+        destination,
+        peak,
+    }
+}
+
+#[test]
+fn v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement() {
     let mut peak = 0;
     for side in 0..2 {
         for backing in [61u64, 307] {
             for late in [false, true] {
                 for bundled in [false, true] {
-                    let mut env = inv018_public_spl_market_with_params(
-                        0,
-                        V16CuMarketParams {
-                            max_portfolio_assets: 2,
-                            maintenance_margin_bps: 1_000,
-                            initial_margin_bps: 1_000,
-                            max_price_move_bps_per_slot: 500,
-                            ..V16CuMarketParams::default()
-                        },
-                    );
-                    let admin = env.admin.insecure_clone();
-                    let beneficiary = Keypair::new();
-                    env.svm
-                        .airdrop(&beneficiary.pubkey(), 1_000_000_000)
-                        .unwrap();
-                    env.try_update_per_asset_authority_with_cu(
-                        &admin,
-                        Some(&beneficiary),
-                        0,
-                        processor::ASSET_AUTH_INSURANCE,
-                        beneficiary.pubkey().to_bytes(),
-                    )
-                    .unwrap();
-                    env.svm.warp_to_slot(1);
-                    for asset in [0, 1] {
-                        env.configure_auth_mark_for_asset_as_admin(asset, 1, 100);
-                    }
-                    let owners: [Keypair; 3] = std::array::from_fn(|_| Keypair::new());
-                    let portfolios = owners.each_ref().map(|owner| {
-                        env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
-                        let key = Keypair::new();
-                        system_create_account_for_test(
-                            &mut env.svm,
-                            &env.payer,
-                            &key,
-                            env.portfolio_account_len,
-                            env.program_id,
-                        );
-                        env.send(
-                            ProgInstruction::InitPortfolio,
-                            vec![
-                                AccountMeta::new(owner.pubkey(), true),
-                                AccountMeta::new(env.market, false),
-                                AccountMeta::new(key.pubkey(), false),
-                            ],
-                            &[owner],
-                        )
-                        .unwrap();
-                        env.portfolios.push(key.pubkey());
-                        key.pubkey()
-                    });
-                    let tokens = owners.each_ref().map(|owner| {
-                        create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint)
-                    });
-                    let reserve = create_ata_for_test(
-                        &mut env.svm,
-                        &env.payer,
-                        beneficiary.pubkey(),
-                        env.mint,
-                    );
-                    let destination =
-                        create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
-                    for (token, amount) in tokens
-                        .into_iter()
-                        .zip(CAPITAL)
-                        .chain([(reserve, SPENT), (destination, backing)])
-                    {
-                        send_raw_tx(
-                            &mut env.svm,
-                            &env.payer,
-                            spl_token::instruction::mint_to(
-                                &spl_token::ID,
-                                &env.mint,
-                                &token,
-                                &admin.pubkey(),
-                                &[],
-                                amount,
-                            )
-                            .unwrap(),
-                            &[&admin],
-                        )
-                        .unwrap();
-                    }
-                    send_raw_tx(
-                        &mut env.svm,
-                        &env.payer,
-                        spl_token::instruction::set_authority(
-                            &spl_token::ID,
-                            &env.mint,
-                            None,
-                            spl_token::instruction::AuthorityType::MintTokens,
-                            &admin.pubkey(),
-                            &[],
-                        )
-                        .unwrap(),
-                        &[&admin],
-                    )
-                    .unwrap();
-                    for actor in 0..3 {
-                        env.send(
-                            env.deposit_ix(portfolios[actor], CAPITAL[actor].into()),
-                            vec![
-                                AccountMeta::new(owners[actor].pubkey(), true),
-                                AccountMeta::new(env.market, false),
-                                AccountMeta::new(portfolios[actor], false),
-                                AccountMeta::new(tokens[actor], false),
-                                AccountMeta::new(env.vault, false),
-                                AccountMeta::new_readonly(spl_token::ID, false),
-                            ],
-                            &[&owners[actor]],
-                        )
-                        .unwrap();
-                    }
-                    env.send(
-                        ProgInstruction::TopUpInsuranceDomain {
-                            domain: side as u16,
-                            market_id: env.asset_market_id(0),
-                            authority_epoch: env.control_sequences(0).authority_epoch,
-                            intent_id: 0,
-                            amount: SPENT.into(),
-                        },
-                        vec![
-                            AccountMeta::new(beneficiary.pubkey(), true),
-                            AccountMeta::new(env.market, false),
-                            AccountMeta::new(reserve, false),
-                            AccountMeta::new(env.vault, false),
-                            AccountMeta::new_readonly(spl_token::ID, false),
-                        ],
-                        &[&beneficiary],
-                    )
-                    .unwrap();
-                    env.top_up_backing_bucket_from_admin_token_with_cu(
+                    let RecreditFixture {
+                        mut env,
+                        admin,
+                        beneficiary,
+                        owners,
+                        portfolios,
+                        tokens,
+                        reserve,
                         destination,
-                        (2 + side) as u16,
-                        backing.into(),
-                        EXPIRY,
-                    );
-                    env.trade_asset_with_cu(
-                        0,
-                        &owners[0],
-                        portfolios[0],
-                        &owners[1],
-                        portfolios[1],
-                        (10 * POS_SCALE) as i128 * if side == 0 { 1 } else { -1 },
-                        100,
-                        0,
-                    );
-                    for offset in 0..5 {
-                        let slot = offset + 2;
-                        let mark = if side == 0 {
-                            100 + 5 * (offset + 1).min(4)
-                        } else {
-                            100 - 5 * (offset + 1).min(4)
-                        };
-                        env.svm.warp_to_slot(slot);
-                        env.push_auth_mark_for_asset_as_admin(0, slot, mark);
-                        env.crank(
-                            portfolios[2],
-                            ProgInstruction::PermissionlessCrank {
-                                now_slot: slot,
-                                observations: crank_observations(0),
-                            },
-                        );
-                    }
-                    for actor in [0, 1] {
-                        env.crank(
-                            portfolios[actor],
-                            ProgInstruction::PermissionlessCrank {
-                                now_slot: 6,
-                                observations: crank_observations(0),
-                            },
-                        );
-                    }
-                    assert_eq!(
-                        env.portfolio_state(portfolios[0]).pnl.get(),
-                        i128::from(GAIN)
-                    );
-                    assert_eq!(
-                        env.market_state().1.assets[0].effective_price,
-                        if side == 0 { 120 } else { 80 }
-                    );
-                    assert_eq!(
-                        env.portfolio_state(portfolios[1]).pnl.get(),
-                        -i128::from(SPENT)
-                    );
-                    env.svm.warp_to_slot(40);
-                    env.resolve();
-                    env.svm.warp_to_slot(43);
-                    for actor in [1, 0, 2] {
-                        for _ in 0..8 {
-                            if resolved_portfolio_is_terminal(&env, portfolios[actor]) {
-                                break;
-                            }
-                            env.svm.expire_blockhash();
-                            let cu = env
-                                .send(
-                                    ProgInstruction::CloseResolved {
-                                        fee_rate_per_slot: 0,
-                                    },
-                                    vec![
-                                        AccountMeta::new_readonly(owners[actor].pubkey(), false),
-                                        AccountMeta::new(env.market, false),
-                                        AccountMeta::new(portfolios[actor], false),
-                                        AccountMeta::new(tokens[actor], false),
-                                        AccountMeta::new(env.vault, false),
-                                        AccountMeta::new_readonly(env.vault_authority, false),
-                                        AccountMeta::new_readonly(spl_token::ID, false),
-                                    ],
-                                    &[],
-                                )
-                                .unwrap();
-                            assert_cu_within("earlier-asset user payout", cu, LIMIT);
-                            peak = peak.max(cu);
-                        }
-                        assert!(resolved_portfolio_is_terminal(&env, portfolios[actor]));
-                        assert_eq!(env.token_amount(tokens[actor]), PAYOUTS[actor]);
-                        env.send(
-                            env.close_portfolio_ix(portfolios[actor]),
-                            vec![
-                                AccountMeta::new(owners[actor].pubkey(), true),
-                                AccountMeta::new(env.market, false),
-                                AccountMeta::new(portfolios[actor], false),
-                            ],
-                            &[&owners[actor]],
-                        )
-                        .unwrap();
-                    }
+                        peak: fixture_peak,
+                    } = fixture(side, backing);
+                    peak = peak.max(fixture_peak);
                     let close = wrap(
                         &env,
                         ProgInstruction::CloseSlab {
@@ -570,7 +624,10 @@ fn v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement() {
                         &[],
                         &tracked,
                         &[],
-                        Some(2),
+                        Some((
+                            2,
+                            InstructionError::Custom(PercolatorError::EngineLockActive as u32),
+                        )),
                         (0, 0),
                     ));
                     let before_clock = env.svm.get_account(&env.market);
@@ -582,7 +639,10 @@ fn v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement() {
                         &[],
                         &tracked,
                         &[],
-                        Some(2),
+                        Some((
+                            2,
+                            InstructionError::Custom(PercolatorError::EngineLockActive as u32),
+                        )),
                         (0, 0),
                     ));
 
@@ -593,7 +653,10 @@ fn v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement() {
                         &[&admin],
                         &tracked,
                         &[],
-                        Some(4),
+                        Some((
+                            4,
+                            InstructionError::Custom(PercolatorError::EngineLockActive as u32),
+                        )),
                         (2, 1),
                     ));
                     stocks(&env, side, backing, false, 0, 0, tokens, reserve);
@@ -626,7 +689,10 @@ fn v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement() {
                             &[&admin],
                             &tracked,
                             &[],
-                            Some(3),
+                            Some((
+                                3,
+                                InstructionError::Custom(PercolatorError::EngineLockActive as u32),
+                            )),
                             (1, 1),
                         ));
                         peak = peak.max(land(

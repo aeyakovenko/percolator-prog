@@ -437,7 +437,7 @@ fn v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings()
                 env.svm.warp_to_slot(slot);
                 assert_eq!(env.svm.get_account(&env.market), market);
                 let ixs = if slot == 400 {
-                    vec![close.clone(), close.clone()]
+                    vec![close.clone(), close.clone(), close.clone()]
                 } else {
                     vec![close.clone()]
                 };
@@ -446,14 +446,15 @@ fn v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings()
                     &ixs,
                     &[&admin],
                     &tracked,
-                    if slot == 400 { 3 } else { 2 },
-                    usize::from(slot == 400),
+                    if slot == 400 { 4 } else { 2 },
+                    2 * usize::from(slot == 400),
                 ));
             }
-            max_success =
-                max_success.max(scan_step(&mut env, &close, &admin, &tracked, EARLY_ASSET));
+            max_success = max_success.max(scan_step(&mut env, &close, &admin, &tracked, 0));
             assert_eq!(env.market_state().1.current_slot, 400);
             assert_stocks(&env, domains, [true, false, false], user, provider);
+            max_success =
+                max_success.max(scan_step(&mut env, &close, &admin, &tracked, EARLY_ASSET));
             for slot in [425, 449] {
                 let market = env.svm.get_account(&env.market);
                 env.svm.warp_to_slot(slot);
@@ -470,19 +471,17 @@ fn v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings()
                 assert_stocks(&env, domains, [true, false, false], user, provider);
             }
             env.svm.warp_to_slot(450 + u64::from(late));
-            max_success =
-                max_success.max(scan_step(&mut env, &close, &admin, &tracked, EARLY_ASSET));
+            max_success = max_success.max(scan_step(&mut env, &close, &admin, &tracked, 0));
             assert_stocks(&env, domains, [true, true, false], user, provider);
-            max_success =
-                max_success.max(scan_step(&mut env, &close, &admin, &tracked, LATER_ASSET));
+            max_success = max_success.max(scan_step(&mut env, &close, &admin, &tracked, 256));
             assert_stocks(&env, domains, [true, true, false], user, provider);
             let market = env.svm.get_account(&env.market);
             env.svm.warp_to_slot(452 + u64::from(late));
             assert_eq!(env.svm.get_account(&env.market), market);
-            max_success =
-                max_success.max(scan_step(&mut env, &close, &admin, &tracked, LATER_ASSET));
+            max_success = max_success.max(scan_step(&mut env, &close, &admin, &tracked, 0));
             assert_stocks(&env, domains, [true; 3], user, provider);
-            assert_eq!(rank(&env), (0, 1));
+            assert_eq!(rank(&env), (0, SLOTS));
+            max_success = max_success.max(scan_step(&mut env, &close, &admin, &tracked, 256));
 
             let market_before = env.svm.get_account(&env.market).unwrap();
             let vault_before = env.svm.get_account(&env.vault).unwrap();
@@ -523,7 +522,7 @@ fn v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings()
                 .svm
                 .get_account(&env.vault)
                 .is_none_or(|a| a.lamports == 0 && a.data.iter().all(|byte| *byte == 0)));
-            eprintln!("row424 side={early_side} late={late}: payout=101, normalized=91, cursor=0->1->257, 13 exact rejections, final rank=tombstone");
+            eprintln!("row424 side={early_side} late={late}: payout=101, normalized=91, expiry resets cursor to zero, 13 exact rejections, final rank=tombstone");
         }
     }
     assert_cu_within(
@@ -531,5 +530,5 @@ fn v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings()
         max_success,
         STEP_LIMIT,
     );
-    eprintln!("row424: 4 worlds, 32 committed suffix calls, 52 exact rejections, max_success={max_success} max_rejection={max_rejection} CU");
+    eprintln!("row424: 4 worlds, 40 committed suffix calls, 52 exact rejections, max_success={max_success} max_rejection={max_rejection} CU");
 }

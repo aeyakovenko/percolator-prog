@@ -132,7 +132,7 @@ fn stocks(env: &V16CuEnv, domain: usize, expired: bool, donated: bool, tokens: [
         (0, 0, BACKING.into())
     );
     assert_eq!(group.materialized_portfolio_count, 0);
-    assert_eq!(cfg.terminal_slab_scan_progress, 2);
+    assert_eq!(cfg.terminal_slab_scan_progress, if expired { 0 } else { 2 });
     let fresh = if expired {
         0
     } else {
@@ -514,7 +514,7 @@ fn v16_program_terminal_prefix_blocks_reserve_backfill_across_expiry_and_retries
                 &[&admin, &donor],
             ));
             assert!(rank(&env) < before_rank);
-            assert_eq!(rank(&env), (0, 1));
+            assert_eq!(rank(&env), (0, SLOTS));
             stocks(&env, tail_domain, true, true, tokens);
             assert_eq!(env.market_state().1.current_slot, landing);
             assert_eq!(
