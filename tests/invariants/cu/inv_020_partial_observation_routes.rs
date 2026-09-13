@@ -1,4 +1,4 @@
-//! INV-020: three-leg partial observation followed by single/batch owner reduction.
+//! INV-020: three-leg partial observations across owner reduction and risk admission.
 //! Public construction only; decoded copies and Account snapshots are read-only oracles.
 
 use super::*;
@@ -10,6 +10,103 @@ use crate::support::fuzz_model::{
 const PRICES: [u64; 3] = [1_040_000, 1_050_000, 960_000];
 const PRINCIPAL: u128 = 10_000_000;
 const SUPPLY: u64 = (2 * PRINCIPAL + 1_000) as u64;
+
+struct ThreeLegSeed {
+    env: V16CuEnv,
+    owners: [Keypair; 3],
+    portfolios: [Pubkey; 3],
+    tokens: [Pubkey; 3],
+    initial: Pubkey,
+    report: Pubkey,
+}
+
+fn three_leg_seed(order: &[u16], prices: [u64; 3]) -> ThreeLegSeed {
+    let mut env = inv018_public_spl_market_with_params(
+        0,
+        V16CuMarketParams {
+            max_portfolio_assets: 3,
+            initial_price: PRICE,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 10,
+            max_accrual_dt_slots: 65,
+            min_funding_lifetime_slots: 65,
+            ..V16CuMarketParams::default()
+        },
+    );
+    set_test_clock(&mut env, 0, 100);
+    let feed = [0xab; 32];
+    let initial = env.set_pyth_price_with_conf(&feed, PRICE as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0; 32], [0; 32]],
+        &[initial],
+        0,
+        100,
+        0,
+        0,
+        100,
+        0,
+    )
+    .expect("public Hybrid configuration");
+    for asset in 1..3 {
+        env.configure_auth_mark_for_asset_as_admin(asset, 0, PRICE);
+    }
+    let owners = [Keypair::new(), Keypair::new(), Keypair::new()];
+    let funded = [PRINCIPAL, PRINCIPAL, 1_000]
+        .into_iter()
+        .enumerate()
+        .map(|(i, amount)| funded_owner(&mut env, &owners[i], amount))
+        .collect::<Vec<_>>();
+    let portfolios = [0, 1, 2].map(|i| funded[i].0);
+    let tokens = [0, 1, 2].map(|i| funded[i].1);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::set_authority(
+            &spl_token::ID,
+            &env.mint,
+            None,
+            spl_token::instruction::AuthorityType::MintTokens,
+            &env.admin.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&env.admin],
+    )
+    .unwrap();
+    for asset in 0..3 {
+        env.trade_asset_with_cu(
+            asset,
+            &owners[0],
+            portfolios[0],
+            &owners[1],
+            portfolios[1],
+            POS_SCALE as i128,
+            PRICE,
+            0,
+        );
+    }
+    census(&env, portfolios);
+    set_test_clock(&mut env, 0, 101);
+    for asset in 1..3 {
+        env.push_auth_mark_for_asset_as_admin(asset, u64::MAX, prices[asset as usize]);
+    }
+    let report = env.set_pyth_price_with_conf(&feed, prices[0] as i64, -6, 0, 101);
+    crank(&mut env, portfolios[2], report, order);
+    ThreeLegSeed {
+        env,
+        owners,
+        portfolios,
+        tokens,
+        initial,
+        report,
+    }
+}
 
 fn crank(env: &mut V16CuEnv, target: Pubkey, report: Pubkey, order: &[u16]) -> u64 {
     let mut accounts = vec![
@@ -213,88 +310,15 @@ fn v16_program_partial_observation_three_leg_reductions_match_single_and_batch()
         for reverse in [false, true] {
             for explicit in [true, false] {
                 for batch in [false, true] {
-                    let mut env = inv018_public_spl_market_with_params(
-                        0,
-                        V16CuMarketParams {
-                            max_portfolio_assets: 3,
-                            initial_price: PRICE,
-                            min_nonzero_mm_req: 599,
-                            min_nonzero_im_req: 600,
-                            maintenance_margin_bps: 1_000,
-                            initial_margin_bps: 1_000,
-                            max_price_move_bps_per_slot: 10,
-                            max_accrual_dt_slots: 65,
-                            min_funding_lifetime_slots: 65,
-                            ..V16CuMarketParams::default()
-                        },
-                    );
-                    set_test_clock(&mut env, 0, 100);
-                    let feed = [0xab; 32];
-                    let initial = env.set_pyth_price_with_conf(&feed, PRICE as i64, -6, 0, 100);
-                    env.try_configure_hybrid_asset_with_conf_filter_cu(
-                        0,
-                        1,
-                        0,
-                        [feed, [0; 32], [0; 32]],
-                        &[initial],
-                        0,
-                        100,
-                        0,
-                        0,
-                        100,
-                        0,
-                    )
-                    .expect("public Hybrid configuration");
-                    for asset in 1..3 {
-                        env.configure_auth_mark_for_asset_as_admin(asset, 0, PRICE);
-                    }
-                    let owners = [Keypair::new(), Keypair::new(), Keypair::new()];
-                    let funded = [PRINCIPAL, PRINCIPAL, 1_000]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, amount)| funded_owner(&mut env, &owners[i], amount))
-                        .collect::<Vec<_>>();
-                    let portfolios = [0, 1, 2].map(|i| funded[i].0);
-                    let tokens = [0, 1, 2].map(|i| funded[i].1);
-                    send_raw_tx(
-                        &mut env.svm,
-                        &env.payer,
-                        spl_token::instruction::set_authority(
-                            &spl_token::ID,
-                            &env.mint,
-                            None,
-                            spl_token::instruction::AuthorityType::MintTokens,
-                            &env.admin.pubkey(),
-                            &[],
-                        )
-                        .unwrap(),
-                        &[&env.admin],
-                    )
-                    .unwrap();
-                    for asset in 0..3 {
-                        env.trade_asset_with_cu(
-                            asset,
-                            &owners[0],
-                            portfolios[0],
-                            &owners[1],
-                            portfolios[1],
-                            POS_SCALE as i128,
-                            PRICE,
-                            0,
-                        );
-                    }
-                    census(&env, portfolios);
-                    set_test_clock(&mut env, 0, 101);
-                    for asset in 1..3 {
-                        env.push_auth_mark_for_asset_as_admin(
-                            asset,
-                            u64::MAX,
-                            PRICES[asset as usize],
-                        );
-                    }
-                    let report = env.set_pyth_price_with_conf(&feed, PRICES[0] as i64, -6, 0, 101);
                     let order = if reverse { [2, 1, 0] } else { [0, 1, 2] };
-                    peak = peak.max(crank(&mut env, portfolios[2], report, &order));
+                    let ThreeLegSeed {
+                        mut env,
+                        owners,
+                        portfolios,
+                        tokens,
+                        initial,
+                        report,
+                    } = three_leg_seed(&order, PRICES);
                     let accounts = frame(&env, &portfolios);
                     set_test_clock(&mut env, 64, 102);
                     peak = peak.max(crank(&mut env, portfolios[2], report, &order));
@@ -416,4 +440,308 @@ fn v16_program_partial_observation_three_leg_reductions_match_single_and_batch()
     }
     assert_eq!(worlds, 16);
     println!("partial-observation reduction routes: {worlds} public worlds, peak {peak} CU; no injected economic state");
+}
+
+#[test]
+fn v16_program_partial_sibling_observations_cannot_expand_single_or_batch_risk_capacity() {
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    let prices = [960_000, 950_000, 940_000];
+    let mut peak = 0;
+    let mut rollbacks = 0;
+    for batch in [false, true] {
+        let mut reference = None;
+        let mut reference_capacity = None;
+        for partial in [false, true] {
+            let order = [0, 1, 2];
+            let ThreeLegSeed {
+                mut env,
+                owners,
+                portfolios,
+                tokens,
+                initial,
+                report,
+            } = three_leg_seed(&order, prices);
+            let accounts = frame(&env, &portfolios);
+            set_test_clock(&mut env, 64, 102);
+            peak = peak.max(crank(&mut env, portfolios[2], report, &order));
+            assert!(env.market_state().1.assets[..3]
+                .iter()
+                .all(|a| a.slot_last == 32));
+            set_test_clock(&mut env, 65, 103);
+            for _ in 0..2 {
+                peak = peak.max(crank(
+                    &mut env,
+                    portfolios[2],
+                    report,
+                    if partial { &[0, 1] } else { &order },
+                ));
+            }
+            assert_eq!(frame(&env, &portfolios[..2]), accounts[..2]);
+            let group = env.market_state().1;
+            assert_eq!(group.current_slot, 65);
+            for asset in 0..2 {
+                assert_eq!(group.assets[asset].slot_last, 65);
+                assert_eq!(group.assets[asset].effective_price, prices[asset]);
+            }
+            assert_eq!(group.assets[2].slot_last, if partial { 32 } else { 65 });
+            assert_eq!(group.assets[2].raw_oracle_target_price, prices[2]);
+            if partial {
+                assert!(group.assets[2].effective_price > prices[2]);
+            }
+            let market = env.svm.get_account(&env.market).unwrap();
+            let hybrid = state::read_asset_oracle_profile(&market.data, 0).unwrap();
+            assert_eq!(hybrid.oracle_target_publish_time, 101);
+            assert_eq!(hybrid.oracle_leg_prices_e6, [prices[0], 0, 0]);
+            let loss = state::read_asset_oracle_profile(&market.data, 2).unwrap();
+            assert_eq!(loss.mark_ewma_e6, prices[2]);
+            assert_eq!(loss.mark_ewma_last_slot, 0);
+
+            let keys = [
+                env.market,
+                portfolios[0],
+                portfolios[1],
+                portfolios[2],
+                env.vault,
+                env.mint,
+                tokens[0],
+                tokens[1],
+                tokens[2],
+                initial,
+                report,
+                owners[0].pubkey(),
+                owners[1].pubkey(),
+                owners[2].pubkey(),
+                env.admin.pubkey(),
+                solana_sdk::sysvar::clock::ID,
+            ];
+            let immutable = frame(&env, &keys[4..]);
+            let instruction = Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(owners[0].pubkey(), true),
+                    AccountMeta::new(owners[1].pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolios[0], false),
+                    AccountMeta::new(portfolios[1], false),
+                ],
+                data: if batch {
+                    env.batch_trade_no_cpi_ix(
+                        portfolios[0],
+                        portfolios[1],
+                        [0, 1]
+                            .map(|asset_index| BatchTradeLeg {
+                                asset_index,
+                                market_id: env.asset_market_id(asset_index),
+                                size_q: POS_SCALE as i128,
+                                exec_price: prices[asset_index as usize],
+                                fee_bps: 0,
+                            })
+                            .to_vec(),
+                    )
+                } else {
+                    env.trade_no_cpi_ix(
+                        portfolios[0],
+                        portfolios[1],
+                        0,
+                        POS_SCALE as i128,
+                        prices[0],
+                        0,
+                    )
+                }
+                .encode(),
+            };
+            let mut admit = |env: &mut V16CuEnv, reject: bool| {
+                env.svm.expire_blockhash();
+                let mut instructions = vec![heap_ix(), cu_ix(), instruction.clone()];
+                if reject {
+                    instructions.push(Instruction {
+                        program_id: env.program_id,
+                        accounts: vec![
+                            AccountMeta::new(owners[0].pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(portfolios[0], false),
+                        ],
+                        data: ProgInstruction::PermissionlessCrank {
+                            now_slot: 65,
+                            observations: crank_observations_with_accounts(0, 1),
+                        }
+                        .encode(),
+                    });
+                }
+                let tx = Transaction::new_signed_with_payer(
+                    &instructions,
+                    Some(&env.payer.pubkey()),
+                    &[&env.payer, &owners[0], &owners[1]],
+                    env.svm.latest_blockhash(),
+                );
+                let mut tracked = keys.to_vec();
+                tracked.extend(tx.message.account_keys.iter().copied());
+                tracked.sort_unstable();
+                tracked.dedup();
+                tracked.retain(|key| *key != env.payer.pubkey());
+                let before: Vec<_> = tracked.iter().map(|key| env.svm.get_account(key)).collect();
+                let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+                payer.lamports -=
+                    tx.signatures.len() as u64 * FeeStructure::default().lamports_per_signature;
+                let result = env.svm.send_transaction(tx);
+                let cu = if reject {
+                    let error = result.expect_err("missing authenticated tail aborts admission");
+                    assert_eq!(
+                        error.err,
+                        TransactionError::InstructionError(
+                            3,
+                            InstructionError::NotEnoughAccountKeys,
+                        ),
+                        "{error:?}"
+                    );
+                    assert_eq!(
+                        error
+                            .meta
+                            .logs
+                            .iter()
+                            .filter(|line| **line == format!("Program {} success", env.program_id))
+                            .count(),
+                        1,
+                        "the risk-increasing prefix must finish before the missing-tail rejection"
+                    );
+                    assert_eq!(
+                        tracked.iter().map(|key| env.svm.get_account(key)).collect::<Vec<_>>(),
+                        before,
+                        "single/batch risk rejection restores complete Accounts, including sequence and custody"
+                    );
+                    rollbacks += 1;
+                    error.meta.compute_units_consumed
+                } else {
+                    result
+                        .expect("complete observations permit the same funded risk increase")
+                        .compute_units_consumed
+                };
+                assert_eq!(env.svm.get_account(&env.payer.pubkey()).unwrap(), payer);
+                assert_cu_within("sibling-observation risk admission", cu, 750_000);
+                cu
+            };
+            if !partial {
+                for i in [1, 0, 1] {
+                    peak = peak.max(crank(&mut env, portfolios[i], report, &order));
+                }
+            }
+            peak = peak.max(admit(&mut env, true));
+            peak = peak.max(admit(&mut env, false));
+            let admitted = env.market_state().1;
+            let capacity = [0, 1].map(|i| {
+                let account = env.portfolio_state(portfolios[i]);
+                assert!(assert_current_certificate_matches_independent(
+                    "inline admission includes authenticated sibling lag",
+                    &admitted,
+                    &account,
+                )
+                .unwrap());
+                let cert = health_cert(&account);
+                cert.certified_equity - i128::try_from(cert.certified_initial_req).unwrap()
+            });
+            if partial {
+                assert_eq!(admitted.assets[2].slot_last, group.assets[2].slot_last);
+                assert_eq!(
+                    admitted.assets[2].effective_price,
+                    group.assets[2].effective_price
+                );
+                assert_eq!(admitted.assets[2].raw_oracle_target_price, prices[2]);
+                let full: [i128; 2] = reference_capacity.unwrap();
+                for i in 0..2 {
+                    assert!(capacity[i] <= full[i], "owner {i}: pending sibling cannot expand risk capacity: partial={capacity:?}, full={full:?}");
+                }
+                assert!(
+                    capacity[0] < full[0],
+                    "the pending loss must impose a real conservative charge"
+                );
+                for _ in 0..2 {
+                    peak = peak.max(crank(&mut env, portfolios[2], report, &order));
+                }
+                for i in [1, 0, 1] {
+                    peak = peak.max(crank(&mut env, portfolios[i], report, &order));
+                }
+            } else {
+                reference_capacity = Some(capacity);
+            }
+            let group = env.market_state().1;
+            let net = prices
+                .iter()
+                .map(|&price| i128::from(price) - i128::from(PRICE))
+                .sum::<i128>();
+            let expected_value = [PRINCIPAL as i128 + net, PRINCIPAL as i128 - net];
+            let result = [0, 1].map(|i| {
+                let account = env.portfolio_state(portfolios[i]);
+                assert!(assert_current_certificate_matches_independent(
+                    "sibling loss fully included at risk admission",
+                    &group,
+                    &account,
+                )
+                .unwrap());
+                let cert = health_cert(&account);
+                assert_eq!(
+                    account.capital.get() as i128 + account.pnl.get(),
+                    expected_value[i]
+                );
+                let margin = (prices.iter().map(|&price| u128::from(price)).sum::<u128>()
+                    + u128::from(prices[0])
+                    + if batch { u128::from(prices[1]) } else { 0 })
+                    / 10;
+                assert_eq!(cert.certified_initial_req, margin);
+                assert_eq!(cert.certified_maintenance_req, margin);
+                let positions = [0, 1, 2].map(|asset| active_leg_for_asset(&account, asset));
+                for (asset, position) in positions.iter().enumerate() {
+                    let quantity = if asset == 0 || (batch && asset == 1) {
+                        2 * POS_SCALE
+                    } else {
+                        POS_SCALE
+                    };
+                    assert_eq!(
+                        position.basis_pos_q,
+                        if i == 0 { 1 } else { -1 } * quantity as i128
+                    );
+                }
+                let health = (
+                    cert.certified_equity,
+                    cert.certified_initial_req,
+                    cert.certified_maintenance_req,
+                    cert.certified_worst_case_loss,
+                    cert.certified_liq_deficit,
+                    cert.active_bitmap_at_cert,
+                );
+                (account.capital.get(), account.pnl.get(), health, positions)
+            });
+            for asset in 0..3 {
+                let state = &group.assets[asset];
+                assert_eq!(state.slot_last, 65);
+                assert_eq!(state.effective_price, prices[asset]);
+                let quantity = if asset == 0 || (batch && asset == 1) {
+                    2 * POS_SCALE
+                } else {
+                    POS_SCALE
+                };
+                assert_eq!(
+                    (state.oi_eff_long_q, state.oi_eff_short_q),
+                    (quantity, quantity)
+                );
+            }
+            assert_eq!(frame(&env, &keys[4..]), immutable);
+            assert_eq!(env.portfolio_state(portfolios[2]).capital.get(), 1_000);
+            assert_eq!(env.portfolio_state(portfolios[2]).pnl.get(), 0);
+            census(&env, portfolios);
+            let outcome = (group.assets[..3].to_vec(), result);
+            if let Some(reference) = &reference {
+                assert_eq!(
+                    &outcome, reference,
+                    "partial/inline admission matches full/explicit refresh"
+                );
+            } else {
+                reference = Some(outcome);
+            }
+        }
+    }
+    assert_eq!(rollbacks, 4);
+    println!("row426 sibling-loss risk admission: 4 public worlds, {rollbacks} exact rollbacks, 2 full-current comparisons; peak={peak} CU");
 }

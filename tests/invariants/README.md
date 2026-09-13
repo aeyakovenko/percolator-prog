@@ -1,5 +1,90 @@
 # Invariant-owned test coverage
 
+## INV-020 sibling observations at risk admission (row 426, 2026-09-13)
+
+Owner: [cu/inv_020_partial_observation_routes.rs](cu/inv_020_partial_observation_routes.rs),
+mounted under `inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::partial_observation_routes`.
+New selector: `v16_program_partial_sibling_observations_cannot_expand_single_or_batch_risk_capacity`.
+Requirement: `favorable-account-actions-require-complete-current-authenticated-observations`.
+
+Four independent public LiteSVM worlds cross single/two-leg batch risk increase
+with complete/partial observation schedules. The shared public three-leg seed
+keeps the existing reduction selector's prices and parameters; this new selector
+uses authenticated targets `[960000, 950000, 940000]` from initial prices of
+1000000. Both owners hold one unit on each asset. System/SPL/ATA/wrapper routes
+create and fund all economic Accounts, and revoke mint authority at 20001000
+atoms. Only Clock, external Pyth fixtures, program loading and SOL airdrops use
+the harness. No initialized program Account is injected, edited or replayed.
+
+At authenticated slot 65, the partial schedule has advanced the two traded
+assets to slot 65 while the omitted nontraded AuthMark sibling remains at slot
+32, price 968000, against its already authenticated target 940000. Owner Accounts
+have not been refreshed. The single trade adds one unit on asset 0; the batch
+adds one unit on each of assets 0 and 1. Both routes may admit these funded
+requests: on-demand health refresh must include the sibling's adverse lag even
+though its market catchup remains deferred. Independent full-health checks bind
+both current certificates to all active legs. For each owner, certified equity
+minus initial requirement cannot exceed the separate fully observed reference;
+the long owner's capacity is strictly lower while the 28000-atom loss remains
+pending. This is a conservative current certificate, not evidence that market
+settlement has already reached slot 65 on the omitted sibling.
+
+Before each committed admission, the identical instruction is the successful
+prefix of a transaction whose subsequent Hybrid observation names one oracle
+account but supplies none. Logs require the admission to finish before
+`NotEnoughAccountKeys` at instruction index 3. Four failures restore all tracked
+and compiled Accounts, including metadata/absence, market, both portfolios,
+intent sequences, provider accounts, Clock, mint and SPL custody; the payer
+loses exactly three signature fees. Retrying the original admission succeeds.
+The missing-tail suffix is an atomicity control, not a new provider parser claim.
+
+Complete observations and public recertification subsequently converge to exact
+asset states, all six position records, owner capital/PnL, and economic health
+fields. Certificate epoch counters are checked for currentness independently,
+not equated between different schedules. The input-derived owner value change
+is -150000/+150000, with initial/maintenance requirements 381000 for single and
+476000 for batch. Stock/reservation censuses and unchanged custody Accounts
+exclude new token value. The exact new selector passed 1/1 in 2.06s: four worlds,
+four exact rollbacks, two full-current comparisons; peak 550782 CU (limit 750000).
+
+This adds actual risk increase **before completion of the nontraded sibling's
+market catchup**. The related existing selector below completes market catchup
+before single/batch reductions. Earlier INV-056 mixed-observation risk tests
+likewise complete market observations before admission. Caller-slot fallback,
+oracle timestamp boundaries, retained fee consent and mark-cap arithmetic are
+not new coverage here.
+
+Row 426 remains **OPEN**. This is a finite three-asset, unit-ADL, zero-funding,
+zero-fee bilateral family with a previously authenticated AuthMark target and a
+fresh Pyth report. It does not cover an unknown/missing Hybrid report during
+admission, mixed gain/loss classification, CPI, terminal conversion/payout,
+arbitrary histories or maximum shapes. No generic completeness oracle,
+production fix, dependency change or invariant-status promotion is claimed.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at `c540acde`.
+Worktree: `/home/anatoly/percolator-row426-astra-20260913`.
+Branch: `codex/astra-row426-current-observations-20260913`.
+A private non-hardlinked copy of `/dev/shm/percolator-row426-target` seeded the
+target; default-feature SBF was rebuilt locked/offline from this worktree using
+platform-tools v1.52. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Exact validation commands, including the directly related unchanged selector:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row426-current-observations-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/dev/shm/row426-current-observations-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::partial_observation_routes::v16_program_partial_sibling_observations_cannot_expand_single_or_batch_risk_capacity -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::partial_observation_routes::v16_program_partial_observation_three_leg_reductions_match_single_and_batch -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-024 expired principal through role succession (row 429, 2026-09-13)
 
 Owner: [cu/inv_024_expired_principal_role_succession.rs](cu/inv_024_expired_principal_role_succession.rs),
