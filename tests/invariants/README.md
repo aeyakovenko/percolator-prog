@@ -2192,6 +2192,113 @@ cargo clean --target-dir /home/anatoly/percolator-row411-retained-fee-route-2026
 cargo clean --target-dir /run/user/1001/row411-mixed-fee-20260913-target
 ```
 
+## INV-045 overlapping funding checkpoints and carry (row 425, 2026-09-13)
+
+Owner: [cu/inv_045_checkpoint_replacement.rs](cu/inv_045_checkpoint_replacement.rs),
+mounted by `cu/inv_045_funding_carry_entitlement.rs`. Exact selector:
+`inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::checkpoint_replacement::v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolved_payouts`.
+
+Eight public LiteSVM histories cross both opposite AuthMark premium directions,
+single/batch CPI and bilateral reductions, and failed-suffix/no-failure controls.
+Four owners hold two assets at input anchors 100/125, with cap 24 bps/slot and
+funding cap 10,000. A one-lot CPI reduction at slot 2 preserves carries
+4,800/6,000. Three subsequent publications each reset a nonzero carry:
+
+| Clock / Accrual Frontier | Public Target Distance | Funding Boundary |
+| --- | --- | --- |
+| 5 / 2 | +30, following the initial +20 | First pending mark at slot 5 |
+| 5 / 3 | -20 | Same-slot replacement cancels the +30 pending premium |
+| 7 / 4 | +40 | The -20 boundary at slot 5 remains owed; +40 belongs to slot 7 |
+
+Distances are multiplied by the world's direction and have opposite signs on
+the two assets. A public crank between publications rebuilds carries 2,400/3,000.
+The publication journal collapses same-slot replacements and independently selects
+funding by the mark in force before each accrual slot. One-slot quotients/remainders,
+signed-floor funding, input lots and the existing owner-value ledger check every
+committed publication, crank and reduction. Decoded active/pending/latest marks,
+K/F indices, OI, latent plus settled entitlement, capital/PnL totals, custody and
+fixed supply must agree. No production arithmetic routine supplies expected values.
+
+Both pending boundaries activate while Clock remains 7. The intermediate -20
+premium earns exactly slots 6/7 even though +40 is already the latest price target.
+A bilateral reduction at slot 7 and CPI reduction at slot 9 preserve the rebuilt
+carry. Final carries are 2,000/5,000, prices move one atom in opposite directions,
+and funding indices in quote units are [7,2] or [2,7]. An absent owner remains a
+complete-Account match through the entire Live history. Publications frame all
+owners; other cranks/fills frame their absent owners and grants/fills frame the
+complete oracle profiles.
+
+The four failure worlds execute 88 successful economic prefixes before an invalid
+wrapper suffix, including 16 real SPL payout prefixes, one for each owner. Complete
+tracked and compiled Accounts, matcher context, token custody, metadata and absent
+accounts roll back, apart from the independently calculated payer signature fee.
+Identical prefix instructions retry with fresh blockhash/signatures; transaction
+history remains enabled. Resolution at slot 9 and bounded closes at slot 100 freeze
+K/F, price and carry, fully settle every portfolio, and pay 32 exact owner entitlements.
+Direction -1 pays [100123,199889,300092,399962]; direction +1 pays
+[100135,199877,300104,399950]. Each world distributes the fixed 1,000,066-atom
+supply exactly, leaving zero vault, capital, positive PnL, insurance, provider
+earnings and OI. Mint authority is revoked through SPL. Economic setup uses public
+System/ATA/SPL/wrapper instructions; only program loading, signer funding, Clock
+and blockhashes are harness inputs. No program-owned bytes are patched.
+
+Novelty: `retained_funding_retry` owns one pending replacement and rejected
+reductions, not a same-slot cancellation followed by two overlapping funding
+boundaries. `funding_carry_entitlement` replaces a caught-up mark. The generated
+fractional-route/cadence tests retain fixed targets. Stateful
+`v16_program_pending_trade_mark_replacement_preserves_funding_fee_and_exit`
+owns two later-slot paid trade-driven marks, without this same-slot cancellation
+and repeated nonzero carry-reset journal. This increment targets row425 only;
+it does not claim another general CPI route matrix or close those other gaps.
+
+**Row 425 remains OPEN; invariant dispositions are unchanged.** This is a finite
+AuthMark, integral-position, unit-ADL, zero-fee, solvent, classic-SPL family. All
+replacements precede the first representable price atom and all premiums saturate
+the funding cap. Arbitrary publication queues/cadence, moving-anchor replacement,
+fractional K/F settlement, source-credit haircuts, trade-driven discovery,
+successful inline carry, fees/policy products, ADL and other modes remain open.
+Physical account deletion, rent disposition and slab closure are not exercised.
+No production change, public bug, vulnerable-pin experiment or generic closure
+is claimed. The existing constructor, accounting and payout helpers are unchanged.
+
+Base: `c3c9f0d38eafba1411f87ac32ce2193bac71af22` from
+`origin/codex/astra-open-holdout-ledger-20260912`. Worktree:
+`/home/anatoly/percolator-row425-astra-20260913-d`; branch:
+`codex/astra-row425-carry-route-20260913-d`. The supervisor checkout was not edited.
+Default-feature wrapper and authenticated matcher SBFs were built locked/offline
+with platform-tools v1.52 in the fresh private target below, without copying a
+dependency target. Engine pin: `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+New selector: PASS 1/1, eight histories, 88 rollbacks, 16 rolled-back SPL payouts,
+32 final owner payouts; peak 469,674 CU with a 600,000 ceiling. The measured maximum
+covers publication, crank, reduction and resolved-exit transactions; setup and
+matcher-grant helpers are outside that maximum. Related selectors: PASS 2/2,
+eight retained-retry worlds (peak 364,049 CU) and sixteen funding-reversal worlds
+(peak 456,458 CU). Both INV-079 metadata gates: PASS 2/2. Formatting and all three
+Git whitespace checks pass. Commands (from this worktree except the explicit
+matcher subshell):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row425-carry-route-20260913-d-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/dev/shm/row425-carry-route-20260913-d-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+(
+  cd tests/fixtures/auth_matcher
+  RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /home/anatoly/percolator-row425-astra-20260913-d/tests/fixtures/auth_matcher/target/deploy -- --locked
+)
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::checkpoint_replacement::v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolved_payouts -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::retained_funding_retry::v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpoint inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::v16_program_funding_reversal_preserves_carry_and_unsettled_owner_entitlement
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-045/038/085 retained funding-checkpoint retry (row 425, 2026-09-13)
 
 Owner: [cu/inv_045_retained_funding_retry.rs](cu/inv_045_retained_funding_retry.rs),

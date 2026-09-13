@@ -1286,6 +1286,25 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # target/checkpoint replacement, CPI, fees/ADL and other modes remain outside it.
 # No production or status change. README section "INV-045 fractional owner
 # settlement cadence" records the independent oracle, limits and exact commands.
+# Row 425 bounded overlapping-checkpoint conformance (2026-09-13):
+# cu/inv_045_checkpoint_replacement.rs, mounted by funding_carry_entitlement.
+# Eight public histories compose same-slot pending-mark cancellation, later-slot
+# publication while the first boundary remains owed, and single/batch CPI/bilateral
+# reductions. Three nonzero carry resets and two funding activations match an
+# input-owned publication journal, K/F and owner entitlement through resolved exit.
+# 88 complete Account suffix rollbacks include 16 SPL payouts; 32 final payouts
+# reconcile the fixed 1000066 supply with zero vault/OI/insurance/earnings residue.
+# Peak 469674 CU, ceiling 600000. One-pending retry and caught-up reversal do not
+# cover this composition; fixed-target fractional/cadence routes do not replace
+# checkpoints. The stateful paid-target witness lacks this same-slot cancellation
+# and repeated nonzero carry-reset journal. Only row425 is targeted; it stays OPEN.
+# Limits: integral lots, saturated funding cap, replacements before K movement,
+# AuthMark, unit ADL, zero fees, solvent two-asset classic SPL. Arbitrary queues,
+# moving anchors/cadence, source haircuts, inline carry, fees/ADL and modes stay open.
+# No production change, bug claim or status promotion. Base/private artifacts,
+# exact new/related/INV-079 selectors and hygiene commands: README section
+# "INV-045 overlapping funding checkpoints and carry (row 425, 2026-09-13)".
+# Exact selector: cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::checkpoint_replacement::v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolved_payouts -- --exact --nocapture --test-threads=1
 425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	OPEN
 # Row 426 partial conformance (2026-09-12): cu/inv_020_interrupted_refresh_fees.rs,
 # v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements.
