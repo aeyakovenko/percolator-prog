@@ -1,5 +1,18 @@
 # PR410-434 are post-hoc holdout/conformance misses; rows left OPEN still affect invariant status.
 # This is a coverage-fidelity ledger, not independent-discovery or whole-invariant proof evidence.
+# Scope D bounded conformance for rows 410/416/429 (2026-09-13):
+# cu/inv_024_generated_reserve_entitlement.rs runs eight seeds in sixteen public
+# LiteSVM histories, 144 funded handoffs and all twelve directed owner/role pairs.
+# Input-derived owner/class claims compare bundled fee/insurance and separate
+# principal with reversed split payouts paid for by former holders. Each public
+# transaction checks recipient SPL amounts, role stocks and attributed ledgers;
+# conserved wrong-owner and wrong-reserve observations both fail the oracle.
+# Thirty-two exact Account rollbacks cover a real payout before cold-admin
+# rejection and a fee over-budget request with funded principal/insurance.
+# Bounded INV-024/036/041 succession/partition evidence, INV-027 principal frame;
+# no generic closure, current-evidence/residual/actionability claim or production
+# change. All three rows remain OPEN; invariant_status.tsv is unchanged.
+# Selector, commands, non-vacuity and limits: pr135_scope_d_audit_20260913.md.
 # Row 412 bounded conformance (2026-09-13): cu/inv_012_revoked_renewal_payout.rs,
 # mounted by joint_incarnation_binding::revocation_atomicity::revoked_renewal_payout.
 # Four public System/ATA/SPL/wrapper histories cross both CPI routes and signs.

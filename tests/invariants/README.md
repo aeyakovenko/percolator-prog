@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## PR135 Scope D generated reserve entitlement (2026-09-13)
+
+Owner: [cu/inv_024_generated_reserve_entitlement.rs](cu/inv_024_generated_reserve_entitlement.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::generated_reserve_entitlement`.
+Eight seeds run sixteen public LiteSVM histories with 144 funded role handoffs.
+The input-derived owner/class claim book compares bundled fee/insurance payouts
+and separate principal with reversed, split payouts submitted by former holders.
+All twelve directed owner/role pairs execute. Each public transaction checks
+exact beneficiary tokens, role reserves, ledger attribution and stock; two
+conservation-preserving observation mutations reject. Thirty-two complete-Account
+rollbacks cover a cold-admin suffix after an actual payout and a fee request
+above its local budget while principal and insurance remain available.
+
+This closes the bounded generated succession/partition evidence cell for
+INV-024/036/041, with principal-preservation evidence for INV-027. Rows
+410/416/429 remain OPEN, and invariant statuses are unchanged. No production
+change or Scope A/B/C closure is claimed. The [Scope D audit](pr135_scope_d_audit_20260913.md)
+records the row mapping, non-vacuity, limits, exact selectors and build provenance.
+
 ## INV-024 atomic resolution and submitter reserves (row 410, 2026-09-13)
 
 Owner: [cu/inv_024_resolution_submitter_reserve.rs](cu/inv_024_resolution_submitter_reserve.rs),

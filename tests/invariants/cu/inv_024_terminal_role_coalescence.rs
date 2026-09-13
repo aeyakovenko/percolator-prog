@@ -6,6 +6,9 @@
 
 use super::*;
 
+#[path = "inv_024_generated_reserve_entitlement.rs"]
+mod generated_reserve_entitlement;
+
 #[path = "inv_024_terminal_role_exchange.rs"]
 mod terminal_role_exchange;
 
