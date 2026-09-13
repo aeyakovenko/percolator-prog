@@ -1,5 +1,98 @@
 # Invariant-owned test coverage
 
+## INV-067 fractional conversion and same-source expiry (row 417, 2026-09-13)
+
+Owner: [cu/inv_067_receipt_fractional_source.rs](cu/inv_067_receipt_fractional_source.rs).
+Exact selector:
+`inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_fractional_source::v16_program_fractional_source_conversion_preserves_receipts_through_same_bucket_expiry`.
+
+Four public LiteSVM histories split the existing 1,000-face backed winner into
+350- and 650-face owners, preserving total deposits, backing and SPL supply.
+One owner converts against the shared 350-atom backing pool before its deadline:
+`floor(350 * 350 / 1000) = 122` or `floor(650 * 350 / 1000) = 227`. Both divisions
+have a half-atom remainder. Only the converted atoms leave the terminal claim
+denominator. The converted owner's remaining 228 or 423 face becomes a third
+paid receipt alongside the older 700- and 1,300-face receipts. Their unchanged
+top-up instructions remain usable when the **same** bucket's remaining 228 or
+123 atoms expire at slot 13 or are processed late at slot 15.
+
+The oracle derives payouts from submitted deposits, trade sizes and price changes.
+It checks complete receipt identity with only cumulative paid value changing,
+portfolio identity/provenance, exact and unreceipted claim bounds, consumed
+provider attribution, remaining source stock, every owner's SPL balance, and
+mint/vault custody. Clock advancement alone cannot release this stock or pay a
+receipt. A rejected transaction must first normalize expiry, replace the final
+bound and execute all four owner transfers, then restore complete fixture
+Accounts; only the separate payer's signature fee remains charged. The unchanged
+requests subsequently pay exact positive top-ups to all three retained receipts,
+including the owner whose source conversion rounded down. Zero-due cleanup,
+repeated byte-identical retries and rent-exact deletion of all six portfolios
+finish each history.
+
+With the 350-face owner converting first, final owner payments in fixture order
+are `[1177, 0, 529, 0, 1329, 814]`; with the 650-face owner converting first they
+are `[1157, 0, 428, 0, 1292, 972]`. These are different economic histories, so the
+test compares exact/late expiry within each history, not conversion-order equality.
+Each endpoint has one provider wallet atom and two unpaid rounding atoms in
+custody, conserving all 3,852 minted atoms.
+
+Overlap review discarded an adjacent-backing-amount rounding probe because
+`receipt_rounding_threshold` already covers that dimension. `receipt_source_realization`
+converts one owner's integral allocation; `receipt_conversion_then_expiry` converts
+one source and expires another. This increment instead combines a fractional
+allocation, a newly retained converted-owner receipt and later expiry within one
+shared pool. It adds a `SplitClaimants` constructor variant to the existing
+`late_expiry::World`; the adjacent single-source, staggered-source and variable-
+backing controls below cover the shared constructor paths. System/SPL/ATA/wrapper
+calls construct and mutate all economic accounts. LiteSVM supplies programs,
+signer SOL and Clock advancement. No initialized program account bytes are edited.
+
+**Row 417 remains OPEN.** This is a finite conformance increment, not a generic
+generator/oracle or vulnerable-pin experiment. Arbitrary claim populations,
+conversion amounts/rates, repeated conversion/expiry words, Recovery, insurance
+(including overfunding), other backing/insurance routes, alternate collateral
+rails, absent roles and maximum shapes remain open. Slab retirement and disposal
+of the final two rounding atoms are outside this selector. Production, dependency
+pins and machine invariant statuses are unchanged.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`8b82465a9b95f80a0b35b27451feeba7b6733916`. Isolated branch:
+`codex/row417-fractional-stock-20260913`; worktree:
+`/home/anatoly/percolator-row417-fractional-stock-20260913`.
+The coordinator checkout was not edited. The requested model/reasoning setting
+was `gpt-6-astra` / `ultra`; this worker session exposes no switch or independent
+verification of that setting.
+
+Environment: Linux `6.1.0-52-cloud-amd64`, x86_64; host Rust/Cargo 1.90.0;
+LiteSVM 0.1.0 with its bundled SPL Token 3.5.0 and ATA programs. A private,
+default-feature SBF build uses platform-tools v1.52, Anchor v2 and locked engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The new selector passes all four histories, four exact rollbacks and 24 portfolio
+deletions; peak settlement cost is **611,544 CU** against the 900,000 bound.
+All three adjacent constructor controls pass. The initial draft incorrectly
+expected an immediate transfer from the first receipt-creation call; bounded
+public preparation corrected that test assumption without changing the expected
+entitlements. No production invariant failure or correction was found.
+Exact commands from the isolated worktree (all test selectors use one thread):
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/row417-fractional-stock-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_fractional_source::v16_program_fractional_source_conversion_preserves_receipts_through_same_bucket_expiry -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_source_realization::v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_conversion_then_expiry::v16_program_committed_conversion_then_late_expiry_preserves_receipt_attribution -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_rounding_threshold::v16_program_late_receipt_rounding_threshold_preserves_zero_vault_settlement -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-028 last latent domain through Recovery (row 423, 2026-09-13)
 
 Owner: [cu/inv_028_recovery_latent_capacity.rs](cu/inv_028_recovery_latent_capacity.rs),

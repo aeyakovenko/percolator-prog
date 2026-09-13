@@ -330,6 +330,20 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # records exact new/INV-079 selectors, isolated build paths and verification commands.
 # OPEN: fixed population/amounts/source order; arbitrary histories, Recovery/insurance,
 # conversion mixtures, alternate rails, absent roles, maxima and account retirement omitted.
+# 417 bounded fractional-source conformance (2026-09-13): cu/inv_067_receipt_fractional_source.rs,
+# inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_fractional_source::v16_program_fractional_source_conversion_preserves_receipts_through_same_bucket_expiry.
+# Four public histories share 350 backing across 350/650 face: one owner converts
+# floor(122.5) or floor(227.5) before the SAME source's remaining 228/123 atoms expire.
+# Two older receipts and the newly retained converted-owner receipt preserve exact
+# identity, input-derived entitlement and provider attribution through full paying
+# rollback, unchanged retry, zero-due cleanup and all six rent-exact portfolio exits.
+# This adds fractional shared-source conversion, not adjacent backing thresholds or
+# separate-domain conversion/expiry. One provider atom plus two rounding atoms remain.
+# Base 8b82465a; private build provenance, exact new/adjacent/metadata commands and
+# limits: README "INV-067 fractional conversion and same-source expiry".
+# Finite evidence only; arbitrary rates/populations/words, Recovery, insurance,
+# other routes/rails, absent roles, maxima and slab retirement remain open.
+# No generic generator/oracle, vulnerable-pin experiment, production or status change.
 417	LoF	BLOCKER	INV-067	INV-010,INV-024,INV-029,INV-063,INV-066,INV-067,INV-068,INV-070	receipt+x-late-expiry+x-claimant-order	terminal-claim-identity-survives-every-later-stock-reclassification	OPEN
 # Row 418 partial conformance (2026-09-10): cu/inv_077_terminal_quote_variants.rs,
 # v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent.

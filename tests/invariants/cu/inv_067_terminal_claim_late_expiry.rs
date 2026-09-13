@@ -28,6 +28,13 @@ pub(crate) struct World {
     pub(crate) peak_cu: u64,
 }
 
+#[derive(Clone, Copy)]
+enum SourceShape {
+    Single,
+    Staggered,
+    SplitClaimants,
+}
+
 impl World {
     // INV-066 varies receipt creation across expiry; new() retains INV-067's original seed.
     pub(crate) fn before_receipts() -> Self {
@@ -35,12 +42,17 @@ impl World {
     }
 
     pub(crate) fn before_receipts_with_claimant_owners(claimant_owners: [Keypair; 2]) -> Self {
-        Self::build_before_receipts(claimant_owners, None, BACKING, false)
+        Self::build_before_receipts(claimant_owners, None, BACKING, SourceShape::Single)
     }
 
     pub(super) fn before_receipts_with_backing(backing: u128) -> Self {
         assert!(backing > 0 && backing <= BACKING);
-        Self::build_before_receipts([Keypair::new(), Keypair::new()], None, backing, false)
+        Self::build_before_receipts(
+            [Keypair::new(), Keypair::new()],
+            None,
+            backing,
+            SourceShape::Single,
+        )
     }
 
     pub(super) fn before_receipts_with_setup(setup: fn(&mut V16CuEnv)) -> Self {
@@ -48,30 +60,55 @@ impl World {
             [Keypair::new(), Keypair::new()],
             Some(setup),
             BACKING,
-            false,
+            SourceShape::Single,
         )
     }
 
     pub(super) fn before_receipts_with_staggered_sources() -> Self {
-        Self::build_before_receipts([Keypair::new(), Keypair::new()], None, BACKING, true)
+        Self::build_before_receipts(
+            [Keypair::new(), Keypair::new()],
+            None,
+            BACKING,
+            SourceShape::Staggered,
+        )
+    }
+
+    pub(super) fn before_receipts_with_split_source_claimants() -> Self {
+        Self::build_before_receipts(
+            [Keypair::new(), Keypair::new()],
+            None,
+            BACKING,
+            SourceShape::SplitClaimants,
+        )
     }
 
     fn build_before_receipts(
         claimant_owners: [Keypair; 2],
         setup: Option<fn(&mut V16CuEnv)>,
         backing: u128,
-        staggered_sources: bool,
+        source_shape: SourceShape,
     ) -> Self {
         // Allocate and initialize through System/SPL/wrapper instructions, including the
         // initial collateral endowment. LiteSVM only supplies programs, clock and signer SOL.
+        let staggered_sources = matches!(source_shape, SourceShape::Staggered);
+        let split_claimants = matches!(source_shape, SourceShape::SplitClaimants);
         let asset_count = if staggered_sources { 3 } else { 2 };
         let mut deposits = DEPOSITS.to_vec();
+        let mut faces = FACES.to_vec();
         let trades = if staggered_sources {
             // Split the same 250 debtor capital, 100 backing and 1,000 claim face
             // across two independent source domains, without changing token supply.
             deposits[3] = 100;
             deposits.push(150);
+            faces.push(0);
             vec![(0, 1, 0, 14), (4, 1, 0, 26), (2, 3, 1, 8), (2, 5, 2, 12)]
+        } else if split_claimants {
+            // Preserve total capital and face, but share one source's fractional rate.
+            deposits[2] = 350;
+            deposits.push(650);
+            faces[2] = 7 * 50;
+            faces.push(13 * 50);
+            vec![(0, 1, 0, 14), (4, 1, 0, 26), (2, 3, 1, 7), (5, 3, 1, 13)]
         } else {
             vec![(0, 1, 0, 14), (4, 1, 0, 26), (2, 3, 1, 20)]
         };
@@ -275,6 +312,8 @@ impl World {
             }
             let actors = if staggered_sources {
                 vec![1, 3, 5, 0, 4, 2]
+            } else if split_claimants {
+                vec![1, 3, 0, 4, 2, 5]
             } else {
                 vec![1, 3, 0, 4, 2]
             };
@@ -294,14 +333,14 @@ impl World {
         for &(winner, loser, asset, size) in &trades {
             world.trade(winner, loser, asset, -size, 150);
         }
-        for actor in [0, 2, 4] {
+        for (actor, &face) in faces.iter().enumerate().filter(|(_, face)| **face != 0) {
             assert_eq!(
                 world
                     .env
                     .portfolio_state(world.actors[actor].portfolio)
                     .pnl
                     .get(),
-                FACES[actor] as i128
+                face as i128
             );
         }
         assert_eq!(

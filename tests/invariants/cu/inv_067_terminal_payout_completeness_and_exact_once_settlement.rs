@@ -79,6 +79,9 @@ mod receipt_conversion_then_expiry;
 #[path = "inv_067_receipt_overdue_history.rs"]
 mod receipt_overdue_history;
 
+#[path = "inv_067_receipt_fractional_source.rs"]
+mod receipt_fractional_source;
+
 #[test]
 fn v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once() {
     late_expiry::verify_receipt_payout_and_portfolio_close_retry();
