@@ -7,6 +7,9 @@
 use super::*;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_039_pending_loss_mixed_roles.rs"]
+mod mixed_roles;
+
 const LOTS: [u128; 2] = [1, 2];
 const MOVES: [u128; 2] = [7, 13_999];
 const DEBTORS: [usize; 2] = [1, 3];

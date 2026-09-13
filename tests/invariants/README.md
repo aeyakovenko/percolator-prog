@@ -1,5 +1,78 @@
 # Invariant-owned test coverage
 
+## INV-039 mixed creditor/debtor close order (row 419, 2026-09-13)
+
+Owner: [cu/inv_039_pending_loss_mixed_roles.rs](cu/inv_039_pending_loss_mixed_roles.rs),
+mounted under `inv_039_pending_loss_obligation_durability::shared_holder::mixed_roles`.
+Exact selector:
+`v16_program_mixed_creditor_debtor_preserves_pending_attribution_through_resolved_close_order`.
+
+This public-route TDD regression now passes with the production correction below.
+A portfolio holds a pending credit in one domain and owes a larger loss in another.
+Both pending cohorts cross resolution. The test compares settlement of the original
+payer before versus after the mixed account's settlement and mechanical deletion.
+An independent input ledger checks every owner's capital, PnL, outstanding receipt
+face and prior payout, alongside domain ownership, basis, OI, loss weights/counts,
+market stock census, custody and fixed mint supply. Three rejected System suffixes
+restore complete Accounts, including earlier successful closes, except exact payer
+signature fees. All economic state comes from public System/SPL/ATA/wrapper routes;
+mint authority is publicly revoked and no program-owned bytes are directly mutated.
+
+On wrapper base `b7ccff2a9c7c3631518749c6b8fd7fde1da0cd08` with engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, the unchanged selector reproduced the
+original-payer-last failure: the downstream owner received 310,000 atoms against
+340,000 expected, with no remaining capital, PnL or receipt. The payer-first control
+completed. No assertion, test action, ignore or expected-failure annotation changed.
+
+Engine commit `0b861efbdc5b613c300344dc1d73cd5c2622464f` corrects
+`reserve_new_capital_backed_loss_for_source_domain_not_atomic`: in Resolved mode,
+if the source claim bound is zero and the creditor side has no stored or stale
+legs, newly crystallized debt enters terminal junior residual through the existing
+residual-credit helper. Previously it recreated fresh source backing after that
+source's credit had been consumed, withholding the late payer's 30,000 atoms from
+the downstream claim. Existing impaired-bucket handling remains in place; Live
+settlement, domains with claims or creditor legs, and existing backing are unchanged.
+There is no account-layout change or new engine proof suite. Both Cargo dependency
+entries and the lockfile pin this engine correction; wrapper settlement still uses
+the same public engine API.
+
+The corrected default-feature SBF selector passed: two close orders, three exact
+suffix rollbacks, ten exact owner payouts and deletions, and zero terminal vault.
+The downstream owner receives all 340,000 atoms in both orders. Peak suffix CU:
+286,404 across the exact runs (limit 500,000). Wrapper SBF SHA-256:
+`7d72ae5fcfe147bcde8616cf463f159d9caa778d25df7909e7a4c11a06ca9cac`.
+
+The surrounding INV-039 run passed 20 selectors; its two restart selectors stopped
+at the old exact-pin assertion and then passed exact reruns after the harness pin
+was updated. Both required INV-079 metadata gates and formatting/whitespace checks
+passed. This is validation of those 22 selectors, not the full wrapper test suite.
+
+**Row 419 remains OPEN and all invariant dispositions are unchanged.** This covers
+one solvent, integral, two-domain mixed-role fixture with zero funding, fees,
+external reserves and ADL. It adds the mixed creditor/debtor consumption case to
+the existing separate-owner and two-credit shared-holder coverage; it does not
+establish arbitrary-history, fractional, bankruptcy or generic proof coverage.
+
+Wrapper worktree: `/home/anatoly/worktrees/astra-row419-attribution-fix-20260913`;
+branch: `codex/astra-row419-attribution-fix-20260913`. Engine worktree:
+`/home/anatoly/worktrees/astra-row419-attribution-engine-fix-20260913`; branch:
+`codex/astra-row419-attribution-engine-fix-20260913`. The engine commit is local and
+unpublished, imported into the local Cargo Git cache for locked/offline validation.
+It must be available upstream before the wrapper pin is merged. No push was made.
+Validation uses a private copied build cache and platform-tools v1.52:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::shared_holder::mixed_roles::v16_program_mixed_creditor_debtor_preserves_pending_attribution_through_resolved_close_order -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability:: -- --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-073 native insurance redemption rollback (row 421, 2026-09-13)
 
 Owner: [cu/inv_073_native_insurance_ledger_progress.rs](cu/inv_073_native_insurance_ledger_progress.rs).
