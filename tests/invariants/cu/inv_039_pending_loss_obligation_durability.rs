@@ -60,6 +60,9 @@ mod owner_partition;
 #[path = "inv_039_fractional_residual_resolution.rs"]
 mod fractional_residual_resolution;
 
+#[path = "inv_039_mixed_role_resolution.rs"]
+mod mixed_role_resolution;
+
 #[path = "inv_039_pending_loss_backing_expiry.rs"]
 mod backing_expiry;
 
