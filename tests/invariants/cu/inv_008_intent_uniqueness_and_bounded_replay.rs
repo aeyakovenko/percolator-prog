@@ -25,7 +25,8 @@
 //! The reserve-swap history retains both withdrawal rails before execution, then replaces
 //! secondary custody with primary custody without advancing owner state. Neither rail can
 //! revive the consumed allowance, including when the swap's two SPL transfers precede rejection.
-//! This does not certify insurance-withdrawal stock binding (counterexample 415 remains open).
+//! The Live-debit child separately checks insurance consumption across optional ledgers,
+//! recipient variants and refill rollback; rows 415/428 remain open for broader histories.
 //! This is bounded asset-0 evidence using signature-distinct envelopes around retained instruction
 //! bytes, not detached-signature, durable-nonce, or arbitrary-history coverage.
 
@@ -44,6 +45,9 @@ mod underfunded_rail_retry;
 
 #[path = "inv_008_insurance_round_trip_retry.rs"]
 mod insurance_round_trip_retry;
+
+#[path = "inv_008_live_debit_consumption.rs"]
+mod live_debit_consumption;
 
 #[path = "inv_008_insurance_destination_epoch_retry.rs"]
 mod insurance_destination_epoch_retry;

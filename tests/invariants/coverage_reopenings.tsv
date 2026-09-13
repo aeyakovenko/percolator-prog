@@ -1586,6 +1586,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # The same matrix, the direct row415/428 regression, and the adjacent INV-064
 # insurance-policy selector pass on PR #428 fixed head a05ef7d3. Row remains OPEN
 # here because the production fix is still held out of this coverage branch.
+# 2026-09-13 Scope E: cu/inv_008_live_debit_consumption.rs independently checks
+# Live debit consumption before retries. The base fails the first paid debit's
+# epoch assertion; a minimal local adjustment consumes its validated authority
+# epoch. Four public histories pass 48 transactions/32 complete rollbacks,
+# including duplicate debits, optional ledgers, alternate recipients and refill
+# prefixes. Adjacent custody/insurance selectors pass. Broader stock histories,
+# policy equivalence and terminal consumption remain open; no status promotion.
+# See pr135_scope_e_retained_debit_20260913.md for exact commands and compatibility.
 428	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	OPEN
 # Row 429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_exchange.rs,
 # v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders.

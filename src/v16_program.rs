@@ -646,6 +646,7 @@ pub mod state {
         pub backing_fee: u64,
         /// Strict per-asset authority incarnation. Every market/asset authority handoff that can
         /// affect this asset binds the exact value and increments it atomically.
+        /// Successful Live insurance debits also consume their bound authority epoch.
         pub authority_epoch: u64,
         pub trade_fee: u64,
         pub liquidation_fee: u64,
@@ -10930,6 +10931,7 @@ pub mod processor {
             }
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
             let authorities = domain_authorities_from_view(&group, &cfg, long_domain)?;
+            let mut live_debit_epoch_asset = None;
             let ledger_authority = if live_mode {
                 let shutdown_drain =
                     live_domain_withdraw_health_or_shutdown_view(&cfg, &group, long_domain)?;
@@ -10943,6 +10945,7 @@ pub mod processor {
                 }
                 let epoch_asset_index = if local_authorized { asset_index } else { 0 };
                 require_authority_epoch_view(&group, epoch_asset_index, expected_authority_epoch)?;
+                live_debit_epoch_asset = Some(epoch_asset_index);
                 if admin_shutdown_authorized && !local_authorized {
                     cfg.marketauth
                 } else {
@@ -11006,6 +11009,10 @@ pub mod processor {
                 (ledger_data.as_deref_mut(), ledger_state.as_ref())
             {
                 write_or_init_insurance_ledger(data, ledger, *initialized)?;
+            }
+            if let Some(epoch_asset) = live_debit_epoch_asset {
+                // Consume signed Live debit consent even when telemetry is omitted.
+                advance_authority_epoch_view(&mut group, epoch_asset, expected_authority_epoch)?;
             }
         }
         let bump_arr = [bump];

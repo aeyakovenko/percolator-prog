@@ -42,6 +42,15 @@ multi-asset batches remain outside this increment. Scope A observation and Scope
 residual work are not extended. See the [Scope F audit](scope_f_first_admission_audit_20260913.md)
 for the oracle, exact commands, results and artifact hashes.
 
+## Scope E Live retained debit conformance (2026-09-13)
+
+[Scope E audit and exact commands](pr135_scope_e_retained_debit_20260913.md)
+records a net-new public LiteSVM probe under INV-008/064, its first-debit
+consumption failure on the requested base, and the minimal Live-only epoch
+consumption adjustment. Four histories cover 48 transactions and 32 exact
+rollbacks across optional ledgers, destinations, duplicate debits and refill
+composition. Rows 415/428 and invariant classifications remain unchanged.
+
 ## INV-024 atomic resolution and submitter reserves (row 410, 2026-09-13)
 
 Owner: [cu/inv_024_resolution_submitter_reserve.rs](cu/inv_024_resolution_submitter_reserve.rs),
