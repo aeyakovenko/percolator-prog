@@ -83,6 +83,106 @@ git diff --check && git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-024 delayed terminal submitters (row 410, 2026-09-13)
+
+Owner: [cu/inv_024_delayed_terminal_submitter.rs](cu/inv_024_delayed_terminal_submitter.rs).
+Exact selector:
+`inv_024_attributed_quote_value_conservation::terminal_earnings_succession::delayed_terminal_submitter::v16_program_delayed_terminal_cleanup_preserves_earned_fees_across_submitter_changes`.
+Primary INV-024; bounded INV-036/081 attribution and success-state evidence for
+PR135 row 410. Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`fe1cc012f416a7d72e2d45618f893b4e0d83a618`. Isolated branch:
+`codex/astra-row410-delayed-terminal-20260913`; worktree:
+`/home/anatoly/percolator-row410-delayed-terminal-20260913`.
+
+Six public LiteSVM histories cross exact/late backing expiry (slots 100/101)
+with three lifecycle orders:
+
+- User settlement at slot 7, delayed last-portfolio deletion, expiry normalization,
+  then the provider's first fee payment.
+- User settlement at slot 7, delayed last-portfolio deletion, a 17-atom provider
+  fee payment, then expiry normalization.
+- User settlement itself delayed until slot 100/101: `CloseResolved` normalizes
+  expired backing while portfolios still exist, then user settlement and deletion
+  precede fee payments.
+
+All three orders preserve the same independent input-derived entitlements:
+56,627/1,995,000 atoms to the two users, 875 earned fees to the provider and
+31 insurance atoms to the separate insurer. Expired 100,000-atom principal is
+burned at final slab closure. The delayed-settlement order has zero historical
+provider credit because backing expires before conversion; timely settlement
+records the 5,000-atom provider receivable and spent-backing history. This
+accounting difference cannot change the recipient of already earned fees.
+
+The former losing user pays the first 17-atom fee payout, the insurance operator
+pays its 858-atom tail, and the settled winner pays last-portfolio deletion,
+any subsequent expiry normalization, and the insurer's payout. A keeper pays
+final slab closure. All seven actors are distinct. Reserve instructions are
+constructed while Live with nonsigner beneficiaries and retained unchanged
+through resolution, delays and payer changes. Neither user gains quote value
+after its exact user payout; operator, keeper and market authority receive zero
+quote atoms. The market authority signs mechanical cleanup and receives exact
+rent refunds, independently of SPL ownership.
+
+The local entitlement checker frames every destination and vault Account, mint,
+authority profile and control sequences; checks provider fee stocks and ledger
+identity/paid history, insurance budget/spend, principal expiry and source
+receivables; and runs the stock census with the actual expected materialized
+portfolio set. Every public user continuation must change market or portfolio
+state and preserve external quote conservation. With one settled portfolio still
+present, slab cleanup and fee payout each reject with exact Account rollback
+apart from signature fees. All six histories then complete a market tombstone,
+exact principal burn, unchanged paid ledger and exact rent disposition.
+
+This adds expiry *before* terminal reserve admission, including normalization
+during delayed economic settlement and already-paid users becoming public
+submitters. Existing `terminal_cleanup_submitter` finishes before expiry;
+`terminal_earnings_expiry` and `terminal_public_reserves` start with portfolios
+already deleted. The fee-loss/recredit fixture is unused: insurance is never
+spent here, and beneficiary succession, existing-wallet recredit and shutdown
+attribution are not extended. Existing constructors, `reserve_payout` and `land`
+are reused without behavior changes; the parent file only mounts the new module.
+All initialized program state comes from public System/SPL/wrapper instructions.
+Mutable Account copies are assertion frames and are never installed into LiteSVM.
+
+**Row 410 remains OPEN.** This is six bounded conformance histories, not a generic
+generator/oracle or whole-invariant proof. Other assets and quote rails, other
+claimant/role orders, fees earned across multiple lifecycles, concurrent receipts,
+insurance depletion/recredit, donated surplus, arbitrary funding and authority
+histories, and larger transaction compositions remain open. No production or
+dependency changes, vulnerable-pin experiment, other-row claim or status promotion.
+
+Environment: Linux x86_64 (`6.1.0-52-cloud-amd64`), host Rust/Cargo 1.90.0,
+default `anchor-v2` features, LiteSVM 0.1.0, Solana platform-tools v1.52.
+The SBF artifact was built offline from the exact base in this worktree;
+SHA-256 `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Private target/temp paths and exact commands:
+
+```sh
+cd /home/anatoly/percolator-row410-delayed-terminal-20260913
+export CARGO_TARGET_DIR=/tmp/row410-delayed-terminal-20260913-target
+export TMPDIR=/tmp/row410-delayed-terminal-20260913-tmp
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::delayed_terminal_submitter::v16_program_delayed_terminal_cleanup_preserves_earned_fees_across_submitter_changes -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
+Validation: new selector **1/1**, six completed closures, twelve exact admission
+rollbacks, peak **255,710 CU** under the shared 1,200,000 limit. Timely settlement
+needs two user calls; delayed settlement needs four, within the sixteen-call
+bound. Both requested metadata selectors pass **1/1**; formatting and Git
+whitespace checks pass. Adjacent controls were not run because no shared helper
+behavior changed. Development corrected a test field name, the census's
+materialized-portfolio input, and assumptions about market-only progress and
+source-credit history during late settlement. No production violation was found.
+
 ## INV-067 fractional conversion and same-source expiry (row 417, 2026-09-13)
 
 Owner: [cu/inv_067_receipt_fractional_source.rs](cu/inv_067_receipt_fractional_source.rs).

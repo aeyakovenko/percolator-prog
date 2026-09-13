@@ -118,6 +118,18 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Exact commands/results: README "INV-024 earned fees beside spent-insurance recovery".
 # Only the new exact v16_cu selector, the two requested INV-079 metadata selectors,
 # fmt and Git whitespace checks; no vulnerable-pin experiment or status promotion.
+# Row 410 bounded delayed-cleanup conformance (2026-09-13): cu/inv_024_delayed_terminal_submitter.rs,
+# inv_024_attributed_quote_value_conservation::terminal_earnings_succession::delayed_terminal_submitter::v16_program_delayed_terminal_cleanup_preserves_earned_fees_across_submitter_changes.
+# Six public histories cross exact/late expiry with delayed user settlement or last
+# deletion and fee-prefix order. CloseResolved versus CloseSlab normalization changes
+# source-credit history but preserves 875 provider fees, 31 insurer atoms, exact user
+# payouts and 100000 principal burn. Settled users and operator alternate public
+# submission without gaining another role's quote; 12 admission rollbacks and exact
+# custody, ledger, rent and tombstone checks. Existing public helpers are unchanged.
+# OPEN: bounded lifecycle/submitter composition, no generic generator/oracle, production
+# change or status promotion. Other assets/rails, receipts, depletion/recredit, surplus,
+# arbitrary role/funding histories and transaction words remain open. Base, environment,
+# exact selectors/commands and results: README "INV-024 delayed terminal submitters".
 410	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-036,INV-081	authority-role+x-lifecycle+x-attribution	terminal-submitters-cannot-receive-another-role-attributed-reserve	OPEN
 # 411 partial public coverage (2026-09-10): stateful/inv_014_retained_backing_fee_cap.rs::v16_program_retained_backing_fee_caps_follow_participant_and_route_consent retains nonzero backing caps across an owner-signed matcher cap change, both charged roles and CPI/no-CPI alternatives. Exact post-CPI rollback, participant-local consent, provider SPL fees and opposite-route close values compose. Single-source Live evidence only; see README. No row/status promotion.
 # 411/432 bounded conformance (2026-09-12): cu/inv_014_retained_redirect_entitlement.rs,

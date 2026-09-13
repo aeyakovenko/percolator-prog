@@ -23,6 +23,9 @@ mod terminal_role_partition;
 #[path = "inv_024_terminal_cleanup_submitter.rs"]
 mod terminal_cleanup_submitter;
 
+#[path = "inv_024_delayed_terminal_submitter.rs"]
+mod delayed_terminal_submitter;
+
 #[path = "inv_024_terminal_recredit_surplus.rs"]
 mod terminal_recredit_surplus;
 
