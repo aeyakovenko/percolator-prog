@@ -4,7 +4,7 @@
 
 use super::*;
 
-fn withdraw_reward(
+pub(super) fn withdraw_reward(
     env: &mut V16CuEnv,
     owner: &Keypair,
     keeper: Pubkey,

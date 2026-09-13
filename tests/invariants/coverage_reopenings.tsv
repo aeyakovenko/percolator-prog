@@ -583,6 +583,24 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # selectors, private rebuilt-SBF provenance, open-position residual and limits.
 # CPI/AuthMark, multiple assets/providers, exposed keepers and arbitrary histories
 # remain outside this finite family. Row 422 stays OPEN with partial evidence.
+# Row 422 exposed-keeper conformance (2026-09-13):
+# cu/inv_045_exposed_keeper_provenance.rs, selector
+# inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::exposed_keeper_provenance::v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybrid_catchup.
+# Exact command with the README environment: cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::exposed_keeper_provenance::v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybrid_catchup -- --exact --nocapture --test-threads=1
+# Public SPL/Hybrid discovery plus a long/short AuthMark keeper, settled before or
+# after reward credit, checks independent effective-price fees through fresh-report
+# lag and full catchup, receipt-only keeper mutation, separate own-position PnL,
+# retained discovery exclusion from both assets' budgets and exact reward payout.
+# Pass: four histories, eight rewarded liquidations, twelve healthy rollbacks and
+# four exposed-withdraw rollbacks; each keeper receives 4757 SPL atoms after its
+# signed AuthMark close. Opposite own-position PnL remains separate from rewards.
+# README section "INV-045 exposed AuthMark keeper during Hybrid catchup" records
+# exact new/control/metadata commands and the private rebuilt default-feature SBF
+# SHA-256 dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52,
+# platform-tools v1.52, base c5bc37c0, engine 394fd0bf. No production change.
+# Finite two-asset evidence only: CPI, underwater/shared-owner keepers, additional
+# providers, funding/maintenance, arbitrary histories and terminal exits remain
+# unproven. Prior flat-keeper limits above describe their own families. OPEN.
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN
 # 423 partial conformance (2026-09-10): cu/inv_028_single_slot_admission.rs::v16_program_batch_admission_cannot_share_last_future_domain_slot.
 # Two individually fitting old-asset legs jointly need 29 domains: both batch orders reject atomically;

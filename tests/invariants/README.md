@@ -1876,6 +1876,90 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-045 exposed AuthMark keeper during Hybrid catchup (row 422, 2026-09-13)
+
+Owner: [cu/inv_045_exposed_keeper_provenance.rs](cu/inv_045_exposed_keeper_provenance.rs),
+mounted under
+`inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::exposed_keeper_provenance`.
+Selector:
+`v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybrid_catchup`.
+This exercises INV-045 with INV-020/024/036/041/061/062 and the row's obligation
+`liquidation-reward-provenance-follows-the-effective-price-until-catchup`.
+
+Four public LiteSVM histories cross a keeper's long/short two-lot AuthMark position
+with its settlement before/after receiving Hybrid liquidation rewards. The keeper's
+counterparty also holds the target's opposite Hybrid exposure. Unlike the earlier
+flat-keeper histories, the reward recipient has its own pending authenticated mark,
+active exposure and nonzero position PnL. System/SPL/ATA and public wrapper instructions
+create and fund all accounts. Only external Pyth reports, Clock, airdrops and program
+loading use harness inputs; no initialized protocol bytes or snapshots are installed.
+
+Paid Hybrid discovery stages 992,320 from 1,000,000. Fresh reports at slots 6/7/14
+cross effective prices 997,600/995,206/980,000. Independent elapsed-cap and two-stage
+fee arithmetic distinguish the liquidation price from the original price, accepted
+print, raw print, paid mark, fresh target and the keeper's AuthMark price. Each
+receipt credits only keeper capital and invalidates its certificate, preserving
+the entire remaining keeper record, the unobserved AuthMark asset, foreign portfolio
+Accounts and SPL custody. Refreshes and final catchup cannot manufacture receipts.
+Only each new liquidation fee's remainder enters the selected Hybrid domains;
+the second asset's budgets remain zero and all discovery fees stay unbudgeted.
+
+AuthMark settlement accounts separately for the keeper's final +10,000/-10,000
+position PnL. The test settles all five portfolios with independent current-health,
+stock, source-rate and reservation censuses, compares every owner's capital, PnL
+and legs across the two settlement orders. Withdrawal while exposed must reject
+with exact `EngineStale` rollback. A signed AuthMark close then permits withdrawal
+of exactly the earned rewards to the keeper's SPL account. The endpoint includes
+insurance, both domain budgets, custody and the nonnegative open-claim rounding
+residual. No terminal redemption of remaining capital or source claims is claimed.
+
+**Row 422 remains OPEN with partial conformance evidence.** This finite two-asset
+family does not close arbitrary histories, CPI or AuthMark-origin reward handoffs,
+underwater/shared-owner keepers, additional provider assignments, nonzero funding
+or maintenance, or terminal exits. AuthMark is the recipient's independent exposure;
+the selected liquidated asset remains a direct Pyth Hybrid. No production code changes.
+
+Base: `c5bc37c0c54110e7461b5cdbeee3680b8458e3e3`, branch
+`codex/astra-row422-mark-provenance-20260913`, worktree
+`/tmp/percolator-astra-row422-mark-provenance-20260913`. A private, ordinary copy of
+`/dev/shm/percolator-row426-target` seeded the worktree's ignored `target` directory.
+Both the host test and default-feature wrapper SBF were rebuilt from this worktree,
+locked/offline. Platform-tools v1.52; engine pin
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`; wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+No matcher artifact is used. The new two-asset family uses the existing mixed-provider
+test's 500,000-CU action bound; the reused helper retains the original 325,000-CU
+default for all earlier callers.
+
+The new selector passes four histories: eight positive liquidations, twelve exact
+healthy-retry rollbacks and four exact exposed-withdrawal rollbacks. Each history
+closes 12,001,223 then 16,653,247 Hybrid quantity units, charges 5,987/8,287 atoms,
+and earns 1,995/2,762 atoms under the fixed 3,333-bps share. Each keeper withdraws
+exactly 4,757 SPL atoms after its signed AuthMark close. Peak crank/payout CU are
+354,125/64,336; every endpoint retains the same four-atom open-Hybrid-claim residual.
+Both adjacent controls pass. Development corrected test assumptions about the
+one-asset CU bound, unchanged AuthMark publication and the required flat-account
+withdrawal route. No public-route implementation violation was found.
+Exact build and validation commands, from this worktree:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target"
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::exposed_keeper_provenance::v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybrid_catchup -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --quiet --test-threads=1 \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper_exit \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_policy_catchup::v16_program_reward_policy_succession_preserves_receipts_and_effective_price_catchup
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-073 native provider redemption before unsigned remainder (row 420, 2026-09-12)
 
 Owner: [cu/inv_073_native_provider_redemption.rs](cu/inv_073_native_provider_redemption.rs),

@@ -15,6 +15,9 @@ mod retained_penalty_handoff;
 #[path = "inv_045_reward_policy_catchup.rs"]
 mod reward_policy_catchup;
 
+#[path = "inv_045_exposed_keeper_provenance.rs"]
+mod exposed_keeper_provenance;
+
 fn values(env: &V16CuEnv, portfolios: [Pubkey; 5]) -> [i128; 5] {
     portfolios.map(|key| {
         let account = env.portfolio_state(key);
@@ -79,6 +82,24 @@ fn submit(
     tracked: &[Pubkey],
     rejection: Option<(u8, InstructionError)>,
 ) -> u64 {
+    submit_with_cu_limit(
+        env,
+        signer,
+        instructions,
+        tracked,
+        rejection,
+        CRANK_CU_LIMIT,
+    )
+}
+
+fn submit_with_cu_limit(
+    env: &mut V16CuEnv,
+    signer: &Keypair,
+    instructions: &[Instruction],
+    tracked: &[Pubkey],
+    rejection: Option<(u8, InstructionError)>,
+    instruction_cu_limit: u64,
+) -> u64 {
     env.svm.expire_blockhash();
     let mut ixs = vec![heap_ix(), cu_ix()];
     ixs.extend_from_slice(instructions);
@@ -142,7 +163,7 @@ fn submit(
     assert_cu_within(
         "authenticated handoff transaction",
         cu,
-        CRANK_CU_LIMIT * instructions.len() as u64,
+        instruction_cu_limit * instructions.len() as u64,
     );
     cu
 }
