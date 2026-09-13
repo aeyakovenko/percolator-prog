@@ -1,5 +1,96 @@
 # Invariant-owned test coverage
 
+## INV-028 last latent domain through Recovery (row 423, 2026-09-13)
+
+Owner: [cu/inv_028_recovery_latent_capacity.rs](cu/inv_028_recovery_latent_capacity.rs),
+mounted under the existing historical-capacity owner. Exact selector:
+`inv_028_source_domain_realizability_cap::historical_latent_capacity::recovery_latent_capacity::v16_program_last_latent_domain_survives_split_recovery_and_terminal_payout`.
+
+Four public LiteSVM histories cross both final-leg position signs with one full or
+two half `ForceCloseAbandonedAsset` calls. Thirteen assets first retain both source
+sides, using 26 of the supported 28 slots. A six-lot position on asset 13 settles
+one favorable move and reverses, retaining a 27th claim. The counterparty alone
+accrues a second favorable mark: the claimant Account is unchanged, and its final
+source remains latent when public shutdown moves that asset into Recovery.
+After the configured five-slot timeout, keeper-only force-close materializes the
+28th source, preserves every complete historical source record, and strictly
+reduces paired exposure to zero in one or two transactions. The split history
+retains all 28 claims while the half-position is still active.
+
+This is a distinct capacity/lifecycle composition. Existing row423 terminal-latent
+coverage crosses global resolution and owner-window expiry. The adjacent
+`v16_attack_max_source_force_close_abandoned_asset_stays_bounded` control starts
+Recovery with every source already materialized and stops at pair detachment;
+this selector requires new source storage during Recovery and complete payouts.
+
+The oracle derives the 62-atom gain from submitted sizes and one-atom price moves.
+It checks exact domain claims, principal, PnL, the historical/future resource union,
+signed positions and paired OI. Shared stock/reservation/source-rate censuses run
+at shutdown, every successful force-close, resolution, each terminal step and each
+portfolio deletion. Force-close preserves complete mint/vault/owner-token Accounts.
+Global resolution preserves both portfolio Accounts. After owner-window expiry,
+unsigned-owner `CloseResolved` calls retire exactly one source per claimant call,
+leave the absent peer Account and token Account unchanged, and transfer only the
+current owner's exact entitlement. The endpoint is 28 claimant calls plus one
+counterparty call, payouts **1,000,062 / 999,938** atoms, two closed portfolios,
+zero capital/vault/OI/live claims/fresh backing, and unchanged **2,000,000** SPL supply.
+
+The exact selector passes **4 worlds, 6 keeper force-closes and 116 terminal calls**.
+Maximum force-close: **1,256,569 CU**; maximum terminal step: **769,762 CU**; largest
+force-close/terminal transaction: **465 bytes**. Each measured lifecycle call is
+asserted below 1,375,000 CU, and portfolio deletion below the existing custody limit.
+System/SPL/ATA/matcher/wrapper instructions construct economic state. Fixture SOL
+funding and Clock advancement use existing LiteSVM helpers; no initialized program
+account bytes are edited or restored. No production code, engine pin, dependency,
+shared helper implementation or invariant status changes. The parent test module
+only gains a mount, so adjacent behavioral controls are not rerun.
+
+**Row 423 remains OPEN.** This finite positive family is not a generic resource
+generator or liveness oracle. It has one active asset at shutdown, integral claims,
+single no-CPI admission, fully realized counterparty backing, zero fees/funding and
+no provider contribution. Maximum simultaneous active legs, historical liens,
+consumed-provider-label retirement, backing expiry/reset composition, underfunded
+Recovery, alternate quotes/CPI, admission rejection/rollback histories and other
+future resource classes remain outside this increment. No implementation failure
+was found, and no other reopening row receives new evidence.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`0c3904470b1429d8e789a290b04982d330ee212a`. Isolated branch:
+`codex/inv028-row423-recovery-capacity-20260913`; worktree:
+`/tmp/percolator-inv028-row423-recovery-20260913`. Environment: Linux x86_64,
+host Rust/Cargo 1.90.0, LiteSVM 0.1, default `anchor-v2` features,
+`solana-cargo-build-sbf` 2.3.13 with platform-tools v1.52, engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Host artifacts were copied from
+`/dev/shm/astra-row423-lifecycle-20260912-host` into the private target before
+Cargo rebuilt the current tests; both SBF programs were freshly built offline.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Auth matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The initial build/run used the worktree's temporary name
+`/tmp/percolator-inv028-row423-expiry-20260913`; the final selector and metadata
+checks run from the worktree path above after its Git-managed move.
+
+Reproduction commands from the worktree (builds use the same source and flags as
+the initial build; the SBF output location is independent of the worktree name):
+
+```bash
+cd /tmp/percolator-inv028-row423-recovery-20260913
+export CARGO_TARGET_DIR=/tmp/inv028-row423-recovery-20260913-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+cd tests/fixtures/auth_matcher
+env CARGO_TARGET_DIR=/tmp/inv028-row423-recovery-20260913-matcher-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir /tmp/percolator-inv028-row423-recovery-20260913/tests/fixtures/auth_matcher/target/deploy --offline -- --locked
+cd ../../..
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::recovery_latent_capacity::v16_program_last_latent_domain_survives_split_recovery_and_terminal_payout -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+# After the local commit:
+git show --format= --check HEAD
+```
+
 ## INV-070 native Recovery claim disposition (row 418, 2026-09-13)
 
 Owner: [cu/inv_070_native_recovery_disposition.rs](cu/inv_070_native_recovery_disposition.rs),

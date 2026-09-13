@@ -660,6 +660,18 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # This uses 18/28 domains. The explored 26-history admissions exhausted CU before
 # success; maximum-shape and arbitrary resource/lifecycle closure remain OPEN.
 # No production correction, other-row edits or status promotion.
+# 423 partial conformance (2026-09-13): cu/inv_028_recovery_latent_capacity.rs,
+# inv_028_source_domain_realizability_cap::historical_latent_capacity::recovery_latent_capacity::v16_program_last_latent_domain_survives_split_recovery_and_terminal_payout.
+# Four public sign/full-or-half-close histories enter asset Recovery with 27 claims
+# and one latent source. Keeper-only force-close materializes slot 28, preserves all
+# historical source records, and drains paired OI in one or two bounded calls.
+# Resolution/owner-window expiry then retire one source per claimant call and pay
+# 1000062/999938 atoms in 28+1 calls before both portfolio deletions. Stock, reservation,
+# source-rate and complete custody/peer frames are checked. Base 0c390447; 6 force-close
+# and 116 terminal calls; maxima 1256569/769762 CU, packets <=465 bytes. See README.
+# One active asset, integral fully backed claims, no-CPI, zero fees/provider funding.
+# Maximum active-leg products, liens, consumed-provider-label retirement, expiry/reset,
+# underfunded Recovery and generic resource/liveness closure remain OPEN. Tests only.
 423	DoS	BLOCKER	INV-028	INV-028,INV-031,INV-057,INV-073,INV-077,INV-078,INV-082,INV-089	historical-capacity+x-latent-domain+x-position-admission	risk-admission-reserves-every-future-settlement-resource-needed-for-exit	OPEN
 # 424 partial public coverage (2026-09-10): cu/inv_070_terminal_prefix_reuse.rs::v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback covers admin/permissionless reuse behind cursor 2, live success controls, exact terminal rejection/expiry-prefix rollback, and bounded close. General actionability invalidation remains OPEN; see README's retired-slot reuse entry.
 # 424 partial public coverage (2026-09-12): cu/inv_071_terminal_prefix_recredit.rs::v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement.
