@@ -21,6 +21,9 @@ mod exposed_keeper_provenance;
 #[path = "inv_045_reward_maintenance_catchup.rs"]
 mod reward_maintenance_catchup;
 
+#[path = "inv_045_reward_terminal_redemption.rs"]
+mod reward_terminal_redemption;
+
 fn values(env: &V16CuEnv, portfolios: [Pubkey; 5]) -> [i128; 5] {
     portfolios.map(|key| {
         let account = env.portfolio_state(key);

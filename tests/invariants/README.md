@@ -5131,6 +5131,112 @@ cargo clean --target-dir /dev/shm/percolator-row433b-target
 git show --format= --check HEAD # post-commit
 ```
 
+## INV-045 reward catchup through cohort redemption (row 422, 2026-09-13)
+
+Owner: [cu/inv_045_reward_terminal_redemption.rs](cu/inv_045_reward_terminal_redemption.rs),
+mounted under
+`inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_terminal_redemption`.
+Selector:
+`v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order`.
+
+Four public LiteSVM histories cross retaining the first earned reward or withdrawing
+it during lag with forward/reverse redemption of all five portfolios. Public
+System/SPL/ATA/wrapper instructions create and fund every protocol and token Account.
+Program loading, signer SOL, Clock and external Pyth reports are harness inputs;
+no initialized protocol bytes or snapshots are installed. The selected asset is
+a single direct-Pyth Hybrid, with a flat keeper and five independent owners.
+
+Paid discovery contributes 1,540,072 insurance atoms and stages 992,320 from
+1,000,000. Fresh reports at slots 6/7/14 move the effective price through
+997,600/995,206/980,000. Independent elapsed-cap and two-stage fee arithmetic bind
+the two liquidations to effective prices, distinguishing original price, paid
+mark, fresh target and raw/accepted prints. The episodes close 12,001,223 and
+16,653,247 quantity units, charge 5,987/8,287 atoms and earn 1,995/2,762 atoms under
+the constant 3,333-bps share. Only keeper capital and certificate validity change
+on reward credit; foreign portfolio Accounts and SPL custody remain framed.
+Full catchup earns no further reward. The remaining liquidation fees allocate
+exactly 4,758/4,759 atoms to the selected domains, while all discovery stock stays
+outside domain budgets through resolution and redemption.
+
+`ResolveMarket` freezes slot 14 and price 980,000 without changing portfolio
+Accounts. Owner-signed `CloseResolved` calls at slot 30 settle the whole cohort in
+both orders. The frozen oracle profile is exact throughout; a later external
+report cannot enter this oracle-free payout route. Every accepted close changes
+the selected account or its payout, every nonterminal round progresses, and all
+accounts must terminate within sixteen rounds. A flat positive-PnL account waiting
+for another stored position residue is identified from pre-state and must reject
+with exact `EngineNonProgress` rollback before the remaining cohort advances.
+
+All four histories return the same SPL payouts, in target/peer/trader-A/trader-B/
+keeper order: `[3550175, 101540147, 9209964, 9245364, 5757]`. The keeper's 5,757 atoms
+are its original 1,000 plus exactly 4,757 earned atoms, including any early payment.
+Each owner receives its fully settled pre-resolution capital plus PnL, with that
+early payment counted once. Terminal capital, positive PnL, OI, source claims and
+outstanding receipts clear. The vault retains 1,549,589 insurance atoms plus the
+same four-atom rounding residual measured before resolution; this is not slab
+retirement or a claim that user redemptions exhaust custody. Mint/provider Accounts,
+token supply, per-recipient payouts, rent and signer SOL are reconciled, alongside
+the independent health, stock, source-rate and reservation censuses.
+
+The new relation is **earned effective-price reward persistence through full
+cohort redemption**, including keeper-first/last terminal payout. Policy succession,
+exposed AuthMark keeper, keeper maintenance, authenticated/retained-penalty,
+trade-origin and corroborated handoff tests already own the earlier liquidation
+and keeper-withdrawal relations; they leave other portfolios' claims open. Existing
+INV-045 carry/rebalance terminal tests have no liquidation-reward insurance stock.
+Those earlier obligations are controls, not additional coverage claims here.
+
+**Row 422 remains OPEN; invariant_status.tsv is unchanged.** This is finite positive
+conformance, not generic provenance closure. Limits include matcher CPI, AuthMark
+origin, multiple assets/providers, exposed/shared-owner keepers, funding,
+maintenance, policy succession, external backing, arbitrary histories, insurance
+withdrawal and slab retirement. No production change or public LoF/DoS was found.
+Development corrected a moved Rust argument and the assumption that every
+nonterminal winner can close before other position residues detach; no economic
+assertion was weakened to accept a payout or reward discrepancy.
+
+Continuation base: `1e5fb1b5ef4cae10fc56b58392f6b438ddc0ecbf` on
+`origin/codex/astra-open-holdout-ledger-20260912`. Existing dirty worktree:
+`/home/anatoly/percolator-row422-astra-20260913-c`; branch:
+`codex/astra-row422-effective-price-reward-20260913-c`. Only this worktree and its
+private target/tmp directories were used. The default-feature SBF wrapper was
+recompiled locked/offline after removing only this package's private SBF release
+outputs, using platform-tools v1.52 and engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Cargo.lock SHA-256:
+`c9edf71dafda5e617f5b3e6f5c19cb6c8585551b2cb426b4ca8bc7b3a7e4e6a0`.
+SPL Token 3.5.0 and ATA 1.1.1 artifacts come from LiteSVM 0.1.0's installed
+fixtures; no matcher artifact is used.
+
+The new exact selector passes 1/1: four histories, eight liquidations, 28
+progressing closes, twelve healthy-crank rollbacks, twenty rejected suffixes
+after independently simulated successful close prefixes, and four waiting-close
+rollbacks. All 36 failures restore complete tracked and compiled Account frames
+except the separately classified exact network fee. Peak transaction CU is
+319,341, below the asserted 500,000 bound. The related policy-succession selector
+and both INV-079 metadata gates are included in the exact validation commands
+below. No full-suite or Kani result is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row422-effective-price-reward-20260913-c-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export TMPDIR=/dev/shm/row422-effective-price-reward-20260913-c-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo clean --release --target sbpf-solana-solana -p percolator-prog
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF" Cargo.lock
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_terminal_redemption::v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_policy_catchup::v16_program_reward_policy_succession_preserves_receipts_and_effective_price_catchup -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --nocapture --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-045 keeper maintenance across reward catchup (row 422, 2026-09-13)
 
 Owner: [cu/inv_045_reward_maintenance_catchup.rs](cu/inv_045_reward_maintenance_catchup.rs),

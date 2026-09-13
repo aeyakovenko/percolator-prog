@@ -1065,6 +1065,33 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # not another stale/fresh report ordering or one-asset net payout. No production
 # change or status promotion. CPI, clipping/rewarded fees, funding, exposed keepers,
 # extra providers, arbitrary histories and full terminal redemption remain OPEN.
+# Row 422 cohort-redemption conformance (2026-09-13):
+# cu/inv_045_reward_terminal_redemption.rs, selector
+# inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_terminal_redemption::v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order.
+# Four public SPL/Hybrid histories cross early/retained earned rewards with both
+# full-cohort redemption orders after effective-price catchup and resolution.
+# Eight liquidations bind fees to 997600/995206; full catchup at 980000 adds no
+# reward. Every keeper receives exactly 5757 atoms including 1000 principal.
+# All five portfolios reach terminal payouts with zero OI/source claims; domain
+# budgets remain 4758/4759 and all 1540072 discovery atoms stay unbudgeted. Final
+# custody preserves insurance plus the same four-atom pre-resolution residual.
+# Public account creation only; Clock/external reports/SOL/loading are harness
+# inputs. Receipt-only recipient mutation, complete rollback Accounts, exact
+# token/lamport accounting and independent censuses accompany the public path.
+# Pass: 4 histories, 28 progressing closes, 12 healthy + 20 suffix + 4 waiting
+# rollbacks; peak 319341 CU below 500000. Distinct from existing row422 keeper
+# withdrawals with open cohort claims and zero-reward INV-045 terminal carry.
+# Existing dirty worktree/branch: percolator-row422-astra-20260913-c /
+# codex/astra-row422-effective-price-reward-20260913-c, base 1e5fb1b5ef4cae10fc56b58392f6b438ddc0ecbf.
+# Fresh private default-feature SBF: platform-tools v1.52, engine 394fd0bf,
+# SHA-256 dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52.
+# README section "INV-045 reward catchup through cohort redemption" records full
+# provenance, exact build/new/control/metadata commands and fixture corrections.
+# No production change, public LoF/DoS finding or invariant_status.tsv promotion.
+# Finite one-asset, flat-keeper, constant-policy, zero-funding/maintenance coverage.
+# CPI/AuthMark origin, multiple providers/assets, external backing, arbitrary
+# histories, insurance withdrawal and slab retirement remain outside this family.
+# Row422 remains OPEN; earlier families' terminal limits describe their own scope.
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN
 # 423 partial conformance (2026-09-10): cu/inv_028_single_slot_admission.rs::v16_program_batch_admission_cannot_share_last_future_domain_slot.
 # Two individually fitting old-asset legs jointly need 29 domains: both batch orders reject atomically;
