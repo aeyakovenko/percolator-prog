@@ -1090,6 +1090,25 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # README "INV-073 recredited insurance across quote rails" records scope, duplicate
 # assessment, exact selectors/checks and fresh private SBF provenance: v1.52,
 # engine 394fd0bf; SHA-256 dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52.
+# Astra Scope B bounded conformance (2026-09-13), rows 418/421/433:
+# cu/inv_073_native_recredit_custody.rs, mounted below absent_insurer_spent_retirement.
+# v16_program_recredited_insurance_recreates_native_custody_without_role_signatures
+# crosses asset 0/1, recovered claim 100/101, classic-first/native-first payment,
+# and unsynced/synced native donations in 16 public histories. Both insurance wallets
+# and primary custody disappear before loss settlement; all reserve keys are dropped.
+# Preauthorized keeper redemption returns only old native custody's rent + 17 donation
+# to the absent beneficiary wallet, then recreates an unencumbered ATA before payout.
+# Three unsigned payments share one recovered claim across rails and custody epochs;
+# 19 vault lamports remain external surplus. 48 exact Account rollbacks precede the
+# identical successful prefixes, 32 ATA repairs and 16 wallet recreations. Every
+# history burns 207 claim-free SPL atoms and retires both vaults with exact rent.
+# Net new beyond X unspent native reserves, N earned reserve words, L unspent native
+# multisig and classic-only cross-rail recredit. Row420 expiry remains reused setup.
+# All four rows remain OPEN. No production change, generic closure or status promotion.
+# Limits: preauthorized custody closer, funded keeper, owner-signed empty portfolio
+# deletion and administrative expiry/retirement; no native-primary booked retirement,
+# partial recredit, active peer claims at repair, ledgers, fees or maximum shapes.
+# See astra_scope_b_native_recredit_custody_20260913.md for artifact and validation.
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
 # Row 422 bounded policy-succession conformance (2026-09-12):
 # cu/inv_045_reward_policy_catchup.rs,

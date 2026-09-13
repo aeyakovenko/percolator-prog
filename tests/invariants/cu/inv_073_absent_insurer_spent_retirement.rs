@@ -21,6 +21,9 @@ mod missing_insurance_wallet_recredit;
 #[path = "inv_073_recredited_insurance_quote_rails.rs"]
 mod recredited_insurance_quote_rails;
 
+#[path = "inv_073_native_recredit_custody.rs"]
+mod native_recredit_custody;
+
 #[test]
 fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion() {
     absent_reserve_progress(ProviderHistory::Empty, None);
@@ -56,6 +59,7 @@ enum ProviderHistory {
     Fresh,
     FreshMissingWallets,
     FreshDualQuote(bool),
+    FreshNativeCustody { native_first: bool, sync: bool },
     Withdrawn,
 }
 
@@ -69,7 +73,9 @@ fn absent_reserve_progress(
     const PAYOUTS: [u64; 3] = [CAPITAL[0] + GAIN, 0, CAPITAL[2]];
     const CALL_BOUND: usize = 8;
     const EXPIRY: u64 = 44;
-    let missing_wallets = provider_history == ProviderHistory::FreshMissingWallets;
+    let native_custody = matches!(provider_history, ProviderHistory::FreshNativeCustody { .. });
+    let missing_wallets =
+        provider_history == ProviderHistory::FreshMissingWallets || native_custody;
     let dual_quote = matches!(provider_history, ProviderHistory::FreshDualQuote(_));
     let with_backing = provider_history == ProviderHistory::Fresh || missing_wallets || dual_quote;
     let provider_principal = if provider_history == ProviderHistory::Empty {
@@ -86,16 +92,18 @@ fn absent_reserve_progress(
             let supply = CAPITAL.iter().sum::<u64>() + insurance + provider_principal;
             let backing_asset = asset;
             let backing_domain = 2 * backing_asset;
-            let mut env = inv018_public_spl_market_with_params(
-                0,
-                V16CuMarketParams {
-                    max_portfolio_assets: 2,
-                    maintenance_margin_bps: 1_000,
-                    initial_margin_bps: 1_000,
-                    max_price_move_bps_per_slot: 500,
-                    ..V16CuMarketParams::default()
-                },
-            );
+            let params = V16CuMarketParams {
+                max_portfolio_assets: 2,
+                maintenance_margin_bps: 1_000,
+                initial_margin_bps: 1_000,
+                max_price_move_bps_per_slot: 500,
+                ..V16CuMarketParams::default()
+            };
+            let mut env = if native_custody {
+                native_recredit_custody::world(params)
+            } else {
+                inv018_public_spl_market_with_params(0, params)
+            };
             let admin = env.admin.insecure_clone();
             let beneficiary = Keypair::new();
             let operator = Keypair::new();
@@ -170,6 +178,9 @@ fn absent_reserve_progress(
                     &admin,
                     beneficiary.pubkey(),
                 )
+            });
+            let native = native_custody.then(|| {
+                native_recredit_custody::NativeCustody::create(&mut env, &admin, &beneficiary)
             });
             for (token, amount) in tokens
                 .into_iter()
@@ -416,6 +427,9 @@ fn absent_reserve_progress(
             if let Some(secondary) = &secondary {
                 tracked.extend(secondary.keys());
             }
+            if let Some(native) = &native {
+                tracked.extend(native.keys());
+            }
             let wrap = |data: ProgInstruction, accounts| Instruction {
                 program_id: percolator_prog::id(),
                 accounts,
@@ -574,6 +588,15 @@ fn absent_reserve_progress(
                     [
                         AccountMeta::new(secondary.vault, false),
                         AccountMeta::new(secondary.admin_token, false),
+                    ],
+                );
+            }
+            if let Some(native) = &native {
+                close.accounts.splice(
+                    6..6,
+                    [
+                        AccountMeta::new(native.vault, false),
+                        AccountMeta::new(native.admin_token, false),
                     ],
                 );
             }
@@ -850,6 +873,25 @@ fn absent_reserve_progress(
                     normalized.source_credit[2 * asset + 1].provider_receivable_num,
                     u128::from(CAPITAL[1]) * BOUND_SCALE
                 );
+                if let ProviderHistory::FreshNativeCustody { native_first, sync } = provider_history
+                {
+                    peak = peak.max(native_recredit_custody::finish(
+                        &mut env,
+                        &admin,
+                        asset,
+                        absent,
+                        reserve_token,
+                        native.as_ref().unwrap(),
+                        remainder + recovered,
+                        native_first,
+                        sync,
+                        &close,
+                        &tracked,
+                    ));
+                    assert_eq!(tokens.map(|key| env.token_amount(key)), PAYOUTS);
+                    println!("INV-073 native recredit custody asset={asset}, remainder={remainder}, native_first={native_first}, sync={sync}: user_calls={calls:?}/{CALL_BOUND}, whole_history_peak={peak} CU");
+                    continue;
+                }
                 if let ProviderHistory::FreshDualQuote(secondary_first) = provider_history {
                     peak = peak.max(recredited_insurance_quote_rails::finish(
                         &mut env,

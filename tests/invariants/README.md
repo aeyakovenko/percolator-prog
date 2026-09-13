@@ -1,5 +1,23 @@
 # Invariant-owned test coverage
 
+## Astra Scope B native recredit custody (2026-09-13)
+
+Owner: [cu/inv_073_native_recredit_custody.rs](cu/inv_073_native_recredit_custody.rs),
+mounted under `inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::native_recredit_custody`.
+Sixteen public LiteSVM histories combine spent insurance restored by backing expiry,
+classic/native quote rails, absent insurance wallets, and keeper-authorized redemption
+of old native custody before unencumbered ATA recreation. Three unsigned payments
+exhaust each 100/101-atom claim; old custody's 17 donated lamports and 19 vault
+lamports stay outside entitlement. Complete Account rollback, decreasing claim rank,
+stock and reservation censuses, exact 207-atom SPL burn, both vault closes and native
+surplus redemption bind the terminal continuation.
+
+This adds bounded INV-073 evidence for rows 418/421/433. Row 420's absent-provider
+expiry is reused setup, with no new provider-family claim. All four rows stay OPEN;
+production and machine classifications are unchanged. The
+[Scope B audit](astra_scope_b_native_recredit_custody_20260913.md) records the
+comparison with Scopes X/N/L, assumptions, artifact provenance and exact validation.
+
 ## PR135 Scope C carry resets and composite recipient observations (2026-09-13)
 
 Row 425: [cu/inv_045_moving_reset_routes.rs](cu/inv_045_moving_reset_routes.rs),
