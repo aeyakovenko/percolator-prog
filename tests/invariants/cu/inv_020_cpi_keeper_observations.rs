@@ -3,6 +3,9 @@
 
 use super::*;
 
+#[path = "inv_020_generated_current_hybrid.rs"]
+mod generated_current_hybrid;
+
 fn favorable_trade(
     env: &V16CuEnv,
     owners: &[Keypair; 4],

@@ -1,5 +1,26 @@
 # Invariant-owned test coverage
 
+## PR135 Scope O current Hybrid recipient observations (2026-09-13)
+
+Owner: [cu/inv_020_generated_current_hybrid.rs](cu/inv_020_generated_current_hybrid.rs),
+mounted under `inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations::cpi_keeper_observations::generated_current_hybrid`.
+The generated public LiteSVM family adds a separate Hybrid feed on an active
+reward recipient, with single/batch CPI and bilateral admission and exit. It
+compares clean/interrupted histories, both observation orders and explicit versus
+trade-time account refresh after complete market observations. Input-derived
+report provenance, owner value and custody checks complement independent and
+detached-full-refresh certificate comparisons.
+
+Missing declared oracle tails and regressed reports target the active peer,
+liquidation account and recipient before/after a liquidation-plus-admission word.
+Every rejected transaction restores complete Accounts apart from its exact payer
+signature fee. Exit and actual SPL payout prefixes receive the same rollback
+check. This is bounded INV-020/024/053/054/056/061/071/072/081/086 evidence;
+omitted-Hybrid discovery during active certification remains outside this probe.
+Row 426 stays **OPEN**, and machine classifications are unchanged. No production
+change or generic completeness claim. The [Scope O audit](pr135_scope_o_current_hybrid_20260913.md)
+records the existing coverage comparison, limits, exact selectors and validation.
+
 ## PR135 Scope Q retained insurance stock epochs (2026-09-13)
 
 Owner: [cu/inv_008_generated_insurance_stock_epochs.rs](cu/inv_008_generated_insurance_stock_epochs.rs),
