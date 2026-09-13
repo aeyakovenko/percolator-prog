@@ -1398,6 +1398,24 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # payout, arbitrary histories and maximum shapes remain gaps. No production or
 # status change; row stays OPEN. Exact commands and scope/limits:
 # README.md#inv-020-sibling-observations-at-risk-admission-row-426-2026-09-13.
+# Row 426 repeated-active-recipient conformance (2026-09-13):
+# cu/inv_020_repeated_active_rewards.rs, mounted under active_keeper_observations;
+# v16_program_repeated_active_rewards_preserve_renewed_observations_and_exact_exit.
+# Four public histories cross forward/reverse observations and interrupted controls.
+# One active AuthMark keeper receives three liquidation rewards across two Hybrid
+# episodes, and every reward invalidates its certificate until a complete current
+# recertification accounts for the adverse recipient leg. Interrupted sequences roll
+# back a successful reward plus recipient recertification before a stale suffix and
+# roll back reward withdrawal before stale evidence. The final keeper close and SPL
+# withdrawal pay exactly 205215 atoms; target account bytes remain framed through
+# the keeper exit; insurance-domain budgets equal the independent penalty/reward
+# ledger. Peak 652980 CU below the existing 900000 ceiling. Related active-keeper
+# selector, both INV-079 metadata gates, fmt and Git checks passed.
+# Net-new scope: repeated active recipient reward/renewal, not one-reward admission,
+# recipient-as-target, CPI parity or single payout rollback. Row426 remains OPEN:
+# omitted-Hybrid active certification, recipient Hybrid+CPI, mixed gain/loss,
+# funding/fee products, longer histories and maximum shapes remain outside scope.
+# No production change, bug claim or invariant-status promotion.
 426	LoF	BLOCKER	INV-020	INV-020,INV-024,INV-053,INV-054,INV-056,INV-061,INV-071,INV-072,INV-081,INV-086	missing-evidence+x-multi-step-refresh+x-liquidation	favorable-account-actions-require-complete-current-authenticated-observations	OPEN
 # Row 427 additional bounded conformance (2026-09-12): cu/inv_058_atomic_oi_fee_handoff.rs,
 # v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes.

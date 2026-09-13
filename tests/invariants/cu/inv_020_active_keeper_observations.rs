@@ -14,6 +14,9 @@ mod reward_recipient_liquidation;
 #[path = "inv_020_cpi_keeper_observations.rs"]
 mod cpi_keeper_observations;
 
+#[path = "inv_020_repeated_active_rewards.rs"]
+mod repeated_active_rewards;
+
 const ENDOWMENTS: [u128; 4] = [10_000_000, 220_000, 300_000, 10_000_000];
 const KEEPER_PRICE: u64 = 1_050_000;
 const SHARE: u128 = 3_333;

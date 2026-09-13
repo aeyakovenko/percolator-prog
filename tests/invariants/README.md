@@ -1496,6 +1496,72 @@ cargo clean --target-dir "$CARGO_TARGET_DIR"
 rmdir "$CARGO_TARGET_DIR" "$TMPDIR"
 ```
 
+## INV-020 repeated active reward recertification (row 426, 2026-09-13)
+
+Owner: [cu/inv_020_repeated_active_rewards.rs](cu/inv_020_repeated_active_rewards.rs),
+mounted under
+`inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations::repeated_active_rewards`.
+Exact selector:
+`v16_program_repeated_active_rewards_preserve_renewed_observations_and_exact_exit`.
+
+Four public LiteSVM histories cross forward/reverse observation order and
+interrupted/uninterrupted reward paths. A Hybrid target receives two fresh Pyth
+reports while an active keeper already carries an unrelated AuthMark loss leg.
+Across two 64-slot episodes, the target is fully refreshed, then repeatedly
+liquidated until its certified deficit clears. Each reward invalidates the active
+keeper certificate; a complete keeper recertification must include its own adverse
+AuthMark leg before any favorable exit is accepted. The keeper receives three
+distinct reward credits, then closes its own leg and withdraws exactly 205,215 atoms.
+
+The new relation is repeated active-recipient reward/recertification composition.
+Existing active-keeper coverage owns one reward plus unrelated loss admission;
+recipient-to-target owns one follow-on target; CPI coverage owns route parity; and
+reward-payout rollback owns one withdrawal suffix. This selector keeps the same
+active recipient through repeated reward credits and renewed current certificates
+before exact owner exit. It is not a new omitted-Hybrid, CPI, maximum-shape, funding,
+fee-policy, or terminal-market proof.
+
+Every public transition records an independent snapshot of asset state, health
+certificates, account value, custody stock and insurance-domain budgets. Interrupted
+histories roll back a successful reward plus complete recipient recertification
+before a stale suffix, and roll back reward withdrawal before a stale suffix. A
+stale omitted-recipient refresh after partial progress must reject exactly. The
+custody frame remains fixed until the final keeper withdrawal; the target Account is
+unchanged by the keeper exit. The final insurance-domain budget equals the
+independent penalty-minus-reward ledger.
+
+**Row 426 remains OPEN; invariant_status.tsv is unchanged.** This is finite
+positive evidence over one Hybrid target, one active AuthMark recipient, two
+episodes, unit ADL, zero funding, zero maintenance fees, classic SPL and bounded
+four-portfolio state. Omitted-Hybrid active certification, recipient Hybrid+CPI,
+mixed gain/loss classifications, funding/fee products, longer arbitrary histories
+and maximum shapes remain outside this increment. No production code, engine pin,
+public bug, vulnerable-pin replay or generic closure claim is added.
+
+Base: `a8ffd03b` on `origin/codex/astra-open-holdout-ledger-20260912`.
+Worktree: `/home/anatoly/percolator-row426-astra-20260913-e`; branch:
+`codex/astra-row426-observation-coverage-20260913-e`. New selector: PASS 1/1,
+four histories, twelve reward credits, sixteen exact rollbacks, peak 652,980 CU
+under the existing 900,000 ceiling. Related active-keeper selector and both INV-079
+metadata gates passed; formatting and Git whitespace checks passed. No full-suite
+or Kani run is claimed.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row426-observation-coverage-20260913-e-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/row426-observation-coverage-20260913-e-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations::repeated_active_rewards::v16_program_repeated_active_rewards_preserve_renewed_observations_and_exact_exit -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations::v16_program_active_keeper_reward_recertifies_unrelated_loss_across_partial_refresh -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --quiet --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-020 observation abort after reward payout (row 426, 2026-09-13)
 
 Owner: [cu/inv_020_reward_payout_rollback.rs](cu/inv_020_reward_payout_rollback.rs),
