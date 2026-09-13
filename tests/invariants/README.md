@@ -1,5 +1,29 @@
 # Invariant-owned test coverage
 
+## PR135 Scope C carry resets and composite recipient observations (2026-09-13)
+
+Row 425: [cu/inv_045_moving_reset_routes.rs](cu/inv_045_moving_reset_routes.rs),
+mounted below `public_carry_order::target_arrival_entitlement`, composes three
+nonzero carry resets per asset after effective-price and cap-anchor movement.
+Sixteen public histories cross both directions, single/batch reductions,
+bilateral/matcher handoffs and grouped/one-slot accrual with publication-order
+interleavings. The inherited input-derived bigint episode/owner book checks
+568 prefixes, 224 exact rollbacks and 64 exact resolved SPL payouts. Peak 436627 CU.
+
+Row 426: [cu/inv_020_reward_recipient_liquidation.rs](cu/inv_020_reward_recipient_liquidation.rs)
+adds a selector for CPI/bilateral composite-recipient admission and exit with
+missing-provider interruptions. Sixteen worlds include four existing controls;
+72 exact rollbacks include eight completed reduction-plus-SPL-payout prefixes.
+The recipient's independently attributed payout remains 69361 atoms after it
+becomes the second liquidation target. Peak 396803 CU. Successful no-tail account
+actions consume already committed complete market evidence; malformed declared
+tails are tested separately from omission of an undiscovered Hybrid observation.
+
+Both rows remain OPEN, with no production or machine-classification change.
+The [Scope C audit](pr135_scope_c_carry_observation_conformance_20260913.md)
+compares Scopes H/O/V/T and adjacent families, states limits, and records artifact
+provenance, exact selectors and validation results.
+
 ## Scope A retained capital/insurance exchange (2026-09-13)
 
 [cu/inv_008_capital_insurance_exchange.rs](cu/inv_008_capital_insurance_exchange.rs)
