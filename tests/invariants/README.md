@@ -7391,6 +7391,86 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-014 retained atomic round-trip fee consent (row 432, 2026-09-13)
+
+Owner: [cu/inv_014_retained_round_trip_fee_consent.rs](cu/inv_014_retained_round_trip_fee_consent.rs),
+mounted by the existing single-CPI policy-history owner. Exact selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_round_trip_fee_consent::v16_retained_single_cpi_round_trip_cannot_pool_instruction_fee_consent`.
+
+Four public LiteSVM worlds cross both opening directions and restored-policy versus
+renewed-closing-consent continuations. Each retains a single transaction containing
+a 113-atom SPL deposit, a single-CPI opening capped at 99 bps, and a single-CPI
+full close capped at 19 bps. Both future position epochs are signed in advance.
+One initial simulation per world establishes that the complete round trip is live
+at 19 bps without changing any Account. Two pre-signed envelopes differ only in
+their CU limits to avoid the failed-transaction cache; the LP signs neither.
+
+After a public policy update to 37 bps, the opening succeeds and the closing
+instruction rejects at index 4 with `InvalidInstruction`, before a second matcher
+invocation. The attempted two-fill fee is **190 atoms per owner**, below the
+**302-atom sum** of the independently signed ceilings (253 + 49), but the closing
+instruction still exceeds its own 19-bps consent. Thus unused opening allowance,
+the permissive 137-bps LP grant, the shared transaction signature and zero net
+position do not authorize the closing fee. Four complete Account rollbacks include
+the successful SPL deposit and charged opening, matcher response/request sequence,
+position epochs and token custody; only exact payer signature fees remain charged.
+
+Two byte-identical retained alternatives execute after restoring 19 bps. Two other
+worlds keep 37 bps and change only the closing instruction's signed fee field;
+message comparison checks that opening, identities, epochs and deposit persist.
+Input-priced two-stage ceilings give 49/95 atoms per fill and **98/190 per owner**
+for the successful round trip. Checks reconcile both owners' capital, zero PnL and
+fee credits, zero open interest, both insurance side budgets, two consumed position
+epochs and matcher requests, unchanged LP grant terms (with its packed position
+epoch advancing twice) and fixed SPL supply of 300,123.
+Eight public owner withdrawals leave exactly **196/380 fee atoms** in the vault,
+with zero remaining owner capital. Stock and reservation censuses run throughout.
+
+This is net-new **instruction-local consent inside one atomic same-asset CPI
+round trip**. Row411's partial-route and maintenance-reward histories do not
+compose two differently capped single-CPI instructions under one signature and
+roll back an already charged opening when the close's own cap rejects. Row432's
+existing underfunded-close history instead rejects one close or a stale policy
+suffix after that close; its opening was committed separately.
+
+**Row 432 remains OPEN.** Fixed Live, manual-price, fully funded, single-asset,
+full-fill base-fee histories only. There is no generic generator/oracle, dynamic or
+backing fee coverage, partial retry, changing fee policy within the transaction,
+authority/expiry/recipient composition, multi-asset/batch equivalence, terminal
+payout or insurance withdrawal claim. No production code or invariant status is
+changed. No out-of-band program-owned account mutation is used.
+
+Worktree: `/home/anatoly/percolator-row432-astra-20260913`; local unpushed branch:
+`codex/astra-row432-single-cpi-fee-consent-20260913`. Base:
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`416aeb07892e42bb239b1780911f263d19e23471`. Builds use default features and
+platform-tools v1.52 with private target directories. Validation: new selector
+**1/1**, related underfunded-close selector **1/1** (eight worlds, sixteen exact
+rollbacks), both metadata gates **1/1**, formatting and all three whitespace
+checks pass. New-test peak CU: simulation/commit **346,916**, rejected bundle
+**199,432**, policy **2,699**. Both locked/offline SBF builds pass. The first test
+iteration corrected an assertion about the grant's packed position epoch; no
+public-route violation or production fix was found. Program SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Reproduction commands:
+
+```sh
+cd /home/anatoly/percolator-row432-astra-20260913
+export CARGO_TARGET_DIR=/dev/shm/row432-single-cpi-fee-consent-20260913-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/row432-single-cpi-fee-consent-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+env CARGO_TARGET_DIR=/dev/shm/row432-single-cpi-fee-consent-20260913-matcher-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_NET_OFFLINE=true cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_round_trip_fee_consent::v16_retained_single_cpi_round_trip_cannot_pool_instruction_fee_consent -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_underfunded_close::v16_retained_single_cpi_underfunded_close_preserves_consent_and_actual_fee_budget -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-014 retained underfunded single-CPI close (row 432, 2026-09-13)
 
 Owner: [cu/inv_014_retained_underfunded_close.rs](cu/inv_014_retained_underfunded_close.rs).

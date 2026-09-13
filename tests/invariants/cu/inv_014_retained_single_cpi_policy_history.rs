@@ -25,6 +25,9 @@ mod retained_underfunded_close;
 #[path = "inv_014_retained_mixed_route_fees.rs"]
 mod retained_mixed_route_fees;
 
+#[path = "inv_014_retained_round_trip_fee_consent.rs"]
+mod retained_round_trip_fee_consent;
+
 const DEPOSITS: [u64; 2] = [100_003, 200_007];
 const PREFIX: u64 = 113;
 const PRICE: u64 = 100;

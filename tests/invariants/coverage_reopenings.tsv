@@ -1407,6 +1407,26 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # dynamic/backing fees, zero/two-role underfunding, partials, expiry/authority
 # composition, terminal payout or insurance withdrawal. No production change or
 # invariant-status promotion; row 432 remains OPEN.
+# 432 bounded atomic round-trip consent (2026-09-13): cu/inv_014_retained_round_trip_fee_consent.rs,
+# retained_single_cpi_policy_history::retained_round_trip_fee_consent::v16_retained_single_cpi_round_trip_cannot_pool_instruction_fee_consent.
+# Four public SPL/SBF worlds retain deposit + opening(99-bps cap) + close(19-bps cap)
+# under one taker signature, then raise policy 19->37. Four exact Account rollbacks
+# undo a successful charged opening/deposit when the close rejects its own cap,
+# despite 190 attempted atoms/owner fitting below the 302-atom summed ceilings.
+# Two unchanged alternatives at restored policy and two closing-fee-only renewals
+# pay exactly 98/190 atoms per owner; eight SPL withdrawals leave 196/380 insurance
+# atoms, zero capital/PnL/OI and fixed 300123 supply. LP grants stay permissive.
+# Net-new per-instruction cap isolation within an atomic same-asset round trip;
+# no row411 maintenance/partial-route or engine-proof duplication. See README's
+# retained atomic round-trip fee consent section for scope and exact build/test
+# commands, related underfunded-close selector, both metadata gates and fmt/diff
+# checks. Private target /dev/shm/row432-single-cpi-fee-consent-20260913-target;
+# base 416aeb07. New/related selectors and both metadata gates pass 1/1 each;
+# fmt/whitespace checks pass; peak new-test CU 346916 (rejection 199432).
+# Bounded Live/manual/fully-funded/full-fill/base-fee evidence only;
+# no generic oracle, dynamic/backing/partial/in-transaction policy/authority/expiry/
+# recipient/multi-asset/batch/terminal or insurance withdrawal claim. Production
+# and invariant_status.tsv unchanged; row 432 remains OPEN.
 432	LoF	PRIVILEGED	INV-014	INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-080,INV-081	retained-cpi-fee+x-taker-terms+x-single-route	retained-single-cpi-trades-cannot-charge-fee-terms-outside-signed-taker-consent	OPEN
 # 433 bounded conformance (2026-09-12): cu/inv_073_terminal_reserve_close_retry.rs.
 # Two public classic-SPL/asset-0 histories retain keeper-paid principal/insurance and
