@@ -1,5 +1,123 @@
 # Invariant-owned test coverage
 
+## INV-012 retained mixed renewals after reduction (row 412, 2026-09-13)
+
+Owner: [stateful/inv_012_mixed_episode_renewal.rs](stateful/inv_012_mixed_episode_renewal.rs),
+mounted by `stateful/inv_012_retained_grant_atomicity.rs`. Exact selector:
+`inv_012_capability_and_delegate_scope::retained_grant_atomicity::mixed_episode_renewal::v16_program_retained_mixed_renewals_preserve_reduced_episode_and_independent_retry`.
+Requirement: `retained-capability-cannot-cross-any-authority-revoking-state-transition`.
+
+Sixteen public LiteSVM histories cross bilateral versus owner-only partial
+reduction, stale-peer-first versus stale-peer-last renewal order, both CPI
+transports and both position signs. Each subject first uses its matcher grant to
+open 12 lots on asset 0, then reduces three lots through `TradeNoCpi` or
+`RebalanceReduce`. The reduction advances the subject episode and clears its
+enabled flag/expiry without consuming its grant sequence. A separate peer's
+grant, positions and episode remain unchanged. Consumers use live asset 1 to
+avoid the reduced asset's cohort/admission conditions.
+
+**The new relation is retained joint renewal and independent retry across mixed
+revoked/live starting states after a committed reduction.** Only after that
+reduction, the subject and peer owners sign a joint renewal, a second identical
+instruction bundle with a distinct CU envelope, and an independent subject
+renewal. All three exact transactions simulate successfully before a competing
+peer renewal consumes the peer sequence. The two retained bundles then reject
+with `EngineStale` at wrapper instruction 0 or 1 (transaction index 2 or 3).
+The late case must log one successful subject renewal before the peer rejection
+rolls it back, preserving the subject's automatic revocation and unconsumed
+sequence. Each envelope remains byte-identical from signing to delivery.
+
+A consumer retained before reduction rejects with `EngineStale`; a request
+retained after reduction binds current episodes and rejects `Unauthorized` after
+the failed bundles. Neither denial invokes the matcher. An unchanged peer
+consumer retained before both bundle attempts still fills. The subject's
+independently retained renewal also still commits, restoring exactly the original
+tuple/cap/expiry with one sequence increment and no episode increment; a fresh
+nonzero consumer then fills through the opposite CPI transport. Both successful
+consumers have only the taker and separate payer signatures, with no LP signature.
+
+The existing append-only authorization journal derives IDs, epochs, sequences,
+enabled state, expiry and exact basis positions from committed public events.
+Every delivery checks all five owners' distinct capital, zero PnL, empty source
+and destination wallets, total capital/vault/insurance, physical SPL custody and
+fixed mint supply. Asset-1 long/short OI equals the committed fill sum; final
+subject/peer/taker positions are `-size/-size/2*size`. Complete tracked and
+transaction Accounts, including metadata, absence, matcher state and lamports,
+are compared on rejection. Only the exact signature fee leaves the separate
+payer. Successful operations may change only their declared market/portfolio/
+matcher accounts; grant writes preserve every economic account. Simulations
+also compare complete Accounts and never supply committed oracle events.
+
+Overlap boundaries:
+
+| Existing owner | Scope distinction |
+| --- | --- |
+| `retained_grant_atomicity` | Flat, enabled portfolios and competing grant-only updates; no prior used/reduced episode or mixed revoked/live renewal state. Its grant builder and signer are reused. |
+| `owner_episode_revocation` and `revocation_words` | Retained consumers and fresh regrants; no retained joint renewal rollback followed by an unchanged independent renewal retry. |
+| CU `revocation_atomicity` and `grant_writer_order` | Position/grant ordering inside an atomic bundle; this keeps the reduction committed and uses an independently competing peer sequence to abort later joint renewal. |
+| `retained_grant_expiry` | Delivery-time expiry; this keeps the authenticated slot fixed and both expiries live. |
+
+**Row 412 remains OPEN.** This is one finite conformance schedule, not a generic
+generator/oracle, vulnerable-pin comparison, independent discovery or invariant
+status promotion. It deliberately retains grant instructions after reduction;
+admission of grant instructions signed before automatic revocation remains
+outside this test. Also excluded: arbitrary writer words, grant-plus-fill atomic
+bundles, other reduction amounts, full closes/reopens, expiry boundaries,
+liquidation/Recovery/cure, authority/incarnation/asset replacement, changed
+matcher tuples, nonzero fees/funding/PnL, multi-leg/max shapes and final custody
+withdrawals. Asset-0 effective cohort accounting is not independently modeled.
+The existing `V16Svm::new` setup seeds valid external accounts and zeroed program
+storage, then uses public initialization, grant, deposit and oracle instructions.
+All subsequent changes use signed public wrapper instructions; no initialized
+program bytes are injected, edited or restored. Production and shared support
+are unchanged; no current public-interface property violation was observed.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`4886d7bdae8a48ebb2f0e9bcd7702e7980f0a289`. Branch:
+`codex/row412-mixed-renewal-20260913`; isolated worktree:
+`/home/anatoly/percolator-row412-mixed-renewal-20260913`. The main checkout was
+not edited. Host Rust 1.90.0, LiteSVM 0.1.0, locked engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Host and SBF cache files were copied
+from `/dev/shm/astra-capability-6d2a-target` into a private target; the default
+Anchor-v2 wrapper and matcher SBF were rebuilt from this worktree offline with
+platform-tools v1.52. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+Validation: exact selector **1/1 passed in 8.27s**, with 16 histories,
+176 transactions (excluding fixture initialization), 80 live simulations,
+64 exact rejections, 16 rolled-back grants and 56 committed fills. Peak measured
+success/rejection/bundle CU: **169,807 / 8,411 / 16,218**, all below the existing
+1,400,000-CU transaction limit. The two required metadata selectors and the
+format/whitespace checks below pass. An initial compile required changing the
+test simulation helper to borrow LiteSVM mutably; no production edit was needed.
+Existing unused-support and Solana future-incompatibility warnings remain.
+No broad suite, additional behavioral selector or Kani run is claimed.
+
+Exact commands, run from the isolated worktree (private target directories use
+mode 0700; cleanup follows validation, retaining one unpushed local commit):
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/row412-mixed-renewal-20260913-target
+export TMPDIR=/run/user/1001/row412-mixed-renewal-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -m 700 "$CARGO_TARGET_DIR" "$TMPDIR" /run/user/1001/row412-mixed-renewal-20260913-matcher-target
+cp -a /dev/shm/astra-capability-6d2a-target/debug /dev/shm/astra-capability-6d2a-target/release /dev/shm/astra-capability-6d2a-target/sbpf-solana-solana "$CARGO_TARGET_DIR/"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /run/user/1001/row412-mixed-renewal-20260913-target/deploy -- --locked
+CARGO_TARGET_DIR=/run/user/1001/row412-mixed-renewal-20260913-matcher-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+sha256sum "$CARGO_TARGET_DIR/deploy/percolator_prog.so" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::retained_grant_atomicity::mixed_episode_renewal::v16_program_retained_mixed_renewals_preserve_reduced_episode_and_independent_retry -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /run/user/1001/row412-mixed-renewal-20260913-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir /run/user/1001/row412-mixed-renewal-20260913-matcher-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir tests/fixtures/auth_matcher/target
+rmdir /run/user/1001/row412-mixed-renewal-20260913-tmp
+```
+
 ## INV-008 co-owned withdrawal stock and sibling retry (row 415, 2026-09-13)
 
 Owner: [cu/inv_008_coowned_withdrawal_stock.rs](cu/inv_008_coowned_withdrawal_stock.rs),

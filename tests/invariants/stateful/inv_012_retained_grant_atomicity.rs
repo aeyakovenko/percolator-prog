@@ -5,6 +5,9 @@
 use super::*;
 use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_012_mixed_episode_renewal.rs"]
+mod mixed_episode_renewal;
+
 #[derive(Default)]
 struct Evidence {
     worlds: usize,

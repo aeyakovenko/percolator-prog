@@ -1,5 +1,28 @@
 # PR410-434 are post-hoc holdout/conformance misses; rows left OPEN still affect invariant status.
 # This is a coverage-fidelity ledger, not independent-discovery or whole-invariant proof evidence.
+# Row 412 bounded conformance (2026-09-13): stateful/inv_012_mixed_episode_renewal.rs,
+# mounted by retained_grant_atomicity::mixed_episode_renewal. Sixteen public-route
+# histories compose committed bilateral/owner partial reductions with retained
+# joint renewal of a revoked subject and live peer. A competing peer sequence
+# forces early/late EngineStale rollback; exact retained/current-episode consumers
+# remain stale/Unauthorized, the peer still fills, and an unchanged independent
+# subject renewal retries successfully before a fresh opposite-transport fill.
+# Both signs, CPI routes and bundle orders; serialized bytes, complete Account
+# rollback, owner capital/PnL, custody/supply and consumer OI are asserted.
+# Net-new mixed revoked/live renewal rollback/retry relation; grant-only atomicity,
+# episode consumers, revocation words and expiry do not own this composition.
+# 16 histories, 176 transactions, 80 live simulations, 64 rejections, 16 rolled-back
+# grants, 56 fills; peak success/rejection/bundle CU 169807/8411/16218, limit 1400000.
+# Base 4886d7bdae8a48ebb2f0e9bcd7702e7980f0a289; production unchanged; row 412 OPEN.
+# Limits: grants retained AFTER reduction only; no pre-revocation grant admission,
+# generic oracle, grant-plus-fill bundles, full closes, expiry, Recovery/liquidation,
+# changed tuples/incarnations, fees/funding, multi-leg/max shapes or final payouts.
+# Exact new command: cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::retained_grant_atomicity::mixed_episode_renewal::v16_program_retained_mixed_renewals_preserve_reduced_episode_and_independent_retry -- --exact --nocapture
+# Exact metadata command: cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+# Checks: cargo fmt --all -- --check; git diff --check && git diff --cached --check;
+# git show --format= --check HEAD (post-commit). Private build/artifact provenance,
+# complete commands and cleanup: README "INV-012 retained mixed renewals after
+# reduction (row 412, 2026-09-13)". No status promotion or public-interface bug claim.
 # Row 412 bounded generated conformance (2026-09-13): stateful/inv_012_revocation_words.rs,
 # mounted under inv_012_capability_and_delegate_scope::revocation_words. All 64
 # three-writer words (regrant, participating CPI, former-LP taker CPI through a peer,
