@@ -5430,12 +5430,35 @@ fn discover_one_portfolio_incarnation_replay(
     let mut env = V16Svm::new(seed, MarketConfig::default());
     let supply_before = env.token_supply_observed();
     env.begin_public_trace();
+    if kind == PortfolioIntentKind::Close {
+        let capital = env.primary_portfolio(subject).capital.get();
+        env.withdraw_primary(subject, capital)
+            .map_err(|error| format!("make retained close initially executable: {error}"))?;
+    }
     let old_portfolio_id = env.primary_portfolio_id(subject);
     let retained = retained_portfolio_intent(&mut env, kind);
+    let custody = matches!(
+        kind,
+        PortfolioIntentKind::Deposit | PortfolioIntentKind::Withdraw | PortfolioIntentKind::Close
+    );
+    let retained_sequence = env.primary_portfolio_matcher_sequence(subject);
+    if custody {
+        let before = fingerprint(&env);
+        env.svm
+            .simulate_transaction(retained.clone().into())
+            .map_err(|error| format!("{kind:?} must execute before recreation: {error:?}"))?;
+        if fingerprint(&env) != before {
+            return Err(format!(
+                "{kind:?} initial simulation changed economic state"
+            ));
+        }
+    }
 
     let old_capital = env.primary_portfolio(subject).capital.get();
-    env.withdraw_primary(subject, old_capital)
-        .map_err(|error| format!("empty old portfolio: {error}"))?;
+    if old_capital != 0 {
+        env.withdraw_primary(subject, old_capital)
+            .map_err(|error| format!("empty old portfolio: {error}"))?;
+    }
     env.close_primary_portfolio(subject)
         .map_err(|error| format!("close old portfolio: {error}"))?;
     let (intermediate_portfolio_id, new_portfolio_id) = env
@@ -5460,6 +5483,42 @@ fn discover_one_portfolio_incarnation_replay(
                 .map_err(|error| format!("establish replacement matcher policy: {error}"))?;
         }
         _ => {}
+    }
+
+    if custody {
+        // Restore the watermark publicly: a stale sequence must not mask the incarnation guard.
+        let replacement_sequence = env.primary_portfolio_matcher_sequence(subject);
+        if replacement_sequence > retained_sequence {
+            return Err(format!(
+                "{kind:?} replacement exceeded the retained sequence"
+            ));
+        }
+        for _ in replacement_sequence..retained_sequence {
+            env.set_matcher_config(subject, 1)
+                .map_err(|error| format!("{kind:?} restore custody sequence: {error}"))?;
+        }
+        let fresh = current_portfolio_intent(&mut env, kind);
+        let mut expected = retained.message.instructions.last().unwrap().clone();
+        use percolator_prog::ix::Instruction as ProgInstruction;
+        let mut request = ProgInstruction::decode(&expected.data)
+            .map_err(|error| format!("decode retained custody request: {error:?}"))?;
+        match &mut request {
+            ProgInstruction::Deposit { portfolio_id, .. }
+            | ProgInstruction::Withdraw { portfolio_id, .. }
+            | ProgInstruction::ClosePortfolio { portfolio_id, .. } => {
+                *portfolio_id = new_portfolio_id;
+            }
+            _ => unreachable!("custody route registry"),
+        }
+        expected.data = request.encode();
+        if fresh.message.account_keys != retained.message.account_keys
+            || fresh.message.header != retained.message.header
+            || fresh.message.instructions.last() != Some(&expected)
+        {
+            return Err(format!(
+                "{kind:?} fresh custody control must change only portfolio_id"
+            ));
+        }
     }
 
     finish_portfolio_incarnation_discovery(

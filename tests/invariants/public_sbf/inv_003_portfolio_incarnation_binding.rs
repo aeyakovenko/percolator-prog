@@ -15,6 +15,10 @@
 //! economic delta, preventing an always-rejecting implementation from satisfying
 //! the matrix. The trace schema additionally proves every lifecycle edge is a
 //! real public transaction.
+//! Deposit, withdrawal and close requests must simulate successfully before recreation.
+//! Public matcher controls restore the replacement custody sequence to its retained value;
+//! the fresh control must have identical accounts and instruction bytes except portfolio_id.
+//! Thus neither an initially funded close nor a reset sequence can mask the identity check.
 //! A separate retained-deposit control keeps its original signature across another
 //! portfolio's A -> B -> A cycle, proving unrelated incarnation allocation does
 //! not invalidate consent for an unchanged portfolio.
