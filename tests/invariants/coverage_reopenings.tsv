@@ -167,6 +167,20 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # commands and scope. Live/manual-mark/full-funding/base-fee evidence only; dynamic,
 # backing, partial, underfunded, terminal and arbitrary policy/route histories remain open.
 # No implementation violation or production fix; no row/status promotion.
+# 411 bounded mixed-route increment (2026-09-13): cu/inv_014_retained_mixed_route_fees.rs,
+# inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_mixed_route_fees::v16_retained_mixed_route_fee_budgets_survive_bilateral_revocation_and_renewal.
+# Base c377c7bdd267f31f3b0cbd2ff1172bdfe93217db; public setup and retained CPI opening,
+# bilateral reduction, LP renewal and funded CPI close cross 19->37->7->101->37 policy.
+# This adds changing transport within the fee history; existing policy-route budgets
+# keep transport fixed and existing mixed-transport reductions keep fee policy fixed.
+# Input-only 95+100+58 per-owner fee oracle, exact grant/position sequences, full Account
+# deposit-prefix rollback and final owner SPL payouts; all retained bytes stay fixed.
+# Live, one asset, base fees and full fills only; no generic history generator/oracle.
+# Exact selector PASS: 8 worlds, 24 fills, 8 funded rollbacks, 16 payouts; peak CU 225173
+# (simulation 148838, policy/renewal 10477, rejection 208504); ceiling 500000 CU. README's
+# retained mixed-route fee budgets section records exact selector/metadata/build/check/
+# cleanup commands and limits. Row 411 stays OPEN; fixed relation only.
+# Private target /run/user/1001/row411-mixed-fee-20260913-target; production unchanged.
 411	LoF	PRIVILEGED	INV-014	INV-005,INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-081	retained-intent+x-policy-update+x-route	retained-trade-fee-consent-bounds-every-fee-bearing-route	OPEN
 412	LoF	BLOCKER	INV-012	INV-004,INV-005,INV-010,INV-012,INV-024,INV-081	capability+x-automatic-revocation+x-episode	retained-capability-cannot-cross-any-authority-revoking-state-transition	OPEN
 # Row 413 partial conformance (2026-09-12): cu/inv_027_reward_mapping_admission.rs,

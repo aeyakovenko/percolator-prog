@@ -95,6 +95,111 @@ git show --format= --check HEAD
 cargo clean --target-dir "$CARGO_TARGET_DIR"
 ```
 
+## INV-014 retained mixed-route fee budgets (row 411, 2026-09-13)
+
+Owner: [cu/inv_014_retained_mixed_route_fees.rs](cu/inv_014_retained_mixed_route_fees.rs),
+mounted by `cu/inv_014_retained_single_cpi_policy_history.rs`. Exact selector:
+`inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_mixed_route_fees::v16_retained_mixed_route_fee_budgets_survive_bilateral_revocation_and_renewal`.
+
+This increment composes retained fee consent with a **CPI opening, bilateral
+reduction, owner-authorized matcher renewal, and CPI residual close on the same
+pair**. Eight bounded worlds cross both position signs, single/one-leg-batch CPI,
+and independently single/one-leg-batch bilateral reductions. The fee-policy
+history is `19 -> 37 -> 7 -> 101 -> 37`. Both owners, the payer, and matcher
+context are distinct. The reused parent fixture creates portfolios through
+System/wrapper instructions and quote accounts through SPL/ATA instructions,
+funds 100,003 and 200,007 atoms, leaves 113 atoms in the taker's source ATA, and
+revokes mint authority. No initialized program bytes are injected or edited.
+
+All three trade transactions, the funded-close rejection alternative, and the
+LP's renewal are signed **before any policy change or fill**. Full serialized
+transactions retain their original signatures, blockhash, account metas and
+instruction bytes. Future position epochs and the post-renewal matcher sequence
+are explicit signed request fields. CPI has payer+taker signatures and no LP
+signature; bilateral consent has both owners plus the payer. Single CPI signs a
+37-bps cap and fixed-price limit 100. Batch CPI signs zero slippage and exact
+95/58-atom opening/closing caps; its per-leg 137-bps field and the LP's separate
+137-bps standing grant remain independently permissive. Bilateral reduction
+signs an explicit 99-bps rate. The bilateral fill clears the grant expiry to zero;
+the retained renewal restores the same LP grant tuple, cap and original expiry,
+consuming exactly one owner control sequence.
+
+An input-only two-ceiling oracle computes fees on nonintegral quantities:
+95 atoms for opening, 100 for bilateral reduction, and 58 for residual close,
+per owner. The bilateral fill at live policy 7 still charges its signed 99 bps
+and disables the prior grant. After renewal, policy 101 exceeds the close's
+retained taker bound. The funded close rejects at instruction 3 with exact
+`InvalidInstruction`: its 113-atom SPL deposit succeeds first; batch CPI also
+returns successfully before aggregate-cap rejection. Complete tracked and
+compiled Accounts roll back, including economic lamports, matcher context,
+positions, grant/control sequences, insurance and SPL custody. Only the separate
+payer's exact network signature fee is charged. Restoring policy 37 permits the
+other already-signed close transaction to commit without refreshing any bounds.
+Distinct CU-limit nonces distinguish the pre-signed alternatives; no claim is
+made that a recorded failed Solana signature can execute again.
+
+Each policy/fill/rollback/renewal/payout prefix reconciles both owners' capital,
+zero PnL and fee credits, remaining position, both OI sides, per-side insurance,
+total capital, engine/SPL custody, fixed mint supply and stock/encumbrance
+censuses. Route-specific matcher calls, request counts, position epochs and
+grant enablement are checked. Fresh exact withdrawals pay 99,863 and 199,754
+atoms, leaving zero owner capital and precisely 506 earned insurance atoms in
+custody. Single/batch variants and both signs reach these same endpoints.
+
+Non-overlap at base `c377c7bdd267f31f3b0cbd2ff1172bdfe93217db`:
+
+| Existing selector | Distinct scope of this increment |
+| --- | --- |
+| `v16_retained_policy_route_budgets_bound_each_committed_prefix` | Existing history keeps transport fixed; this history revokes and renews the same LP grant between differently priced CPI/bilateral fills. |
+| `v16_program_retained_grants_bind_context_across_mixed_transport_reductions` | Existing mixed-route relation keeps policy fixed; this retains the entire three-fill fee history and renewal before policy changes. |
+| `v16_retained_close_withdrawal_reconciles_repriced_fees_across_all_trade_routes` | Existing retained close/withdrawal product has no intervening bilateral reduction and retained grant renewal. |
+
+**Row 411 remains OPEN** for
+`retained-trade-fee-consent-bounds-every-fee-bearing-route`. This is a fixed
+three-fill Live/manual-mark/base-fee relation, not a generic generator/oracle.
+Arbitrary histories, cross-asset batches, matcher-selected partial fills,
+underfunded fees, source/backing/mark/funding/maintenance fees, authority or
+recipient changes, terminal routes and alternate quote rails are outside this
+increment. Production code and invariant status rows are unchanged.
+
+Worktree: `/home/anatoly/percolator-row411-retained-fee-route-20260913`; branch:
+`codex/row411-retained-fee-route-increment-20260913`. Base is the requested local
+origin ref at exactly `c377c7bdd267f31f3b0cbd2ff1172bdfe93217db`; engine pin
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Fresh locked/offline default-feature
+SBF builds use platform-tools v1.52. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+authenticated matcher SHA-256:
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The exact new selector passes **8 worlds, 24 fills, 8 exact funded rollbacks,
+and 16 owner payouts**. Peak CU: simulation **148,838**, policy/renewal **10,477**,
+rejection **208,504**, fill/payout **225,173**. Every measured transaction is
+bounded by 500,000 CU (signed limits subtract small nonce values). Preliminary
+runs corrected only test expectations: the grant enable accessor is `u64`, and
+bilateral revocation clears expiry. No production inconsistency was observed.
+Both required `inv_079` metadata selectors pass (2/2), as do repository formatting
+and working/staged whitespace checks. The commit check runs on the resulting
+local commit. Private Cargo and fixture targets are removed after validation;
+the worktree and single local commit are retained without pushing.
+
+Exact commands from the worktree root:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/row411-mixed-fee-20260913-target
+export TMPDIR=/run/user/1001/row411-mixed-fee-20260913-target/tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /run/user/1001/row411-mixed-fee-20260913-target/deploy -- --locked
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /home/anatoly/percolator-row411-retained-fee-route-20260913/tests/fixtures/auth_matcher/target/deploy -- --locked
+rustfmt --edition 2021 tests/invariants/cu/inv_014_retained_mixed_route_fees.rs
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_mixed_route_fees::v16_retained_mixed_route_fee_budgets_survive_bilateral_revocation_and_renewal -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /home/anatoly/percolator-row411-retained-fee-route-20260913/tests/fixtures/auth_matcher/target
+cargo clean --target-dir /run/user/1001/row411-mixed-fee-20260913-target
+```
+
 ## INV-045/038/085 retained funding-checkpoint retry (row 425, 2026-09-13)
 
 Owner: [cu/inv_045_retained_funding_retry.rs](cu/inv_045_retained_funding_retry.rs),

@@ -22,6 +22,9 @@ mod retained_policy_route_budgets;
 #[path = "inv_014_retained_underfunded_close.rs"]
 mod retained_underfunded_close;
 
+#[path = "inv_014_retained_mixed_route_fees.rs"]
+mod retained_mixed_route_fees;
+
 const DEPOSITS: [u64; 2] = [100_003, 200_007];
 const PREFIX: u64 = 113;
 const PRICE: u64 = 100;
