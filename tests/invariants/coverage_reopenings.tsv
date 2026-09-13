@@ -1,5 +1,21 @@
 # PR410-434 are post-hoc holdout/conformance misses; rows left OPEN still affect invariant status.
 # This is a coverage-fidelity ledger, not independent-discovery or whole-invariant proof evidence.
+# Row 412 bounded generated conformance (2026-09-13): stateful/inv_012_revocation_words.rs,
+# mounted under inv_012_capability_and_delegate_scope::revocation_words. All 64
+# three-writer words (regrant, participating CPI, former-LP taker CPI through a peer,
+# bilateral mutation) cross both transports and signs: 256 public LiteSVM histories.
+# Retained subject/peer requests, current-episode original-grant probes and fresh
+# controls check every prefix against the authorization journal, complete Account
+# rollback/success scope, exact owner fees, positions/OI, insurance and full user exits.
+# This composes position and grant writers beyond the existing one-writer/grant-only
+# matrices. Market/portfolio/asset replacement, keeper/Recovery/close/cure writers,
+# expiry, nonconstant prices/funding, multi-leg/max shapes and longer words stay open.
+# No vulnerable-pin experiment, implementation violation or status promotion; only
+# row 412 is targeted. Private environment, artifact provenance and all commands:
+# README "INV-012 interleaved revocation words (row 412, 2026-09-13)".
+# Exact new command: cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::revocation_words::v16_program_interleaved_revocation_words_bind_every_retained_prefix_and_owner_value -- --exact --nocapture
+# Exact metadata command: cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+# Additional checks: cargo fmt --all -- --check; git diff --check; git diff --cached --check; git show --format= --check HEAD (post-commit).
 # 411/432 bounded conformance (2026-09-12): stateful/inv_014_retained_fee_expiry.rs,
 # v16_program_retained_fee_prefix_rolls_back_at_grant_expiry_before_bilateral_retry.
 # Policy-authority succession and repricing precede exact/late LP-grant expiry;

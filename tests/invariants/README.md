@@ -1,5 +1,102 @@
 # Invariant-owned test coverage
 
+## INV-012 interleaved revocation words (row 412, 2026-09-13)
+
+Owner: [stateful/inv_012_revocation_words.rs](stateful/inv_012_revocation_words.rs),
+mounted under `inv_012_capability_and_delegate_scope::revocation_words`.
+Exact selector:
+`v16_program_interleaved_revocation_words_bind_every_retained_prefix_and_owner_value`.
+
+This bounded generator exhausts 256 public LiteSVM histories: all 64 length-three
+words over owner regrant, participating-LP CPI, former-LP-as-taker CPI through a
+peer context of the same matcher program, and bilateral position mutation; each
+word crosses both starting transports and both position signs. Writer and consumer
+routes alternate between single and one-leg batch. Two writer assets and a third
+consumer asset share four economically active portfolios; a fifth actor pays the
+locally constructed transactions' network fees.
+
+The existing append-only `AuthorizationHistory` predicts grant sequence, enabled
+state, expiry, scope, portfolio ID, position episodes and exact positions from
+committed events. Each world first successfully uses the subject capability. Before
+each writer it signs and retains both a subject request and a peer request. Actual
+delivery distinguishes episode/sequence staleness from disabled authority, while
+the untouched peer request provides positive scope isolation. A second probe binds
+current episodes but the original grant sequence, separating automatic revocation
+from stale-position rejection. A current-grant probe and final explicit regrant
+exercise nonzero liveness on both transports; using the fresh grant cannot revive
+the original grant in the subsequent episode. Rejected writers are journal no-ops.
+
+Every trade checks complete transaction and protected Accounts. Rejections restore
+all Accounts, including matcher writes, SPL custody/supply and economic lamports;
+only the exact signature fee changes at the separate payer. Successful fills can
+change only the market, participating portfolios and selected LP matcher context,
+and must leave all configured matcher tuples in their original owner/portfolio
+scope. All five owners have distinct initial capital. At constant price 100, each
+100-lot fill charges exactly one atom per participant at the explicitly signed
+one-basis-point cap. An input-derived oracle reconstructs each owner's fees,
+capital, zero PnL, side OI, total insurance and SPL custody after every trade.
+Reverse bilateral fills close all committed exposure. Every owner then withdraws
+exactly initial capital less its own fees, leaving only the charged insurance in
+the vault and zero user capital. No insurance payout is claimed.
+
+The net-new relation is prefix-by-prefix interleaving of position writers, role
+switches and grant replacement under one authorization and value oracle. The
+existing stateful one-writer matrix and grant-only word matrix do not compose
+these events. CU `grant_writer_order` owns atomic two-writer bundles, and
+`role_switch_generation` owns a fixed asset-reuse history. This increment adds
+neither bundle rollback nor asset reuse, and does not target row 410 or the
+completed neighboring rows.
+
+**Row 412 remains OPEN; invariant statuses are unchanged.** This is bounded
+conformance, not independent discovery or whole-invariant proof. Market/asset and
+portfolio recreation, authority handoff, expiry boundaries, liquidation, Recovery,
+close/cure writers, nonconstant prices/funding, multi-leg/max shapes, longer words
+and arbitrary matcher-program substitutions remain outside this generator. It
+uses the repository's existing `V16Svm::new` account setup and public wrapper,
+matcher and withdrawal interfaces; it adds no program-owned byte mutation or
+snapshot restoration. Production, shared support and dependency pins are unchanged.
+No vulnerable-pin experiment or implementation violation is claimed.
+
+Base: `88f0c98c74a3c8ca7147b6d2a1bb7346178457a7` from the fetched requested origin
+branch. Worktree: `/tmp/percolator-row412-capability-revocation-20260913`.
+Branch: `codex/row412-capability-revocation-20260913`. The parent worktree was not
+edited. Host dependencies were copied into a private target from
+`/dev/shm/astra-capability-6d2a-target`; both SBF artifacts were rebuilt from this
+worktree using locked/offline platform-tools v1.52 and default wrapper features.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+Validation: the new exact selector passed **1/1 in 165.85s**, covering 256 worlds,
+4,488 committed fills, 1,724 stale and 960 disabled-capability rejections,
+576 unchanged retained peer fills and 1,280 owner withdrawals. Peak trade CU was
+240,386, within the existing 1,400,000-CU transaction bound. Both requested metadata
+selectors passed (2/2), as did formatting and whitespace checks. Development corrected
+a Rust moved-value error and a test CPI fee cap that did not consent to the selected
+nonzero policy; a preliminary run was stopped to add the untouched-peer control.
+These were test construction changes, not an implementation violation. Existing
+unused-support and `solana-client v1.18.26` future-incompatibility warnings remain.
+Only the new exact selector and the two metadata selectors below were run; no
+broad suite, adjacent invariant selectors or Kani execution is claimed.
+
+Exact build and verification commands, with the private environment factored out:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row412-revocation-20260913-target
+export TMPDIR=/dev/shm/row412-revocation-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/row412-revocation-20260913-target/deploy -- --locked
+CARGO_TARGET_DIR=/dev/shm/row412-revocation-20260913-matcher-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_012_capability_and_delegate_scope::revocation_words::v16_program_interleaved_revocation_words_bind_every_retained_prefix_and_owner_value -- --exact --nocapture
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /dev/shm/row412-revocation-20260913-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir /dev/shm/row412-revocation-20260913-matcher-target
+cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir /tmp/percolator-row412-capability-revocation-20260913/tests/fixtures/auth_matcher/target
+```
+
 ## INV-028 historical liens and future exit resources (row 423, 2026-09-13)
 
 Owner: [cu/inv_028_exit_resource_reservation.rs](cu/inv_028_exit_resource_reservation.rs),
