@@ -104,6 +104,20 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # deletion, expiry, payout and final disposal restore all Accounts except exact
 # signature fees; unchanged prefix instructions then succeed. Two bounded public
 # histories, no generic oracle or status promotion; see INV-024 README section.
+# Row 410 partial conformance (2026-09-13): cu/inv_024_terminal_recredit_fee_partition.rs,
+# inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_fee_partition::v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_orders.
+# Twelve public histories combine 657 earned provider-fee atoms with 73 actually
+# spent insurance atoms; principal tails 17/73/101 cross both payout orders and
+# operator/provider fee payers. Input-derived source-rate rounding, exact role SPL
+# payouts, insurance recovery capped by expired principal, fee/principal exclusion,
+# post-success no-recredit, full Account frames and 42 exact rollbacks compose.
+# All 12 histories close; no production violation/change or other row claim.
+# OPEN: bounded entitlement book, not an arbitrary-history generator; other assets/
+# rails, multiple recredit beneficiaries, concurrent receipts, donated surplus plus
+# fees, arbitrary role/funding histories and transaction compositions remain open.
+# Exact commands/results: README "INV-024 earned fees beside spent-insurance recovery".
+# Only the new exact v16_cu selector, the two requested INV-079 metadata selectors,
+# fmt and Git whitespace checks; no vulnerable-pin experiment or status promotion.
 410	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-036,INV-081	authority-role+x-lifecycle+x-attribution	terminal-submitters-cannot-receive-another-role-attributed-reserve	OPEN
 # 411 partial public coverage (2026-09-10): stateful/inv_014_retained_backing_fee_cap.rs::v16_program_retained_backing_fee_caps_follow_participant_and_route_consent retains nonzero backing caps across an owner-signed matcher cap change, both charged roles and CPI/no-CPI alternatives. Exact post-CPI rollback, participant-local consent, provider SPL fees and opposite-route close values compose. Single-source Live evidence only; see README. No row/status promotion.
 # 411/432 bounded conformance (2026-09-12): cu/inv_014_retained_redirect_entitlement.rs,

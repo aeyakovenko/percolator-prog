@@ -26,6 +26,9 @@ mod terminal_cleanup_submitter;
 #[path = "inv_024_terminal_recredit_surplus.rs"]
 mod terminal_recredit_surplus;
 
+#[path = "inv_024_terminal_recredit_fee_partition.rs"]
+mod terminal_recredit_fee_partition;
+
 #[path = "inv_073_terminal_public_reserves.rs"]
 mod terminal_public_reserves;
 pub(crate) use terminal_public_reserves::{

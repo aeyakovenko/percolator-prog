@@ -97,6 +97,99 @@ cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir 
 cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir /tmp/percolator-row412-capability-revocation-20260913/tests/fixtures/auth_matcher/target
 ```
 
+## INV-024 earned fees beside spent-insurance recovery (row 410, 2026-09-13)
+
+Owner: [cu/inv_024_terminal_recredit_fee_partition.rs](cu/inv_024_terminal_recredit_fee_partition.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_fee_partition`.
+Exact selector: `v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_orders`.
+Primary INV-024; related INV-005/024/036/081. Branch
+`codex/row410-terminal-role-attribution-20260913`, worktree
+`/tmp/percolator-row410-terminal-role-attribution-20260913`; rebased onto
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`88f0c98c74a3c8ca7147b6d2a1bb7346178457a7`, including row 418.
+
+Twelve public LiteSVM histories cross three remaining principal amounts
+(17/73/101), both provider-fee/insurance-recovery payment orders, and operator
+versus backing-provider transaction payers. The existing public earned-fee fixture
+charges 875 atoms: 657 belong to the provider and 218 to insurance. Authenticated
+observations move the mark from 105 to 51; resolved settlement consumes 73 insurance
+atoms while leaving all provider fees payable. The two users receive exactly
+0/2,051,699 atoms. Independent integer source-rate arithmetic accounts for the
+one counterparty-funded backing atom left by rounding; it is paid to the provider
+through domain 0. No observed payout is substituted for an expected entitlement.
+
+Provider, insurer, operator, market authority, both users and the original keeper
+are seven distinct identities. Public role consent establishes the insurer before
+resolution. The terminal payer owns either the provider role or the live insurance
+operator role. Reserve instructions mark beneficiaries as nonsigners: operator-paid
+transactions have no reserve-holder signature, while provider-paid transactions
+carry the provider's signature through the fee payer. Both backing domains'
+principal and the 176 unspent insurance atoms are paid, leaving only the selected
+principal tail, the provider's 657 earned fees and historical insurance spend. Before expiry,
+neither principal nor fees can fund additional insurance. At slot 100, public slab
+cleanup expires the tail; recoverable insurance is exactly `min(tail, 73)`, regardless
+of which reserve is paid first. The provider receives its remaining fees, the
+insurer receives 17/73/73 recovered atoms, and the operator and market authority
+receive zero quote atoms. Only the 101-atom world burns a residual, exactly 28 atoms.
+
+The input-derived entitlement book checks both principal domains, fee stocks and
+the provider ledger, insurance budgets/spend, provider receivables, beneficiary
+identities, full SPL Account frames, fixed mint supply, engine/SPL conservation,
+stock census and shape after every terminal reserve step. Config and authority
+sequences remain framed. Final closure preserves paid tokens and the provider ledger,
+closes the vault, and returns exact slab/vault rent to the market authority.
+
+There are **42 exact rollback checks**: 12 premature recoveries after real fee
+payouts; 12 expiry-plus-fee prefixes followed by over-capacity insurance withdrawals;
+12 identical prefixes followed by correctly signed insurance requests from the
+other reserve/control role; and six additional requests after insurance recovery
+has committed while provider fees remain unpaid. The latter cannot recredit those
+fees even when historical insurance spend survives. Shared `land` checks every
+tracked and compiled-message Account, account presence, lazy ledger initialization,
+successful prefix logs and exact signature fees. The identical expiry instruction
+then commits, followed by valid role payouts. New selector: **1/1**, 12 closures,
+observed peak terminal bundle **378,291 CU**
+under the shared 1,200,000 limit. An initial development expectation omitted the
+source-rate rounding atom; the independent arithmetic now accounts for it. No
+implementation violation or production change was found. All program-owned
+economic state comes from public wrapper calls; mutable Account copies are only
+assertion frames and are never installed into LiteSVM.
+
+The substantive addition is simultaneous earned provider fees and actually spent
+insurance across recovery, not another fresh-reserve payout order. Existing
+`terminal_recredit_surplus` has zero earned fees; `terminal_earnings_expiry` and
+`terminal_fee_share_succession` have no spent insurance. This does not extend row
+418 token variants/custody or row 433 absent-beneficiary exit coverage.
+**Row 410 remains OPEN.** This is a bounded invariant-owned entitlement oracle,
+not an arbitrary-history generator or whole-invariant proof. Other assets/quote
+rails, multiple recredit beneficiaries, concurrent receipts, raw donations together
+with earned fees, arbitrary role/funding histories and transaction compositions
+remain open. No vulnerable-pin experiment, status promotion or other row edit.
+
+Exact verification commands (only the new selector and the two requested metadata
+selectors are run; the private target and temporary directories are cleaned):
+
+```sh
+export CARGO_TARGET_DIR=/tmp/row410-terminal-role-20260913-target
+export TMPDIR=/tmp/row410-terminal-role-20260913-tmp
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_fee_partition::v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_orders -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+rmdir "$TMPDIR"
+```
+
+Default-feature SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+
 ## INV-028 historical liens and future exit resources (row 423, 2026-09-13)
 
 Owner: [cu/inv_028_exit_resource_reservation.rs](cu/inv_028_exit_resource_reservation.rs),
