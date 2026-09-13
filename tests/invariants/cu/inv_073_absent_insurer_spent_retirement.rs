@@ -8,6 +8,8 @@
 //! rollback. Provider principal leaves while Live; no reserve holder signs the terminal suffix.
 //! The missing-wallet child removes both insurance wallets and custody before loss settlement,
 //! then completes keeper-funded custody repair, implicit recredit/payment and signed retirement.
+//! The dual-quote child spends the recovered claim across both funded SPL rails, preserving
+//! recredit and a paid prefix through cross-rail rejection before exact burn/sweep retirement.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -15,6 +17,9 @@ use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::
 
 #[path = "inv_073_missing_insurance_wallet_recredit.rs"]
 mod missing_insurance_wallet_recredit;
+
+#[path = "inv_073_recredited_insurance_quote_rails.rs"]
+mod recredited_insurance_quote_rails;
 
 #[test]
 fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion() {
@@ -50,6 +55,7 @@ enum ProviderHistory {
     Empty,
     Fresh,
     FreshMissingWallets,
+    FreshDualQuote(bool),
     Withdrawn,
 }
 
@@ -64,7 +70,8 @@ fn absent_reserve_progress(
     const CALL_BOUND: usize = 8;
     const EXPIRY: u64 = 44;
     let missing_wallets = provider_history == ProviderHistory::FreshMissingWallets;
-    let with_backing = provider_history == ProviderHistory::Fresh || missing_wallets;
+    let dual_quote = matches!(provider_history, ProviderHistory::FreshDualQuote(_));
+    let with_backing = provider_history == ProviderHistory::Fresh || missing_wallets || dual_quote;
     let provider_principal = if provider_history == ProviderHistory::Empty {
         0u64
     } else {
@@ -156,6 +163,13 @@ fn absent_reserve_progress(
                 create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
             let provider_token = (provider_principal != 0).then(|| {
                 create_ata_for_test(&mut env.svm, &env.payer, provider.pubkey(), env.mint)
+            });
+            let secondary = dual_quote.then(|| {
+                recredited_insurance_quote_rails::Secondary::create(
+                    &mut env,
+                    &admin,
+                    beneficiary.pubkey(),
+                )
             });
             for (token, amount) in tokens
                 .into_iter()
@@ -399,6 +413,9 @@ fn absent_reserve_progress(
             tracked.extend(portfolios);
             tracked.extend(tokens);
             tracked.extend(owners.each_ref().map(Signer::pubkey));
+            if let Some(secondary) = &secondary {
+                tracked.extend(secondary.keys());
+            }
             let wrap = |data: ProgInstruction, accounts| Instruction {
                 program_id: percolator_prog::id(),
                 accounts,
@@ -537,7 +554,7 @@ fn absent_reserve_progress(
                 )
             };
             let payouts = [0, 1, 2].map(payout);
-            let close = wrap(
+            let mut close = wrap(
                 ProgInstruction::CloseSlab {
                     authority_epoch: sequences[0].authority_epoch,
                 },
@@ -551,6 +568,15 @@ fn absent_reserve_progress(
                     AccountMeta::new(env.mint, false),
                 ],
             );
+            if let Some(secondary) = &secondary {
+                close.accounts.splice(
+                    6..6,
+                    [
+                        AccountMeta::new(secondary.vault, false),
+                        AccountMeta::new(secondary.admin_token, false),
+                    ],
+                );
+            }
             let market = env.market;
             env.svm.warp_to_slot(40);
             let mut peak = land(
@@ -824,6 +850,23 @@ fn absent_reserve_progress(
                     normalized.source_credit[2 * asset + 1].provider_receivable_num,
                     u128::from(CAPITAL[1]) * BOUND_SCALE
                 );
+                if let ProviderHistory::FreshDualQuote(secondary_first) = provider_history {
+                    peak = peak.max(recredited_insurance_quote_rails::finish(
+                        &mut env,
+                        &admin,
+                        asset,
+                        absent,
+                        reserve_token,
+                        secondary.as_ref().unwrap(),
+                        remainder + recovered,
+                        secondary_first,
+                        &close,
+                        &tracked,
+                    ));
+                    assert_eq!(tokens.map(|key| env.token_amount(key)), PAYOUTS);
+                    println!("INV-073 recredited quote rails asset={asset}, remainder={remainder}, secondary_first={secondary_first}: user_calls={calls:?}/{CALL_BOUND}, paid={}, burned={}, whole_history_peak={peak} CU", remainder + recovered, backing - recovered);
+                    continue;
+                }
                 if missing_wallets {
                     peak = peak.max(missing_insurance_wallet_recredit::finish(
                         &mut env,

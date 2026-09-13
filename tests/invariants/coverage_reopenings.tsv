@@ -991,6 +991,31 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # No production change, generic oracle/proof or status promotion. Beneficiary-independent
 # redemption, liabilities, spend/recredit, other rails and absent-admin closure stay OPEN.
 # README section "INV-073 native insurance redemption rollback" records exact commands.
+# Row421 bounded conformance (2026-09-13): cu/inv_073_recredited_insurance_quote_rails.rs.
+# Exact selector: inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::recredited_insurance_quote_rails::v16_program_recredited_insurance_switches_quote_rails_without_operator_signatures.
+# Eight public asset-0/1, remainder-0/1 and first-rail histories pay one recovered
+# 100/101-atom insurance claim across both funded classic-SPL quote rails. All
+# reserve keys are dropped before trading; 16 keeper-only payments exhaust the
+# entitlement, excluding 211 donated secondary atoms. Each world has three exact
+# Account rollbacks with liquid custody: implicit recredit/payment plus other-rail
+# overclaim, further payout/overclaim after a committed paid prefix, and spent-claim
+# replay. Exact token/supply/rent accounting binds eight final signed slab closes:
+# burn 207 claim-free primary atoms, sweep displaced primary/unused secondary stock.
+# New composition beyond row421 single-rail recredit/native ledger/redemption and
+# row433 unspent dual-quote claims; existing user settlement is reused, not new.
+# New selector PASS 1/1 (eight histories, 4.55s); peak 281298/300000 CU, payment
+# peak 149990 and close peak 61139. Public construction only; no production change.
+# Three related exact selectors PASS 3/3; both INV-079 metadata gates PASS 2/2.
+# cargo fmt --all -- --check and all three Git whitespace checks PASS.
+# OPEN: finite SPL histories, no generic oracle/proof, partial recredit, live peer
+# claims/liabilities at rail switching, native/Token-2022, custody repair/freeze,
+# ledgers, succession, beneficiary redemption, maximum shape or absent-admin close.
+# Owner-signed deletion and admin-signed expiry/retirement remain prerequisites;
+# no invariant status promotion or public LoF/DoS is claimed. Row421 remains OPEN.
+# Existing worktree /home/anatoly/percolator-row421-astra-20260913-c, base 1e5fb1b5.
+# README "INV-073 recredited insurance across quote rails" records scope, duplicate
+# assessment, exact selectors/checks and fresh private SBF provenance: v1.52,
+# engine 394fd0bf; SHA-256 dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52.
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
 # Row 422 bounded policy-succession conformance (2026-09-12):
 # cu/inv_045_reward_policy_catchup.rs,

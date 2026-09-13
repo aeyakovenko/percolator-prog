@@ -883,6 +883,106 @@ cargo fmt --all -- --check
 git diff --check
 ```
 
+## INV-073 recredited insurance across quote rails (row 421, 2026-09-13)
+
+Owner: [cu/inv_073_recredited_insurance_quote_rails.rs](cu/inv_073_recredited_insurance_quote_rails.rs),
+registered under `inv_073_no_permanent_user_lock::absent_insurer_spent_retirement`.
+Selector: `recredited_insurance_quote_rails::v16_program_recredited_insurance_switches_quote_rails_without_operator_signatures`.
+
+Eight public LiteSVM histories cross asset 0/1, a 0/1-atom surviving insurance
+remainder, and primary-first/secondary-first payment. The existing loss fixture
+funds 100/101 primary insurance atoms and 307 backing atoms, drops the beneficiary,
+operator and provider keys before trading, resolves permissionlessly, and pays
+users exactly `[1200, 0, 137]`. Each user finishes in one strictly progressing
+call, below the existing eight-call bound. Owner-signed portfolio deletion and
+admin-signed expiry normalization leave 100 spent insurance atoms recoverable.
+The child configures a second classic-SPL quote mint through `UpdateBaseUnitMints`
+before funding; its 211 publicly minted vault atoms never create an insurance
+entitlement. Both mint authorities are revoked. No program-owned bytes are
+modified outside public instructions; expected Account images stay host-only.
+
+The first keeper-only payment implicitly restores insurance and pays 37 atoms;
+the remaining 63/64 are paid on the other rail. Both payments use the configured
+beneficiary's custody without any reserve or administrator signature. The shared
+entitlement decreases `100/101 -> 63/64 -> 0` across the switch. Exact market state,
+peer domains, role profiles/control sequences, token/mint images, market metadata,
+unchanged accounts and signature fees are checked. Stock and encumbrance censuses
+use booked custody; independent per-mint equations reconcile both physical vaults.
+Secondary payments displace exactly their primary backing into raw surplus.
+Final admin-signed retirement burns only 207 unallocated primary atoms, sweeps
+the displaced primary stock and unused secondary stock, and returns both vault
+rents plus market excess while retaining exact tombstone rent and paid custody.
+
+Each world checks three complete Account rollbacks: an implicit recredit/payment
+prefix followed by a cross-rail one-atom overclaim; a further payment followed by
+a cross-rail overclaim after the first 37 atoms have committed; and a replay after
+claim exhaustion. The rejecting rail has enough raw liquidity in every case.
+Wrapper and SPL success logs prove both bundled prefixes executed before the
+expected `EngineLockActive` suffix. Rejections restore all tracked and compiled
+accounts, including the original unbooked recovery or committed paid prefix;
+only the payer's exact signature fee changes. Successful retries exhaust the
+same entitlement without an operator, beneficiary or provider signature.
+
+**Duplicate assessment: keep as net-new partial row421 composition.** Existing
+row421 frozen-remainder, missing-wallet recredit, native-ledger progress and native
+paid-prefix redemption controls do not switch a recovered claim between funded
+rails. Row433's dual-quote reserve selector starts with unspent reserves and has
+no failing suffix; INV-024's raw-surplus recredit selector uses one payout rail.
+The new evidence joins loss/expiry recredit to shared entitlement across rails,
+rollback before/after the first committed payment, and exact burn/sweep retirement.
+The reused user-settlement fixture is not a separate new coverage claim.
+
+**Row 421 remains OPEN; `invariant_status.tsv` is unchanged.** This finite family
+does not prove arbitrary histories, maximum shapes, partial recredit, funded peer
+domains, pending liabilities during rail switching, native/Token-2022 custody,
+unavailable/frozen custody, optional ledgers, succession, beneficiary redemption,
+or absent-admin retirement. Portfolio deletion, expiry normalization and final
+closure retain their named owner/admin participation. No public LoF/DoS or
+production change is claimed; no generic closure proof or oracle is added.
+
+Provenance: existing dirty worktree
+`/home/anatoly/percolator-row421-astra-20260913-c`, branch
+`codex/astra-row421-operator-progress-20260913-c`, base
+`origin/codex/astra-open-holdout-ledger-20260912` at
+`1e5fb1b5ef4cae10fc56b58392f6b438ddc0ecbf`. The default-feature SBF package was
+cleaned and freshly rebuilt in the private target with platform-tools v1.52;
+engine pin `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+SBF SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Cargo.lock SHA-256: `c9edf71dafda5e617f5b3e6f5c19cb6c8585551b2cb426b4ca8bc7b3a7e4e6a0`.
+The exact new selector passed **1/1** in 4.55s: eight histories, 16 unsigned
+insurance payments, 24 exact rollback checks and eight final slab closes.
+Peak measured rejection/payment/close CU was **281298/149990/61139**;
+the whole measured history peak was **281298**, below the **300000** limit.
+Setup transactions are not included in this peak. The three related exact
+selectors passed **3/3** in 5.95s; both INV-079 metadata gates passed **2/2** in
+0.01s. Formatting and all three Git whitespace checks passed. No full-suite or
+Kani run is claimed. Existing metadata-harness dead-code warnings and the Solana
+future-compatibility warning remain.
+
+Exact validation commands, executed from that worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row421-operator-progress-20260913-c-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/row421-operator-progress-20260913-c-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo clean --locked --offline --package percolator-prog --release --target sbpf-solana-solana
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::recredited_insurance_quote_rails::v16_program_recredited_insurance_switches_quote_rails_without_operator_signatures -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::v16_program_absent_reserve_roles_preserve_recredited_insurance_after_backing_expiry \
+  inv_073_no_permanent_user_lock::absent_insurer_spent_retirement::missing_insurance_wallet_recredit::v16_program_recredited_insurance_reaches_terminal_exit_without_wallets_or_signatures \
+  inv_073_no_permanent_user_lock::dual_quote_reserve_progress::v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_surplus
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-073 native insurance redemption rollback (row 421, 2026-09-13)
 
 Owner: [cu/inv_073_native_insurance_ledger_progress.rs](cu/inv_073_native_insurance_ledger_progress.rs).
