@@ -57,6 +57,9 @@ mod shared_holder;
 #[path = "inv_039_pending_loss_backing_expiry.rs"]
 mod backing_expiry;
 
+#[path = "inv_039_pending_loss_restart.rs"]
+mod restart;
+
 const ATTRIBUTION_DEPOSITS: [u128; 5] = [200_000, 180_000, 300_000, 250_000, 777];
 const ATTRIBUTION_PRICE_MOVES: [i128; 2] = [30_000, 20_000];
 

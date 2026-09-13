@@ -93,6 +93,85 @@ git diff --check && git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-039 pending attribution across sibling restart (row 419, 2026-09-13)
+
+Owner: [cu/inv_039_pending_loss_restart.rs](cu/inv_039_pending_loss_restart.rs),
+mounted under `inv_039_pending_loss_obligation_durability::restart`. Exact selector:
+`inv_039_pending_loss_obligation_durability::restart::v16_program_pending_debt_survives_sibling_restart_and_delayed_resolution`.
+
+Eight public LiteSVM histories cross mirrored position sides, both debtor-domain
+completion orders and both claimant payout orders. Two solvent pairs create
+unequal **30,000 / 40,000** atom debts on assets 1 and 2. Creditor-only accrual,
+asset shutdown and owner forfeiture retain zero-basis legs with nonzero loss
+weight while the opposing debtor Accounts remain exactly as they were after
+opening. Asset 0 undergoes public shutdown and `RestartAssetOracle` twice:
+once with both obligations pending, and again after only the first debtor pays
+and its holder releases. Both original domain engine slots, oracle profiles,
+owner Accounts, source-claim generation IDs and exact claim faces survive the
+sibling's fresh generation assignment. Global market mode remains Live during
+these asset-local Recovery/restart transitions.
+
+Each indebted asset separately rejects restart at three checkpoints: unbooked
+opposing debt, zero OI with one retained obligation, and released obligation with
+an unconsumed original source claim. All **48** rejections reach `EngineLockActive`
+and restore complete Accounts, including market control sequences, custody and
+lamports; only the independent transaction fee payer is excluded. Successful
+sibling restart proves that the public restart route is usable in the same
+worlds. Permissionless release removes only the paid domain's retained weight.
+After both debts settle, resolution and unsigned-owner `CloseResolved` calls
+preserve each original owner's capital + PnL + unpaid receipt + SPL payout at
+every prefix. Final entitlements are **230,000 / 150,000 / 340,000 / 210,000 / 777**
+atoms in either order. Forty payout retries preserve the complete frame; all
+forty portfolios then close, with zero vault/capital/positions/pending counts
+and unchanged **930,777** token supply.
+
+This adds pending-obligation attribution across an actual sibling restart and
+the three indebted-domain restart gates. Existing row419 forfeiture, resolution,
+cure/cancel, close/preemption and payout products do not exercise restart;
+INV-065's simultaneous lifecycle/restart product reaches zero pending counts.
+The new owner uses the existing `AttributionWorld` constructor and census without
+changing shared helper implementations. Economic accounts are created with
+System/SPL/ATA/wrapper instructions; LiteSVM supplies Clock and SOL funding.
+No initialized program account bytes are edited or restored. No production,
+dependency, engine-pin or invariant-status changes; adjacent behavioral controls
+are not rerun because the parent owner only gains a module mount.
+
+**Row 419 remains OPEN.** This is a finite, integral, zero-fee/funding/backing/
+insurance family, not a generic generator or oracle. The unbacked source claims
+are paid at resolution; this does not establish early Live conversion, successful
+restart of the originally indebted slots, fresh trading after restart, global
+Market Recovery/FinalizeRecovery, bankruptcy/B drift, ADL/reset, partial reductions,
+fractional rounding, CPI/alternate quotes, maximum shape or arbitrary histories.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`8b82465a9b95f80a0b35b27451feeba7b6733916`. Isolated branch:
+`codex/inv039-row419-recovery-20260913`; worktree:
+`/home/anatoly/percolator-prog-row419-recovery`. Environment: Linux x86_64,
+host Rust/Cargo 1.90.0, LiteSVM 0.1, default `anchor-v2` features,
+`solana-cargo-build-sbf` 2.3.13 with explicitly selected platform-tools v1.52,
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. The private target was copied
+from `/dev/shm/astra-row426-public-observations-target`; Cargo rebuilt this
+worktree's host tests and wrapper SBF offline. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The behavioral selector passes **8 worlds, 48 exact restart rollbacks, 16 sibling
+restarts and 40 exact payouts/retries/deletions**; peak measured CU **141,120**.
+
+Exact reproduction and required validation commands from the isolated worktree:
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/inv039-restart-8b82465a-20260913-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc PATH=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin:$PATH CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --sbf-out-dir "$CARGO_TARGET_DIR/deploy" --offline -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_039_pending_loss_obligation_durability::restart::v16_program_pending_debt_survives_sibling_restart_and_delayed_resolution -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-028 last latent domain through Recovery (row 423, 2026-09-13)
 
 Owner: [cu/inv_028_recovery_latent_capacity.rs](cu/inv_028_recovery_latent_capacity.rs),
