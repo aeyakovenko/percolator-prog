@@ -18,6 +18,9 @@ mod terminal_role_exchange;
 #[path = "inv_024_live_earnings_terminal_exchange.rs"]
 mod live_earnings_terminal_exchange;
 
+#[path = "inv_014_retained_policy_earned_reserves.rs"]
+mod retained_policy_earned_reserves;
+
 #[path = "inv_024_terminal_fee_share_succession.rs"]
 mod terminal_fee_share_succession;
 

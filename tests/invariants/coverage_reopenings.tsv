@@ -317,6 +317,11 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # promotion. Row411 stays OPEN. Exact selectors/build/checks and limits: README
 # "INV-014 retained trade beside counterparty maintenance rewards". Base 47258b68;
 # private target /run/user/1001/astra-row411-maintenance-20260913-target; production unchanged.
+# Scope E supplement (2026-09-13): cu/inv_014_retained_policy_earned_reserves.rs
+# composes direct/CPI retained closes and policy prefix/suffix rollback with a
+# funded insurance-authority return, prior provider payout, shared utilization
+# earnings, exact terminal beneficiaries and slab closure. Four bounded histories;
+# no generic policy/route closure. See pr135_scope_e_retained_policy_earned_reserves_20260913.md.
 411	LoF	PRIVILEGED	INV-014	INV-005,INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-081	retained-intent+x-policy-update+x-route	retained-trade-fee-consent-bounds-every-fee-bearing-route	OPEN
 # Row 412 independent discovery (2026-09-13): stateful/inv_012_capability_and_delegate_scope.rs,
 # v16_program_position_mutation_invalidates_retained_matcher_enable. The generic INV-012
@@ -1833,6 +1838,13 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # histories, new live accrual, insurance recovery and shutdown fallback remain open.
 # No out-of-band program state writes, production change or row/status promotion;
 # this is bounded row429-only evidence, not a generic generator/oracle.
+# Scope E supplement (2026-09-13): retained policy/close histories above preserve
+# a 17-atom paid provider prefix, 657/218 provider/insurance earned-fee partition,
+# 816 closing-fee atoms and exact owner payouts through resolution. The returning
+# beneficiary receives insurance; the temporary holder/current operator receives
+# none. Incumbent backing stays attributed through final payout and slab closure.
+# Related row416 authority containment is bounded; row413 gains no new first-risk
+# coverage. All four requested rows stay OPEN and production is unchanged.
 429	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-025,INV-027,INV-036,INV-070,INV-081	shutdown-reserve+x-beneficiary+x-attribution	terminal-reserve-value-remains-bound-to-the-beneficiary-and-role-that-earned-it	OPEN
 # 432 public red/green coverage (2026-09-12): cu/inv_014_delayed_policy_and_policy_epoch_safety.rs::v16_retained_single_cpi_taker_fee_cap_rejects_policy_increase.
 # Parent source accepted a retained TradeCpi after trade_fee_base_bps rose above the taker's signed fee_bps;

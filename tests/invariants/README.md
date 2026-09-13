@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## Scope E retained policy and earned reserves (2026-09-13)
+
+Owner: [cu/inv_014_retained_policy_earned_reserves.rs](cu/inv_014_retained_policy_earned_reserves.rs),
+mounted below INV-024's `terminal_earnings_succession::terminal_role_coalescence`.
+Four public LiteSVM histories cross direct/CPI retained closes with an unchanged
+retained transaction or an epoch-only renewed policy envelope. A funded insurance
+authority returns after raising the base fee; stale policy prefix/suffix requests
+and excessive current fees preserve already-paid provider earnings, live source
+liens, and both owners' claims. Final insurance, provider and user payouts retain
+their independently computed attribution through exact slab closure.
+
+Primary INV-014 with bounded INV-005/010/011/024/036/047/070/081 evidence. This adds
+earned reserve and terminal attribution to the existing retained policy/authority
+family; it does not repeat the generated funded-role or first-risk families in
+Scopes M/P/S/T. Rows 411/413/416/429 remain OPEN and machine statuses are unchanged.
+The [Scope E audit](pr135_scope_e_retained_policy_earned_reserves_20260913.md)
+records the comparison, exact commands, artifact hashes and limits. Production
+is unchanged; the existing matching Scope W program and auth matcher are reused.
+
 ## Astra Scope D pending claimant reserve roles (2026-09-13)
 
 Owner: [cu/inv_039_pending_reserve_role_recredit.rs](cu/inv_039_pending_reserve_role_recredit.rs),
