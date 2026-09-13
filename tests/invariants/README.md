@@ -1,5 +1,96 @@
 # Invariant-owned test coverage
 
+## INV-014 retained trade beside counterparty maintenance rewards (row 411, 2026-09-13)
+
+Owner: [cu/inv_014_retained_maintenance_reward.rs](cu/inv_014_retained_maintenance_reward.rs),
+mounted under `inv_014_delayed_policy_and_policy_epoch_safety::retained_partial_fee_routes::retained_maintenance_reward`.
+Exactly one new selector:
+`v16_retained_trade_fees_exclude_counterparty_maintenance_rewards_across_routes`.
+
+Twenty public LiteSVM histories cross partial single CPI and all four exact
+transports, both signed directions, and separate/bundled maintenance collection.
+The LP first pays its own 307-atom maintenance fee. Before policy changes, each
+owner retains the applicable trade consent plus a 113-atom SPL deposit and a
+permissionless taker-maintenance prefix. All three packet-sized signed delivery
+alternatives retain their complete serialized bytes, blockhash and signatures.
+The authority then changes the maintenance reward share to 50% and the base
+trade policy from 19 to 38, then 37 bps. Partial CPI additionally reduces the
+offered fill to 127/255 through the fixture's owner-authenticated public control.
+
+The taker's 307-atom maintenance payment credits 153 atoms to the LP and retains
+154 in insurance. This reward exceeds even the full-request trade fee. A 38-bps
+trade still rejects its retained 37-bps consent (or equivalent batch atom cap),
+after maintenance and the real SPL deposit have succeeded. A second, ordinary
+SPL insufficient-funds suffix rejects after maintenance, deposit and the now
+authorized 37-bps trade have all succeeded. Both boundaries restore every tracked
+and compiled Account exactly, including reward, fee cursor, position epochs,
+matcher context, grant, fee stock and SPL custody; only the separate payer's
+exact signature charge remains. Successful program logs and exact error indices
+establish that the respective prefixes executed.
+
+The unchanged retained success alternative pays exactly 48 trade-fee atoms per
+owner. Separate maintenance collection preserves trade epochs and the grant;
+the retained bundle's repeated maintenance call cannot collect twice. The LP's
+net 105-atom credit is independently decomposed into a 153-atom reward and a
+48-atom gross trade fee. The taker's maintenance debit exceeds its entire signed
+trade-fee ceiling, so a single net-capital oracle would also misclassify its valid
+execution. Input-only fee and entitlement books separately check each owner's
+capital, maintenance debit, reward, trade fees and SPL payments at every step.
+They also check side-local insurance rounding, price, executed quantity, OI,
+zero PnL, fee cursors, fixed mint supply, complete custody Account images, and
+stock/encumbrance censuses. A fee-bearing bilateral close and full withdrawals
+converge on owner payments `[99713, 199757]` and exactly 653 insurance atoms in
+custody in every world. No initialized program-owned bytes are installed or edited.
+
+Novelty: **retained trade consent composed with an offsetting counterparty
+maintenance reward**, including both gross-fee rejection and successful value
+attribution through partial/exact route choices. Existing row411 partial-route
+equivalence has zero maintenance/rewards; mixed-route budgets have only trade
+fees. INV-027 reward-recipient first admission owns capital eligibility with
+fixed policy, while INV-008 reciprocal stock owns consumed withdrawals without
+trade consent. Neither contains this retained policy/route/gross-fee relation.
+The reused partial-route fixture gains parameterized construction, instruction
+access, distinct signed delivery envelopes and selectable rejection indices;
+its original defaults and selector are preserved.
+
+**Row411 remains OPEN; all invariant statuses are unchanged.** This narrows one
+finite Live/base-fee composition only. Multiple assets, underfunding, movement/
+backing/funding fees, arbitrary reward recipients and policy/route histories,
+authority succession, terminal settlement and generic coverage remain outside
+this increment. No public-interface bug or production change is claimed.
+
+Worktree: `/home/anatoly/percolator-row411-astra-20260913`; branch:
+`codex/astra-row411-fee-route-20260913`. Initially based on `8760bfd7`, then rebased
+onto latest origin `47258b68ba95f679c61b979f6c8511031e03c5a5` before final validation
+and commit. That advancement changed only invariant tests/documentation. A private
+copy of the existing row415 target cache was used. Default-feature wrapper and
+the existing partial-capable matcher were built locked/offline with platform-tools
+v1.52; engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher SHA-256: `e0c20fad34a7822cc6ce42a3c77ff08a8591977102f0c497a339d66a9dd6240a`.
+
+The exact new selector passes 1/1: 20 initial simulations, 40 complete rollbacks,
+40 committed fills and 40 owner payouts. Peak simulation/control/rejection/success
+CU is `[264204, 53365, 308058, 299541]`, below 500,000. The original partial-route
+selector and both requested metadata gates also pass; formatting and Git whitespace
+checks pass. No full-suite or vulnerable-pin run is claimed. Exact commands:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/astra-row411-maintenance-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+# Matcher command runs from tests/fixtures/hostile_matcher.
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /home/anatoly/percolator-row411-astra-20260913/tests/fixtures/hostile_matcher/target/deploy -- --locked
+# Remaining commands run from the worktree root.
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_partial_fee_routes::retained_maintenance_reward::v16_retained_trade_fees_exclude_counterparty_maintenance_rewards_across_routes -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_014_delayed_policy_and_policy_epoch_safety::retained_partial_fee_routes::v16_retained_partial_fill_fee_rate_matches_exact_routes_after_funded_rejection -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-027 refilled first admission after clipped maintenance (row 413, 2026-09-13)
 
 Owner: [cu/inv_027_refilled_first_admission.rs](cu/inv_027_refilled_first_admission.rs),

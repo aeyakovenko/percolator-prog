@@ -221,6 +221,21 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # retained mixed-route fee budgets section records exact selector/metadata/build/check/
 # cleanup commands and limits. Row 411 stays OPEN; fixed relation only.
 # Private target /run/user/1001/row411-mixed-fee-20260913-target; production unchanged.
+# 411 bounded maintenance/reward composition (2026-09-13): cu/inv_014_retained_maintenance_reward.rs,
+# inv_014_delayed_policy_and_policy_epoch_safety::retained_partial_fee_routes::retained_maintenance_reward::v16_retained_trade_fees_exclude_counterparty_maintenance_rewards_across_routes.
+# 20 public worlds cross partial CPI/four exact transports, both directions and
+# separate/bundled maintenance. Retained 37-bps/atom consent survives 19->38->37
+# policy and a new 50% maintenance share: the LP's offsetting 153-atom reward cannot
+# authorize excess gross trade fees. 40 exact rollbacks restore maintenance/deposit
+# and completed-trade prefixes; original success bytes pay 48 atoms per trade/owner.
+# Independent gross-fee/reward/cursor/custody checks, fee-bearing closes and 40 SPL
+# payouts converge to owner payments [99713,199757] plus 653 insurance atoms.
+# Existing row411 partial/mixed-route histories have no maintenance; INV-027 reward
+# admission and INV-008 reward-stock histories lack retained trade-policy consent.
+# Finite Live, one-asset, funded conformance only; no generic coverage or status
+# promotion. Row411 stays OPEN. Exact selectors/build/checks and limits: README
+# "INV-014 retained trade beside counterparty maintenance rewards". Base 47258b68;
+# private target /run/user/1001/astra-row411-maintenance-20260913-target; production unchanged.
 411	LoF	PRIVILEGED	INV-014	INV-005,INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-081	retained-intent+x-policy-update+x-route	retained-trade-fee-consent-bounds-every-fee-bearing-route	OPEN
 412	LoF	BLOCKER	INV-012	INV-004,INV-005,INV-010,INV-012,INV-024,INV-081	capability+x-automatic-revocation+x-episode	retained-capability-cannot-cross-any-authority-revoking-state-transition	OPEN
 # Row 413 partial conformance (2026-09-12): cu/inv_027_reward_mapping_admission.rs,

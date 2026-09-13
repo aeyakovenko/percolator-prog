@@ -13,6 +13,9 @@ use percolator_prog::matcher_abi::{read_matcher_return, FLAG_PARTIAL_OK};
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 use std::collections::BTreeMap;
 
+#[path = "inv_014_retained_maintenance_reward.rs"]
+mod retained_maintenance_reward;
+
 const PRINCIPAL: [u64; 2] = [100_003, 200_007];
 const DEPOSIT: u64 = 113;
 const PRICE: u64 = 100;
@@ -54,12 +57,19 @@ struct World {
 
 impl World {
     fn new(matcher_bytes: &[u8]) -> Self {
-        let mut env = inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params(
-            6,
+        Self::with_params(
+            matcher_bytes,
             V16CuMarketParams {
                 trade_fee_base_bps: 19,
                 ..V16CuMarketParams::default()
             },
+        )
+    }
+
+    fn with_params(matcher_bytes: &[u8], params: V16CuMarketParams) -> Self {
+        let mut env = inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params(
+            6,
+            params,
         );
         let owners = [Keypair::new(), Keypair::new()];
         let portfolio_keys = [Keypair::new(), Keypair::new()];
@@ -195,9 +205,13 @@ impl World {
     }
 
     fn sign(&self, instructions: &[Instruction]) -> Transaction {
+        self.sign_with_nonce(instructions, 0)
+    }
+
+    fn sign_with_nonce(&self, instructions: &[Instruction], nonce: u32) -> Transaction {
         let mut ixs = vec![
             heap_ix(),
-            ComputeBudgetInstruction::set_compute_unit_limit(CU_LIMIT as u32),
+            ComputeBudgetInstruction::set_compute_unit_limit(CU_LIMIT as u32 - nonce),
         ];
         ixs.extend_from_slice(instructions);
         let mut signers = vec![&self.env.payer];
@@ -224,6 +238,26 @@ impl World {
     }
 
     fn bundle(&self, route: Route, requested: i128, executed: i128, bps: u64) -> Transaction {
+        let tx = self.sign(&self.bundle_instructions(route, requested, executed, bps));
+        assert_eq!(
+            tx.message.header.num_required_signatures,
+            if route.cpi() { 2 } else { 3 }
+        );
+        assert_eq!(
+            tx.message.account_keys[..tx.message.header.num_required_signatures as usize]
+                .contains(&self.owners[1].pubkey()),
+            !route.cpi(),
+        );
+        tx
+    }
+
+    fn bundle_instructions(
+        &self,
+        route: Route,
+        requested: i128,
+        executed: i128,
+        bps: u64,
+    ) -> [Instruction; 2] {
         let [a, b] = self.portfolios;
         let size = if route == Route::PartialCpi {
             requested
@@ -279,7 +313,7 @@ impl World {
                 AccountMeta::new(b, false),
             ]
         };
-        let tx = self.sign(&[
+        [
             Instruction {
                 program_id: self.env.program_id,
                 accounts: vec![
@@ -297,17 +331,7 @@ impl World {
                 accounts,
                 data: trade.encode(),
             },
-        ]);
-        assert_eq!(
-            tx.message.header.num_required_signatures,
-            if route.cpi() { 2 } else { 3 }
-        );
-        assert_eq!(
-            tx.message.account_keys[..tx.message.header.num_required_signatures as usize]
-                .contains(&self.owners[1].pubkey()),
-            !route.cpi(),
-        );
-        tx
+        ]
     }
 
     fn frame(&self, tx: &Transaction) -> BTreeMap<Pubkey, Option<Account>> {
@@ -343,20 +367,36 @@ impl World {
         changed: &[Pubkey],
         calls: [usize; 3],
     ) -> u64 {
+        self.deliver_with_error(
+            tx,
+            reject.then_some((
+                3,
+                InstructionError::Custom(PercolatorError::InvalidInstruction as u32),
+            )),
+            changed,
+            calls,
+        )
+    }
+
+    fn deliver_with_error(
+        &mut self,
+        tx: Transaction,
+        error: Option<(u8, InstructionError)>,
+        changed: &[Pubkey],
+        calls: [usize; 3],
+    ) -> u64 {
         let before = self.frame(&tx);
         let payer = self.env.payer.pubkey();
         let mut payer_account = before[&payer].clone().unwrap();
         payer_account.lamports -= FeeStructure::default().lamports_per_signature
             * u64::from(tx.message.header.num_required_signatures);
         let result = self.env.svm.send_transaction(tx);
-        let meta = if reject {
+        let reject = error.is_some();
+        let meta = if let Some((index, error)) = error {
             let failure = result.expect_err("smaller fills do not relax signed fee rates");
             assert_eq!(
                 failure.err,
-                TransactionError::InstructionError(
-                    3,
-                    InstructionError::Custom(PercolatorError::InvalidInstruction as u32),
-                )
+                TransactionError::InstructionError(index, error)
             );
             if calls[2] == 0 {
                 assert!(!failure
