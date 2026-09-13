@@ -5,6 +5,9 @@ use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_005_funded_role_zero_transition.rs"]
+mod funded_role_zero_transition;
+
 const ROLES: [u8; 3] = [
     processor::ASSET_AUTH_INSURANCE,
     processor::ASSET_AUTH_INSURANCE_OPERATOR,

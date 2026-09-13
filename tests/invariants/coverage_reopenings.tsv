@@ -364,6 +364,38 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # cargo clean --target-dir /dev/shm/row416-cold-admin-containment-20260912-target
 # cargo clean --target-dir /dev/shm/row416-cold-admin-containment-20260912-tmp
 # Row 416 remains OPEN; invariant verdicts and production code are unchanged.
+# 416 zero-role suffix after funded handoff increment (2026-09-13):
+# cu/inv_005_funded_role_zero_transition.rs, mounted by cold_admin_handoff_scope.
+# Exact v16_cu selector:
+# inv_005_authority_incarnation_binding::cold_admin_handoff_scope::funded_role_zero_transition::v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_consent
+# Eight public worlds cross insurance/backing operator, asset 0/1 and cold/successor
+# zero-signing. A funded handoff and real successor SPL payout execute before zeroing
+# rejects InvalidInstruction, restoring stock/profile/epoch and retained incumbent
+# consent. Original signed payouts and handoff then commit. Later current-epoch cold
+# zeroing/replacement rejects after a sibling SPL prefix; full rollback preserves
+# both scopes and the sibling retry. Old incumbent payout rejects Unauthorized.
+# Input book pins four backing/four insurance domains, all six destinations, user
+# capital 101, mint supply 411, whole profiles/sequences and complete Account frames
+# except exact payer fees. New successor retains both backing domains' attribution.
+# 16 simulations, 64 transactions, 32 exact rejections, 8 rolled-back handoffs,
+# 24 rolled-back SPL payouts, 8 committed handoffs and 32 committed payouts.
+# Peak CU [zero rollback, cold/old-role rejection, payout]=[41506,39659,44037];
+# ceiling 600000 per transaction. Exact selector PASS (1/1, 3.49s).
+# Net new is joint zeroing/handoff/payout rollback and delayed retained consent;
+# older standalone zero-role, cold-admin ABA/burn and oracle-observation coverage
+# lack this relation. Finite conformance only, no generic generator/oracle; arbitrary
+# histories, funded-oracle protection, policy succession, telemetry, positions/claims,
+# fees/funding/earned/impaired stock, expiry, terminal/native/dual-quote/recreation
+# remain gaps. No initialized program-byte mutation, production fix or row promotion.
+# Base origin/codex/astra-open-holdout-ledger-20260912:
+# 160dc00d89e769692c96acac47613115b8db5df6. Private default SBF rebuilt locked/offline
+# with platform-tools v1.52; branch/worktree/SBF SHA and exact environment/commands
+# are in README section "INV-005 zero-role suffix after funded handoff".
+# Commands there include the new --exact selector, both inv_079 metadata selectors,
+# cargo fmt --all -- --check, git diff --check && git diff --cached --check,
+# git show --format= --check HEAD and private cargo-clean/rmdir commands.
+# Private /run/user/1001/row416-funded-zero-20260913-{target,tmp} removed after checks.
+# Row 416 remains OPEN; rows415/433, invariant verdicts and production are unchanged.
 416	LoF	PRIVILEGED	INV-005	INV-005,INV-020,INV-024,INV-027,INV-055	cold-admin+x-funded-role+x-authority-containment	correctly-signed-role-management-cannot-seize-an-incumbent-funded-role	OPEN
 # 417 partial conformance (2026-09-10): cu/inv_067_receipt_source_realization.rs::v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry.
 # Partial source realization plus an older receipt payout rolls back; retained claims survive

@@ -1,5 +1,126 @@
 # Invariant-owned test coverage
 
+## INV-005 zero-role suffix after funded handoff (row 416, 2026-09-13)
+
+Owner: [cu/inv_005_funded_role_zero_transition.rs](cu/inv_005_funded_role_zero_transition.rs),
+mounted by `cu/inv_005_cold_admin_handoff_scope.rs`. Exact selector:
+`inv_005_authority_incarnation_binding::cold_admin_handoff_scope::funded_role_zero_transition::v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_consent`.
+Requirement: `correctly-signed-role-management-cannot-seize-an-incumbent-funded-role`.
+
+Eight public LiteSVM worlds cross insurance/backing operator, asset 0/1, and
+cold-admin/successor signing a zero-role suffix. Distinct insurer, insurance
+operator, backing operator, successor, cold admin and user keys have separate
+SPL destinations. Public System/SPL/ATA/wrapper instructions construct both
+assets' backing `[31, 43, 59, 71]`, insurance `[17, 23, 29, 37]` and the user's
+flat 101-atom portfolio. Mint authority is revoked at exactly 411 atoms. Only
+ordinary fixture airdrops and program loading use the harness; no initialized
+program bytes are injected, changed or restored.
+
+Each world retains two signed transactions: the incumbent's 3-atom payout, and
+its co-signed funded handoff followed by a 5-atom successor payout at the next
+epoch. Both simulate successfully with complete Account frames unchanged.
+Appending a correctly signed zero-authority instruction at that next epoch
+rejects `InvalidInstruction` at transaction index 4. Logs prove that both the
+handoff and real SPL payout completed before the rejection. Complete Account
+rollback restores the incumbent, shared authority epoch, reserve stock and token
+destinations. The exact original transactions then commit without changing
+their bytes, metas, signatures or blockhash: first the incumbent payout, then
+the handoff and successor payout.
+
+After the committed handoff, an independently retained sibling payout is the
+successful prefix of two cold-admin bundles. Zeroing rejects
+`InvalidInstruction`; replacement with the cold key (including its incoming
+signature) rejects `EngineLockActive`. Both use the current subject epoch and
+roll back the sibling's real 7-atom SPL payout. The previous incumbent's subject
+payout, also using the current epoch, rejects `Unauthorized`. The original
+sibling transaction still commits, and the successor withdraws the remaining
+subject insurance or long backing principal. The transferred backing role's
+short-domain principal stays funded and attributed to that successor.
+
+An input-derived book checks every domain's stock, all six SPL balances and
+owners, physical/internal vault equality, zero liens/impairments/earnings, fixed
+mint supply and conservation after every delivery. Both complete role profiles
+and control-sequence records are exact: only the committed subject handoff
+advances an authority epoch. Wrapper configuration, both asset states and the
+complete user portfolio Account stay unchanged. The shared `land` helper checks
+all compiled and tracked Accounts, including metadata and absence, with only
+the calculated signature fee leaving the separate payer; successful writes
+are restricted to the named market/vault/destination accounts.
+
+Final amounts, identical for either zero-signing variant:
+
+| Transferred role | Asset | Successor SPL | Incumbent SPL (subject + sibling) | Vault | Transferred short backing retained |
+| --- | --- | --- | --- | --- | --- |
+| Insurance operator | 0 | 37 | 10 | 364 | n/a |
+| Insurance operator | 1 | 63 | 10 | 338 | n/a |
+| Backing operator | 0 | 28 | 10 | 373 | 43 |
+| Backing operator | 1 | 56 | 10 | 345 | 71 |
+
+The cold admin receives zero atoms; the user's 101 atoms remain protected.
+The new relation is **atomic zero-role rejection after a funded succession and
+successor payout, followed by delivery of retained incumbent consent and
+containment of later cold-admin actions**. The older standalone zero-role test
+uses coalesced roles and terminal payout, without a handoff/payout prefix or
+retained consent. Cold-admin ABA/burn coverage does not roll back a newly funded
+successor's payout on zeroing. Funded-oracle and role-observation tests exercise
+observation authority and epoch changes; this slice has no oracle operations.
+The parent module contributes transaction/frame builders, not fixture state.
+
+**Row 416 remains OPEN.** This is finite conformance, not a generic generator or
+oracle. It does not certify arbitrary histories, funded-oracle replacement,
+insurance-policy succession, cold-admin burn/ABA, telemetry ledgers, nonzero
+positions/claims/fees/funding, earned or impaired backing, time/expiry changes,
+Recovery/terminal lifecycles, native/dual quote, reincarnation or withdrawal
+replenishment. Rows 415/433 and invariant verdicts receive no new claims.
+Production is unchanged; no current public-interface bug was observed.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`160dc00d89e769692c96acac47613115b8db5df6`. Branch:
+`codex/row416-funded-role-disabled-20260913`; isolated worktree:
+`/tmp/percolator-row416-funded-role-disabled-20260913`. The main checkout was
+not edited. Host Rust 1.90.0, LiteSVM 0.1.0 and locked engine
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Existing build cache files were copied
+into a private target; the default-feature Anchor-v2 SBF was rebuilt locally
+with platform-tools v1.52, locked/offline. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+
+Validation: exact new selector **1/1 passed in 3.49s**, eight worlds, 16 live
+simulations, 64 transactions after fixture setup, 32 exact rejections, eight
+rolled-back handoffs, 24 rolled-back SPL payouts, eight committed handoffs and
+32 committed payouts. Peak CU `[zero rollback, cold/old-role rejection, payout]`
+was **[41,506, 39,659, 44,037]**, each under the shared 600,000-CU ceiling.
+Both required metadata selectors and all formatting/whitespace checks below
+pass. The first runtime run passed; no production changes were required.
+Existing Solana future-incompatibility and unused-support warnings remain.
+No full suite, additional behavioral selector or Kani run is claimed.
+
+Exact build, validation and cleanup commands, run in the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR=/run/user/1001/row416-funded-zero-20260913-target
+export TMPDIR=/run/user/1001/row416-funded-zero-20260913-tmp
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -m 700 "$CARGO_TARGET_DIR" "$TMPDIR"
+cp -a /dev/shm/row416-cold-admin-20260912-target/. "$CARGO_TARGET_DIR/"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::cold_admin_handoff_scope::funded_role_zero_transition::v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_consent -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD # post-commit
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+rmdir "$CARGO_TARGET_DIR"
+cargo clean --target-dir "$TMPDIR"
+rmdir "$TMPDIR"
+```
+
+Private target and temporary directories were removed after validation. One
+local commit is retained on the isolated branch; nothing was pushed.
+
 ## INV-012 retained mixed renewals after reduction (row 412, 2026-09-13)
 
 Owner: [stateful/inv_012_mixed_episode_renewal.rs](stateful/inv_012_mixed_episode_renewal.rs),
