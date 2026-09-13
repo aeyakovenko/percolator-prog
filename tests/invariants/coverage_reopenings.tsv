@@ -887,6 +887,31 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # two rollbacks/two closures; peak 255716 CU <= 600000. Both metadata gates PASS.
 # Public construction only; no production changes, status promotion or generic
 # closure claim. README records exact selectors, build provenance and limitations.
+# Row 420 bounded conformance (2026-09-13): cu/inv_073_replenished_provider_progress.rs.
+# Exact selector: inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::replenished_provider_progress::v16_program_absent_provider_replenished_principal_reaches_terminal_close.
+# Two public histories pay 1100/900 to users, retain exactly 100 atoms of consumed
+# backing/receivable history, and publicly withdraw all 401 replenished principal
+# atoms with no provider signature. A 400-payment + 101-overclaim bundle reaches
+# the stock guard with liquid unrelated insurance and rolls back complete Accounts.
+# The unchanged 400 retry and last atom exhaust principal at slot 7 < expiry 1000;
+# retained consumed history permits immediate signed slab retirement without burn.
+# Five ranked user calls, four provider payouts, two rollbacks and two slab closes;
+# input-derived stock accounting and full token frames; peak 427072/500000 CU.
+# New and both existing selectors PASS 1/1 each; both metadata gates, fmt and
+# all three Git whitespace checks PASS. No invariant status is promoted.
+# New relative to the existing absent-provider suffix that retains all 401 atoms
+# and its provider-signed sibling. Insurance disposal is cleanup, no row421/433 claim.
+# OPEN: fixed fully replenished asset-1/SPL histories only, no generic oracle,
+# unrecovered/partial loss, fees, provider ledgers, fractions, Recovery, expiry
+# schedules, other rails, multiple providers or absent mechanical cleanup signers.
+# Private worktree /home/anatoly/percolator-row420-astra-20260913-b, base dc29fe34.
+# README "INV-073 replenished provider principal" records fresh SBF hashes and
+# exact build, compatibility, metadata, fmt and Git whitespace commands.
+# export CARGO_TARGET_DIR=/dev/shm/row420-provider-progress-20260913-b-target
+# export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so TMPDIR=/dev/shm/row420-provider-progress-20260913-b-tmp
+# export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+# cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::replenished_provider_progress::v16_program_absent_provider_replenished_principal_reaches_terminal_close -- --exact --nocapture --test-threads=1
+# Test-only; no production change, implementation violation or status promotion.
 420	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-026,INV-027,INV-032,INV-063,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	provider-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-provider-signature	OPEN
 # Row 421 bounded conformance (2026-09-12): cu/inv_073_frozen_insurance_remainder.rs,
 # v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement.

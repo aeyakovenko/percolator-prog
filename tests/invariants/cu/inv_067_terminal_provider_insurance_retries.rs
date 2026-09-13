@@ -12,17 +12,27 @@ const INSURANCE: u64 = 204;
 const UNRELATED_INSURANCE: u64 = 1_000;
 const FUNDED: u64 = 2 * CAPITAL + BACKING + INSURANCE + UNRELATED_INSURANCE;
 
+#[path = "inv_073_replenished_provider_progress.rs"]
+mod replenished_provider_progress;
+
+#[derive(Clone, Copy)]
+enum ProviderExit {
+    Signed,
+    Absent,
+    Replenished,
+}
+
 #[test]
 fn v16_program_terminal_provider_and_insurance_retries_preserve_separate_entitlements() {
-    run_terminal_provider_and_insurance(false);
+    run_terminal_provider_and_insurance(ProviderExit::Signed);
 }
 
 #[test]
 fn v16_program_absent_provider_preserves_user_order_and_operator_free_insurance_exit() {
-    run_terminal_provider_and_insurance(true);
+    run_terminal_provider_and_insurance(ProviderExit::Absent);
 }
 
-fn run_terminal_provider_and_insurance(absent_provider: bool) {
+fn run_terminal_provider_and_insurance(exit: ProviderExit) {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
     use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 
@@ -227,7 +237,20 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
         assert!(env.market_state().1.source_credit[3].positive_claim_bound_num > 0);
         env.resolve();
 
-        if absent_provider {
+        if matches!(exit, ProviderExit::Replenished) {
+            let absent = [provider.pubkey(), insurer.pubkey(), operator.pubkey()];
+            drop((provider, insurer, operator));
+            replenished_provider_progress::verify(
+                &mut env,
+                &owners,
+                absent,
+                tokens,
+                insurance_first,
+            );
+            continue;
+        }
+
+        if matches!(exit, ProviderExit::Absent) {
             let absent = [provider.pubkey(), operator.pubkey()];
             drop(provider);
             drop(operator);
@@ -567,7 +590,7 @@ fn run_terminal_provider_and_insurance(absent_provider: bool) {
         assert_closed_market_tombstone(&env.svm.get_account(&env.market).unwrap());
         println!("INV-067 provider/insurance order insurance_first={insurance_first}: users=2000 backing={BACKING} insurance={INSURANCE} unrelated={UNRELATED_INSURANCE}; zero vault residue");
     }
-    if !absent_provider {
+    if matches!(exit, ProviderExit::Signed) {
         println!("INV-067 provider/insurance terminal suffix peak CU {peak_cu}");
     }
 }

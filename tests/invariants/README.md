@@ -1045,6 +1045,98 @@ cargo clean --target-dir "$CARGO_TARGET_DIR"
 rmdir "$TMPDIR"
 ```
 
+## INV-073 replenished provider principal (row 420, 2026-09-13)
+
+Owner: [cu/inv_073_replenished_provider_progress.rs](cu/inv_073_replenished_provider_progress.rs).
+Exact `v16_cu` selector:
+`inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::replenished_provider_progress::v16_program_absent_provider_replenished_principal_reaches_terminal_close`.
+The existing INV-067 fixture hosts this bounded INV-073 increment for row 420's
+`terminal-economic-progress-does-not-require-an-adversarial-provider-signature`.
+
+Two public System/SPL/wrapper histories share a fixed 3,605-atom supply. A real
+20-lot trade from price 100 to 105 creates a 100-atom claim on asset 1's backing.
+Provider, insurer and operator keys are dropped at resolution. Both unsigned
+user orders strictly reduce `(active legs, unpaid user value)` and pay exactly
+1,100/900 atoms in two or three calls, bounded by 16. Counterparty settlement
+restores the 401-atom principal while the consumed-lien and provider-receivable
+history each remain exactly `100 * BOUND_SCALE`.
+
+After signed empty-portfolio deletion, a keeper submits a 400-atom provider
+payment followed by a 101-atom overclaim. Both the wrapper and SPL payment
+complete before the second wrapper rejects `EngineLockActive` at instruction 3.
+The remaining 1,204 insurance atoms keep custody liquid, so this tests the
+provider's independent allowance. Every complete transaction/tracked Account
+rolls back except the exact signature fee. An unchanged 400-atom retry and a
+one-atom tail then pay all restored principal without the provider signing.
+The historical consumed/receivable amounts remain unchanged; they neither
+authorize another payout nor pin the final close. The bucket becomes `Expired`
+on exhaustion at actual slot 7, before its expiry slot 1000. Existing insurance
+payouts drain cleanup stock, and one administrator-signed `CloseSlab` retires
+each world without waiting for expiry, burning tokens or changing mint supply.
+
+Input-derived entitlements check provider/user destinations and fresh reserved
+stock separately from consumed history after each provider attempt. Market
+stock and reservation censuses cover every suffix transaction through reserve
+disposal; exact token Account frames allow only balance changes. Unrelated
+domains and insurance stocks stay unchanged during provider payments. All
+compiled signer sets exclude the provider, insurer and operator. Portfolio
+rent moves exactly to the slab, then slab/vault rent refunds reconcile with
+the final tombstone. Account copies are observations/expectations only.
+
+Net-new coverage is **unsigned withdrawal and retirement of principal restored
+after actual claim consumption**, including refusal to count historical
+consumption as a second allowance. The existing absent-provider compatibility
+selector uses the same public origins but leaves all 401 provider atoms in
+custody. Its signed sibling pays them with the provider present. Earlier row
+420 expiry, fresh-principal custody/keeper handoff and distinct-fee-holder
+tests do not own this consumed-history disposal. Insurance cleanup contributes
+no new row 421/433 claim; their statuses are untouched.
+
+**Row 420 remains OPEN.** These two fixed, fully replenished asset-1/classic-SPL
+histories are not a generic generator/oracle. Unrecovered principal losses,
+partial replenishment, earnings, retained provider ledgers, fractional claims,
+Recovery, expiry interleavings, other quote rails, multiple providers, absent
+portfolio/market cleanup signers and arbitrary histories are outside this
+increment. No production change or implementation violation was found.
+
+Worktree: `/home/anatoly/percolator-row420-astra-20260913-b`; branch:
+`codex/astra-row420-provider-progress-20260913-b`; base:
+`dc29fe346b869eba0d591d42f896e45b8f475aa9`. The suggested branch was already
+occupied. Default-feature wrapper and authenticated matcher were freshly
+built locked/offline with platform-tools v1.52 in the private target.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+New selector: PASS 1/1, two histories, five user calls, four provider payments,
+two complete rollbacks and two slab closures. Per-world suffix peaks are
+424,072/427,072 CU; headroom at peak is 72,928 CU (14.59%) below the enforced
+500,000-CU limit. Setup CU is outside that measurement.
+Both existing selectors below: PASS 1/1 each. Both INV-079 metadata gates:
+PASS 1/1 each. Formatting and all three Git whitespace checks: PASS.
+Initial harness compile errors and an incorrect portfolio-rent expectation
+were corrected; the final oracle follows rent into the slab. No production
+behavior was changed to obtain the passing result.
+
+Commands from the worktree:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row420-provider-progress-20260913-b-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/row420-provider-progress-20260913-b-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cd tests/fixtures/auth_matcher
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/target/deploy" -- --locked
+cd ../../..
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::replenished_provider_progress::v16_program_absent_provider_replenished_principal_reaches_terminal_close -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::v16_program_absent_provider_preserves_user_order_and_operator_free_insurance_exit -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::v16_program_terminal_provider_and_insurance_retries_preserve_separate_entitlements -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-073 distinct absent provider claims (row 420, 2026-09-13)
 
 Owner: [cu/inv_073_distinct_provider_disposition.rs](cu/inv_073_distinct_provider_disposition.rs).
