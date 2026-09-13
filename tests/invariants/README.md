@@ -1,5 +1,25 @@
 # Invariant-owned test coverage
 
+## PR135 Scope H target arrival and carry entitlement (2026-09-13)
+
+Owner: [cu/inv_045_target_arrival_entitlement.rs](cu/inv_045_target_arrival_entitlement.rs),
+mounted under `inv_045_no_free_mark_movement::public_carry_order::target_arrival_entitlement`.
+The new public LiteSVM selector compares grouped accrual and whole bilateral
+batches with one-slot accrual and split single-asset reductions, across both
+AuthMark directions. Targets arrive, plateau, and resume from changed cap
+anchors. An independent big-integer episode ledger checks carry, K, OI and each
+owner's settled plus latent entitlement after every committed history action.
+Four histories pass 148 ledger checks, 54 complete-Account suffix rollbacks and
+16 exact SPL payouts; peak measured cost is 412,814 CU under a 600,000-CU bound.
+
+This adds target-arrival/anchor-transition evidence beyond the fixed-target
+generated fractional routes. Positions are integral, both legs of an owner
+gain or lose together, and fees/funding/ADL changes are absent. Row 425 remains
+OPEN; INV-045 remains `REFUTED_CURRENT` and INV-038/052/085/086 remain
+`OPEN_EVIDENCE`. No production change or whole-invariant closure is claimed.
+The [Scope H audit](pr135_scope_h_carry_entitlement_20260913.md) records the
+oracle, exact commands, artifact provenance and remaining limits.
+
 ## PR135 Scope D generated reserve entitlement (2026-09-13)
 
 Owner: [cu/inv_024_generated_reserve_entitlement.rs](cu/inv_024_generated_reserve_entitlement.rs),

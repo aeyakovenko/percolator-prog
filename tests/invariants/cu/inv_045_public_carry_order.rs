@@ -23,6 +23,9 @@ mod funding_carry_entitlement;
 #[path = "inv_045_generated_fractional_routes.rs"]
 mod generated_fractional_routes;
 
+#[path = "inv_045_target_arrival_entitlement.rs"]
+mod target_arrival_entitlement;
+
 const ANCHORS: [u64; 2] = [100, 125];
 const CAP_BPS: u64 = 24;
 const PRINCIPAL: [u64; 4] = [100_003, 200_009, 300_017, 400_037];

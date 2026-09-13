@@ -1347,6 +1347,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # exact new/related/INV-079 selectors and hygiene commands: README section
 # "INV-045 overlapping funding checkpoints and carry (row 425, 2026-09-13)".
 # Exact selector: cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::checkpoint_replacement::v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolved_payouts -- --exact --nocapture --test-threads=1
+# Scope H target-arrival conformance (2026-09-13): cu/inv_045_target_arrival_entitlement.rs.
+# Four public histories compare grouped/one-slot accrual and whole/split bilateral
+# reductions across arrival, plateau, same-target reports and resumed cap anchors.
+# An input-derived bigint episode/owner book passes 148 checks and 16 exact SPL
+# payouts; 54 economic-prefix suffix failures restore complete Accounts apart
+# from exact payer signature fees. Peak 412814 CU. Integral aligned exposures,
+# zero fees/funding and unit ADL bound the oracle; source-credit consumption and
+# fractional K/F remain outside it. Row/status classifications stay unchanged.
+# Exact selector, commands, results and limits: pr135_scope_h_carry_entitlement_20260913.md.
 425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	OPEN
 # Row 426 partial conformance (2026-09-12): cu/inv_020_interrupted_refresh_fees.rs,
 # v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements.
