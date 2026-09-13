@@ -603,6 +603,25 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # histories do not cross funded owner conversion with multisig quorum disposal.
 # README "INV-070 multisig terminal custody" records exact selectors and limits.
 # No production change, implementation violation or generic coverage/status promotion.
+# Row 418 bounded custody program recreation (2026-09-13):
+# cu/inv_070_terminal_custody_program_recreation.rs; one new selector, four public
+# histories crossing mintable/fixed SPL and separate/bundled final initialization.
+# The same admin sweep address crosses SPL -> initialized Token-2022 -> uninitialized
+# SPL -> repaired SPL while 101 principal, 307 expiring backing and 17 surplus reach
+# exact payment/burn/sweep and slab/rent disposition. Eight complete Account rollbacks
+# include completed payout/deletion prefixes; valid alternate custody advances expiry
+# before original-account repair. Two successful CloseSlab calls per history.
+# Measured peak 144029 CU / 300000 (155971 headroom), packet bound 1232 bytes;
+# initial System/ATA bootstrap CU excluded. Net new program-incarnation/stock order,
+# beyond native Recovery, multisig owners, shared user ATAs and delegated SPL sweeps.
+# OPEN: native booked retirement, dual quote, extensions/arbitrary malformed lengths,
+# PnL/Recovery/receipts, insurance/fees, absent authorities/keys, arbitrary histories
+# and maximum shapes. Token-2022 is rejected custody, never an admitted quote mint.
+# No production change, observed implementation violation, generic oracle or status promotion.
+# Base e0719b67; private environment/build hash/commands in README section
+# "INV-070 terminal custody program recreation". Exact new and related selectors:
+# cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_custody_program_recreation::v16_program_terminal_custody_program_recreation_preserves_funded_retirement -- --exact --nocapture --test-threads=1
+# cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::terminal_destination_variants::v16_program_terminal_sweep_preserves_destination_authorities_and_exact_disposal -- --exact --nocapture --test-threads=1
 418	DoS	BLOCKER	INV-070	INV-018,INV-021,INV-025,INV-069,INV-070,INV-073,INV-077,INV-078,INV-081	token-variant+x-terminal-stock+x-close	all-supported-quote-token-variants-have-a-bounded-terminal-disposition	OPEN
 # Row 419 bounded public conformance (2026-09-12): cu/inv_039_pending_loss_funded_resolution.rs,
 # v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders.

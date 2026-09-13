@@ -1,5 +1,88 @@
 # Invariant-owned test coverage
 
+## INV-070 terminal custody program recreation (row 418, 2026-09-13)
+
+Owner: [cu/inv_070_terminal_custody_program_recreation.rs](cu/inv_070_terminal_custody_program_recreation.rs),
+mounted as `inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_custody_program_recreation`.
+One new selector: `v16_program_terminal_custody_program_recreation_preserves_funded_retirement`.
+
+Four public LiteSVM histories cross mintable/fixed-supply, six-decimal classic SPL
+quotes with separate/bundled final custody initialization. Each starts with a
+live portfolio containing 101 principal atoms, 307 atoms of expiring domain-1
+backing, and 17 external surplus atoms. After resolution, an empty administrative
+sweep account closes through SPL and the same address is publicly recreated as
+a valid, extension-free Token-2022 account for a separate Token-2022 mint.
+`CloseResolved` pays the owner without its signature and `ClosePortfolio` deletes
+the account in a transaction prefix, but the subsequent `CloseSlab` rejects that
+unsupported destination. Exact error/index and successful wrapper logs establish
+the executed prefix. Every compiled and tracked Account rolls back, including
+principal custody, portfolio bytes/rent, both mints and the changed sweep account;
+only the separate payer's exact signature fee remains.
+
+Changing only the sweep destination to the existing valid funding ATA permits
+that prefix to commit and the first `CloseSlab` to expire backing, while the
+original address remains Token-2022-owned. Principal is paid exactly once and
+portfolio rent is retained in the market slab. The Token-2022 account then closes
+through its own program; System recreates the same address as an uninitialized
+classic SPL account. Final `CloseSlab` rejects this malformed custody with another
+complete Account rollback, preserving the already-normalized backing. Public SPL
+initialization, committed separately or bundled with the identical final close,
+permits the second successful `CloseSlab`: burn exactly 307, sweep exactly 17,
+close the vault, and retain canonical tombstone rent. Full token and mint Account
+images establish `425 = 101 paid + 307 burned + 17 swept`; stock/encumbrance
+censuses check the intermediate states. Full wallet images account for both
+destination incarnations' rent, portfolio rent, vault rent and market excess.
+All construction and transitions use System/SPL/Token-2022/ATA/wrapper instructions;
+packing expected Account copies never installs program-owned bytes into the SVM.
+
+Net new: **same-address custody program changes across funded payout, backing
+normalization and final retirement**. Existing terminal destination-authority
+coverage has delegated/closable SPL custody and no user claims; multisig custody
+changes the beneficiary's authority representation; shared custody histories
+recycle classic/native user ATAs. Native Recovery and terminal-stock witnesses
+do not own this unsupported-program/uninitialized-account repair ordering.
+
+Scope: four finite histories, eight exact rejected transactions, eight completed
+wrapper calls inside rejected prefixes, four user payouts and four tombstones.
+Each history needs two successful `CloseSlab` calls; submitted transactions are
+bounded by 300,000 CU and 1,232 bytes. The new selector passed 1/1 in 1.88s;
+observed peak across measured setup/wrapper/custody transactions was **144,029 CU**,
+leaving **155,971 CU (52.0%)**. Initial System/ATA bootstrap CU is not reported.
+Random key/PDA derivations can vary observed CU; the enforced limit is unchanged.
+
+**Row 418 remains OPEN.** This is a bounded conformance increment, not a generic
+generator/oracle. Token-2022 is rejected custody, not a supported quote mint.
+Native booked retirement, dual quote, Token-2022 extensions, arbitrary malformed
+lengths, PnL/Recovery/receipt claims, insurance/fee stocks, unavailable authority
+or account keys, arbitrary histories and maximum account shapes are not covered.
+No production change, observed production violation or invariant-status promotion.
+
+Validation base: `e0719b67ecb118b43b01832a437bc9192657a6c5` on
+`origin/codex/astra-open-holdout-ledger-20260912`. Worktree:
+`/home/anatoly/percolator-row418-astra-20260913`; local branch:
+`codex/astra-row418-token-terminal-20260913`. Fresh default-feature SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+The related existing destination-authority selector below checks compatibility
+with terminal retirement under SPL delegate/close-authority variants: 1/1 passed
+across its six worlds (2.27s). Both required metadata selectors passed 1/1;
+formatting and diff whitespace checks passed. Only existing dependency/dead-code
+warnings were emitted.
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row418-token-terminal-20260913-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/row418-token-terminal-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_custody_program_recreation::v16_program_terminal_custody_program_recreation_preserves_funded_retirement -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::terminal_destination_variants::v16_program_terminal_sweep_preserves_destination_authorities_and_exact_disposal -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-014 retained trade beside counterparty maintenance rewards (row 411, 2026-09-13)
 
 Owner: [cu/inv_014_retained_maintenance_reward.rs](cu/inv_014_retained_maintenance_reward.rs),
