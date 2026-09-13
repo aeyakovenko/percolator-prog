@@ -336,6 +336,36 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # that donation as unsynced custody. The same prefix retries with exact 1010/1290/37
 # entitlement/surplus, native backing and rent disposition. Peak 296866 CU; see README
 # for base, selectors and overlap review. Native booked residue/general row stay OPEN.
+# Row 418 generated shared-custody conformance (2026-09-13):
+# cu/inv_070_shared_custody_terminal_history.rs; exact v16_cu selector:
+# inv_070_zero_unattributed_terminal_residue_and_close_slab::shared_custody_terminal_history::v16_program_generated_shared_custody_recreation_preserves_terminal_owner_value
+# Four seeded 4/6/8-portfolio cohorts, two owners sharing payout ATAs, both winning
+# sides, SPL decimals 0/6/9 and wSOL, accumulated/recycled custody: 32 public worlds.
+# Net new: previously paid user custody is transferred/unwrapped and closed while
+# sibling claims remain; recreation of the same ATA preserves cumulative owner
+# entitlement. Independent principal/PnL, OI, custody/supply/native/rent census;
+# 192 exact payments, 64 detach-only steps, 128 custody closes, 64 recreations,
+# 608 complete Account rollbacks, 480 successful aborted wrapper calls and 32
+# exact slab/tombstone dispositions. Max 11 successful payout/detach calls per
+# sampled cohort, rebased peak 224233 CU, terminal step limit 500000 CU/1232 bytes.
+# No row415 live withdrawal, row417 late receipt stock, row423 capacity admission,
+# row424 scan prefix or row433 reserve-custody coverage is claimed.
+# OPEN: native booked residue, backing/insurance/fees, fractional/Recovery claims,
+# partial top-ups, dual quote, frozen/delegated custody, absent-owner disposal,
+# unsynced donations, arbitrary histories and maximum shapes. No production fix,
+# implementation violation or status promotion. README's shared-terminal-custody
+# section records generation, oracle scope, build hashes and private environments.
+# Rebased onto row423 commit 4e5bffd3; all prior notes preserved. New selector 1/1
+# and required metadata selectors 2/2 pass on the rebased tree.
+# cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::shared_custody_terminal_history::v16_program_generated_shared_custody_recreation_preserves_terminal_owner_value -- --exact --nocapture --test-threads=1
+# cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+# cargo fmt --all -- --check
+# git diff --check
+# git diff --cached --check
+# git show --format= --check HEAD (post-commit)
+# cargo clean --target-dir /tmp/row418-terminal-token-target
+# cargo clean --target-dir /tmp/percolator-row418-terminal-token-variant-20260913/tests/fixtures/auth_matcher/target
+# cargo clean --target-dir /tmp/row418-terminal-token-tmp
 418	DoS	BLOCKER	INV-070	INV-018,INV-021,INV-025,INV-069,INV-070,INV-073,INV-077,INV-078,INV-081	token-variant+x-terminal-stock+x-close	all-supported-quote-token-variants-have-a-bounded-terminal-disposition	OPEN
 # Row 419 bounded public conformance (2026-09-12): cu/inv_039_pending_loss_funded_resolution.rs,
 # v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders.

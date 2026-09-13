@@ -104,6 +104,116 @@ cargo clean --target-dir /tmp/row423-exit-reservation-20260912-matcher-target
 cargo clean --target-dir tests/fixtures/auth_matcher/target
 ```
 
+## INV-070 shared terminal custody incarnations (row 418, 2026-09-13)
+
+Owner: [cu/inv_070_shared_custody_terminal_history.rs](cu/inv_070_shared_custody_terminal_history.rs),
+mounted under INV-070 as `shared_custody_terminal_history`. Exact selector:
+`inv_070_zero_unattributed_terminal_residue_and_close_slab::shared_custody_terminal_history::v16_program_generated_shared_custody_recreation_preserves_terminal_owner_value`.
+
+Four deterministic XorShift seeds (`418`, `418070`, `418025`, `418081`) generate
+unequal capital, integral position sizes, mark changes, external surplus and
+sibling claim order. Two owners each hold two, three or four independent
+portfolios, sharing one payout ATA per owner. Seed parity ensures both winning
+sides occur. Each history runs on fixed-supply classic SPL with 0/6/9 decimals
+and native wSOL, comparing accumulated custody with custody disposal/recreation
+between sibling payouts: **32 public LiteSVM worlds**.
+
+The new relation is cumulative owner entitlement across **already-paid user
+custody incarnations while sibling claims remain pending**. Classic SPL payouts
+move to another token account owned by the same user before the payout ATA
+closes; wSOL payouts unwrap directly to that user's wallet. A keeper recreates
+the same ATA address for the next sibling claim. Both schedules must deliver
+the independently computed sum of each portfolio's principal plus/minus
+`lots * mark_change`, with rent accounted separately. `CloseResolved` and
+`PermissionlessCrank` alternate and exchange roles between schedules. All payout
+transactions require only the external payer's signature; token disposal is
+owner-authorized, and slab cleanup is administrator-authorized.
+
+This adds a shared-destination, multiple-portfolio terminal composition beyond
+INV-070's single-claim prefunded/frozen destination repairs and native PnL sync
+retry. Row 415 owns retained live withdrawals and replenishment; row 433 owns
+reserve-custody recreation. This family has no reserve claims, retained trade
+policy, capacity-admission pressure, late receipt stock release, persisted scan
+prefix or funding-carry history. It adds no coverage claim to rows
+411/413/415/416/417/419/423/424/425/426/427/433.
+
+The oracle checks every committed terminal step and every rejection. It tracks
+detachment separately from payment: earlier winners detach without payment,
+then receive their exact claims after the remaining cohort is ready. The
+generated schedule needs at most `3 * pairs - 1` successful terminal calls
+(eleven at the largest sampled cohort), without an unbounded retry loop.
+Independent remaining entitlements reconcile engine custody, both OI sides,
+per-owner accumulated/redeemed value, token supply, native backing and rent.
+Full stock/reservation censuses and market/portfolio shape validation run too.
+Whole token Accounts are compared with expected copies; successful steps frame
+all other Accounts. Portfolio rent remains in the market slab until final
+reclaim. Every world deletes all portfolios, closes the canonical vault and
+retains exactly tombstone rent; only the input external surplus reaches the
+administrator's token destination. No booked residue is burned in this family.
+
+Evidence totals: **192 exact payments, 64 detach-only steps, 128 user custody
+closes, 64 committed ATA recreations, 576 committed terminal/disposal steps and
+608 exact Account rollbacks**. The failures include 32 premature slab closes,
+128 completed-claim replays after successful ATA-creation prefixes, 256 aborted
+detach/payment continuations and 192 aborted portfolio-deletion continuations,
+including all 32 final slab closes. Logs verify 480 successful wrapper calls
+before failing suffixes. Complete transaction/fixture Accounts, including
+created/deleted custody and the mint, roll back; only the exact payer signature
+fee is charged. The unchanged instruction prefixes then commit with fresh
+blockhashes. All transactions submitted by the terminal step runner fit 1,232
+bytes and enforce 500,000 CU; the resolution helper's measured CU is bounded too.
+
+**Row 418 remains OPEN.** This is bounded generated conformance, not an arbitrary
+history or all-token-variant theorem. Native booked-residue retirement,
+nonzero backing/insurance/fees, fractional claims, Recovery, partial receipt
+top-ups, dual quote, frozen/delegated custody composition, absent-owner token
+disposal, unsynced donations, longer histories and maximum market shapes remain
+outside this increment. No implementation violation was found; production code
+and invariant verdicts are unchanged. The existing native-mint genesis fixture
+is reused; all market, portfolio and custody creation and subsequent transitions
+use public System/SPL/ATA/wrapper instructions, with no program-owned byte edits.
+
+Validation worktree: `/tmp/percolator-row418-terminal-token-variant-20260913`;
+branch: `codex/row418-terminal-token-variant-20260913`; originally fetched base
+`a47abd05`, then rebased onto `4e5bffd3` from
+`origin/codex/astra-open-holdout-ledger-20260912` before final validation/commit.
+The incoming row423 notes are preserved verbatim. Default-feature wrapper and
+authenticated matcher SBFs were rebuilt here with platform-tools v1.52; the
+rebase changes only invariant tests/documentation and preserves all production,
+dependency and shared fixture inputs to those builds.
+SHA-256: wrapper `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The rebased exact selector passed in **19.92s**, peak **224,233 CU**; both requested
+metadata selectors passed (2/2). The earlier pre-rebase run peaked at 226,554 CU;
+the 500,000-CU guard accommodates fixture address variation. Development
+corrected two test type annotations and the oracle's initial assumptions about
+one-call winner payment and immediate portfolio-rent refunds; these were test
+errors, not implementation violations. An earlier passing run prompted explicit
+coverage of both winning sides. Only this new selector and the two metadata
+selectors below are run; no adjacent or broad test suite is used.
+
+Exact commands from this worktree (all build and temporary paths are private):
+
+```sh
+export CARGO_TARGET_DIR=/tmp/row418-terminal-token-target
+export TMPDIR=/tmp/row418-terminal-token-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$CARGO_TARGET_DIR/deploy" "$TMPDIR"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/row418-terminal-token-target/deploy -- --locked
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/percolator-row418-terminal-token-variant-20260913/tests/fixtures/auth_matcher/target/deploy -- --locked
+sha256sum /tmp/row418-terminal-token-target/deploy/percolator_prog.so tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+git diff --exit-code a47abd05 HEAD -- src Cargo.toml Cargo.lock tests/fixtures tests/v16_cu.rs tests/support
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::shared_custody_terminal_history::v16_program_generated_shared_custody_recreation_preserves_terminal_owner_value -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir /tmp/row418-terminal-token-target
+cargo clean --target-dir /tmp/percolator-row418-terminal-token-variant-20260913/tests/fixtures/auth_matcher/target
+cargo clean --target-dir /tmp/row418-terminal-token-tmp
+```
+
 ## INV-014 retained policy and route budgets (row 411, 2026-09-13)
 
 Owner: [cu/inv_014_retained_policy_route_budgets.rs](cu/inv_014_retained_policy_route_budgets.rs).
