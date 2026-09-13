@@ -1,5 +1,107 @@
 # Invariant-owned test coverage
 
+## INV-024 depleted insurance beneficiary succession (row 429, 2026-09-13)
+
+Owner: [cu/inv_024_depleted_reserve_beneficiary_succession.rs](cu/inv_024_depleted_reserve_beneficiary_succession.rs),
+mounted under `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_fee_partition::depleted_reserve_beneficiary_succession`.
+Selector: `v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribution`.
+Primary INV-024; related INV-005/025/027/036/070/081. Target: row 429's
+`terminal-reserve-value-remains-bound-to-the-beneficiary-and-role-that-earned-it`.
+
+Eight public LiteSVM histories cross beneficiary succession before any spent
+insurance recovers versus after a seven-atom recovery payment, partial versus full
+recovery with excess burn, and both final provider-fee/insurance payout orders.
+The existing row410 fee-loss setup is extracted unchanged into
+`terminal_fee_loss_world`; its existing selector remains an adjacent control.
+System/SPL/ATA instructions create and fund accounts; public wrapper trades,
+authenticated marks, cranks, resolution, payouts and owner-signed deletion create
+the terminal state. VM controls are limited to signer SOL, Clock and blockhashes.
+There are no new program-owned account byte writes or production changes.
+
+The public loss history earns 657 provider-fee atoms and 218 insurance-fee atoms,
+then spends 73 insurance atoms. The old beneficiary withdraws all 176 available
+insurance atoms while 73 spent atoms remain recorded. The provider withdraws its
+one-atom counterparty-source remainder and all but 17 or 101 backing atoms.
+Succession either occurs at slot 61 with zero available insurance, or after
+expiry normalization at slot 100 and a seven-atom recovery payment. Both holders
+sign the transfer; the incoming holder initializes its own insurance ledger with
+`SyncInsuranceLedger`. Later reserve payouts require only the keeper's signature.
+
+The oracle derives every recipient's amount from funding, fee/loss arithmetic and
+the chosen public actions. It checks full SPL Account images and fixed supply,
+exact raw/booked vault and domain stocks, provider fee/principal attribution,
+complete insurance ledger records, role/configuration/epoch frames and the stock
+census. The old beneficiary's ledger retains its own paid prefix and observation;
+the successor receives only the unpaid recovery. When succession precedes
+recovery, the successor ledger records that recovery as profit. After an old-holder
+recovery prefix, its opening observation is the remaining stock and it records no
+new profit. The former ledger's stale observation does not block final retirement.
+
+| Backing left to expire | Old recovery prefix | Old beneficiary total | Successor total | Provider total | Spent before final close | Burn |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 17 | 0 | 176 | 17 | 100641 | 56 | 0 |
+| 17 | 7 | 183 | 10 | 100641 | 56 | 0 |
+| 101 | 0 | 176 | 73 | 100557 | 0 | 28 |
+| 101 | 7 | 183 | 66 | 100557 | 0 | 28 |
+
+Both payout orders reach each row. The operator and market administrator receive
+zero quote tokens; users retain their exact settled amounts. Eight rejected
+transactions combine an actual full provider-fee payout with the successor's
+insurance request carrying the former beneficiary's ledger. Complete Account
+rollback includes the fee payment, provider ledger initialization, and, in the
+four zero-prefix worlds, lazy recovery. Four further rejections prevent insurance
+from consuming the 28 burnable atoms after full recovery. Successful continuations
+pay the exact separate stocks. Eight final slab closures preserve recipient and
+ledger Accounts, create the exact tombstone, refund exact rent and burn only the
+tabulated excess.
+
+This adds beneficiary succession across depleted insurance and delayed recredit.
+Prior row429 funded exchanges do not deplete/recover insurance, and row410
+recredit/submitter witnesses keep the beneficiary fixed. **Only row 429 gains
+evidence; it remains OPEN and invariant statuses are unchanged.** This finite
+family is not a generic generator/oracle. Nonconsensual authority changes, live
+shutdown administrative fallback, other assets/quote rails, absent signers,
+arbitrary accrual/role/expiry histories, ledger disposal and generic replay or
+terminal closure remain outside this increment. No public-route implementation
+violation was observed in these consensual histories.
+
+Base: `c5bc37c0c54110e7461b5cdbeee3680b8458e3e3`; engine pin:
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Branch:
+`codex/astra-row429-terminal-attribution-20260913`; worktree:
+`/tmp/percolator-astra-row429-terminal-attribution-20260913`. The parent checkout
+was not edited. Build caches were copied, without hard links, from
+`/tmp/percolator-astra-row420-provider-progress-20260913/target/build` into this
+worktree's ignored `target/build`. Both artifacts were freshly rebuilt here using
+locked/offline platform-tools v1.52; the wrapper uses default features.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+The new selector passed 1/1 in 8.56s: eight histories, twelve exact rollbacks,
+eight completed closures. The isolated worker peaked at 594106 CU; integration
+on the watch branch peaked at 622606 CU, below the 700000-CU assertion.
+The shared-fixture control passed 1/1 in 13.16s (twelve histories, 42 exact
+rollbacks). Both required metadata selectors passed 1/1. Formatting and whitespace
+checks pass. No broad suite, old-wrapper comparison or engine proof was run.
+Existing unused-support warnings and the `solana-client v1.18.26`
+future-incompatibility warning remain.
+Exact build and validation commands, from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target/build"
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir target/build/deploy -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_fee_partition::depleted_reserve_beneficiary_succession::v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribution -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_fee_partition::v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_orders -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## INV-073 unsigned native insurance ledger progress (row 421, 2026-09-13)
 
 Owner: [cu/inv_073_native_insurance_ledger_progress.rs](cu/inv_073_native_insurance_ledger_progress.rs),

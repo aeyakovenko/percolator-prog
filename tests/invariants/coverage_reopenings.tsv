@@ -865,6 +865,29 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # fee-share fixture now configures before funding. No property violation observed.
 # Command: cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_role_coalescence::terminal_fee_share_succession::v16_program_terminal_fee_share_succession_preserves_operator_paid_history -- --exact --nocapture
 # No production or machine-status promotion; row OPEN.
+# Row 429 depleted-beneficiary increment (2026-09-13):
+# cu/inv_024_depleted_reserve_beneficiary_succession.rs, eight public LiteSVM
+# histories cross succession before recovery/after a seven-atom recovery prefix,
+# partial/full spent-insurance recovery, and both final fee/insurance payout orders.
+# Old/new beneficiaries receive 176/17, 183/10, 176/73 or 183/66 atoms; provider
+# receives exactly 100641 or 100557, independently of the 0/28-atom final burn.
+# Complete insurance ledgers preserve each holder's paid history and distinguish
+# new recovery profit from opening stock. Twelve complete-Account rollbacks include
+# actual fee payouts, provider-ledger initialization and lazy recovery. Eight exact
+# tombstone/rent closures preserve stale former-holder ledgers and recipient custody.
+# Shared public fee-loss setup was extracted unchanged; existing row410 control
+# is retained, without adding evidence or changing status for any other row.
+# New selector passed 1/1; isolated peak 594106 CU, watch-branch integration
+# peak 622606 CU <= 700000. Same-worktree default SBF:
+# dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52;
+# fresh matcher: 50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93.
+# Base c5bc37c0; engine 394fd0bf; locked/offline platform-tools v1.52 builds.
+# Command: cargo test --locked --offline --test v16_cu inv_024_attributed_quote_value_conservation::terminal_earnings_succession::terminal_recredit_fee_partition::depleted_reserve_beneficiary_succession::v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribution -- --exact --nocapture --test-threads=1
+# Exact build/control/metadata commands and environment are in README's depleted
+# insurance beneficiary succession entry. Consensual finite histories only: no
+# nonconsensual transfer, live shutdown admin fallback, other assets/rails, absent
+# signers, arbitrary histories, ledger disposal or generic generator/oracle claim.
+# No production change or observed public-route violation; row remains OPEN.
 429	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-025,INV-027,INV-036,INV-070,INV-081	shutdown-reserve+x-beneficiary+x-attribution	terminal-reserve-value-remains-bound-to-the-beneficiary-and-role-that-earned-it	OPEN
 # 432 public red/green coverage (2026-09-12): cu/inv_014_delayed_policy_and_policy_epoch_safety.rs::v16_retained_single_cpi_taker_fee_cap_rejects_policy_increase.
 # Parent source accepted a retained TradeCpi after trade_fee_base_bps rose above the taker's signed fee_bps;

@@ -5,6 +5,9 @@ use super::*;
 use terminal_public_reserves::reserve_payout;
 use terminal_reserve_destination_recovery::land;
 
+#[path = "inv_024_depleted_reserve_beneficiary_succession.rs"]
+mod depleted_reserve_beneficiary_succession;
+
 const SHARE_BPS: u16 = 2_500;
 const INSURANCE_FEE: u64 = EARNINGS * SHARE_BPS as u64 / 10_000;
 const PROVIDER_FEE: u64 = EARNINGS - INSURANCE_FEE;
@@ -155,6 +158,96 @@ impl Entitlements {
     }
 }
 
+fn terminal_fee_loss_world() -> (TerminalEarningsWorld, Keypair, Pubkey) {
+    let (mut world, users) = terminal_earnings_world_with_fee_share(false, None, SHARE_BPS);
+    let insurer = Keypair::new();
+    world
+        .env
+        .svm
+        .airdrop(&insurer.pubkey(), 1_000_000_000)
+        .unwrap();
+    world
+        .env
+        .try_update_per_asset_authority_with_cu(
+            &world.admin,
+            Some(&insurer),
+            0,
+            processor::ASSET_AUTH_INSURANCE,
+            insurer.pubkey().to_bytes(),
+        )
+        .unwrap();
+    let admin_token = world.tokens[4];
+    world.wallets[4] = insurer.pubkey();
+    world.tokens[4] = create_ata_for_test(
+        &mut world.env.svm,
+        &world.env.payer,
+        insurer.pubkey(),
+        world.env.mint,
+    );
+    // Public authenticated observations make the former winner insolvent;
+    // the existing utilization charge remains split between its two roles.
+    for price in (51..105).rev() {
+        let slot = 107 - price;
+        world.env.svm.warp_to_slot(slot);
+        world.env.push_auth_mark_for_asset_as_admin(0, slot, price);
+        world.env.crank(
+            world.portfolios[1],
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    world.env.resolve();
+    world.env.svm.warp_to_slot(61);
+    for _ in 0..8 {
+        for actor in [0, 1] {
+            if !resolved_portfolio_is_terminal(&world.env, world.portfolios[actor]) {
+                world.env.svm.expire_blockhash();
+                world
+                    .env
+                    .send(
+                        ProgInstruction::CloseResolved {
+                            fee_rate_per_slot: 0,
+                        },
+                        vec![
+                            AccountMeta::new_readonly(world.wallets[actor], false),
+                            AccountMeta::new(world.env.market, false),
+                            AccountMeta::new(world.portfolios[actor], false),
+                            AccountMeta::new(world.tokens[actor], false),
+                            AccountMeta::new(world.env.vault, false),
+                            AccountMeta::new_readonly(world.env.vault_authority, false),
+                            AccountMeta::new_readonly(spl_token::ID, false),
+                        ],
+                        &[],
+                    )
+                    .unwrap();
+            }
+        }
+        if world
+            .portfolios
+            .iter()
+            .all(|key| resolved_portfolio_is_terminal(&world.env, *key))
+        {
+            break;
+        }
+    }
+    for actor in 0..2 {
+        assert!(resolved_portfolio_is_terminal(
+            &world.env,
+            world.portfolios[actor]
+        ));
+        assert_eq!(
+            world.env.token_amount(world.tokens[actor]),
+            USER_PAID[actor]
+        );
+        world
+            .env
+            .close_portfolio_with_cu(&users[actor], world.portfolios[actor]);
+    }
+    (world, insurer, admin_token)
+}
+
 #[test]
 fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_orders() {
     assert_eq!((PROVIDER_FEE, SPENT, AVAILABLE), (657, 73, 176));
@@ -165,92 +258,7 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
             .into_iter()
             .flat_map(|first| [2, 3].map(|role| (first, role)))
         {
-            let (mut world, users) = terminal_earnings_world_with_fee_share(false, None, SHARE_BPS);
-            let insurer = Keypair::new();
-            world
-                .env
-                .svm
-                .airdrop(&insurer.pubkey(), 1_000_000_000)
-                .unwrap();
-            world
-                .env
-                .try_update_per_asset_authority_with_cu(
-                    &world.admin,
-                    Some(&insurer),
-                    0,
-                    processor::ASSET_AUTH_INSURANCE,
-                    insurer.pubkey().to_bytes(),
-                )
-                .unwrap();
-            let admin_token = world.tokens[4];
-            world.wallets[4] = insurer.pubkey();
-            world.tokens[4] = create_ata_for_test(
-                &mut world.env.svm,
-                &world.env.payer,
-                insurer.pubkey(),
-                world.env.mint,
-            );
-            // Public authenticated observations make the former winner insolvent;
-            // the existing utilization charge remains split between its two roles.
-            for price in (51..105).rev() {
-                let slot = 107 - price;
-                world.env.svm.warp_to_slot(slot);
-                world.env.push_auth_mark_for_asset_as_admin(0, slot, price);
-                world.env.crank(
-                    world.portfolios[1],
-                    ProgInstruction::PermissionlessCrank {
-                        now_slot: slot,
-                        observations: crank_observations(0),
-                    },
-                );
-            }
-            world.env.resolve();
-            world.env.svm.warp_to_slot(61);
-            for _ in 0..8 {
-                for actor in [0, 1] {
-                    if !resolved_portfolio_is_terminal(&world.env, world.portfolios[actor]) {
-                        world.env.svm.expire_blockhash();
-                        world
-                            .env
-                            .send(
-                                ProgInstruction::CloseResolved {
-                                    fee_rate_per_slot: 0,
-                                },
-                                vec![
-                                    AccountMeta::new_readonly(world.wallets[actor], false),
-                                    AccountMeta::new(world.env.market, false),
-                                    AccountMeta::new(world.portfolios[actor], false),
-                                    AccountMeta::new(world.tokens[actor], false),
-                                    AccountMeta::new(world.env.vault, false),
-                                    AccountMeta::new_readonly(world.env.vault_authority, false),
-                                    AccountMeta::new_readonly(spl_token::ID, false),
-                                ],
-                                &[],
-                            )
-                            .unwrap();
-                    }
-                }
-                if world
-                    .portfolios
-                    .iter()
-                    .all(|key| resolved_portfolio_is_terminal(&world.env, *key))
-                {
-                    break;
-                }
-            }
-            for actor in 0..2 {
-                assert!(resolved_portfolio_is_terminal(
-                    &world.env,
-                    world.portfolios[actor]
-                ));
-                assert_eq!(
-                    world.env.token_amount(world.tokens[actor]),
-                    USER_PAID[actor]
-                );
-                world
-                    .env
-                    .close_portfolio_with_cu(&users[actor], world.portfolios[actor]);
-            }
+            let (mut world, _insurer, admin_token) = terminal_fee_loss_world();
             let ledger = Keypair::new();
             system_create_account_for_test(
                 &mut world.env.svm,
