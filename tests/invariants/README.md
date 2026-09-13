@@ -1,5 +1,27 @@
 # Invariant-owned test coverage
 
+## PR135 Scope W used-generation capacity admission (2026-09-13)
+
+Owner: [cu/inv_028_generation_capacity_admission.rs](cu/inv_028_generation_capacity_admission.rs),
+mounted under `inv_028_source_domain_realizability_cap::historical_latent_capacity::generation_capacity_admission`.
+The public family crosses 22/24/26 detached historical sources, both position signs,
+single/batch bilateral routes and original/reused generations of a previously
+traded, zero-PnL asset. Admission leaves six/four/two future domains latent.
+Exact rollback/retry, over-capacity rejection, cross-zero risk and complete
+materialization precede live reductions and ranked permissionless resolved payouts.
+
+An input-derived domain ledger and generation journal supplement stock, reservation
+and source-rate censuses. Complete Account rollback includes the exact payer fee;
+successful admission, reduction, source-retirement and SPL payout prefixes are
+retried using the same signed bytes. Related evidence is bounded to
+INV-028/031/057/073/077/078/082/089. Row 423 remains OPEN and machine classifications
+are unchanged. The base failed admission; separate implementation commit `0dbac7d2`
+counts every surviving active leg's latent domains while preserving same-batch
+close/open resource reuse. The new selector passes 24 worlds, 192 exact rollbacks
+and 696 ranked terminal calls (peak 1152561 CU, packet <=842 bytes).
+The [Scope W audit](pr135_scope_w_latent_source_capacity_admission_20260913.md)
+records the distinct composition, limits, exact selectors and validation results.
+
 ## PR135 Scope T generated funded-role epochs (2026-09-13)
 
 Owner: [cu/inv_005_generated_funded_role_epochs.rs](cu/inv_005_generated_funded_role_epochs.rs),

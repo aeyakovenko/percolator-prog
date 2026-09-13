@@ -1279,6 +1279,18 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # packets <=465 bytes; exact payouts 1000054/1000164/999782 and twelve deletions.
 # No production or status changes; row423 stays OPEN. No INV-089 reuse increment.
 # See pr135_scope_g_capacity_20260913.md for exact commands, limits and provenance.
+# 423 Scope W bounded conformance (2026-09-13): cu/inv_028_generation_capacity_admission.rs,
+# historical_latent_capacity::generation_capacity_admission::v16_program_used_generation_admission_reserves_latent_capacity_through_exact_exit.
+# Public used-slot generation reuse composes with 22/24/26 detached sources,
+# six/four/two latent domains, single/batch admission, exact rollback/retry,
+# cross-zero materialization, live reduction and ranked unsigned resolved payouts.
+# Base admission failed the invariant; separate fix 0dbac7d2 includes surviving
+# active-leg domains and releases only fully closed latent pairs in the same batch.
+# Final: 24 worlds, 192 exact rollbacks, 132 restored prefixes, 696 terminal calls,
+# peak 1152561 CU and packet <=842 bytes. Six controls and four metadata gates PASS.
+# Row423 remains OPEN; this fully funded finite family does not close generic
+# admission/resource/lifecycle coverage. Machine invariant statuses are unchanged.
+# See pr135_scope_w_latent_source_capacity_admission_20260913.md for results and limits.
 423	DoS	BLOCKER	INV-028	INV-028,INV-031,INV-057,INV-073,INV-077,INV-078,INV-082,INV-089	historical-capacity+x-latent-domain+x-position-admission	risk-admission-reserves-every-future-settlement-resource-needed-for-exit	OPEN
 # 424 partial public coverage (2026-09-10): cu/inv_070_terminal_prefix_reuse.rs::v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback covers admin/permissionless reuse behind cursor 2, live success controls, exact terminal rejection/expiry-prefix rollback, and bounded close. General actionability invalidation remains OPEN; see README's retired-slot reuse entry.
 # 424 partial public coverage (2026-09-12): cu/inv_071_terminal_prefix_recredit.rs::v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement.
