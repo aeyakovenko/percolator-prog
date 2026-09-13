@@ -785,6 +785,20 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # boundary; omitted Hybrid, funding, active recipients, provider changes, arbitrary
 # longer histories and maximum shapes remain gaps. No implementation violation or
 # generic completeness proof; row stays OPEN. See README for exact commands/results.
+# Row 426 bounded active-recipient CPI conformance (2026-09-13):
+# cu/inv_020_cpi_keeper_observations.rs, mounted under
+# inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations::cpi_keeper_observations;
+# v16_program_cpi_active_keeper_observations_preserve_admission_and_payout.
+# Eight public histories compare single/batch CPI and bilateral routes after an
+# active maker receives a reward with unrelated loss-leg catchup still pending.
+# Partial/full refresh admission checks independent current health and adverse lag;
+# two-leg exit and exact SPL payout reconcile reward/insurance, owner value and OI.
+# Liquidation/admission and exit prefixes precede stale-report suffix rollback,
+# including matcher context and exact signature fees: 28 exact rollbacks and eight
+# 252925-atom keeper payouts; peak 689686 CU. Public construction only.
+# Funding/fees, repeated active rewards, recipient Hybrid+CPI, omitted-Hybrid active
+# certification, arbitrary histories and maximum shapes remain open. No generic
+# oracle, production change or status promotion; see README for exact commands.
 426	LoF	BLOCKER	INV-020	INV-020,INV-024,INV-053,INV-054,INV-056,INV-061,INV-071,INV-072,INV-081,INV-086	missing-evidence+x-multi-step-refresh+x-liquidation	favorable-account-actions-require-complete-current-authenticated-observations	OPEN
 # Row 427 additional bounded conformance (2026-09-12): cu/inv_058_atomic_oi_fee_handoff.rs,
 # v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes.

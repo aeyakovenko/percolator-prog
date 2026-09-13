@@ -87,7 +87,99 @@ cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public
 cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
 cargo fmt --all -- --check
 git diff --check && git diff --cached --check
-# After the local commit:
+git show --format= --check HEAD
+```
+
+## INV-020 active reward recipient through CPI (row 426, 2026-09-13)
+
+Owner: [cu/inv_020_cpi_keeper_observations.rs](cu/inv_020_cpi_keeper_observations.rs),
+mounted as a child of `staged_action_observations::active_keeper_observations`.
+Exact selector:
+`inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations::cpi_keeper_observations::v16_program_cpi_active_keeper_observations_preserve_admission_and_payout`.
+
+Eight public LiteSVM histories cross CPI/bilateral transport, single/batch trades
+and partial/complete recipient refresh before admission. A two-leg target receives
+complete Hybrid-Pyth/AuthMark observations and pays a liquidation reward to an
+active recipient whose unrelated AuthMark short still has 32 slots of catchup.
+Receipt invalidates that recipient's certificate without settling its loss leg.
+The recipient is the maker on a new asset-3 position: public matcher initialization
+and delegation authorize CPI admission and exit with only the taker signing.
+Reward-bearing cranks separately require the recipient owner's signature. Complete
+refresh controls and trade-time recertification must include the exact recipient
+equity and side-specific adverse lag; both participants' current certificates are
+checked against the independent raw-state health oracle. Single exits close assets
+3 and 2 separately; batch exits close both in one actual two-leg batch.
+
+Every history first rolls back a successful liquidation-plus-admission prefix at
+an exact stale-report suffix, then commits the same liquidation. An omitted loss
+leg rejects with `EngineNonProgress`. Each exit is also executed before a stale
+suffix and retried successfully. Complete tracked and compiled-message Accounts,
+including matcher context, token custody, metadata, absence and lamports, must
+roll back apart from exact payer signature fees. The single matcher response is
+decoded after admission; the batch matcher uses return data and leaves its context
+unchanged. Market stock, reservation and fixed-supply SPL censuses accompany the
+health checks. Independently calculated liquidation penalty, reward and insurance
+domain allocations reconcile the keeper's exact final SPL withdrawal, and all
+eight routes must agree on owner capital/PnL, final OI and payout.
+
+This adds the active paid maker's CPI observation/admission/exit composition.
+The earlier active-keeper probe uses bilateral routes; chunked-observation CPI
+coverage has no liquidation reward or unrelated recipient leg. The first candidate,
+recipient Hybrid feeds, was discarded because recipient-to-target coverage already
+contains a composite Hybrid recipient. No shared helper implementation changed;
+the existing active-keeper owner only registers the new child. All economic state
+and matcher context construction use System/SPL/ATA/public wrapper or matcher
+instructions. Only signer SOL, Clock and external provider reports use harness
+fixtures. No initialized program account bytes are edited or restored.
+
+**Row 426 remains OPEN; invariant_status.tsv is unchanged.** This is a finite
+conformance product, not a generic observation generator/oracle. Nonzero funding,
+maintenance/trade fees, repeated rewards to one active recipient, recipient Hybrid
+feeds composed with CPI, arbitrary observation orders, omitted-Hybrid active
+certification, additional renewals, other market modes and maximum shapes remain
+outside this increment. Observation order is forward for single and reverse for
+batch, not an independent product axis. Production and dependency pins are unchanged.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`5fc55daca542417202d454c0663d0b5ecd1b87f0`. Branch:
+`codex/astra-row426-cpi-observations-20260913`; worktree:
+`/home/anatoly/percolator-row426-cpi-observations-20260913`.
+Environment: Linux x86_64, Rust/Cargo 1.90.0, LiteSVM 0.1.0, default `anchor-v2`,
+engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`, platform-tools v1.52.
+The session cannot select or verify the requested `gpt-6-astra`/ultra settings.
+A private, non-hardlinked copy of `/dev/shm/percolator-row426-target` seeded the
+build cache. Wrapper and in-repository auth matcher SBF were rebuilt from this
+worktree. SHA-256: wrapper
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`;
+matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Development corrected the bitmap assertion's array type and the reward crank's
+required recipient-owner signer; neither was a production invariant violation.
+
+Behavioral validation: the exact selector passed 1/1 in 4.78s, with eight histories,
+28 exact rollbacks and eight 252925-atom keeper withdrawals. Each liquidation
+charges 8778 atoms, pays 2925 to the recipient and allocates the remaining 5853 to
+insurance. Peak transaction cost is 689686 CU, below the existing helper's 900000
+bound; each explicit transaction also fits the 1232-byte packet bound. No adjacent
+selectors are needed because shared helper implementations are unchanged.
+Both required INV-079 metadata selectors passed 1/1. `cargo fmt --all -- --check`
+and Git whitespace checks passed. The build cache and logs remain outside the
+tracked artifacts; no push is performed.
+
+Commands from the isolated worktree:
+
+```sh
+cp -a /dev/shm/percolator-row426-target /dev/shm/row426-cpi-observations-20260913-target
+export CARGO_TARGET_DIR=/dev/shm/row426-cpi-observations-20260913-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+cargo test --locked --offline --test v16_cu inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations::cpi_keeper_observations::v16_program_cpi_active_keeper_observations_preserve_admission_and_payout -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
 git show --format= --check HEAD
 ```
 

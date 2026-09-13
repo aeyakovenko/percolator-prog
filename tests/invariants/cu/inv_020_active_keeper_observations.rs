@@ -11,6 +11,9 @@ use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::
 #[path = "inv_020_reward_recipient_liquidation.rs"]
 mod reward_recipient_liquidation;
 
+#[path = "inv_020_cpi_keeper_observations.rs"]
+mod cpi_keeper_observations;
+
 const ENDOWMENTS: [u128; 4] = [10_000_000, 220_000, 300_000, 10_000_000];
 const KEEPER_PRICE: u64 = 1_050_000;
 const SHARE: u128 = 3_333;
