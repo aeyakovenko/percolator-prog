@@ -1,5 +1,5 @@
 # Open public-route security finding benchmark
-# Snapshot extended: 2026-09-04 UTC; source: GitHub open PR titles
+# Snapshot extended: 2026-09-13 UTC; source: GitHub open PR titles
 # Evidence is PR135 evidence, not the PR author claim or fix status.
 # Kind/severity preserve historical claims (including legacy REAL), not current scripts/loop.md classifications.
 # Evidence mappings alone do not establish qualifying LoF/DoS impact or whole-invariant proof.
@@ -169,3 +169,4 @@
 432	LoF	PRIVILEGED	INV-014	independent-discovery	[PRIVILEGED LoF] Enforce retained single-CPI taker fee terms
 433	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Permit unsigned terminal reserve payouts
 434	LoF	BLOCKER	INV-027	independent-discovery	Settle flat-account fees before risk admission
+435	LoF	BLOCKER	INV-039	missing	[BLOCKER LoF] Preserve mixed-role resolved debt attribution
