@@ -957,6 +957,79 @@ cargo fmt --all -- --check
 git diff --check
 ```
 
+## INV-067 last receipt after destination recreation (row 417, 2026-09-13)
+
+Owner: [cu/inv_067_receipt_destination_recreation.rs](cu/inv_067_receipt_destination_recreation.rs),
+mounted under INV-067 as `receipt_destination_recreation`. Four public LiteSVM
+histories cross the missing destination's claimant (700/1,300 face) and retained
+`ClaimResolvedPayoutTopup`/`CloseResolved` route; the peer uses the other route.
+System, ATA, SPL and wrapper instructions construct the six-portfolio fixture.
+There is no out-of-band program-owned account mutation or production change.
+
+The first source expires at slot 13, raising residual from 501 to 662. Both
+receipts receive their first top-ups, reaching independent junior floors 154/286.
+One claimant spends its entire 1,154/1,286-token payout into a zero-claim debtor's
+wallet, then closes its ATA with an exact rent refund. At slot 15 a transaction
+normalizes the second source and pays the peer before the retained request to the
+absent ATA rejects with `InvalidTokenAccount`. Logs require both successful
+wrapper prefixes and the peer's SPL transfer. Whole fixture Account rollback
+includes receipts, stock, tokens and rent; the fee payer loses exactly one fee.
+
+The retry order deliberately leaves the ATA absent: the second 189-atom release,
+peer top-up, source claimant settlement and peer receipt retirement all commit
+first. The unreceipted bound reaches zero and every other portfolio is terminal.
+The original missing receipt still retains its face, episode and first-wave paid
+counter, with precisely its remaining due plus two rounding atoms in custody.
+Only then does a public ATA instruction recreate the same address with zero
+tokens. The unchanged retained request pays **44 or 82**, never the already-spent
+capital or earlier junior payments. Receipt cleanup follows the handler's
+contract; terminal replay is an exact no-op or typed `EngineNonProgress` rollback.
+The independent cashflow oracle reconciles all six wallets, external spending,
+booked/SPL custody and the 3,852 mint supply. Final attributed payouts are
+1,198/0/1,283/0/1,368/0; custody retains two rounding atoms and the provider wallet
+retains its one never-deposited atom.
+
+Net-new scope is **delayed repair of the last receipt after a second stock
+release, final bound replacement and peer retirement**, including rollback that
+preserves already-committed first-wave payments. The related INV-082
+`receipt_destination_recovery` selector repairs both destinations after one
+expiry and before source settlement. `receipt_repeated_stock` keeps destinations
+alive; `receipt_spend_replay` never closes them. This is not another late-fee,
+fresh-source-realization or row410/429 reserve-role test.
+
+**Row 417 remains OPEN; invariant statuses are unchanged.** Four fixed histories
+are not a generic generator/oracle. Arbitrary stock sequences, more destination
+lifetimes, other faces/rails, shared owners, fees, source conversion, maxima,
+portfolio deletion and slab burn/closure are outside this increment.
+
+Worktree: `/home/anatoly/percolator-row417-astra-20260913`; branch:
+`codex/astra-row417-terminal-claim-identity-20260913`; base:
+`dc29fe346b869eba0d591d42f896e45b8f475aa9`. A fresh isolated locked/offline
+default-feature SBF build uses platform-tools v1.52 and engine pin
+`394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. Wrapper SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+New selector: PASS (1/1), four histories, four paying-prefix rollbacks, four ATA
+repairs and eight second-wave top-ups; peak 259,330 CU (600,000 ceiling).
+Related selector: PASS (1/1), 16 histories, peak 339,582 CU. Both INV-079 metadata
+gates: PASS (1/1 each). Formatting and all three Git whitespace checks: PASS.
+No full-suite, Kani or generic closure result is claimed. Validation commands:
+
+```sh
+cd /home/anatoly/percolator-row417-astra-20260913
+export CARGO_TARGET_DIR=/dev/shm/row417-terminal-claim-identity-20260913-target
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+export TMPDIR=/dev/shm/row417-terminal-claim-identity-20260913-tmp
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+mkdir -p "$TMPDIR"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_destination_recreation::v16_program_recreated_destination_preserves_receipt_identity_across_second_expiry_retry -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_082_state_indexed_liveness_theorem::terminal_destination_recovery::receipt_destination_recovery::v16_program_recreated_destinations_preserve_paid_receipts_across_expiry_without_owners -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check && git show --format= --check HEAD
+```
+
 ## INV-067 late fee reclassification and retained receipts (row 417, 2026-09-13)
 
 Owner: [cu/inv_067_receipt_late_fee_reclassification.rs](cu/inv_067_receipt_late_fee_reclassification.rs),

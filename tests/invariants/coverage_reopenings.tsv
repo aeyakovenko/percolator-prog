@@ -18,6 +18,23 @@
 # Exact selector: cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::revocation_atomicity::revoked_renewal_payout::v16_program_failed_renewal_exit_payout_preserves_revocation_and_instruction_retry -- --exact --nocapture --test-threads=1
 # Full build/related/metadata/hygiene commands and artifact provenance: README
 # "INV-012 revoked renewal, exit and payout rollback (row 412, 2026-09-13)".
+# Row 417 bounded conformance (2026-09-13): cu/inv_067_receipt_destination_recreation.rs.
+# Four public histories cross the absent-ATA claimant and both payout handlers.
+# First expiry/top-ups commit before SPL spend/close; second expiry plus peer payout
+# rolls back on the absent ATA. Retry settles all other claimants and replaces the
+# final unreceipted bound before same-address repair pays only 44/82 remaining atoms.
+# Exact receipt/episode identity, whole Account rollback, rent, fees, external spend,
+# final handler-specific replay and independent fixed-supply payout accounting.
+# Net-new delayed last-receipt repair after two releases and peer retirement; INV-082
+# receipt_destination_recovery repairs after one expiry before source settlement.
+# No late-fee/source-realization or row410/429 reserve-role duplication. Row 417 OPEN.
+# Limits: fixed six portfolios/two sources/one ATA lifetime replacement, classic SPL;
+# no generic oracle, fees/conversion, other rails, shared owners, maxima or slab close.
+# New selector PASS: 4 histories, 4 paying-prefix rollbacks, peak 259330 CU; related
+# INV-082 selector PASS (16 histories). Both metadata gates and fmt/Git checks PASS.
+# Exact selector: cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_destination_recreation::v16_program_recreated_destination_preserves_receipt_identity_across_second_expiry_retry -- --exact --nocapture --test-threads=1
+# All build/related/metadata/hygiene commands and provenance: README "INV-067 last
+# receipt after destination recreation (row 417, 2026-09-13)". No status promotion.
 # Row 417 bounded conformance (2026-09-13): cu/inv_067_receipt_late_fee_reclassification.rs,
 # mounted as INV-067 receipt_late_fee_reclassification. One new public selector
 # crosses six claimant orders, exact/late expiry and explicit/close-collected fees.
