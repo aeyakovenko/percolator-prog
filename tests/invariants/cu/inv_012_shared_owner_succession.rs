@@ -49,6 +49,7 @@ fn grant(h: &mut History, scope: &mut Scope) -> u64 {
                 portfolio_id: scope.ids[1],
                 expected_sequence: scope.sequence,
                 position_epoch: h.env.portfolio_position_epoch(scope.portfolios[1]),
+                asset_generation_frontier: h.env.market_state().1.next_market_id,
                 enabled: 1,
                 trade_fee_cap_bps: FEE_CAP,
                 expiry_slot: EXPIRY,

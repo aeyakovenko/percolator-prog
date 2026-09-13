@@ -162,6 +162,7 @@ fn v16_program_retained_fee_prefix_rolls_back_at_grant_expiry_before_bilateral_r
                             portfolio_id: env.primary_portfolio_id(3),
                             expected_sequence: env.primary_portfolio_matcher_sequence(3),
                             position_epoch: env.primary_portfolio_position_epoch(3),
+                            asset_generation_frontier: env.primary_market_state().1.next_market_id,
                             enabled: 1,
                             trade_fee_cap_bps: CAP as u16,
                             expiry_slot: EXPIRY,

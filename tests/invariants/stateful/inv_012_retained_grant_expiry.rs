@@ -31,6 +31,7 @@ fn retained_grant(env: &V16Svm, grant: GrantOracle, expiry: u64, transport: u64)
                     portfolio_id: grant.portfolio_id,
                     expected_sequence: grant.sequence,
                     position_epoch: grant.epoch,
+                    asset_generation_frontier: env.primary_market_state().1.next_market_id,
                     enabled: 1,
                     trade_fee_cap_bps: 1,
                     expiry_slot: expiry,

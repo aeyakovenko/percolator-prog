@@ -849,6 +849,11 @@ stale retained enable bytes fail on the vulnerable pin, and the fixed wrapper si
 `position_epoch` before mutating the matcher configuration. INV-012 still has broader sampled
 writer/domain coverage rather than a full arbitrary-history theorem.
 
+The [row-414 retained matcher-grant frontier coverage](tests/invariants/README.md#inv-012-retained-matcher-grant-frontier-row-414-2026-09-13)
+binds owner-signed `SetMatcherConfig` bytes to the current asset-generation frontier. A grant
+retained before public asset-slot retirement/reactivation now rejects with exact rollback after
+`next_market_id` advances, while a freshly signed current-frontier grant succeeds.
+
 Before publishing a bounty, run the commands in [Build & test](#build--test) and record the exact output for the current commit.
 
 ---

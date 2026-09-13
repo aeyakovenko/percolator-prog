@@ -2933,6 +2933,7 @@ fn matcher_config_alias_fixture(route: MatcherConfigAliasRoute) -> CoreAccountAl
         portfolio_id: env.portfolio_id(portfolio),
         expected_sequence: env.portfolio_matcher_sequence(portfolio),
         position_epoch: env.portfolio_position_epoch(portfolio),
+        asset_generation_frontier: env.market_state().1.next_market_id,
         enabled,
         trade_fee_cap_bps: if enabled == 0 { 0 } else { 10_000 },
         expiry_slot: if enabled == 0 { 0 } else { u64::MAX },

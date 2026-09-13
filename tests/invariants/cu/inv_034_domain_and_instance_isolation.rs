@@ -160,6 +160,10 @@ fn set_matcher_config_on_market(
     let portfolio_id = env.portfolio_id(portfolio);
     let expected_sequence = env.portfolio_matcher_sequence(portfolio);
     let position_epoch = env.portfolio_position_epoch(portfolio);
+    let asset_generation_frontier = state::read_market(&env.svm.get_account(&market).unwrap().data)
+        .unwrap()
+        .1
+        .next_market_id;
     env.svm.expire_blockhash();
     send_tx(
         &mut env.svm,
@@ -169,6 +173,7 @@ fn set_matcher_config_on_market(
             portfolio_id,
             expected_sequence,
             position_epoch,
+            asset_generation_frontier,
             enabled: 1,
             trade_fee_cap_bps: 10_000,
             expiry_slot: u64::MAX,

@@ -407,23 +407,26 @@ fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
     let portfolio_id: u64 = kani::any();
     let expected_sequence: u64 = kani::any();
     let position_epoch: u64 = kani::any();
+    let asset_generation_frontier: u64 = kani::any();
     let enabled: u8 = kani::any();
     let trade_fee_cap_bps: u16 = kani::any();
     let expiry_slot: u64 = kani::any();
 
-    let mut body = [0u8; 35];
+    let mut body = [0u8; 43];
     body[0..8].copy_from_slice(&portfolio_id.to_le_bytes());
     body[8..16].copy_from_slice(&expected_sequence.to_le_bytes());
     body[16..24].copy_from_slice(&position_epoch.to_le_bytes());
-    body[24] = enabled;
-    body[25..27].copy_from_slice(&trade_fee_cap_bps.to_le_bytes());
-    body[27..35].copy_from_slice(&expiry_slot.to_le_bytes());
+    body[24..32].copy_from_slice(&asset_generation_frontier.to_le_bytes());
+    body[32] = enabled;
+    body[33..35].copy_from_slice(&trade_fee_cap_bps.to_le_bytes());
+    body[35..43].copy_from_slice(&expiry_slot.to_le_bytes());
 
     match Instruction::decode_body_for_proof(68, &body).unwrap() {
         Instruction::SetMatcherConfig {
             portfolio_id: decoded_portfolio_id,
             expected_sequence: decoded_sequence,
             position_epoch: decoded_position_epoch,
+            asset_generation_frontier: decoded_asset_generation_frontier,
             enabled: decoded_enabled,
             trade_fee_cap_bps: decoded_cap,
             expiry_slot: decoded_expiry,
@@ -431,6 +434,7 @@ fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
             assert_eq!(decoded_portfolio_id, portfolio_id);
             assert_eq!(decoded_sequence, expected_sequence);
             assert_eq!(decoded_position_epoch, position_epoch);
+            assert_eq!(decoded_asset_generation_frontier, asset_generation_frontier);
             assert_eq!(decoded_enabled, enabled);
             assert_eq!(decoded_cap, trade_fee_cap_bps);
             assert_eq!(decoded_expiry, expiry_slot);
@@ -449,9 +453,18 @@ fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
     prior_schema_body[19..27].copy_from_slice(&expiry_slot.to_le_bytes());
     assert!(Instruction::decode_body_for_proof(68, &prior_schema_body).is_err());
 
-    let mut trailing_body = [0u8; 36];
-    trailing_body[..35].copy_from_slice(&body);
-    trailing_body[35] = 0;
+    let mut prior_position_schema_body = [0u8; 35];
+    prior_position_schema_body[0..8].copy_from_slice(&portfolio_id.to_le_bytes());
+    prior_position_schema_body[8..16].copy_from_slice(&expected_sequence.to_le_bytes());
+    prior_position_schema_body[16..24].copy_from_slice(&position_epoch.to_le_bytes());
+    prior_position_schema_body[24] = enabled;
+    prior_position_schema_body[25..27].copy_from_slice(&trade_fee_cap_bps.to_le_bytes());
+    prior_position_schema_body[27..35].copy_from_slice(&expiry_slot.to_le_bytes());
+    assert!(Instruction::decode_body_for_proof(68, &prior_position_schema_body).is_err());
+
+    let mut trailing_body = [0u8; 44];
+    trailing_body[..43].copy_from_slice(&body);
+    trailing_body[43] = 0;
     assert!(Instruction::decode_body_for_proof(68, &trailing_body).is_err());
 }
 

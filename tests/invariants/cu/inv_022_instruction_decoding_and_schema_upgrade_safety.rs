@@ -481,6 +481,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             portfolio_id: 1,
             expected_sequence: 1,
             position_epoch: 0,
+            asset_generation_frontier: 2,
             enabled: 1,
             trade_fee_cap_bps: 25,
             expiry_slot: u64::MAX,

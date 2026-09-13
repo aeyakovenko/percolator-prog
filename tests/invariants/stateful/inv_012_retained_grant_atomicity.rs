@@ -38,6 +38,7 @@ fn grant_ix(env: &V16Svm, grant: GrantOracle, cap: Option<u16>, expiry: u64) -> 
             portfolio_id: grant.portfolio_id,
             expected_sequence: grant.sequence,
             position_epoch: grant.epoch,
+            asset_generation_frontier: env.primary_market_state().1.next_market_id,
             enabled: u8::from(cap.is_some()),
             trade_fee_cap_bps: cap.unwrap_or(0),
             expiry_slot: expiry,

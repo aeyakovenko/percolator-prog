@@ -85,6 +85,117 @@ fn reject(
     assert_cu_within("INV-012 reused response rejection", *peak, CUSTODY_CU_LIMIT);
 }
 
+fn retained_matcher_grant(h: &History, asset_generation_frontier: u64) -> Transaction {
+    let tx = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: h.env.program_id,
+                accounts: vec![
+                    AccountMeta::new(h.owners[1].pubkey(), true),
+                    AccountMeta::new_readonly(h.env.market, false),
+                    AccountMeta::new(h.portfolios[1], false),
+                    AccountMeta::new_readonly(h.matcher.0, false),
+                    AccountMeta::new_readonly(h.matcher.1, false),
+                    AccountMeta::new_readonly(h.matcher.2, false),
+                ],
+                data: ProgInstruction::SetMatcherConfig {
+                    portfolio_id: h.env.portfolio_id(h.portfolios[1]),
+                    expected_sequence: h.grant_sequence,
+                    position_epoch: h.env.portfolio_position_epoch(h.portfolios[1]),
+                    asset_generation_frontier,
+                    enabled: 1,
+                    trade_fee_cap_bps: FEE_CAP,
+                    expiry_slot: EXPIRY,
+                }
+                .encode(),
+            },
+        ],
+        Some(&h.env.payer.pubkey()),
+        &[&h.env.payer, &h.owners[1]],
+        h.env.svm.latest_blockhash(),
+    );
+    tx.verify().unwrap();
+    tx
+}
+
+#[test]
+fn v16_program_retained_matcher_grant_rejects_after_asset_generation_frontier_moves() {
+    // INV-012/002/007/089: the capability grant itself is retained signed consent, so the
+    // wrapper must bind it to the current market asset-generation frontier. Otherwise an old
+    // owner-signed same-tuple grant can be held across a public retire/reactivate cycle and
+    // re-enable matcher authority over the replacement asset generation.
+    let mut evidence = Evidence::default();
+    let mut stale_rejections = 0;
+    let mut peak_cu = 0;
+
+    for asset in [1u8, 2] {
+        let mut h = History::new();
+        let stale_frontier = h.env.market_state().1.next_market_id;
+        let old_grant = retained_matcher_grant(&h, stale_frontier);
+        let old_grant_sequence = h.grant_sequence;
+
+        h.replace(asset, &mut evidence);
+        assert!(
+            h.env.market_state().1.next_market_id > stale_frontier,
+            "public asset replacement must advance the market generation frontier"
+        );
+        assert_eq!(
+            h.grant_sequence, old_grant_sequence,
+            "asset replacement alone must not consume matcher grant sequence"
+        );
+
+        let before = h.frame();
+        let failed = h
+            .env
+            .svm
+            .send_transaction(old_grant)
+            .expect_err("old retained matcher grant must reject after asset generation moves");
+        assert_eq!(
+            failed.err,
+            TransactionError::InstructionError(
+                2,
+                InstructionError::Custom(PercolatorError::EngineStale as u32)
+            ),
+            "stale retained grant failed with unexpected logs: {:#?}",
+            failed.meta.logs
+        );
+        assert_eq!(
+            h.frame(),
+            before,
+            "stale retained grant rejection must roll back every economic account"
+        );
+        assert_eq!(
+            h.grant_sequence, old_grant_sequence,
+            "rejected retained grant must not consume retry state"
+        );
+        peak_cu = peak_cu.max(failed.meta.compute_units_consumed);
+        stale_rejections += 1;
+
+        let fresh_frontier = h.env.market_state().1.next_market_id;
+        assert_ne!(fresh_frontier, stale_frontier);
+        let fresh_grant = retained_matcher_grant(&h, fresh_frontier);
+        h.env
+            .svm
+            .send_transaction(fresh_grant)
+            .expect("fresh retained matcher grant binds the current generation frontier");
+        h.grant_sequence += 1;
+        h.assert_state();
+    }
+
+    assert_eq!(stale_rejections, 2);
+    assert_cu_within(
+        "INV-012 retained grant generation-frontier rejection",
+        peak_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    println!(
+        "INV-012 row414 grant frontier: stale_rejections={stale_rejections}, lifecycle_peak={}, rejection_peak={peak_cu}",
+        evidence.writer_cu
+    );
+}
+
 #[test]
 fn v16_program_reused_asset_requires_current_generation_and_fresh_matcher_output() {
     let mut evidence = Evidence::default();

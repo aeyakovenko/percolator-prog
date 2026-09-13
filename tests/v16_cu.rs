@@ -2910,6 +2910,7 @@ impl V16CuEnv {
         let portfolio_id = self.portfolio_id(maker_account);
         let expected_sequence = self.portfolio_matcher_sequence(maker_account);
         let position_epoch = self.portfolio_position_epoch(maker_account);
+        let asset_generation_frontier = self.market_state().1.next_market_id;
         self.svm.expire_blockhash();
         let mut accounts = vec![
             AccountMeta::new(maker_owner.pubkey(), true),
@@ -2928,6 +2929,7 @@ impl V16CuEnv {
                 portfolio_id,
                 expected_sequence,
                 position_epoch,
+                asset_generation_frontier,
                 enabled,
                 trade_fee_cap_bps,
                 expiry_slot,

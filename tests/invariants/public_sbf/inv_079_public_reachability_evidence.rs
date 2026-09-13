@@ -773,11 +773,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
     assert_eq!(rows, 165, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(
-        missing, 19,
+        missing, 18,
         "post-PR135 counterexamples remain missing generic invariant-owned discovery coverage"
     );
     assert_eq!(
-        independent, 129,
+        independent, 130,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
@@ -822,6 +822,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             12,
             &[12],
             include_str!("../stateful/inv_012_capability_and_delegate_scope.rs"),
+        ),
+        (
+            12,
+            &[12],
+            include_str!("../cu/inv_012_reused_asset_return_binding.rs"),
         ),
         (
             14,

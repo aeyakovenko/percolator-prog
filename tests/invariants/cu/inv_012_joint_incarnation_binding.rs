@@ -383,6 +383,7 @@ impl History {
                         portfolio_id: self.env.portfolio_id(self.portfolios[1]),
                         expected_sequence: self.grant_sequence,
                         position_epoch: self.env.portfolio_position_epoch(self.portfolios[1]),
+                        asset_generation_frontier: self.env.market_state().1.next_market_id,
                         enabled: 1,
                         trade_fee_cap_bps: FEE_CAP,
                         expiry_slot: EXPIRY,

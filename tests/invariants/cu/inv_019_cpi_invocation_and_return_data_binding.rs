@@ -1678,6 +1678,7 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
             portfolio_id,
             expected_sequence,
             position_epoch,
+            asset_generation_frontier: env.market_state().1.next_market_id,
             enabled: 1,
             trade_fee_cap_bps: 10_000,
             expiry_slot: u64::MAX,

@@ -28,8 +28,9 @@
 //! The sibling cross-asset episode witness retains an asset-0 exit while the same live grant
 //! opens and closes asset 1 against a third portfolio. Both CPI consumers reject the old LP
 //! episode before CPI even though the requested leg and grant are unchanged; refreshing only
-//! that episode restores the exit. This is sampled evidence for the remaining 412/414 scope
-//! obligations, not closure of generation/incarnation or arbitrary lifecycle histories.
+//! that episode restores the exit. The retained-grant frontier regression closes the row 414
+//! grant-generation hole; broader generation/incarnation and arbitrary lifecycle histories remain
+//! sampled rather than exhaustively proven.
 //! The joint-incarnation product composes two asset replacements with same-tuple regrant in
 //! every order. Both CPI consumers reject every proper subset of refreshed bindings, while
 //! fully current requests retain funded entry, cross-route exit, and complete owner withdrawal.
@@ -1115,6 +1116,7 @@ fn v16_program_non_owner_cannot_revoke_lp_matcher_capability() {
             portfolio_id,
             expected_sequence,
             position_epoch,
+            asset_generation_frontier: env.market_state().1.next_market_id,
             enabled: 0,
             trade_fee_cap_bps: 0,
             expiry_slot: 0,
@@ -1419,6 +1421,7 @@ fn v16_attack_cross_lp_cannot_overwrite_lp_matcher_config() {
             portfolio_id,
             expected_sequence,
             position_epoch,
+            asset_generation_frontier: env.market_state().1.next_market_id,
             enabled: 0,
             trade_fee_cap_bps: 0,
             expiry_slot: 0,
@@ -1490,6 +1493,7 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
                 portfolio_id,
                 expected_sequence,
                 position_epoch,
+                asset_generation_frontier: env.market_state().1.next_market_id,
                 enabled: 1,
                 trade_fee_cap_bps: 10_000,
                 expiry_slot: u64::MAX,

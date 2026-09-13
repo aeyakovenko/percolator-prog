@@ -1010,11 +1010,13 @@ impl V16Svm {
         let portfolio_id = self.primary_portfolio_id(actor_index);
         let expected_sequence = self.primary_portfolio_matcher_sequence(actor_index);
         let position_epoch = self.primary_portfolio_position_epoch(actor_index);
+        let asset_generation_frontier = self.primary_market_state().1.next_market_id;
         self.send_program(
             ProgInstruction::SetMatcherConfig {
                 portfolio_id,
                 expected_sequence,
                 position_epoch,
+                asset_generation_frontier,
                 enabled: 1,
                 trade_fee_cap_bps: 10_000,
                 expiry_slot: u64::MAX,
@@ -1054,6 +1056,7 @@ impl V16Svm {
         let portfolio_id = self.primary_portfolio_id(actor_index);
         let expected_sequence = self.primary_portfolio_matcher_sequence(actor_index);
         let position_epoch = self.primary_portfolio_position_epoch(actor_index);
+        let asset_generation_frontier = self.primary_market_state().1.next_market_id;
         let owner = copy_keypair(&self.actors[actor_index].signer);
         let portfolio = self.actors[actor_index].portfolio;
         let matcher_context = self.actors[actor_index].matcher_context;
@@ -1075,6 +1078,7 @@ impl V16Svm {
                 portfolio_id,
                 expected_sequence,
                 position_epoch,
+                asset_generation_frontier,
                 enabled,
                 trade_fee_cap_bps,
                 expiry_slot: if enabled == 0 { 0 } else { u64::MAX },
@@ -1106,6 +1110,7 @@ impl V16Svm {
         let portfolio_id = self.primary_portfolio_id(actor_index);
         let expected_sequence = self.primary_portfolio_matcher_sequence(actor_index);
         let position_epoch = self.primary_portfolio_position_epoch(actor_index);
+        let asset_generation_frontier = self.primary_market_state().1.next_market_id;
         let owner = copy_keypair(&self.actors[actor_index].signer);
         let portfolio = self.actors[actor_index].portfolio;
         let matcher_context = self.actors[actor_index].matcher_context;
@@ -1127,6 +1132,7 @@ impl V16Svm {
                 portfolio_id,
                 expected_sequence,
                 position_epoch,
+                asset_generation_frontier,
                 enabled,
                 trade_fee_cap_bps,
                 expiry_slot: if enabled == 0 { 0 } else { u64::MAX },
