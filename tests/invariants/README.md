@@ -1,5 +1,111 @@
 # Invariant-owned test coverage
 
+## PR135 Scope I generated grant bindings (2026-09-13)
+
+Owner: [cu/inv_012_generated_grant_bindings.rs](cu/inv_012_generated_grant_bindings.rs),
+mounted under `inv_012_capability_and_delegate_scope::joint_incarnation_binding::generated_grant_bindings`.
+The probe exhausts all 27 three-step words over replacement of asset 1,
+replacement of asset 2, and a matched position round trip. Two route schedules
+and both signs give 108 public LiteSVM worlds, including 72 mixed words.
+A funded asset-0 sibling remains exposed during every word. Repeated slot reuse
+and replacement after actual CPI exposure are required by nonzero counters.
+
+An input journal starts at episode 1/frontier 4 and advances them only from the
+committed word. At every word prefix, original owner-signed grants are simulated
+without changing their bytes. The Cartesian product of historical episode and
+frontier values also constructs pairs that never appeared together. Current
+pairs remain admissible; episode-only, frontier-only and combined mismatches
+must deliver `EngineStale` at instruction 2 with exact Account rollback before
+matcher invocation. Sequence, tuple, cap and expiry remain unchanged throughout
+the word, keeping those guards from masking either binding. Every archived
+signature is delivered after the word; only the final current grant commits.
+
+Complete frames include compiled transaction accounts, both owners and
+portfolios, market/admin, matcher program/context/delegate, mint, vault and both
+token destinations. The known signature fee is the only payer adjustment,
+including failed simulations because LiteSVM 0.1 debits their payer. A successful
+same-tuple grant changes exactly the eight-byte sequence lane in the complete
+LP Account. Input-derived positions, OI, epochs, generation IDs, capital, PnL,
+custody and mint supply compose with those frames. Both CPI consumers then open
+and close exposure, the persistent sibling exits, and both owners withdraw
+exactly their original 1,000,000 atoms.
+
+The added scope is generated retained **grant admission**, with independent
+episode/frontier combinations at every word prefix. The mounted same-asset and
+cross-asset episode selectors retain CPI exits. The joint-incarnation parent
+combines request generations with grant sequence replacement. Neither supplies
+this generated owner-grant admission matrix. The existing public fixture is
+reused; protocol accounts are constructed through System/SPL/wrapper routes.
+
+Classification impact: bounded generated INV-012 conformance, with adjacent
+INV-002/004/007/024/081/089 evidence. On requested base `bba6bab4`, rows 412 and
+414 already read `COVERED` in `coverage_reopenings.tsv`; their entries in
+`open_findings.tsv` are historical inventory. Those labels are unchanged.
+INV-012 remains `SUPPORTED / TRANSITION_SYSTEM / PUBLIC_ROUTE / SAMPLED /
+GLOBAL_CONDITIONAL_TCB`. This adds no independent-discovery claim or production
+change. Longer words, automatic revocation writers, other owner/program/delegate
+identities, fee/expiry boundaries, Recovery and maximum shapes remain outside
+this increment. Prices are fixed, trading fees are zero, and each batch has one
+leg. Prefixes here are completed replacement or round-trip steps, not every
+internal lifecycle/position instruction.
+
+Validation uses fresh default-feature program and matcher SBF builds from the
+isolated worktree, with engine `394fd0bf`. SHA-256:
+
+- Program: `71833878f8d52373e501e70ed21d88495051695f2533b4c55362ae90e737aa9d`.
+- Matcher: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+The new exact selector passes 1/1 in 69.82s: 1,404 grant simulations (756 current,
+648 stale), 1,164 exact stale deliveries, 108 committed current grants, 864 CPI
+fills and 216 complete owner withdrawals. Stale deliveries split into 268
+episode-only, 584 frontier-only and 312 combined mismatches. There are 28 used
+slot replacements and 64 repeated replacements. Peak grant/fill/writer/custody
+costs are 12,203 / 466,363 / 183,863 / 147,768 CU, respectively. The exact listing
+selects one test. The parent joint-incarnation selector passes 1/1 (24 worlds).
+The four related exact selectors below pass 4/4; formatter and whitespace checks
+also pass.
+Three metadata selectors pass (charter/index, authoritative status and audit
+summary). `v16_post_pr135_counterexamples_reopen_every_affected_invariant` fails
+at line 2050 because the expected reopening set includes inventory row 435 and
+the actual reopening set omits it. The identical failure reproduces on a clean,
+detached `bba6bab44a92ef647a49dcd9fad2cb29febfd333` worktree. Neither that selector
+nor the status/reopening ledgers are changed by Scope I.
+
+Exact commands (run from `/home/anatoly/pr135-inv012-generation-episode-20260913`):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/pr135-inv012-generation-episode-20260913-target
+export CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+export PERCOLATOR_FUZZ_SBF=$CARGO_TARGET_DIR/deploy/percolator_prog.so
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu --test v16_program_fuzz_regressions --no-run
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::generated_grant_bindings::v16_program_generated_retained_grants_bind_each_episode_and_generation_prefix -- --exact --list
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::generated_grant_bindings::v16_program_generated_retained_grants_bind_each_episode_and_generation_prefix -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::joint_incarnation_binding::v16_program_joint_replacements_require_every_bound_incarnation -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_012_capability_and_delegate_scope::retained_same_asset_episode::v16_program_retained_exit_cannot_follow_lp_through_same_asset_flat_reopen \
+  inv_012_capability_and_delegate_scope::retained_cross_asset_episode::v16_program_retained_exit_rejects_cross_asset_episode_under_live_matcher_grant \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::reused_asset_return_binding::v16_program_retained_matcher_grant_rejects_after_asset_generation_frontier_moves \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::used_generation_lifecycle::v16_program_used_asset_reuse_with_live_sibling_preserves_authorized_exit
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row \
+  inv_079_public_reachability_evidence::v16_post_pr135_counterexamples_reopen_every_affected_invariant
+cargo fmt --all -- --check
+git diff --check
+sha256sum "$PERCOLATOR_FUZZ_SBF" tests/fixtures/auth_matcher/target/deploy/auth_matcher.so
+```
+
+Baseline metadata reproduction, with the same exported build environment:
+
+```sh
+git worktree add --detach /home/anatoly/pr135-inv012-generation-episode-baseline-20260913 bba6bab4
+cd /home/anatoly/pr135-inv012-generation-episode-baseline-20260913
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_post_pr135_counterexamples_reopen_every_affected_invariant -- --exact --nocapture --test-threads=1
+```
+
 ## PR135 Scope H target arrival and carry entitlement (2026-09-13)
 
 Owner: [cu/inv_045_target_arrival_entitlement.rs](cu/inv_045_target_arrival_entitlement.rs),

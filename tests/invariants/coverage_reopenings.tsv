@@ -1870,3 +1870,10 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Nonzero fees and input-derived payouts compose across collection/trade routes.
 # See scope_f_first_admission_audit_20260913.md; row 434 stays COVERED.
 434	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-055,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-risk-admission	all-accrued-liabilities-precede-every-risk-increasing-admission-even-after-flat-account-history	COVERED
+# Row 435 inventory reconciliation (2026-09-13): mixed-role resolved debt attribution
+# is the still-open same-family holdout where creditor and debtor roles coexist in
+# one portfolio rather than the distinct-portfolio cohorts exercised by Scope B.
+# This is a roster fix only: no selector, status promotion, production change or
+# closure claim is added. The row remains OPEN until a public invariant probe covers
+# the same-portfolio mixed-role cell.
+435	LoF	BLOCKER	INV-039	INV-039	pending-obligation+x-resolution+x-mixed-role-attribution	mixed-role-resolved-debt-attribution-preserves-owner-obligation-through-resolution	OPEN

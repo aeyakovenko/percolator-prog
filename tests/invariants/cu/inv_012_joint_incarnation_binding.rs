@@ -49,6 +49,9 @@ mod reused_asset_return_binding;
 #[path = "inv_012_repriced_generation_consent.rs"]
 mod repriced_generation_consent;
 
+#[path = "inv_012_generated_grant_bindings.rs"]
+mod generated_grant_bindings;
+
 const CAPITAL: u128 = 1_000_000;
 const PRICE: u64 = 100;
 const SLOT: u64 = 1;
