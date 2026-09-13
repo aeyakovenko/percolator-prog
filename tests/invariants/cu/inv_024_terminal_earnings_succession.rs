@@ -58,6 +58,10 @@ pub(crate) use provider_custody_replacement::verify_provider_custody_replacement
 mod provider_keeper_ledger_handoff;
 pub(crate) use provider_keeper_ledger_handoff::verify_provider_keeper_ledger_handoff;
 
+#[path = "inv_073_distinct_provider_disposition.rs"]
+mod distinct_provider_disposition;
+pub(crate) use distinct_provider_disposition::verify_distinct_provider_disposition;
+
 #[path = "inv_073_native_provider_redemption.rs"]
 mod native_provider_redemption;
 pub(crate) use native_provider_redemption::verify_native_provider_redemption;

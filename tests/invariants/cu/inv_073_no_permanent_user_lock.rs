@@ -117,6 +117,11 @@ fn v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_sign
 }
 
 #[test]
+fn v16_program_distinct_absent_providers_preserve_each_others_terminal_fee_claims() {
+    crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_distinct_provider_disposition();
+}
+
+#[test]
 fn v16_program_absent_native_provider_redeemed_prefix_preserves_public_remainder_and_close() {
     crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_native_provider_redemption();
 }

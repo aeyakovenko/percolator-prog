@@ -88,6 +88,89 @@ cargo clean --target-dir "$CARGO_TARGET_DIR"
 rmdir "$TMPDIR"
 ```
 
+## INV-073 distinct absent provider claims (row 420, 2026-09-13)
+
+Owner: [cu/inv_073_distinct_provider_disposition.rs](cu/inv_073_distinct_provider_disposition.rs).
+Exactly one INV-073 selector:
+`inv_073_no_permanent_user_lock::v16_program_distinct_absent_providers_preserve_each_others_terminal_fee_claims`.
+The implementation is mounted beside the shared INV-024 terminal transaction
+checker. Requirement:
+`terminal-economic-progress-does-not-require-an-adversarial-provider-signature`.
+
+Two public LiteSVM worlds reverse the payout order of two independent provider
+authorities on assets 0 and 1, domains 1 and 3, sharing one canonical SPL vault.
+Each deposits 100,000 atoms before both provider keys are dropped. Separate
+public trade cohorts then earn unequal, independently calculated 875/1,749 fee
+atoms. Four unsigned user exits and owner-signed portfolio deletion leave the
+two provider claims as the only economic stocks. Each user receives its exact
+capital plus PnL minus its own domain's fee; fixed mint supply is 4,305,004 atoms.
+
+A separate keeper pays both principal claims and all of the first provider's
+fees, lazily initializing that provider's ledger. Paying all but one atom of the
+second provider's fees followed by administrator-signed slab closure rejects
+`EngineLockActive` after the successful payment. Complete Accounts for every
+compiled key and all tracked economic accounts roll back, including SPL custody,
+market bytes, the second ledger's first initialization and lamports; only the
+calculated network fee leaves the keeper. The same partial payment then commits
+with only the keeper signature, followed by the exact last atom. Each ledger
+binds its own market, domain, authority, observed earnings and paid total. Both
+domain stocks, global earnings, full SPL images, mint, authority profiles and
+control sequences are checked after each transition with independent stock and
+reservation censuses. Final administrative closure preserves all payouts and
+both ledgers, closes the empty vault and refunds exact rent into a canonical
+market tombstone. Final provider custody is 100,875/101,749 atoms in both orders.
+
+The new relation is **simultaneous terminal claims held by distinct absent
+providers across asset domains**, including the last remaining provider's
+one-atom claim after the other domain is fully paid. Existing row420 custody,
+native redemption and keeper/ledger handoff use one provider. INV-088's
+two-domain earnings summary test pays a signing admin in Live mode, uses host
+economic fixtures, and does not test independent absent recipients or terminal
+closure. Row433 dual-quote reserve progress shares one provider and has no earned
+fees. Neither authority nor ledger handoff is part of this increment.
+
+**Row 420 remains OPEN; no invariant status changes.** This finite family covers
+one classic SPL quote, two assets with fresh principal, fixed positive earnings,
+two payout orders and an available administrator and portfolio owners for
+mechanical cleanup. It does not establish arbitrary histories, absent cleanup
+authorities, expiry/recredit/loss products, Recovery or other quote rails. All
+initialized economic state comes from System/SPL/ATA/wrapper instructions;
+airdrop, Clock and program loading are environment fixtures. Host image edits
+only construct expected snapshots. No production or engine changes are made.
+
+Base: `57f1a6394c2643666c9cf94debe1366d6545a7cd` on
+`origin/codex/astra-open-holdout-ledger-20260912`. Worktree:
+`/home/anatoly/percolator-row420-invariants`; branch:
+`codex/row420-provider-independent-disposition`. The default-feature wrapper and
+auth matcher were rebuilt locally, locked/offline, with platform-tools v1.52;
+private build caches were copied from `/tmp/percolator-astra-row429-target-20260912`.
+Wrapper SHA-256: `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+Validation: exact new selector **1/1 in 1.30s**, ten unsigned user settlement
+calls, ten keeper-only reserve payments, two exact rejected-bundle rollbacks
+and two slab closures. Peak measured CU: **255,716 <= 600,000**. Both required
+INV-079 metadata selectors pass 1/1; formatting and whitespace checks pass.
+Development corrected two fixture assumptions: settlement needs round-robin
+cohort scheduling, and a fully withdrawn bucket becomes `Expired` before its
+time expiry. No implementation violation was observed. Existing dead-code and
+Solana future-compatibility warnings remain; no full suite or Kani run is claimed.
+
+Commands, from the isolated worktree:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target/build" TMPDIR="$PWD/target/tmp"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir target/build/deploy -- --locked
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --manifest-path tests/fixtures/auth_matcher/Cargo.toml --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir tests/fixtures/auth_matcher/target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_073_no_permanent_user_lock::v16_program_distinct_absent_providers_preserve_each_others_terminal_fee_claims -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check
+```
+
 ## INV-028 reserved domains through matcher renewal rollback (row 423, 2026-09-13)
 
 Owner: [cu/inv_028_reserved_domain_renewal.rs](cu/inv_028_reserved_domain_renewal.rs),

@@ -714,6 +714,20 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # fixture assertion. No production change or implementation violation. OPEN limits:
 # active claims, economic loss/recredit, Recovery, other rails, multiple providers,
 # absent market authority/portfolio deletion signers and arbitrary histories.
+# Row 420 bounded conformance (2026-09-13): cu/inv_073_distinct_provider_disposition.rs.
+# Selector: inv_073_no_permanent_user_lock::v16_program_distinct_absent_providers_preserve_each_others_terminal_fee_claims.
+# Two absent provider authorities on assets 0/1 share canonical SPL custody and
+# retain unequal 875/1749 earned fees after four unsigned user exits. Both payout
+# orders preserve the other domain's unpaid claim and separate lazy ledgers.
+# After one provider is fully paid, the other's fee-minus-one payment followed by
+# premature close rolls back all Accounts, including first ledger initialization.
+# Keeper-only retry and last-atom payout precede rent-exact administrative closure.
+# This adds distinct simultaneous absent holders beyond row420's single provider,
+# INV-088's signed Live summary and row433's shared-provider/no-fee dual-quote worlds.
+# Exact selector PASS 1/1 in 1.30s; ten unsigned user calls, ten reserve payments,
+# two rollbacks/two closures; peak 255716 CU <= 600000. Both metadata gates PASS.
+# Public construction only; no production changes, status promotion or generic
+# closure claim. README records exact selectors, build provenance and limitations.
 420	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-026,INV-027,INV-032,INV-063,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	provider-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-provider-signature	OPEN
 # Row 421 bounded conformance (2026-09-12): cu/inv_073_frozen_insurance_remainder.rs,
 # v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement.
