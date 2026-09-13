@@ -1,5 +1,100 @@
 # Invariant-owned test coverage
 
+## INV-008 co-owned withdrawal stock and sibling retry (row 415, 2026-09-13)
+
+Owner: [cu/inv_008_coowned_withdrawal_stock.rs](cu/inv_008_coowned_withdrawal_stock.rs),
+mounted by `cu/inv_008_intent_uniqueness_and_bounded_replay.rs`. Exact selector:
+`inv_008_intent_uniqueness_and_bounded_replay::coowned_withdrawal_stock::v16_coowned_withdrawals_preserve_separate_budgets_after_passive_replenishment`.
+Requirement: `a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution`.
+
+Eight public LiteSVM histories cross original amounts 1/37, which co-owned
+portfolio pays first, and both passive-credit orders. The portfolios share one
+signer and SPL destination, and begin with equal amounts and owner sequence 1
+but distinct public portfolio IDs. Two separately owned fee sources create
+82/41 atoms of recipient capital through `SyncMaintenanceFee` at fixed Clock 2,
+with rate 41 and 100% keeper share. This replenishment advances neither recipient's
+sequence. The already-paid request stays stale, while the sibling's original
+unexecuted request pays exactly its signed amount after replenishment and leaves
+all of its new reward stock. Separate sequence-2 consents pay the two rewards.
+
+The first rejected bundle executes both original SPL payouts and both passive
+credits before an `EngineStale` suffix rolls them all back. After one payment
+commits, another failed bundle rolls back both credits and the sibling payout.
+A credit-only prefix, a sibling-payout prefix and a two-fresh-payout prefix also
+roll back before their unchanged requests subsequently commit. Rejection pins
+the exact application instruction index plus the two compute-budget instructions;
+wrapper/SPL success logs prove the intended prefix executed. All tracked and
+compiled non-payer Accounts compare exactly, including metadata, lamports and
+absence; the payer loses only the exact signature fee. Successful operations
+preserve complete unmentioned portfolio Accounts, and passive credits preserve
+complete mint, vault and wallet Accounts.
+
+Input-derived per-portfolio books check capital, fee cursors, consent sequences,
+IDs, position epochs, zero positions/PnL/reserved claims, total capital, accounting
+vault, insurance budgets, controls, fixed mint supply, shared SPL receipts and the
+untouched 103-atom peer after every transaction. Final receipts are separately
+`amount + 82` and `amount + 41`; the common wallet holds `2 * amount + 123`.
+Both subject portfolios have zero capital; sources retain 421/560 atoms and
+the vault holds exactly 1,084 atoms, including the peer. Every delivery is signed
+before the first payment with retained instruction bytes/metas and a distinct
+CU envelope. Serialized transactions remain unchanged until delivery; no duplicate
+signature cache, blockhash refresh or rebinding supplies the retry evidence.
+System, ATA, SPL and wrapper instructions construct all economic accounts; mint
+authority is revoked before retained execution. No initialized program bytes
+are injected, edited or restored.
+
+Net-new scope is **independent live and consumed portfolio consents at one shared
+signer/destination**, composed with two passive stock sources and joint payout
+rollback. The existing passive-reward and mixed stock-history owners have one
+withdrawal recipient; the recreation owner changes the portfolio incarnation.
+Neither owns this fixed-incarnation sibling consent/payout relation. This test
+does not add another standalone reward, redeposit or custody-rail probe.
+
+**Row 415 remains OPEN.** This is a finite conformance schedule, not a generic
+withdrawal-stock generator/oracle or a vulnerable/fixed-pin comparison. Insurance
+and backing withdrawals, arbitrary histories, recipient/source aliasing, other
+fee shares, owner or incarnation replacement, other quote rails, PnL conversion,
+terminal modes, durable nonces and detached signatures remain outside this
+increment. Production code, dependency pins and invariant statuses are unchanged;
+no current public-interface property violation was observed.
+
+Base: `origin/codex/astra-open-holdout-ledger-20260912` at
+`9c6fe4b1fc129718f33d529978485792232d6d5d`. Branch:
+`codex/row415-withdrawal-stock-retry-20260913`; isolated worktree:
+`/home/anatoly/percolator-row415-withdrawal-stock-retry-20260913`.
+The main checkout was not edited. Host Rust/Cargo 1.90.0 and LiteSVM 0.1.0;
+the private default-feature SBF rebuild uses platform-tools v1.52, Anchor v2
+and locked engine `394fd0bf2cb7d73df425eb3754dc3be1a0c44336`. SBF SHA-256:
+`dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
+A private copy of an existing target cache seeds the build; no shared target is
+written. The exact selector passes 1/1: eight worlds, 136 transactions, 88 full
+rollbacks, 48 rolled-back SPL payouts and 32 committed payouts. Peak **328,376 CU**
+is below the 400,000-CU bundle limit; standalone transactions retain the existing
+300,000-CU custody limit. An initial run passed its economic/rejection checks but
+the five-instruction bundle exceeded the mistakenly reused standalone limit at
+325,376 CU. Correcting that test-only limit was not a production fix.
+
+The two INV-079 metadata selectors, formatting and Git whitespace checks pass.
+No broad behavioral suite or other row selector is claimed. Exact commands from
+the isolated worktree follow; the private target is cleaned after validation,
+with the worktree and one unpushed local commit retained.
+
+```bash
+cp -a --reflink=auto /dev/shm/row415-retained-withdrawal-20260912-target /dev/shm/row415-coowned-retry-20260913-target
+export CARGO_TARGET_DIR=/dev/shm/row415-coowned-retry-20260913-target
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+env RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc CARGO_NET_OFFLINE=true cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+sha256sum "$PERCOLATOR_FUZZ_SBF"
+cargo test --locked --offline --test v16_cu inv_008_intent_uniqueness_and_bounded_replay::coowned_withdrawal_stock::v16_coowned_withdrawals_preserve_separate_budgets_after_passive_replenishment -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete -- --exact --quiet --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming -- --exact --quiet --test-threads=1
+cargo fmt --all -- --check
+git diff --check && git diff --cached --check
+git show --format= --check HEAD
+cargo clean --target-dir "$CARGO_TARGET_DIR"
+```
+
 ## INV-045/038/085 retained funding-checkpoint retry (row 425, 2026-09-13)
 
 Owner: [cu/inv_045_retained_funding_retry.rs](cu/inv_045_retained_funding_retry.rs),

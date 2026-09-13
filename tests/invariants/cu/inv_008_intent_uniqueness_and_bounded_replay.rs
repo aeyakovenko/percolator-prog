@@ -51,6 +51,9 @@ mod insurance_destination_epoch_retry;
 #[path = "inv_008_recreated_withdrawal_stock.rs"]
 mod recreated_withdrawal_stock;
 
+#[path = "inv_008_coowned_withdrawal_stock.rs"]
+mod coowned_withdrawal_stock;
+
 fn braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
         .find(marker)

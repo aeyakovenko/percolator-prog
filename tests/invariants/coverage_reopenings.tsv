@@ -267,6 +267,31 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Exact commands: README section "INV-008 paid withdrawal across portfolio stock
 # recreation" runs this v16_cu selector with --exact --nocapture, both requested
 # INV-079 metadata selectors, fmt and Git whitespace checks using private targets.
+# 415 bounded co-owned portfolio conformance (2026-09-13):
+# cu/inv_008_coowned_withdrawal_stock.rs, mounted under
+# inv_008_intent_uniqueness_and_bounded_replay::coowned_withdrawal_stock::
+# v16_coowned_withdrawals_preserve_separate_budgets_after_passive_replenishment.
+# Eight histories cross amounts 1/37, first-paid sibling and two passive-credit
+# orders. Equal original amounts/sequences share one signer/SPL destination;
+# later 82/41-atom rewards do not revive paid consent or consume the sibling's
+# unexecuted consent on rollback. Both original payouts and both stock credits,
+# plus two fresh reward payouts, execute in prefixes before exact stale rollback.
+# Separate input books pin per-portfolio stocks/sequences, full non-payer Accounts,
+# exact payer fees, unchanged custody on credits, fixed supply and final 1084 vault.
+# 136 transactions, 88 full rollbacks, 48 rolled-back SPL payouts, 32 committed
+# payouts; peak 328376 CU, limits 400000 per bundle / 300000 standalone.
+# Distinct from single-recipient stock histories and portfolio recreation.
+# Finite conformance only: generic oracle, insurance/backing rails, arbitrary
+# histories, other fee/quote/identity modes and detached/durable consent remain gaps.
+# No initialized program-byte mutation, production fix or row/status promotion.
+# Base origin/codex/astra-open-holdout-ledger-20260912:
+# 9c6fe4b1fc129718f33d529978485792232d6d5d; branch/worktree/build SHA in README.
+# Default SBF rebuilt locked/offline with platform-tools v1.52; private target
+# /dev/shm/row415-coowned-retry-20260913-target cleaned after validation.
+# Exact commands/environment: README section "INV-008 co-owned withdrawal stock
+# and sibling retry" includes the new --exact selector, both INV-079 metadata
+# selectors, cargo fmt --all -- --check, git diff --check && git diff --cached
+# --check, git show --format= --check HEAD and cargo clean --target-dir.
 415	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-011,INV-024,INV-031,INV-064	retained-withdrawal+x-stock-replenishment+x-retry	a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution	OPEN
 # 416/429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_coalescence.rs,
 # v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements.
