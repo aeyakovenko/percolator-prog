@@ -88,6 +88,9 @@ mod receipt_late_fee_reclassification;
 #[path = "inv_067_receipt_destination_recreation.rs"]
 mod receipt_destination_recreation;
 
+#[path = "inv_067_terminal_claim_episode_materialization.rs"]
+mod claim_episode_materialization;
+
 #[test]
 fn v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once() {
     late_expiry::verify_receipt_payout_and_portfolio_close_retry();

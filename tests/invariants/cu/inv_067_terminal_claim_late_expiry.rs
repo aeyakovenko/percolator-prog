@@ -77,13 +77,11 @@ impl World {
     }
 
     pub(super) fn before_receipts_with_staggered_sources() -> Self {
-        Self::build_before_receipts(
-            [Keypair::new(), Keypair::new()],
-            None,
-            BACKING,
-            SourceShape::Staggered,
-            0,
-        )
+        Self::before_receipts_with_staggered_sources_and_owners([Keypair::new(), Keypair::new()])
+    }
+
+    pub(super) fn before_receipts_with_staggered_sources_and_owners(owners: [Keypair; 2]) -> Self {
+        Self::build_before_receipts(owners, None, BACKING, SourceShape::Staggered, 0)
     }
 
     pub(super) fn before_receipts_with_split_source_claimants() -> Self {

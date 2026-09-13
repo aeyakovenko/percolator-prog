@@ -1,5 +1,23 @@
 # Invariant-owned test coverage
 
+## PR135 Scope U terminal claim episodes (2026-09-13)
+
+Owner: [cu/inv_067_terminal_claim_episode_materialization.rs](cu/inv_067_terminal_claim_episode_materialization.rs),
+mounted under `inv_067_terminal_payout_completeness_and_exact_once_settlement::claim_episode_materialization`.
+Twelve public LiteSVM histories cross co-owned claimant order, receipt creation
+before/between/after two backing expiries, and exact/one-slot-late normalization.
+The episode book binds market, portfolio, owner, incarnation, position epoch,
+receipt face, prior bound, snapshot and cumulative paid entitlement. Repeated
+failed release/creation/payment prefixes restore complete Accounts; unchanged
+instructions retry through final payouts and all six portfolio deletions.
+Aggregate-neutral receipt/payment observation mutations must fail the same
+episode equality checks even though both claimants share an SPL destination.
+
+This is bounded INV-067 evidence with related INV-010/024/029/063/066/068/070
+checks. Row 417 remains OPEN and all machine invariant statuses are unchanged.
+The [Scope U audit](pr135_scope_u_terminal_claim_identity_late_expiry_20260913.md)
+records prior coverage, the new composition, guarantee, limits and exact commands.
+
 ## PR135 Scope X native residue disposition (2026-09-13)
 
 [Scope X](pr135_scope_x_native_terminal_residue_disposition_20260913.md) adds one

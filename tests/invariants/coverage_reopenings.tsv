@@ -1,5 +1,12 @@
 # PR410-434 are post-hoc holdout/conformance misses; rows left OPEN still affect invariant status.
 # This is a coverage-fidelity ledger, not independent-discovery or whole-invariant proof evidence.
+# Scope U bounded conformance for row 417 (2026-09-13):
+# cu/inv_067_terminal_claim_episode_materialization.rs composes two co-owned,
+# unequal claim episodes with deferred receipt creation, two backing expiries,
+# repeated complete Account rollback, unchanged retries and terminal user payouts.
+# The input-owned episode book rejects aggregate-neutral paid/receipt attribution
+# mutations despite a shared SPL destination. See pr135_scope_u_terminal_claim_identity_late_expiry_20260913.md.
+# Row 417 stays OPEN; all invariant verdicts and other row statuses are unchanged.
 # Scope D bounded conformance for rows 410/416/429 (2026-09-13):
 # cu/inv_024_generated_reserve_entitlement.rs runs eight seeds in sixteen public
 # LiteSVM histories, 144 funded handoffs and all twelve directed owner/role pairs.
