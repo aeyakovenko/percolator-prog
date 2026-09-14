@@ -7,8 +7,85 @@ use super::*;
 #[path = "inv_045_paid_origin_routes.rs"]
 mod paid_origin_routes;
 
+#[path = "inv_045_paid_origin_hybrid_recipient.rs"]
+mod paid_origin_hybrid_recipient;
+
+fn observe_with_optional_recipient_report(
+    env: &V16CuEnv,
+    target: Pubkey,
+    signer: Pubkey,
+    target_report: Option<Pubkey>,
+    recipient_report: Option<Pubkey>,
+    reward: Option<Pubkey>,
+) -> Instruction {
+    let Some(recipient_report) = recipient_report else {
+        return observe(env, target, signer, target_report, reward);
+    };
+    let mut accounts = vec![
+        AccountMeta::new(signer, true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(target, false),
+    ];
+    if let Some(target_report) = target_report {
+        accounts.push(AccountMeta::new_readonly(target_report, false));
+        accounts.push(AccountMeta::new_readonly(recipient_report, false));
+    }
+    accounts.extend(reward.map(|key| AccountMeta::new(key, false)));
+    Instruction {
+        program_id: env.program_id,
+        accounts,
+        data: ProgInstruction::PermissionlessCrank {
+            now_slot: u64::MAX,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                },
+                CrankObservationHint {
+                    asset_index: 1,
+                    oracle_accounts: 1,
+                },
+            ],
+        }
+        .encode(),
+    }
+}
+
+fn refresh_with_optional_recipient_report(
+    env: &V16CuEnv,
+    portfolio: Pubkey,
+    signer: Pubkey,
+    report: Pubkey,
+    recipient_report: Option<Pubkey>,
+) -> Instruction {
+    if recipient_report.is_none() {
+        return paid_origin_routes::refresh(env, portfolio, signer, report);
+    }
+    observe_with_optional_recipient_report(
+        env,
+        portfolio,
+        signer,
+        Some(report),
+        recipient_report,
+        None,
+    )
+}
+
 fn run_retained_handoff(
     routes: Option<(bool, bool, bool)>,
+) -> ([i128; 5], [u128; 2], [u128; 4], u64) {
+    run_retained_handoff_impl(routes, false)
+}
+
+pub(super) fn run_retained_handoff_with_hybrid_recipient(
+    routes: (bool, bool, bool),
+) -> ([i128; 5], [u128; 2], [u128; 4], u64) {
+    run_retained_handoff_impl(Some(routes), true)
+}
+
+fn run_retained_handoff_impl(
+    routes: Option<(bool, bool, bool)>,
+    hybrid_recipient: bool,
 ) -> ([i128; 5], [u128; 2], [u128; 4], u64) {
     const SHARE: u128 = 3_333;
     const FRESH_TARGET: u64 = 980_000;
@@ -50,6 +127,27 @@ fn run_retained_handoff(
         0,
     )
     .expect("public direct-price Hybrid configuration");
+    let recipient_feed = [0x6e; 32];
+    let recipient_initial = if routes.is_some() && hybrid_recipient {
+        let report = env.set_pyth_price_with_conf(&recipient_feed, 100, -6, 0, 100);
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            1,
+            1,
+            0,
+            [recipient_feed, [0; 32], [0; 32]],
+            &[report],
+            1,
+            100,
+            0,
+            0,
+            1,
+            0,
+        )
+        .expect("public recipient Hybrid configuration");
+        Some(report)
+    } else {
+        None
+    };
     let owners: [Keypair; 5] = std::array::from_fn(|_| Keypair::new());
     let funded = std::array::from_fn::<_, 5, _>(|i| fund(&mut env, &owners[i], FUNDS[i]));
     let portfolios = funded.map(|pair| pair.0);
@@ -81,7 +179,9 @@ fn run_retained_handoff(
         0,
     );
     if routes.is_some() {
-        env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+        if !hybrid_recipient {
+            env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+        }
         peak_trade = peak_trade.max(env.trade_asset_with_cu(
             1,
             &owners[4],
@@ -92,9 +192,12 @@ fn run_retained_handoff(
             100,
             0,
         ));
-        env.push_auth_mark_for_asset_as_admin(1, 1, 120);
+        if !hybrid_recipient {
+            env.push_auth_mark_for_asset_as_admin(1, 1, 120);
+        }
     }
     let mut tracked = vec![env.market, env.mint, env.vault, env.admin.pubkey(), initial];
+    tracked.extend(recipient_initial);
     tracked.extend(portfolios);
     tracked.extend(tokens);
     tracked.extend(owners.each_ref().map(Signer::pubkey));
@@ -164,17 +267,38 @@ fn run_retained_handoff(
         } else {
             env.set_pyth_price_with_conf(&feed, FRESH_TARGET as i64, -6, 0, now)
         };
+        let recipient_report = if routes.is_some() && hybrid_recipient {
+            Some(env.set_pyth_price_with_conf(&recipient_feed, 120, -6, 0, now))
+        } else {
+            None
+        };
         let equivocal = env.set_pyth_price_with_conf(&feed, FRESH_TARGET as i64 + 1, -6, 0, now);
         tracked.extend([report, equivocal]);
-        let valid = observe(&env, target, owners[4].pubkey(), Some(report), Some(keeper));
-        let conflict = observe(
+        tracked.extend(recipient_report);
+        let valid = observe_with_optional_recipient_report(
+            &env,
+            target,
+            owners[4].pubkey(),
+            Some(report),
+            recipient_report,
+            Some(keeper),
+        );
+        let conflict = observe_with_optional_recipient_report(
             &env,
             target,
             owners[4].pubkey(),
             Some(equivocal),
+            recipient_report,
             Some(keeper),
         );
-        let missing = observe(&env, target, owners[4].pubkey(), None, None);
+        let missing = observe_with_optional_recipient_report(
+            &env,
+            target,
+            owners[4].pubkey(),
+            None,
+            recipient_report,
+            None,
+        );
         if let Some((_, _, publish_first)) = routes {
             peak_reject = peak_reject.max(submit(
                 &mut env,
@@ -185,8 +309,13 @@ fn run_retained_handoff(
             ));
             missing_rollbacks += 1;
             if publish_first {
-                let publication =
-                    paid_origin_routes::refresh(&env, keeper, owners[4].pubkey(), report);
+                let publication = refresh_with_optional_recipient_report(
+                    &env,
+                    keeper,
+                    owners[4].pubkey(),
+                    report,
+                    recipient_report,
+                );
                 peak_reject = peak_reject.max(submit(
                     &mut env,
                     &owners[4],
@@ -357,7 +486,13 @@ fn run_retained_handoff(
             "two liquidation episodes; final catchup cannot charge or reward again"
         );
         if routes.is_some() && !census(&env, portfolios)[4] {
-            let ix = paid_origin_routes::refresh(&env, keeper, owners[4].pubkey(), report);
+            let ix = refresh_with_optional_recipient_report(
+                &env,
+                keeper,
+                owners[4].pubkey(),
+                report,
+                recipient_report,
+            );
             peak_crank = peak_crank.max(submit(&mut env, &owners[4], &[ix], &tracked, None));
         }
         // Finish account-local ADL/source work before the next price boundary.
@@ -367,7 +502,13 @@ fn run_retained_handoff(
                     continue;
                 }
                 let ix = if routes.is_some() {
-                    paid_origin_routes::refresh(&env, portfolios[i], owners[4].pubkey(), report)
+                    refresh_with_optional_recipient_report(
+                        &env,
+                        portfolios[i],
+                        owners[4].pubkey(),
+                        report,
+                        recipient_report,
+                    )
                 } else {
                     observe(&env, portfolios[i], owners[4].pubkey(), Some(report), None)
                 };

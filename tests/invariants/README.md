@@ -1,5 +1,28 @@
 # Invariant-owned test coverage
 
+## Row 422 paid-origin Hybrid-recipient evidence (2026-09-14)
+
+Owner:
+[cu/inv_045_paid_origin_hybrid_recipient.rs](cu/inv_045_paid_origin_hybrid_recipient.rs),
+mounted under INV-045's
+`trade_origin_catchup::authenticated_reward_handoff::retained_penalty_handoff`.
+The selector
+`v16_program_paid_origin_penalty_survives_dual_hybrid_recipient_catchup`
+extends the retained paid-discovery/liquidation-reward history so the reward
+recipient asset is also Hybrid and must be advanced by an authenticated report
+in the same public crank as the liquidation source. It checks batch and
+single-leg no-CPI discovery, publish-first and liquidation-first order, missing
+declared report tails with exact rollback, two stale/fresh liquidation episodes,
+domain-budget attribution, exact SPL payout, recipient PnL separation, and
+bounded CU. The adjacent AuthMark recipient route selector was rerun to ensure
+the shared helper still preserves the old accountless AuthMark observation path.
+
+This is a bounded INV-020/024/036/041/045/061/080 route product, not a generic
+Hybrid reward-history generator. Row **422 remains OPEN**: CPI Hybrid-recipient
+discovery, funding/maintenance/policy products, arbitrary recipient histories,
+terminal reward cohorts, maximum shape, and unbounded whole-route entitlement
+remain outside this increment.
+
 ## Row 435 mixed-role funding-order evidence (2026-09-14)
 
 Owner:
@@ -377,11 +400,16 @@ observation orders preserve old discovery/penalty stock through fresh liquidatio
 and full target catchup. An active AuthMark recipient keeps its own 9-atom PnL
 separate from a 2762-atom reward and a 3762-atom SPL payout. Eight payout prefixes
 are among 84 missing-declared-tail rollbacks; peak measured CU is 382424.
+[cu/inv_045_paid_origin_hybrid_recipient.rs](cu/inv_045_paid_origin_hybrid_recipient.rs)
+adds the bounded Hybrid-recipient cross-product for no-CPI single/batch
+discovery and both publication orders; it reuses the same retained-penalty
+oracle while requiring both assets' authenticated reports in every progressing
+public crank.
 
 Row 422 remains OPEN; rows 425/426 are closed by the top-level regressions above.
-These are bounded history increments, with no new Hybrid-recipient cell beyond
-row426's account-health rescue route. Arbitrary provenance/carry histories and
-full terminal reward cohorts remain outside scope. The [Scope I audit](astra_scope_i_observation_reward_carry_20260914.md)
+These are bounded history increments. Arbitrary provenance/carry histories,
+CPI Hybrid-recipient discovery and full terminal reward cohorts remain outside
+scope. The [Scope I audit](astra_scope_i_observation_reward_carry_20260914.md)
 compares H/O/V/C and the existing owners, and records guarantees, limits, fixed
 Scope W artifact provenance and exact validation commands.
 
@@ -27550,7 +27578,7 @@ Verdicts mean:
 
 ## Known-finding benchmark
 
-The current TSV has 166 rows: 142 `independent-discovery`, 17 `nonqualifying`, and 7 `missing`.
+The current TSV has 166 rows: 143 `independent-discovery`, 17 `nonqualifying`, and 6 `missing`.
 These are recorded evidence dispositions, not new impact or severity acceptance under
 `scripts/loop.md`. Historical severity strings, including `REAL`, are not current classification
 labels; this documentation audit does not reclassify or promote any finding.
