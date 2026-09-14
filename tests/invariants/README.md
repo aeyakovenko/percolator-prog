@@ -244,21 +244,22 @@ commands, owner comparison, fixed-artifact provenance, CU and remaining limits.
 
 Owner: [cu/inv_039_mixed_role_fractional_cohort.rs](cu/inv_039_mixed_role_fractional_cohort.rs),
 mounted under INV-039's `fractional_residual_resolution::mixed_role_fractional_cohort`.
-Eight public LiteSVM histories combine the existing unequal fractional B cohort
-with a same-owner cross-asset debtor role. Actor 0 retains the asset-1 zero-basis,
-nonzero-loss-weight fractional claim while owing actor 4 an exact 37-atom adverse
-asset-2 debt. The paired fractional baseline is run from the same fixture.
+Sixteen public LiteSVM histories combine the existing unequal fractional B cohort
+with a same-owner cross-asset debtor role through direct `TradeNoCpi` and one-leg
+`BatchTradeNoCpi`. Actor 0 retains the asset-1 zero-basis, nonzero-loss-weight
+fractional claim while owing actor 4 an exact 37-atom adverse asset-2 debt. The
+paired fractional baseline is run from the same fixture.
 
 The invariant normalizes the exact 37-atom debt and then requires every owner to
 match the baseline except for at most one atom of explicit protocol custody
 residue. The observed extra atom stays in the vault, not another owner. Both signs,
-live-booked/unbooked B and two terminal close orders pass; final capital, positive
-PnL, insurance and materialized portfolio counts are zero. Peak observed CU is
-334,106.
+both debt-entry routes, live-booked/unbooked B and two terminal close orders pass;
+final capital, positive PnL, insurance and materialized portfolio counts are zero.
+Peak observed CU is 334,106.
 
 Rows **419/435 remain OPEN**. This closes neither arbitrary mixed-role histories
 nor ADL, underfunded receipts, insurance recredit, adverse close drift, fees,
-funding, CPI/batch, maximum shape or generic INV-086 equivalence. The
+funding, CPI, multi-leg batch, maximum shape or generic INV-086 equivalence. The
 [Scope Y audit](astra_scope_y_mixed_fractional_cohort_20260914.md) records the
 exact selector, current SBF build and the residue/owner comparison.
 

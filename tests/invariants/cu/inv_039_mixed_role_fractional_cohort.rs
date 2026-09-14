@@ -10,7 +10,18 @@ const EXTRA_Q: i128 = 1_000;
 const EXTRA_MOVE: u128 = 37_000;
 const EXTRA_DEBT: u128 = EXTRA_Q as u128 * EXTRA_MOVE / POS_SCALE;
 
-fn setup_with_extra_debt(input: Inputs, reverse: bool, peak: &mut u64) -> AttributionWorld {
+#[derive(Clone, Copy, Debug)]
+enum DebtRoute {
+    Direct,
+    BatchNoCpi,
+}
+
+fn setup_with_extra_debt(
+    input: Inputs,
+    reverse: bool,
+    route: DebtRoute,
+    peak: &mut u64,
+) -> AttributionWorld {
     assert_eq!(EXTRA_Q as u128 * EXTRA_MOVE % POS_SCALE, 0);
     let mut world = AttributionWorld::new_with_deposits(
         reverse,
@@ -48,16 +59,42 @@ fn setup_with_extra_debt(input: Inputs, reverse: bool, peak: &mut u64) -> Attrib
         ));
     }
 
-    *peak = (*peak).max(world.env.trade_asset_with_cu(
-        2,
-        &world.actors[4].owner,
-        world.actors[4].portfolio,
-        &world.actors[0].owner,
-        world.actors[0].portfolio,
-        EXTRA_Q * sign,
-        1_000_000,
-        0,
-    ));
+    *peak = (*peak).max(match route {
+        DebtRoute::Direct => world.env.trade_asset_with_cu(
+            2,
+            &world.actors[4].owner,
+            world.actors[4].portfolio,
+            &world.actors[0].owner,
+            world.actors[0].portfolio,
+            EXTRA_Q * sign,
+            1_000_000,
+            0,
+        ),
+        DebtRoute::BatchNoCpi => world
+            .env
+            .send(
+                world.env.batch_trade_no_cpi_ix(
+                    world.actors[4].portfolio,
+                    world.actors[0].portfolio,
+                    vec![BatchTradeLeg {
+                        asset_index: 2,
+                        market_id: world.env.asset_market_id(2),
+                        size_q: EXTRA_Q * sign,
+                        exec_price: 1_000_000,
+                        fee_bps: 0,
+                    }],
+                ),
+                vec![
+                    AccountMeta::new(world.actors[4].owner.pubkey(), true),
+                    AccountMeta::new(world.actors[0].owner.pubkey(), true),
+                    AccountMeta::new(world.env.market, false),
+                    AccountMeta::new(world.actors[4].portfolio, false),
+                    AccountMeta::new(world.actors[0].portfolio, false),
+                ],
+                &[&world.actors[4].owner, &world.actors[0].owner],
+            )
+            .expect("batch no-cpi cross-asset debt"),
+    });
 
     for slot in 1..=5 {
         world.env.svm.warp_to_slot(slot);
@@ -251,48 +288,50 @@ fn v16_program_mixed_role_fractional_b_cohort_preserves_normalized_owner_attribu
     let mut peak = 0u64;
     for reverse in [false, true] {
         for live_booking in [false, true] {
-            for order in [[0, 2, 1, 3, 4], [4, 0, 1, 2, 3]] {
-                let (control_paid, control_vault) =
-                    baseline(input, reverse, live_booking, order, &mut peak);
-                let mut world = setup_with_extra_debt(input, reverse, &mut peak);
-                if live_booking {
-                    peak = peak.max(world.env.crank(
-                        world.actors[1].portfolio,
-                        ProgInstruction::PermissionlessCrank {
-                            now_slot: 6,
-                            observations: crank_observations(1),
-                        },
-                    ));
-                }
-                let (mixed_paid, mixed_vault) = close_all(world, order, &mut peak);
+            for route in [DebtRoute::Direct, DebtRoute::BatchNoCpi] {
+                for order in [[0, 2, 1, 3, 4], [4, 0, 1, 2, 3]] {
+                    let (control_paid, control_vault) =
+                        baseline(input, reverse, live_booking, order, &mut peak);
+                    let mut world = setup_with_extra_debt(input, reverse, route, &mut peak);
+                    if live_booking {
+                        peak = peak.max(world.env.crank(
+                            world.actors[1].portfolio,
+                            ProgInstruction::PermissionlessCrank {
+                                now_slot: 6,
+                                observations: crank_observations(1),
+                            },
+                        ));
+                    }
+                    let (mixed_paid, mixed_vault) = close_all(world, order, &mut peak);
 
-                let mut normalized = mixed_paid;
-                normalized[0] += EXTRA_DEBT;
-                normalized[4] = normalized[4]
-                    .checked_sub(EXTRA_DEBT)
-                    .expect("the cross-asset creditor receives the exact adverse debt");
-                let custody_residue = mixed_vault
-                    .checked_sub(control_vault)
-                    .expect("mixed route cannot consume baseline custody residue");
-                assert!(
-                    custody_residue <= 1,
-                    "exact cross-asset debt may add only bounded protocol residue"
-                );
-                normalized[0] += custody_residue;
-                assert_eq!(
-                    normalized, control_paid,
-                    "fractional B attribution must survive a same-owner cross-asset debt"
-                );
-                assert_eq!(
-                    mixed_vault,
-                    control_vault + custody_residue,
-                    "exact cross-asset debt residue must stay in protocol custody"
-                );
-                worlds += 1;
+                    let mut normalized = mixed_paid;
+                    normalized[0] += EXTRA_DEBT;
+                    normalized[4] = normalized[4]
+                        .checked_sub(EXTRA_DEBT)
+                        .expect("the cross-asset creditor receives the exact adverse debt");
+                    let custody_residue = mixed_vault
+                        .checked_sub(control_vault)
+                        .expect("mixed route cannot consume baseline custody residue");
+                    assert!(
+                        custody_residue <= 1,
+                        "{route:?}: exact cross-asset debt may add only bounded protocol residue"
+                    );
+                    normalized[0] += custody_residue;
+                    assert_eq!(
+                        normalized, control_paid,
+                        "{route:?}: fractional B attribution must survive a same-owner cross-asset debt"
+                    );
+                    assert_eq!(
+                        mixed_vault,
+                        control_vault + custody_residue,
+                        "{route:?}: exact cross-asset debt residue must stay in protocol custody"
+                    );
+                    worlds += 1;
+                }
             }
         }
     }
-    assert_eq!(worlds, 8);
+    assert_eq!(worlds, 16);
     println!(
         "INV-039 mixed fractional cohort: {worlds} public worlds, exact debt={EXTRA_DEBT}, peak {peak} CU"
     );

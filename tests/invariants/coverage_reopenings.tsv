@@ -1006,10 +1006,11 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Scope Y (2026-09-14): cu/inv_039_mixed_role_fractional_cohort.rs adds the
 # same-owner mixed creditor/debtor overlap to Scope P's fractional cohort:
 # actor0 keeps an asset-1 fractional B claim while owing actor4 an exact 37-atom
-# asset-2 debt. Eight public worlds compare against the same fractional baseline;
-# after debt normalization, all owner deltas match and the sole extra atom stays
-# explicit vault residue. No ADL, underfunded receipt, insurance recredit,
-# CPI/batch, maximum-shape, production or status change. Scope/validation:
+# asset-2 debt through direct TradeNoCpi and one-leg BatchTradeNoCpi. Sixteen
+# public worlds compare against the same fractional baseline; after debt
+# normalization, all owner deltas match and the sole extra atom stays explicit
+# vault residue. No ADL, underfunded receipt, insurance recredit, CPI,
+# multi-leg batch, maximum-shape, production or status change. Scope/validation:
 # astra_scope_y_mixed_fractional_cohort_20260914.md.
 419	LoF	BLOCKER	INV-039	INV-024,INV-037,INV-039,INV-041,INV-048,INV-066,INV-067,INV-073,INV-076,INV-081,INV-086	pending-obligation+x-resolution+x-close-order	obligation-attribution-persists-until-the-opposing-economic-debt-settles	OPEN
 # Rows 420/421 partial conformance (2026-09-10): cu/inv_073_absent_insurer_spent_retirement.rs,

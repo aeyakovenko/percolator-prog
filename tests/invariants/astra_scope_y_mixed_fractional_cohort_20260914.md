@@ -18,8 +18,9 @@ one claimant also owes a separate adverse debt on another asset.
 
 The sampled input is the existing fractional cohort
 `weights = [450003, 600004], residual = 7`. All state is reached through
-System/SPL/ATA/wrapper instructions. The test crosses both signs, live B booking
-on/off and two terminal close orders: 8 public LiteSVM worlds.
+System/SPL/ATA/wrapper instructions. The test crosses direct `TradeNoCpi` and
+one-leg `BatchTradeNoCpi` for the added debt, both signs, live B booking on/off
+and two terminal close orders: 16 public LiteSVM worlds.
 
 Actor 0 keeps the existing asset-1 zero-basis, nonzero-loss-weight fractional B
 claim. Actor 4 opens a small asset-2 position against actor 0 before resolution,
@@ -47,7 +48,7 @@ and materialized portfolios. Total SPL supply equals final wallets plus vault.
 Rows 419 and 435 remain OPEN. This is the previously missing cross-product of
 same-owner mixed creditor/debtor state with a fractional B cohort, but it is still
 a bounded fixture. It does not cover ADL, underfunded receipts, insurance
-recredit, adverse close drift, fees/funding, CPI/batch, repeated histories,
+recredit, adverse close drift, fees/funding, CPI, multi-leg batch, repeated histories,
 maximum shape, arbitrary asset orders or generic model equivalence.
 
 No production bug is claimed by this increment. During development an initial
@@ -76,4 +77,4 @@ cargo test --locked --offline --test v16_cu \
   -- --exact --nocapture --test-threads=1
 ```
 
-Result: PASS, 8 public worlds, exact debt 37, peak 334,106 CU.
+Result: PASS, 16 public worlds, exact debt 37, peak 334,106 CU.
