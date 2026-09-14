@@ -147,7 +147,7 @@
 380	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Preserve funding across prospective EWMA updates
 381	LoF	BLOCKER	INV-038	independent-discovery	[BLOCKER LoF] Round composite oracle prices once
 393	LoF	REAL	INV-010	independent-discovery	[REAL LoF] Order matcher config mutations
-410	LoF	PRIVILEGED	INV-024	missing	[PRIVILEGED LoF] Escheat abandoned shutdown reserves
+410	LoF	PRIVILEGED	INV-024	independent-discovery	[PRIVILEGED LoF] Escheat abandoned shutdown reserves
 411	LoF	PRIVILEGED	INV-014	independent-discovery	[PRIVILEGED LoF] Bind retained single-CPI taker fee consent
 412	LoF	BLOCKER	INV-012	independent-discovery	[BLOCKER LoF] Bind matcher grants to position episodes
 413	LoF	BLOCKER	INV-027	independent-discovery	[BLOCKER LoF] Crystallize flat fees before first open
@@ -165,7 +165,7 @@
 425	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Preserve oracle cap carry across interleaved trades
 426	LoF	BLOCKER	INV-020	independent-discovery	[BLOCKER LoF] Require current Hybrid evidence before health refresh
 428	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Consume insurance withdrawal epoch on retained debit
-429	LoF	PRIVILEGED	INV-024	missing	[PRIVILEGED LoF] Preserve shutdown reserve beneficiaries
+429	LoF	PRIVILEGED	INV-024	independent-discovery	[PRIVILEGED LoF] Preserve shutdown reserve beneficiaries
 432	LoF	PRIVILEGED	INV-014	independent-discovery	[PRIVILEGED LoF] Enforce retained single-CPI taker fee terms
 433	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Permit unsigned terminal reserve payouts
 434	LoF	BLOCKER	INV-027	independent-discovery	Settle flat-account fees before risk admission

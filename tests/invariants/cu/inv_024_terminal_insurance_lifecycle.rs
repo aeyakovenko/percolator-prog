@@ -32,6 +32,7 @@ struct History {
     resolved: bool,
     deleted: bool,
     handed_off: bool,
+    reserve_debits: u64,
 }
 
 impl History {
@@ -51,6 +52,7 @@ impl History {
         self.budgets[0] -= long;
         self.budgets[1] = self.budgets[1].checked_sub(amount - long).unwrap();
         self.paid[recipient] += amount;
+        self.reserve_debits += 1;
     }
 }
 
@@ -309,7 +311,7 @@ fn v16_program_terminal_insurance_lifecycle_preserves_fee_and_paid_prefix_attrib
                 }
                 let mut expected_profiles = profiles;
                 let mut expected_sequences = sequences;
-                expected_sequences[0].authority_epoch += u64::from(h.paid[OPERATOR] >= LIVE_PAYOUT);
+                expected_sequences[0].authority_epoch += h.reserve_debits;
                 if h.handed_off {
                     expected_profiles[0].insurance_authority = wallets[SUCCESSOR].to_bytes();
                     expected_sequences[0].authority_epoch += 1;
@@ -568,7 +570,7 @@ fn v16_program_terminal_insurance_lifecycle_preserves_fee_and_paid_prefix_attrib
                 retained_operator,
                 &[&owners[OPERATOR]],
                 &[],
-                Some(PercolatorError::Unauthorized),
+                Some(PercolatorError::InvalidTokenAccount),
                 &h,
             );
             h.withdraw(beneficiary, FIRST_TERMINAL);
@@ -599,7 +601,7 @@ fn v16_program_terminal_insurance_lifecycle_preserves_fee_and_paid_prefix_attrib
                     ix,
                     &[&owners[actor]],
                     &[],
-                    Some(PercolatorError::Unauthorized),
+                    Some(PercolatorError::InvalidTokenAccount),
                     &h,
                 );
             }
@@ -609,7 +611,7 @@ fn v16_program_terminal_insurance_lifecycle_preserves_fee_and_paid_prefix_attrib
                 ix,
                 &[&owners[SUCCESSOR]],
                 &[],
-                Some(PercolatorError::Unauthorized),
+                Some(PercolatorError::InvalidTokenAccount),
                 &h,
             );
             let remaining = INSURANCE + RESOLVE_SLOT * RATE - LIVE_PAYOUT - FIRST_TERMINAL;

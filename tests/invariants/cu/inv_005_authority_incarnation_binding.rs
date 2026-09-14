@@ -5175,7 +5175,7 @@ fn v16_program_shutdown_insurance_withdrawal_retains_market_authority_epoch_acro
         env.top_up_insurance_domain_with_authority_and_cu(&local_authority, DOMAIN, PRINCIPAL);
     let (other_source, _) =
         env.top_up_insurance_domain_with_authority_and_cu(&authority_a, 0, OTHER_INSURANCE);
-    let destination = env.token_account(authority_a.pubkey(), 0);
+    let destination = env.token_account(local_authority.pubkey(), 0);
     env.svm.warp_to_slot(2);
     env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, ASSET, 2, 0);
     env.svm.warp_to_slot(7);
@@ -5317,7 +5317,8 @@ fn v16_program_shutdown_insurance_withdrawal_retains_market_authority_epoch_acro
         );
     }
 
-    // The target asset still has the old epoch, but fallback consent belongs to asset 0.
+    // The target asset still has the old epoch, but shutdown-submission consent belongs
+    // to asset 0. The payout destination remains the configured reserve beneficiary.
     assert_ne!(
         env.control_sequences(0).authority_epoch,
         local_sequences.authority_epoch
@@ -5352,7 +5353,8 @@ fn v16_program_shutdown_insurance_withdrawal_retains_market_authority_epoch_acro
         payer_before
     );
 
-    // Only the epoch differs from the retained request: signer, generation and value are fixed.
+    // Only the epoch differs from the retained request: signer, beneficiary, generation
+    // and value are fixed.
     let fresh = sign(&env, fresh_ix);
     let success = env
         .svm
@@ -5370,7 +5372,7 @@ fn v16_program_shutdown_insurance_withdrawal_retains_market_authority_epoch_acro
     expected_budgets[DOMAIN as usize] -= WITHDRAWAL;
     assert_eq!(after_group.insurance_domain_budget, expected_budgets);
     assert_eq!(env.control_sequences(ASSET as usize), local_sequences);
-    assert_eq!(env.control_sequences(0).authority_epoch, market_epoch + 2);
+    assert_eq!(env.control_sequences(0).authority_epoch, market_epoch + 3);
     assert_eq!(env.asset_market_id(ASSET), market_id);
     eprintln!(
         "INV-005 shutdown insurance ABA CU: prevalidated={}, stale={}, fresh={}",

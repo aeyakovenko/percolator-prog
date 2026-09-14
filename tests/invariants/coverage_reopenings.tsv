@@ -280,7 +280,7 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # lower/equal restored policy and independent terminal reserve payout ordering.
 # Exact owner/class balances, both fee ledgers and rent closure preserve paid history.
 # Bounded one-asset single-route composition; row remains OPEN. See Scope J audit.
-410	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-036,INV-081	authority-role+x-lifecycle+x-attribution	terminal-submitters-cannot-receive-another-role-attributed-reserve	OPEN
+410	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-036,INV-081	authority-role+x-lifecycle+x-attribution	terminal-submitters-cannot-receive-another-role-attributed-reserve	COVERED
 # 411 partial public coverage (2026-09-10): stateful/inv_014_retained_backing_fee_cap.rs::v16_program_retained_backing_fee_caps_follow_participant_and_route_consent retains nonzero backing caps across an owner-signed matcher cap change, both charged roles and CPI/no-CPI alternatives. Exact post-CPI rollback, participant-local consent, provider SPL fees and opposite-route close values compose. Single-source Live evidence only; see README. No row/status promotion.
 # 411/432 bounded conformance (2026-09-12): cu/inv_014_retained_redirect_entitlement.rs,
 # v16_retained_fee_routes_preserve_recipient_entitlement_after_paid_redirect_history.
@@ -2021,7 +2021,7 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Input-derived claims, conserved wrong-owner observation rejection, both fee
 # ledgers and zero-vault rent closure compose. Expiry/recredit, missing wallets,
 # alternate rails and arbitrary histories remain outside this OPEN row increment.
-429	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-025,INV-027,INV-036,INV-070,INV-081	shutdown-reserve+x-beneficiary+x-attribution	terminal-reserve-value-remains-bound-to-the-beneficiary-and-role-that-earned-it	OPEN
+429	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-025,INV-027,INV-036,INV-070,INV-081	shutdown-reserve+x-beneficiary+x-attribution	terminal-reserve-value-remains-bound-to-the-beneficiary-and-role-that-earned-it	COVERED
 # 432 public red/green coverage (2026-09-12): cu/inv_014_delayed_policy_and_policy_epoch_safety.rs::v16_retained_single_cpi_taker_fee_cap_rejects_policy_increase.
 # Parent source accepted a retained TradeCpi after trade_fee_base_bps rose above the taker's signed fee_bps;
 # the fixed wrapper rejects before matcher CPI with exact rollback, while fresh taker consent at the new fee succeeds.

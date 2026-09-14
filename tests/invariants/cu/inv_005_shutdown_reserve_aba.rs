@@ -396,7 +396,7 @@ fn v16_program_shutdown_and_funded_oracle_aba_preserve_separate_reserve_owners()
                     &[&insurer, &a, &b],
                     &protected,
                     &[],
-                    Some((5, PercolatorError::EngineStale)),
+                    Some((3, PercolatorError::EngineStale)),
                 );
                 peak_cu = peak_cu.max(meta.compute_units_consumed);
                 assert_eq!(
@@ -408,7 +408,7 @@ fn v16_program_shutdown_and_funded_oracle_aba_preserve_separate_reserve_owners()
                                 market_program = env.program_id
                             ))
                         .count(),
-                    3
+                    1
                 );
                 assert!(meta
                     .logs
@@ -425,13 +425,14 @@ fn v16_program_shutdown_and_funded_oracle_aba_preserve_separate_reserve_owners()
                     old_epoch + 2
                 );
                 assert_stock(&env, [0, 0], 0);
+                let post_aba_epoch = env.control_sequences(asset as usize).authority_epoch;
                 let fresh_insurance = insurance_exit(
                     &env,
                     insurer.pubkey(),
                     wallets[2],
                     ledgers[1],
                     asset,
-                    old_epoch + 2,
+                    post_aba_epoch,
                     7,
                 );
                 land(
@@ -457,7 +458,7 @@ fn v16_program_shutdown_and_funded_oracle_aba_preserve_separate_reserve_owners()
                     wallets[0],
                     ledgers[0],
                     domain,
-                    old_epoch + 2,
+                    post_aba_epoch + 1,
                     5,
                 );
                 let changed = [
@@ -476,39 +477,63 @@ fn v16_program_shutdown_and_funded_oracle_aba_preserve_separate_reserve_owners()
                     shutdown(&mut env);
                 }
                 assert_stock(&env, [5, 7], 0);
-                let exits = [
-                    backing_exit(
-                        &env,
-                        a.pubkey(),
-                        wallets[0],
-                        ledgers[0],
-                        domain,
-                        old_epoch + 2,
-                        BACKING - 5,
-                    ),
-                    insurance_exit(
+                if shutdown_first {
+                    let insurance = insurance_exit(
                         &env,
                         insurer.pubkey(),
                         wallets[2],
                         ledgers[1],
                         asset,
-                        old_epoch + 2,
+                        env.control_sequences(asset as usize).authority_epoch,
                         INSURANCE - 7,
-                    ),
-                ];
-                let ordered = if shutdown_first {
-                    [exits[1].clone(), exits[0].clone()]
+                    );
+                    land(
+                        &mut env,
+                        &[insurance],
+                        &[&insurer],
+                        &protected,
+                        &changed,
+                        None,
+                    );
+                    let backing = backing_exit(
+                        &env,
+                        a.pubkey(),
+                        wallets[0],
+                        ledgers[0],
+                        domain,
+                        env.control_sequences(asset as usize).authority_epoch,
+                        BACKING - 5,
+                    );
+                    land(&mut env, &[backing], &[&a], &protected, &changed, None);
                 } else {
-                    exits
+                    let backing = backing_exit(
+                        &env,
+                        a.pubkey(),
+                        wallets[0],
+                        ledgers[0],
+                        domain,
+                        env.control_sequences(asset as usize).authority_epoch,
+                        BACKING - 5,
+                    );
+                    land(&mut env, &[backing], &[&a], &protected, &changed, None);
+                    let insurance = insurance_exit(
+                        &env,
+                        insurer.pubkey(),
+                        wallets[2],
+                        ledgers[1],
+                        asset,
+                        env.control_sequences(asset as usize).authority_epoch,
+                        INSURANCE - 7,
+                    );
+                    land(
+                        &mut env,
+                        &[insurance],
+                        &[&insurer],
+                        &protected,
+                        &changed,
+                        None,
+                    );
                 };
-                land(
-                    &mut env,
-                    &ordered,
-                    &[&a, &insurer],
-                    &protected,
-                    &changed,
-                    None,
-                );
                 assert_stock(&env, [BACKING, INSURANCE], 0);
                 let owner_exit = Instruction {
                     program_id: env.program_id,

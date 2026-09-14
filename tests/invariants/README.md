@@ -32,6 +32,25 @@ The unchanged pre-fix artifact admitted the excess first open; the fixed artifac
 hash `1334bfb0cf58100a85b64999b03bb39ebcf9d8424ec6f4fcb159e5dc51a7f34c`
 rejects it and keeps the exact route live.
 
+## Rows 410/429 shutdown reserve beneficiary closure (2026-09-14)
+
+Owner: [cu/inv_024_attributed_quote_value_conservation.rs](cu/inv_024_attributed_quote_value_conservation.rs),
+`v16_program_shutdown_submitter_cannot_receive_foreign_reserve_cleanup`.
+The regression builds a public two-asset market, funds asset-1 insurance and
+backing reserves from a beneficiary distinct from `marketauth`, shuts down the
+empty asset, and then tries the shutdown-drain fallback with an admin-owned
+destination. The old SBF admits that redirect, so the unchanged selector fails.
+The fixed SBF rejects both admin redirections with exact rollback, then permits
+the same admin submitter to send the cleanup to the configured reserve
+beneficiaries and ledgers.
+
+Production behavior changed in [src/v16_program.rs](../../src/v16_program.rs):
+shutdown fallback authority now authorizes submission only; token destinations
+and optional ledgers remain bound to the configured reserve beneficiary. The
+fixed wrapper SBF hash is
+`e5f4c68d1e01b81e85a38019a93facc0ab0ad3dd9619d3dfdf536545af11530f`.
+Rows **410 and 429 are now independently discovered and covered**.
+
 ## Row 421 terminal insurance payout update (2026-09-14)
 
 Owner: [cu/inv_073_no_permanent_user_lock.rs](cu/inv_073_no_permanent_user_lock.rs),
@@ -530,8 +549,9 @@ observations must fail the payout oracle.
 This extends the fresh generated reserve and fixed expired-principal succession
 families with repeated role returns across expiry and operator succession.
 INV-024 owns the guarantee; related INV-005/025/036/070/081 checks are bounded,
-and INV-027 receives only a settled-user principal frame. Rows 410/429 stay OPEN,
-with no machine-classification change. The [Scope S audit](pr135_scope_s_reserve_beneficiary_attribution_20260913.md)
+and INV-027 receives only a settled-user principal frame. This older Scope S
+family did not close rows 410/429; the 2026-09-14 shutdown reserve beneficiary
+regression above now covers them. The [Scope S audit](pr135_scope_s_reserve_beneficiary_attribution_20260913.md)
 records prior families, guarantee, limits, exact commands and validation results.
 
 ## PR135 Scope V Hybrid recipient reward lineage (2026-09-13)
@@ -27380,7 +27400,7 @@ Verdicts mean:
 
 ## Known-finding benchmark
 
-The current TSV has 166 rows: 140 `independent-discovery`, 17 `nonqualifying`, and 9 `missing`.
+The current TSV has 166 rows: 142 `independent-discovery`, 17 `nonqualifying`, and 7 `missing`.
 These are recorded evidence dispositions, not new impact or severity acceptance under
 `scripts/loop.md`. Historical severity strings, including `REAL`, are not current classification
 labels; this documentation audit does not reclassify or promote any finding.
@@ -27392,17 +27412,18 @@ retained debit`. It is now covered by the public Live/Resolved reserve-debit epo
 `open_findings.tsv` includes the historical 2026-08-03 snapshot of 143 open PRs whose titles identify
 a public-route LoF or DoS class. It maps every row to a primary invariant. That dated snapshot has 0
 **Direct regression** rows, 0 **Missing** rows, 126 **Independent discovery** rows, and seventeen
-**Nonqualifying** rows. PRs 410, 415 through 419, 421, 422, 429, and 435 remain appended as 9
+**Nonqualifying** rows. PRs 415, 416, 417, 419, 421, 422, and 435 remain appended as 7
 **Missing** rows. PR 411 is covered by the
 narrow retained single-CPI taker-cap case in the generic INV-014 fee-consent matrix; PR 412 is now covered by
 the independent generic INV-012 retained matcher-grant position-episode oracle; PR 413 is covered by the
 direct flat first-admission maintenance crystallization regression; PR 425 is covered by
 the canonical accrual carry regression; PR 426 is covered by the current-Hybrid rescue regression;
 PR 428 is covered by the Live/Resolved reserve-debit epoch-consumption selector;
+PRs 410 and 429 are covered by the shutdown reserve beneficiary cleanup regression;
 PR 432 is covered by the independent generic INV-014 fee-consent matrix through its retained single-CPI taker-base-fee
 case; PR 434 is covered by the independent INV-027 flat-reopen fee-history selector; PRs 420/423/424/433
 have the qualified discovery mappings documented above; and PR 418 is covered by the native
-booked-residue regression. The 140 independent
+booked-residue regression. The 142 independent
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older
 `tests/support/open_lof_manifest.rs` retains the executable adapter mapping for its 99-LoF snapshot:

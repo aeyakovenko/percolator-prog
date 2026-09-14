@@ -460,25 +460,35 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
 
     let admin_key = env.admin.pubkey();
     let admin_recovery = env.token_account(admin_key, 0);
+    let insurance_recovery = env.token_account(insurance_operator.pubkey(), 0);
+    let backing_recovery = env.token_account(backing_authority.pubkey(), 0);
     for (domain, amount) in [(2u8, 6u128), (3u8, 4u128)] {
-        env.withdraw_insurance_domain_to_admin_token_with_cu(admin_recovery, domain.into(), amount);
+        env.withdraw_insurance_domain_to_admin_token_with_cu(
+            insurance_recovery,
+            domain.into(),
+            amount,
+        );
     }
     for (domain, amount) in [(2u8, 20u128), (3u8, 25u128)] {
-        env.withdraw_backing_bucket_to_admin_token_with_cu(admin_recovery, domain.into(), amount);
+        env.withdraw_backing_bucket_to_admin_token_with_cu(backing_recovery, domain.into(), amount);
     }
+    assert_eq!(env.token_amount(insurance_recovery), 10);
+    assert_eq!(env.token_amount(backing_recovery), 45);
     assert_eq!(
         env.token_amount(admin_recovery),
-        55,
-        "admin must recover asset-domain insurance and backing funds"
+        0,
+        "admin cleanup must pay the configured reserve beneficiaries"
     );
     assert_eq!(env.token_amount(env.vault), 2_000_025);
 
+    // Reuse is funded by new admin capital, not the absent providers' recovered reserves.
+    let admin_recovery = env.token_account(admin_key, 55);
     env.top_up_insurance_from_admin_token_with_cu(admin_recovery, 10);
     env.top_up_backing_bucket_from_admin_token_with_cu(admin_recovery, 0, 45, 20);
     assert_eq!(
         env.token_amount(admin_recovery),
         0,
-        "recovered funds should be re-deposited into market-0 buckets"
+        "new admin capital should fund market-0 buckets"
     );
     assert_eq!(env.token_amount(env.vault), 2_000_080);
     let market_data = env.svm.get_account(&env.market).unwrap().data;
