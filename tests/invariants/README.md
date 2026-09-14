@@ -94,11 +94,17 @@ the role match to write exactly one scoped authority field, including
 
 This is paired with the existing public `cold_admin_handoff_scope`,
 `funded_role_zero_transition`, `cold_oracle_funded_containment`,
-`funded_oracle_succession`, and `funded_backing_succession` witnesses. Row **416
-remains missing**: the new check is a source-composition guard over the current
-handoff branch, not a generic funded-role generator over arbitrary histories,
-positions, claims, coalesced market roles, lifecycle states, clock/oracle
-schedules, or future handler restructurings.
+`funded_oracle_succession`, and `funded_backing_succession` witnesses.
+`impaired_backing_containment` adds the row's previously missing backing-stock
+cell: a public trade/crank/expiry sequence leaves `impaired_liened_backing_num`
+as the only nonzero funded bucket term, then a cold-admin rotation plus a real
+SPL withdrawal prefix rolls back when the cold admin tries to replace the
+incumbent backing provider. The incumbent-consented handoff succeeds and a
+strict public reduction remains live. Row **416 remains missing**: the new
+checks are bounded source-composition and impaired-stock witnesses over the
+current handoff branch, not a generic funded-role generator over arbitrary
+histories, positions, claims, coalesced market roles, lifecycle states,
+clock/oracle schedules, or future handler restructurings.
 Detailed scope is in
 [inv_005_funded_role_source_composition_20260914.md](inv_005_funded_role_source_composition_20260914.md).
 

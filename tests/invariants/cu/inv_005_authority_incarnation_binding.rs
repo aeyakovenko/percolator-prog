@@ -37,6 +37,9 @@
 //! `consumed_backing_containment` instead repays all principal before management,
 //! preserving consumed receivables past expiry and Active/DrainOnly. Authenticated
 //! oracle renewal restores incumbent payouts; only incumbent consent moves the role.
+//! `impaired_backing_containment` creates the complementary exact-expiry shape:
+//! impaired liened backing is the only remaining funded bucket term, and
+//! cold-admin-only replacement still rejects before any role or SPL mutation commits.
 //!
 //! Guarantee boundary: authentication alone does not protect users from a compromised configured
 //! authority. The role matrix proves only the deployed protocol envelope stated for each role;
@@ -65,6 +68,9 @@ mod cold_admin_earned_reserve;
 
 #[path = "inv_005_consumed_backing_containment.rs"]
 mod consumed_backing_containment;
+
+#[path = "inv_005_impaired_backing_containment.rs"]
+mod impaired_backing_containment;
 
 #[path = "inv_005_cold_admin_handoff_scope.rs"]
 mod cold_admin_handoff_scope;

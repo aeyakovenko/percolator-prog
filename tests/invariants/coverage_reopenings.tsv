@@ -725,6 +725,17 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # persistence, and source-locks the five-field role write set including oracle
 # replacement. This complements the public cold-admin/funded-role witnesses but
 # is not a generic funded-history generator/proof. Row remains OPEN.
+# Row416 impaired-only public stock witness (2026-09-14):
+# cu/inv_005_impaired_backing_containment.rs, exact selector
+# inv_005_authority_incarnation_binding::impaired_backing_containment::v16_program_cold_admin_cannot_seize_impaired_backing_only_role.
+# Two public source-domain worlds create source liens through trades, normalize
+# them at exact expiry into positive impaired_liened_backing_num with fresh,
+# valid, consumed and earned backing all zero, then reject a cold-admin-only
+# backing-provider replacement after an actual SPL withdrawal prefix. Complete
+# rollback preserves the provider role and bystander custody; incumbent-consented
+# handoff succeeds and a strict reduction remains live. Bounded evidence only:
+# arbitrary funded histories, positions/claims, role coalescence, other lifecycle
+# modes and generic generators remain open.
 416	LoF	PRIVILEGED	INV-005	INV-005,INV-020,INV-024,INV-027,INV-055	cold-admin+x-funded-role+x-authority-containment	correctly-signed-role-management-cannot-seize-an-incumbent-funded-role	OPEN
 # 417 partial conformance (2026-09-10): cu/inv_067_receipt_source_realization.rs::v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry.
 # Partial source realization plus an older receipt payout rolls back; retained claims survive
