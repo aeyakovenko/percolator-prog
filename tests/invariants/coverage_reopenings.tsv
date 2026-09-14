@@ -262,6 +262,11 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # OPEN: two finite asset-zero/classic-SPL histories, no generic generator/oracle.
 # Populated portfolios, losses, receipts, fees, expiry/recredit, other assets/rails and
 # arbitrary role histories/transaction compositions excluded. No production/status changes.
+# Scope J (2026-09-14): inv_014_generated_policy_reserve_routes adds retained
+# closes across two funded-role returns with a paid temporary-provider slice,
+# lower/equal restored policy and independent terminal reserve payout ordering.
+# Exact owner/class balances, both fee ledgers and rent closure preserve paid history.
+# Bounded one-asset single-route composition; row remains OPEN. See Scope J audit.
 410	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-036,INV-081	authority-role+x-lifecycle+x-attribution	terminal-submitters-cannot-receive-another-role-attributed-reserve	OPEN
 # 411 partial public coverage (2026-09-10): stateful/inv_014_retained_backing_fee_cap.rs::v16_program_retained_backing_fee_caps_follow_participant_and_route_consent retains nonzero backing caps across an owner-signed matcher cap change, both charged roles and CPI/no-CPI alternatives. Exact post-CPI rollback, participant-local consent, provider SPL fees and opposite-route close values compose. Single-source Live evidence only; see README. No row/status promotion.
 # 411/432 bounded conformance (2026-09-12): cu/inv_014_retained_redirect_entitlement.rs,
@@ -333,6 +338,11 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # funded insurance-authority return, prior provider payout, shared utilization
 # earnings, exact terminal beneficiaries and slab closure. Four bounded histories;
 # no generic policy/route closure. See pr135_scope_e_retained_policy_earned_reserves_20260913.md.
+# Scope J (2026-09-14): inv_014_generated_policy_reserve_routes and
+# inv_027_retained_admission_policy_return compose retained envelopes with funded
+# policy-role return, lower/equal restored fee economics, fee-collecting admission
+# and paid provider earnings. 48 worlds, 192 complete-Account rollbacks; limits and
+# exact commands: astra_scope_j_retained_policy_admission_20260914.md. Still OPEN.
 411	LoF	PRIVILEGED	INV-014	INV-005,INV-010,INV-011,INV-014,INV-024,INV-036,INV-047,INV-081	retained-intent+x-policy-update+x-route	retained-trade-fee-consent-bounds-every-fee-bearing-route	OPEN
 # Row 412 independent discovery (2026-09-13): stateful/inv_012_capability_and_delegate_scope.rs,
 # v16_program_position_mutation_invalidates_retained_matcher_enable. The generic INV-012
@@ -426,6 +436,12 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # zero funding/claims and one-leg batches; no standalone deferred-fee boundary claim.
 # Scope A/B products and all status classifications stay unchanged; audit and exact
 # commands: scope_f_first_admission_audit_20260913.md. Row 413 remains OPEN.
+# Scope J (2026-09-14): inv_027_retained_admission_policy_return crosses four
+# transports, two restored fee policies, explicit/withdrawal collection and either
+# trader as temporary funded fee authority. 32 retained exact first admissions,
+# 128 full rollbacks and 64 owner exits check input-derived maintenance, trading
+# fees and insurance domains. No standalone deferred-fee, lag or junior-support
+# closure; row remains OPEN. Scope J audit records exact scope and validation.
 413	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-first-risk	all-accrued-liabilities-precede-every-risk-increasing-admission	OPEN
 # Row 414 bounded response conformance (2026-09-12): cu/inv_012_reused_asset_return_binding.rs,
 # v16_program_reused_asset_requires_current_generation_and_fresh_matcher_output.
@@ -659,6 +675,10 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Finite same-price/flat coverage only; row 416 is a label and remains OPEN.
 # See pr135_scope_t_funded_role_authority_containment_20260913.md for limits and
 # validation, including four unchanged adjacent failures reproduced on the base.
+# Scope J (2026-09-14): funded returns now compose with retained fee policy,
+# first-risk consent and paid/live earned reserves in two bounded generators.
+# All handoffs are consensual; this adds no cold-admin replacement matrix or
+# arbitrary authority-containment theorem. Row remains OPEN; see Scope J audit.
 416	LoF	PRIVILEGED	INV-005	INV-005,INV-020,INV-024,INV-027,INV-055	cold-admin+x-funded-role+x-authority-containment	correctly-signed-role-management-cannot-seize-an-incumbent-funded-role	OPEN
 # 417 partial conformance (2026-09-10): cu/inv_067_receipt_source_realization.rs::v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry.
 # Partial source realization plus an older receipt payout rolls back; retained claims survive
@@ -1903,6 +1923,12 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # none. Incumbent backing stays attributed through final payout and slab closure.
 # Related row416 authority containment is bounded; row413 gains no new first-risk
 # coverage. All four requested rows stay OPEN and production is unchanged.
+# Scope J (2026-09-14): 16 generated retained close histories preserve the
+# 17-atom incumbent and 11-atom temporary provider payments through both funded
+# role returns, restored fee policies and independently ordered terminal payouts.
+# Input-derived claims, conserved wrong-owner observation rejection, both fee
+# ledgers and zero-vault rent closure compose. Expiry/recredit, missing wallets,
+# alternate rails and arbitrary histories remain outside this OPEN row increment.
 429	LoF	PRIVILEGED	INV-024	INV-005,INV-024,INV-025,INV-027,INV-036,INV-070,INV-081	shutdown-reserve+x-beneficiary+x-attribution	terminal-reserve-value-remains-bound-to-the-beneficiary-and-role-that-earned-it	OPEN
 # 432 public red/green coverage (2026-09-12): cu/inv_014_delayed_policy_and_policy_epoch_safety.rs::v16_retained_single_cpi_taker_fee_cap_rejects_policy_increase.
 # Parent source accepted a retained TradeCpi after trade_fee_base_bps rose above the taker's signed fee_bps;

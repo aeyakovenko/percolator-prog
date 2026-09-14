@@ -7,6 +7,9 @@ use crate::support::fuzz_model::{
     assert_market_stock_census, assert_reservation_encumbrance_census,
 };
 
+#[path = "inv_014_generated_policy_reserve_routes.rs"]
+mod generated_policy_reserve_routes;
+
 const SHARE: u16 = 2_500;
 const SHARED: u64 = EARNINGS * SHARE as u64 / 10_000;
 const PROVIDER: u64 = EARNINGS - SHARED;

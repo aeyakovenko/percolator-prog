@@ -50,6 +50,9 @@ mod generated_flat_fee_entitlement;
 #[path = "inv_027_generated_first_risk_liabilities.rs"]
 mod generated_first_risk_liabilities;
 
+#[path = "inv_027_retained_admission_policy_return.rs"]
+mod retained_admission_policy_return;
+
 const PRICE: u64 = 100;
 const START: u64 = 1;
 const ADMISSION: u64 = 4;

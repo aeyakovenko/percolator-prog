@@ -91,6 +91,29 @@ administrator. No production or machine-status changes. The
 [Scope H audit](astra_scope_h_terminal_progress_product_20260914.md) records the
 generator, oracle, prior-owner comparison, authority assumptions and validation.
 
+## Astra Scope J retained policy, admission and earned attribution (2026-09-14)
+
+Two bounded generators add 48 public LiteSVM histories. INV-014's
+[policy/reserve routes](cu/inv_014_generated_policy_reserve_routes.rs) crosses
+single direct/CPI retained closes, lower/equal restored policy, both funded
+provider/beneficiary return orders and independent terminal reserve payout orders.
+A temporary coholder's paid earnings remain separate from returning unpaid claims.
+INV-027's [retained admission](cu/inv_027_retained_admission_policy_return.rs)
+crosses all four transports, lower/equal policy, explicit/withdrawal fee collection
+and either trading party as the temporary funded fee authority. Exact first-risk
+margin, full owner exits, signed envelopes and fee/domain attribution compose.
+
+The selectors pass 192 complete-Account rollbacks, 32 exact first admissions and
+16 rent-exact slab closures. Final-run peaks are 578408 and 275823 CU; the reserve
+selector also measured 581408 CU before the final assertion additions. Batch
+reduction with a funded nonzero backing tariff is outside the supported reserve
+matrix; first admission always has a fee-collecting public prefix. These are new
+combinations with retained authority/policy consent, not additional samples of
+Scopes M/P/S/T's existing generators. The [Scope J audit](astra_scope_j_retained_policy_admission_20260914.md)
+records comparisons with Scopes E/M/P/S/T, exact commands, artifact provenance,
+controls and limits. Rows 410/411/413/416/429 remain OPEN; machine classifications
+and production sources are unchanged.
+
 ## Scope E retained policy and earned reserves (2026-09-13)
 
 Owner: [cu/inv_014_retained_policy_earned_reserves.rs](cu/inv_014_retained_policy_earned_reserves.rs),
