@@ -773,11 +773,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
     assert_eq!(rows, 166, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(
-        missing, 11,
+        missing, 6,
         "post-PR135 counterexamples remain missing generic invariant-owned discovery coverage"
     );
     assert_eq!(
-        independent, 138,
+        independent, 143,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
@@ -814,6 +814,16 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             include_str!("../stateful/inv_008_intent_uniqueness_and_bounded_replay.rs"),
         ),
         (
+            8,
+            &[8, 64],
+            include_str!("../cu/inv_008_generated_insurance_stock_epochs.rs"),
+        ),
+        (
+            8,
+            &[8],
+            include_str!("../cu/inv_014_reserve_debit_epoch.rs"),
+        ),
+        (
             10,
             &[10],
             include_str!("../stateful/inv_010_out_of_order_safety.rs"),
@@ -839,6 +849,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             include_str!("../stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs"),
         ),
         (
+            24,
+            &[24],
+            include_str!("../cu/inv_024_attributed_quote_value_conservation.rs"),
+        ),
+        (
             56,
             &[20, 56],
             include_str!(
@@ -854,6 +869,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             27,
             &[27],
             include_str!("../cu/inv_027_joint_admission_liabilities.rs"),
+        ),
+        (
+            27,
+            &[27],
+            include_str!("../cu/inv_027_protected_principal_seniority.rs"),
         ),
         (
             28,
@@ -1032,6 +1052,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                 fields[3],
                 "stale-intent-must-reject-and-roll-back-exactly"
                     | "same-economic-intent-executes-at-most-once-and-rejection-rolls-back"
+                    | "successful-insurance-debit-consumes-authorizing-reserve-authority-epoch"
                     | "newer-authorized-control-cannot-be-overwritten-by-stale-intent"
                     | "signer-debit-never-exceeds-consented-fee-terms"
                     | "provider-approved-fee-split-is-durable-and-attributed"
@@ -1108,8 +1129,10 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "asset-local-bankruptcy-cannot-lock-unrelated-backed-claim"
                     | "unsigned-lp-cannot-inherit-preexisting-settlement-cohort"
                     | "fresh-counterparty-must-not-inherit-preexisting-settlement-cohort"
+                    | "all-accrued-liabilities-precede-every-risk-increasing-admission"
                     | "all-accrued-liabilities-precede-every-risk-increasing-admission-even-after-flat-account-history"
                     | "resolved-reserve-payouts-preserve-beneficiary-value-without-beneficiary-signatures"
+                    | "shutdown-submitters-cannot-receive-or-relabel-another-role-attributed-reserve"
             ),
             "unknown independent oracle: {}",
             fields[3]
@@ -2011,11 +2034,13 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
         .iter()
         .filter_map(|(pr, evidence)| (*evidence == "missing").then_some(*pr))
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        benchmark_evidence.get(&428),
-        Some(&"missing"),
-        "Live debit coverage does not qualify Resolved epoch consumption"
-    );
+    for pr in [415u16, 428] {
+        assert_eq!(
+            benchmark_evidence.get(&pr),
+            Some(&"independent-discovery"),
+            "retained value-debit coverage must be invariant-owned for row {pr}"
+        );
+    }
 
     let mut saw_header = false;
     let mut prior_pr = 0u16;

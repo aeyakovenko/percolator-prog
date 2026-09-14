@@ -36,6 +36,7 @@ INV-008	intent-retry/trade-family	v16_program_retry_operation_matrix_rejects_eve
 INV-008	intent-retry/insurance-top-up	v16_program_retry_operation_matrix_rejects_every_stale_retry	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	344
 INV-008	intent-retry/backing-top-up	v16_program_retry_operation_matrix_rejects_every_stale_retry	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	351
 INV-008	intent-retry/asset-activation	v16_program_retry_operation_matrix_rejects_every_stale_retry	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	362
+INV-008	retained-insurance-stock/replenishment	v16_generated_live_insurance_stock_epochs_preserve_retained_rail_entitlement	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	415
 INV-014	control-supersession/matcher-config	v16_program_superseded_control_matrix_rejects_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	334
 INV-014	control-supersession/authenticated-mark	v16_program_superseded_control_matrix_rejects_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	335
 INV-014	control-supersession/liquidation-fee-policy	v16_program_superseded_control_matrix_rejects_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	336

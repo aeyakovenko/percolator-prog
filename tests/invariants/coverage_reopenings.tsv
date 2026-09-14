@@ -590,7 +590,10 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # recipient variants and atomic/split retry. Receipt-derived attribution, complete
 # rollback and exact final owner exits; source-complete direct SPL outflow inventory
 # in inv_008_stock_epoch_routes.tsv explicitly retains adjacent reserve/terminal gaps.
-# Rows415/428 remain OPEN; no production or machine-status change. New peak264052 CU.
+# Row415's retained withdrawal stock/retry benchmark is now independently
+# covered when composed with Scope Q's standalone generated insurance epochs.
+# Row428 remains separately covered by its reserve-debit epoch selector; no
+# production change. New peak264052 CU.
 # Exact commands, fixed SBF and two baseline-inherited controls are recorded in
 # astra_scope_g_retained_stock_epochs_20260914.md. This is bounded conformance only.
 # Scope N (2026-09-14): cu/inv_008_backing_earnings_stock_epochs.rs adds a 24-history
@@ -600,10 +603,17 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # preserve owner/class budgets. 564 transactions, 336 full rollbacks, 504 restored
 # SPL transfers, peak602230 CU. No cache-only or frozen-preflight probes retained.
 # Principal omits its optional ledger; earnings telemetry is exact. Standalone
-# backing consumption, terminal/other-rail histories and row428 remain OPEN.
+# backing consumption, terminal/other-rail histories and row428's broader
+# reserve-debit family remain outside this adjacent backing increment.
 # Production/status records unchanged; exact selector and required commands in
 # astra_scope_n_adjacent_backing_stock_epochs_20260914.md and README Scope N.
-415	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-011,INV-024,INV-031,INV-064	retained-withdrawal+x-stock-replenishment+x-retry	a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution	OPEN
+# Reconciled 2026-09-14: Scope Q retains every signed WithdrawInsuranceAsset
+# envelope before execution, alternates partial/full depletion and quote rails,
+# creates replacement stock through public TopUpInsuranceDomain and raw custody
+# donations, then proves stale retained withdrawals reject after real SPL prefixes
+# with exact rollback. Scope G composes capital/insurance class reclassification.
+# The benchmark row is covered; arbitrary future INV-008 histories remain sampled.
+415	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-011,INV-024,INV-031,INV-064	retained-withdrawal+x-stock-replenishment+x-retry	a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution	COVERED
 # 416/429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_coalescence.rs,
 # v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements.
 # Four public histories merge fee/insurance holders and destinations, then split
