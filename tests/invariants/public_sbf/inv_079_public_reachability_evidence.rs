@@ -773,11 +773,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
     assert_eq!(rows, 166, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(
-        missing, 17,
+        missing, 16,
         "post-PR135 counterexamples remain missing generic invariant-owned discovery coverage"
     );
     assert_eq!(
-        independent, 132,
+        independent, 133,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
@@ -955,6 +955,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             include_str!("../cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"),
         ),
         (
+            70,
+            &[70],
+            include_str!("../cu/inv_070_native_booked_residue_cleanup.rs"),
+        ),
+        (
             71,
             &[71, 45],
             include_str!("../cu/inv_071_crank_progress.rs"),
@@ -1083,6 +1088,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "permissionless-asset-local-close-cannot-freeze-unrelated-funded-users"
                     | "account-local-expired-close-preserves-unrelated-resolved-exit"
                     | "recovery-escalation-reaches-public-resolved-continuation"
+                    | "native-booked-residue-must-not-burn-native-mint-or-block-terminal-close"
                     | "successful-crank-cannot-consume-zero-delta-price-time"
                     | "recovery-required-transition-must-not-rollback-funded-survivor-progress"
                     | "prospective-loss-in-lapsed-domain-must-have-bounded-terminal-continuation"

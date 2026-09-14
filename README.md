@@ -511,6 +511,15 @@ This section describes intent and operational ordering, not argument-by-argument
 - **CloseResolved** (tag 30)
   - handles resolved-market terminal PnL, fees, payout, and slot freeing for the supplied portfolio
   - verifies payout routing against the stored owner account
+- **CloseSlab**
+  - requires the market authority and advances bounded expiry/recredit normalization before final reclaim
+  - once all claims are terminal, burns booked classic SPL residue; booked native wSOL residue
+    transfers to the canonical asset-0 insurance authority's unencumbered ATA without that role signing
+  - for nonzero native residue, append that writable insurance ATA after the writable primary mint:
+    account index 7 for one quote rail, or 9 after the existing dual-quote accounts; a keeper may
+    recreate missing custody with the associated-token program in the same transaction
+  - external surplus still goes to administrator custody; vault rent, unsynced native donations and
+    excess slab rent refund to the administrator, leaving the typed tombstone and its exact rent
 
 ---
 

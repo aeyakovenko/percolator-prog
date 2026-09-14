@@ -128,3 +128,4 @@ INV-012	position-episode/matcher-grant-writer	v16_program_position_mutation_inva
 INV-012	asset-generation/matcher-grant-frontier	v16_program_retained_matcher_grant_rejects_after_asset_generation_frontier_moves	stale-intent-must-reject-and-roll-back-exactly	414
 INV-010	matcher-mutation/revoke-order	v16_program_matcher_mutation_order_rejects_revoked_capability	stale-matcher-enable-cannot-revive-revoked-value-authority	393
 INV-027	flat-reopen/fee-history	v16_program_flat_reopen_fee_history_precedes_new_exposure	all-accrued-liabilities-precede-every-risk-increasing-admission-even-after-flat-account-history	434
+INV-070	native-terminal-booked-residue	v16_program_native_booked_residue_escheats_after_fee_recredit_completion	native-booked-residue-must-not-burn-native-mint-or-block-terminal-close	418

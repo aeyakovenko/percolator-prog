@@ -11122,7 +11122,14 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         verify_token_program(token_program)?;
 
-        let (cfg_pre, retired_unbudgeted_insurance, bump, vault_balance, secondary_close) = {
+        let (
+            cfg_pre,
+            retired_unbudgeted_insurance,
+            bump,
+            vault_balance,
+            secondary_close,
+            native_residue_authority,
+        ) = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
             expect_live_authority(&cfg.marketauth, admin_dest.key)?;
@@ -11197,9 +11204,22 @@ pub mod processor {
                 TerminalSlabOutcomeV16::ReadyToClose { retired } => retired,
             };
             cfg.terminal_slab_scan_progress = 0;
+            let native_residue_authority =
+                if retired != 0 && primary_mint == spl_token::native_mint::id() {
+                    Some(domain_authorities_from_view(&group, &cfg, 0)?.insurance_authority)
+                } else {
+                    None
+                };
             drop(group);
             state::write_wrapper_config(&mut market_data, &cfg)?;
-            (cfg, retired, bump, vault_balance, secondary_close)
+            (
+                cfg,
+                retired,
+                bump,
+                vault_balance,
+                secondary_close,
+                native_residue_authority,
+            )
         };
 
         let primary_mint = primary_collateral_mint(&cfg_pre);
@@ -11215,14 +11235,41 @@ pub mod processor {
             expect_writable(primary_mint_ai)?;
             expect_key(primary_mint_ai, &primary_mint)?;
             verify_mint(primary_mint_ai)?;
-            burn_tokens_signed(
-                token_program,
-                vault_token,
-                primary_mint_ai,
-                vault_authority_ai,
-                retired_u64,
-                signer_seeds,
-            )?;
+            if let Some(authority) = native_residue_authority {
+                // Native tokens cannot be burned. Claim-free booked residue escheats
+                // to asset-0 insurance, separately from the administrator's surplus.
+                let authority = Pubkey::new_from_array(authority);
+                let residue_dest = account(accounts, primary_mint_index + 1)?;
+                expect_writable(residue_dest)?;
+                if *residue_dest.key != canonical_vault_address(&authority, &primary_mint) {
+                    return Err(PercolatorError::InvalidTokenAccount.into());
+                }
+                verify_withdrawable_token_accounts(
+                    residue_dest,
+                    &authority,
+                    vault_token,
+                    vault_authority_ai.key,
+                    &cfg_pre,
+                    true,
+                )?;
+                transfer_tokens_signed(
+                    token_program,
+                    vault_token,
+                    residue_dest,
+                    vault_authority_ai,
+                    retired_u64,
+                    signer_seeds,
+                )?;
+            } else {
+                burn_tokens_signed(
+                    token_program,
+                    vault_token,
+                    primary_mint_ai,
+                    vault_authority_ai,
+                    retired_u64,
+                    signer_seeds,
+                )?;
+            }
         }
         if primary_sweep_amount > 0 {
             transfer_tokens_signed(

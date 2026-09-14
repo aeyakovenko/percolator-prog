@@ -10,6 +10,9 @@ use crate::support::fuzz_model::{
 };
 use solana_sdk::account::Account;
 
+#[path = "inv_070_native_booked_residue_cleanup.rs"]
+mod native_booked_residue_cleanup;
+
 const LIMIT: u64 = 300_000;
 const INITIAL_STOCK: u64 = SOURCE_PRINCIPAL + BACKING + PROVIDER_FEE + AVAILABLE;
 
