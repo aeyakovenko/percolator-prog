@@ -542,6 +542,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # New/related selectors and both metadata gates passed 1/1 each; new 40 transactions,
 # 24 full rollbacks, 12 rolled-back and 12 committed SPL payouts; final peak 374941 CU.
 # Formatting and Git whitespace checks passed; no broad-suite or closure claim.
+# Scope G (2026-09-14): cu/inv_008_generated_stock_reclassification.rs adds 96
+# joint capital/insurance histories with generated replenishment, separate owners,
+# recipient variants and atomic/split retry. Receipt-derived attribution, complete
+# rollback and exact final owner exits; source-complete direct SPL outflow inventory
+# in inv_008_stock_epoch_routes.tsv explicitly retains adjacent reserve/terminal gaps.
+# Rows415/428 remain OPEN; no production or machine-status change. New peak264052 CU.
+# Exact commands, fixed SBF and two baseline-inherited controls are recorded in
+# astra_scope_g_retained_stock_epochs_20260914.md. This is bounded conformance only.
 415	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-011,INV-024,INV-031,INV-064	retained-withdrawal+x-stock-replenishment+x-retry	a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution	OPEN
 # 416/429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_coalescence.rs,
 # v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements.
@@ -1768,6 +1776,10 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # prefixes. Adjacent custody/insurance selectors pass. Broader stock histories,
 # policy equivalence and terminal consumption remain open; no status promotion.
 # See pr135_scope_e_retained_debit_20260913.md for exact commands and compatibility.
+# Scope G (2026-09-14): the joint receipt/stock route matrix recorded at row415
+# adds cross-owner capital/insurance reclassification after consumed Live debits.
+# Shared authority epochs only; arbitrary stock, prior unexecuted consent, backing,
+# terminal recredit and global policy remain OPEN. See the Scope G audit above.
 428	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	OPEN
 # Row 429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_exchange.rs,
 # v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders.

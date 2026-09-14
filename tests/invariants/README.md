@@ -25,6 +25,25 @@ ADL, fractional cohort allocation, partial receipt funding or insurance recredit
 closure. The [Scope L audit](astra_scope_l_mixed_fractional_expiry_20260914.md)
 records the owner comparison, precise limits, fixed Scope W artifact and validation.
 
+## Scope G generated stock reclassification (2026-09-14)
+
+Owner: [cu/inv_008_generated_stock_reclassification.rs](cu/inv_008_generated_stock_reclassification.rs),
+mounted under INV-008's `withdrawal_stock_history::generated_stock_reclassification`.
+Ninety-six public LiteSVM histories combine capital/insurance reclassification,
+external replenishment after first payouts, coheld/separate signing owners,
+repeated/alternating recipients and atomic/split delivery. A receipt book and
+independent final-payment formulas bind typed stock and owner attribution through
+3,120 checked transactions, 1,632 exact rollbacks and 7,296 restored SPL transfers.
+Peak new-history CU is 264,052; maximum packet is 1,039 bytes.
+
+The [stock-epoch route matrix](inv_008_stock_epoch_routes.tsv) source-locks all
+eight direct signed SPL outflow handlers, with generated Live coverage for two
+and explicit adjacent-owner gaps for six. Rows **415/428 remain OPEN**; production
+and machine classifications are unchanged. The [Scope G audit](astra_scope_g_retained_stock_epochs_20260914.md)
+records the comparison with Scopes A/Q/E, limits, fixed SBF and exact commands.
+New selectors pass 2/2 and metadata gates 4/4; adjacent controls pass 12/14, with
+both failures reproduced on the untouched base and documented in the audit.
+
 ## Scope E retained policy and earned reserves (2026-09-13)
 
 Owner: [cu/inv_014_retained_policy_earned_reserves.rs](cu/inv_014_retained_policy_earned_reserves.rs),

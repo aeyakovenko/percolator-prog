@@ -18,6 +18,9 @@ mod reciprocal_reward_stock;
 #[path = "inv_008_liquidation_reward_stock.rs"]
 mod liquidation_reward_stock;
 
+#[path = "inv_008_generated_stock_reclassification.rs"]
+mod generated_stock_reclassification;
+
 const SLOT: u64 = 8;
 const RATE: u64 = 11;
 const WALLET: u64 = 4_096;
