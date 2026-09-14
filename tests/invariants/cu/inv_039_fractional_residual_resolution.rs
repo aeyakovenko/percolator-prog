@@ -13,6 +13,9 @@ use crate::support::fuzz_model::{
 };
 use percolator::{BOUND_SCALE, CREDIT_RATE_SCALE, SOCIAL_LOSS_DEN};
 
+#[path = "inv_039_fractional_cohort_recreation.rs"]
+mod cohort_recreation;
+
 #[derive(Clone, Copy, Debug)]
 struct Inputs {
     weights: [u128; 2],
@@ -82,6 +85,7 @@ impl Inputs {
 struct Book {
     input: Inputs,
     recovery_peer: bool,
+    recreated_capital: u128,
     booked: bool,
     settled: [bool; 2],
     detached: [bool; 2],
@@ -90,6 +94,13 @@ struct Book {
 }
 
 impl Book {
+    fn owner_entitlements(&self) -> [u128; 5] {
+        let mut expected = self.input.payouts();
+        expected[1] += self.recreated_capital;
+        expected[4] -= self.recreated_capital;
+        expected
+    }
+
     fn source_backing(&self) -> u128 {
         self.input.deposits()[1]
             + if self.recovery_peer {
@@ -119,11 +130,11 @@ impl Book {
         // A fully source-realized owner may exit before the other conversion.
         // No terminal receipt haircut is allowed before all source faces refine.
         if self.converted.iter().any(Option::is_none) {
-            return self.input.payouts();
+            return self.owner_entitlements();
         }
         let faces = self.faces();
         let total = faces.iter().sum::<u128>();
-        let mut payouts = self.input.payouts();
+        let mut payouts = self.owner_entitlements();
         for i in 0..2 {
             let junior = if total == 0 {
                 0
@@ -221,7 +232,7 @@ impl Book {
                 let expected = if actor == 0 || actor == 2 {
                     self.payouts()[actor]
                 } else {
-                    input.payouts()[actor]
+                    self.owner_entitlements()[actor]
                 };
                 assert_eq!(wallet, expected);
                 assert!(world
@@ -265,7 +276,7 @@ impl Book {
                     }
                 }
                 1 if !self.booked => -(input.residual as i128),
-                _ => input.payouts()[actor] as i128,
+                _ => self.owner_entitlements()[actor] as i128,
             };
             assert_eq!(
                 account.capital.get() as i128 + account.pnl.get() + due as i128 + wallet as i128,
@@ -278,7 +289,7 @@ impl Book {
                 account.pnl.get(),
                 group.resolved_payout_ledger
             );
-            assert!(wallet <= input.payouts()[actor]);
+            assert!(wallet <= self.owner_entitlements()[actor]);
             let legs: Vec<_> = account
                 .legs
                 .iter()
@@ -322,7 +333,7 @@ impl Book {
             }
             let close = close_progress(&account);
             verify_close_residual_partition("INV-039 fractional residual", &close).unwrap();
-            if actor == 1 {
+            if actor == 1 && self.recreated_capital == 0 {
                 assert!(close.active && !close.canceled);
                 assert_eq!(close.finalized, self.booked);
                 assert_eq!(close.gross_loss_at_close_start, input.residual);
@@ -635,6 +646,7 @@ fn v16_program_fractional_cohort_residual_preserves_owner_floors_through_resolut
                             let mut book = Book {
                                 input,
                                 recovery_peer,
+                                recreated_capital: 0,
                                 booked: false,
                                 settled: [false; 2],
                                 detached: [false; 2],

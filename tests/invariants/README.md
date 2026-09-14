@@ -1,5 +1,33 @@
 # Invariant-owned test coverage
 
+## Scope P fractional cohort debt through funded recreation (2026-09-14)
+
+Owner: [cu/inv_039_fractional_cohort_recreation.rs](cu/inv_039_fractional_cohort_recreation.rs),
+mounted under INV-039's `fractional_residual_resolution::cohort_recreation`.
+Sixteen public LiteSVM histories cross two unequal fractional cohorts, both signs,
+both first-settled holders, and debtor recreation before/after that settlement.
+The old debtor's finalized ledger is deleted and its address publicly reinitialized
+with a fresh portfolio ID and 113 capital atoms from a bystander's signed transfer.
+The input book preserves the original B allocation, each retained fractional carry,
+source face/backing and separate fresh capital through resolution and all payouts.
+
+Each history checks complete Account rollback after three SPL-paying prefixes:
+unbooked debtor deletion, funded recreation with a rejected suffix, and the fresh
+incarnation's resolved capital payout with a rejected suffix. The latter two
+prefixes retry unchanged. Exact owner/class observations reject conserved one-atom
+reassignments. All 80 final portfolio deletions return exact rent to the market;
+paired histories have identical five-owner payout vectors and zero or one atom
+of input-predicted source rounding residue. There are 48 full rollback checks.
+
+This adds Scope L's fractional cohort allocation with close/reopen ordering.
+It reuses Scope B's arithmetic fixture without repeating its resolution matrix,
+and adds no second integral recreation, mixed-role expiry or reserve-recredit
+selector. Rows 419/435 stay OPEN. The fresh incarnation has capital but no new
+trading leg; same-portfolio creditor/debtor overlap, ADL, partial receipts,
+insurance recredit and slab retirement are outside this increment. See the
+[Scope P audit](astra_scope_p_fractional_cohort_recreation_20260914.md) for exact
+commands, owner comparison, fixed-artifact provenance, CU and remaining limits.
+
 ## Astra Scope L mixed obligations and fractional source expiry (2026-09-14)
 
 Owner: [cu/inv_039_mixed_role_fractional_retirement.rs](cu/inv_039_mixed_role_fractional_retirement.rs),
