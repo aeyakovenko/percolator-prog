@@ -11,8 +11,10 @@ wire or machine-status change is included.
 At the time of this scope, rows **425 and 426 remained OPEN** and no implementation
 / invariant mismatch was established. The later row-425 canonical-accrual
 regression in [README.md](README.md#row-425-canonical-accrual-carry-closure-2026-09-14)
-now covers row 425; row 426 remains open. This scope remains one bounded public
-LiteSVM product for INV-045/038/085/086, not a whole-invariant closure.
+and row-426 current-Hybrid rescue regression in
+[README.md](README.md#row-426-current-hybrid-rescue-closure-2026-09-14)
+now cover both rows. This scope remains one bounded public LiteSVM product for
+INV-045/038/085/086, not a whole-invariant closure.
 
 ## Ownership Review
 

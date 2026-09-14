@@ -254,7 +254,7 @@ fn v16_program_renewed_observations_preserve_repeated_liquidation_certificates()
                 for episode in 1..=2u64 {
                     let start = 64 * (episode - 1);
                     let prices = [PRICE + episode * 40_000, PRICE + episode * 50_000];
-                    let timestamp = 100 + episode as i64;
+                    let timestamp = 100 + episode as i64 * 10;
                     set_test_clock(&mut env, start, timestamp);
                     env.push_auth_mark_for_asset_as_admin(1, caller_slot, prices[1]);
                     let report =
@@ -272,11 +272,28 @@ fn v16_program_renewed_observations_preserve_repeated_liquidation_certificates()
                         audit(&env, portfolios).into_iter().filter(|x| *x).count();
                     history.push(checkpoint(&env, portfolios, tokens));
                     let prefix_accounts = frame(&env, &portfolios);
-                    set_test_clock(&mut env, start + 64, timestamp);
+                    let current_timestamp = timestamp + 1;
+                    set_test_clock(&mut env, start + 64, current_timestamp);
+                    let current_report = env.set_pyth_price_with_conf(
+                        &feed,
+                        prices[0] as i64,
+                        -6,
+                        0,
+                        current_timestamp,
+                    );
+                    tracked.push(current_report);
+                    let full_current = crank_ix(
+                        &env,
+                        portfolios,
+                        &owners[2],
+                        current_report,
+                        &order,
+                        caller_slot,
+                    );
                     peak_cu = peak_cu.max(submit(
                         &mut env,
                         &owners[2],
-                        &[full.clone()],
+                        &[full_current.clone()],
                         &tracked,
                         None,
                     ));
@@ -299,9 +316,13 @@ fn v16_program_renewed_observations_preserve_repeated_liquidation_certificates()
                         let duplicate = [order[0], order[1], order[0]];
                         for (assets, evidence, error) in [
                             (&order[..], previous_report, PercolatorError::OracleStale),
-                            (&duplicate[..], report, PercolatorError::InvalidInstruction),
-                            (&[0][..], report, PercolatorError::EngineNonProgress),
-                            (&[][..], report, PercolatorError::EngineNonProgress),
+                            (
+                                &duplicate[..],
+                                current_report,
+                                PercolatorError::InvalidInstruction,
+                            ),
+                            (&[0][..], current_report, PercolatorError::EngineNonProgress),
+                            (&[][..], current_report, PercolatorError::EngineNonProgress),
                         ] {
                             let ix = crank_ix(
                                 &env,
@@ -324,7 +345,7 @@ fn v16_program_renewed_observations_preserve_repeated_liquidation_certificates()
                     peak_cu = peak_cu.max(submit(
                         &mut env,
                         &owners[2],
-                        &[full.clone()],
+                        &[full_current.clone()],
                         &tracked,
                         None,
                     ));
@@ -368,7 +389,7 @@ fn v16_program_renewed_observations_preserve_repeated_liquidation_certificates()
                             peak_cu = peak_cu.max(submit(
                                 &mut env,
                                 &owners[2],
-                                &[full.clone(), stale],
+                                &[full_current.clone(), stale],
                                 &tracked,
                                 Some((3, PercolatorError::OracleStale)),
                             ));
@@ -379,7 +400,7 @@ fn v16_program_renewed_observations_preserve_repeated_liquidation_certificates()
                             &env,
                             portfolios,
                             &owners[2],
-                            report,
+                            current_report,
                             if interrupted { &[] } else { &order },
                             caller_slot,
                         );
@@ -425,7 +446,7 @@ fn v16_program_renewed_observations_preserve_repeated_liquidation_certificates()
                         liquidations += 1;
                     }
                     // Publicly settle the opposing cohort after unilateral reductions.
-                    let mut peer_refresh = full.clone();
+                    let mut peer_refresh = full_current.clone();
                     peer_refresh.accounts[2].pubkey = portfolios[0];
                     peak_cu = peak_cu.max(submit(
                         &mut env,
@@ -438,7 +459,7 @@ fn v16_program_renewed_observations_preserve_repeated_liquidation_certificates()
                     assert!(current[0]);
                     certificate_checks += current.into_iter().filter(|x| *x).count();
                     history.push(checkpoint(&env, portfolios, tokens));
-                    previous_report = report;
+                    previous_report = current_report;
                 }
                 let payout = DEPOSITS[2] + total_reward;
                 let withdrawal = Instruction {

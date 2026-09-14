@@ -268,11 +268,19 @@ fn v16_program_staged_observations_match_current_liquidation_and_reduction() {
 
     set_test_clock(&mut env, 0, 101);
     env.push_auth_mark_for_asset_as_admin(1, u64::MAX, CURRENT[1]);
-    let report = env.set_pyth_price_with_conf(&feed, CURRENT[0] as i64, -6, 0, 101);
-    observe(&mut env, short, &owners[2], keeper, report, Evidence::Full)
-        .expect("same-slot target staging");
+    let staging_report = env.set_pyth_price_with_conf(&feed, CURRENT[0] as i64, -6, 0, 101);
+    observe(
+        &mut env,
+        short,
+        &owners[2],
+        keeper,
+        staging_report,
+        Evidence::Full,
+    )
+    .expect("same-slot target staging");
     let account_prefix = portfolios.map(|key| env.svm.get_account(&key).unwrap());
     set_test_clock(&mut env, 64, 102);
+    let report = env.set_pyth_price_with_conf(&feed, CURRENT[0] as i64, -6, 0, 102);
     let prefix_cu = observe(&mut env, short, &owners[2], keeper, report, Evidence::Full)
         .expect("first bounded market-only prefix");
     assert_cu_within("staged market-only prefix", prefix_cu, CRANK_CU_LIMIT);
@@ -302,6 +310,7 @@ fn v16_program_staged_observations_match_current_liquidation_and_reduction() {
         sources[1],
         sources[2],
         initial,
+        staging_report,
         report,
         owners[0].pubkey(),
         owners[1].pubkey(),

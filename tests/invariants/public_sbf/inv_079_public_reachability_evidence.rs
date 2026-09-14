@@ -773,11 +773,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
     assert_eq!(rows, 166, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(
-        missing, 18,
+        missing, 17,
         "post-PR135 counterexamples remain missing generic invariant-owned discovery coverage"
     );
     assert_eq!(
-        independent, 131,
+        independent, 132,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
@@ -837,6 +837,13 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             20,
             &[20],
             include_str!("../stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs"),
+        ),
+        (
+            56,
+            &[20, 56],
+            include_str!(
+                "../cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs"
+            ),
         ),
         (
             27,
@@ -1025,6 +1032,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "mark-movement-cost-must-cover-liquidation-extraction"
                     | "mark-movement-fees-must-be-bilaterally-supported"
                     | "all-economic-routes-preserve-canonical-fractional-accrual-carry"
+                    | "current-hybrid-health-refresh-requires-fresh-authenticated-observation"
                     | "composite-price-is-rounded-once-after-exact-composition"
                     | "omitted-observation-cannot-erase-balanced-rounded-transfer"
                     | "fractional-cap-residue-must-accumulate-to-target"

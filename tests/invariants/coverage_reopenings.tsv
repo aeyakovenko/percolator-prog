@@ -1744,10 +1744,11 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # See astra_scope_i_observation_reward_carry_20260914.md for exact commands and limits.
 # Scope R (2026-09-14) adds fractional funding-checkpoint route evidence only.
 # Its favorable actions follow complete AuthMark catchup; O/V/I observation and
-# reward selectors remain adjacent controls. No new unknown-Hybrid omission or
-# recipient/liquidation evidence-completeness claim; row426 stays OPEN. Limits:
+# reward selectors remain adjacent controls. The 2026-09-14 INV-056 terminal
+# rescue regression below closes the unknown-Hybrid omission and prior-slot
+# replay liquidation case; earlier rows remain historical partial coverage. Limits:
 # astra_scope_r_fractional_checkpoint_routes_20260914.md.
-426	LoF	BLOCKER	INV-020	INV-020,INV-024,INV-053,INV-054,INV-056,INV-061,INV-071,INV-072,INV-081,INV-086	missing-evidence+x-multi-step-refresh+x-liquidation	favorable-account-actions-require-complete-current-authenticated-observations	OPEN
+426	LoF	BLOCKER	INV-020	INV-020,INV-024,INV-053,INV-054,INV-056,INV-061,INV-071,INV-072,INV-081,INV-086	missing-evidence+x-multi-step-refresh+x-liquidation	favorable-account-actions-require-complete-current-authenticated-observations	COVERED
 # Row 427 additional bounded conformance (2026-09-12): cu/inv_058_atomic_oi_fee_handoff.rs,
 # v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes.
 # Twenty-four public histories cross both signs, six mixed CPI release/refill route

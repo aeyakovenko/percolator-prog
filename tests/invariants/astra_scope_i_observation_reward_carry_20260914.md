@@ -9,8 +9,9 @@ commits and host build outputs belong to this clone.
 
 No production, dependency, fixture-program or machine-status change. No public
 instruction conformance mismatch was established in these bounded histories.
-Rows **422, 425 and 426 remain OPEN**; this is not a generic closure or a
-production red/green claim.
+At the time of this scope rows **422, 425 and 426 remained OPEN**; later
+top-level regressions close rows 425 and 426. This file remains a bounded
+history audit, not a generic closure or production red/green claim for row 422.
 
 ## Ownership And Route/History Matrix
 
