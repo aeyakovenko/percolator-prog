@@ -11,7 +11,11 @@ const CHECKPOINT: u64 = 5;
 const EXIT: u64 = 9;
 const LIMIT: u32 = 600_000;
 
-fn sign(world: &World, instructions: &[Instruction], nonce: u32) -> Transaction {
+pub(in super::super) fn sign(
+    world: &World,
+    instructions: &[Instruction],
+    nonce: u32,
+) -> Transaction {
     let mut message = vec![
         heap_ix(),
         ComputeBudgetInstruction::set_compute_unit_limit(LIMIT - nonce),
@@ -58,7 +62,12 @@ fn frame(world: &World, tx: &Transaction) -> BTreeMap<Pubkey, Option<Account>> {
         .collect()
 }
 
-fn reject(world: &mut World, tx: &Transaction, index: u8, error: InstructionError) {
+pub(in super::super) fn reject(
+    world: &mut World,
+    tx: &Transaction,
+    index: u8,
+    error: InstructionError,
+) {
     let mut before = frame(world, tx);
     before
         .get_mut(&world.env.payer.pubkey())

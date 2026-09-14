@@ -1577,6 +1577,18 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # unit ADL and explicit accrual bound the family; pending queues, source consumption,
 # other modes and generic arithmetic remain open. No production/status change.
 # See astra_scope_i_observation_reward_carry_20260914.md for commands and limits.
+# Scope R bounded fractional checkpoint routes (2026-09-14):
+# cu/inv_045_fractional_checkpoint_routes.rs, under generated_fractional_routes;
+# v16_program_fractional_checkpoint_retries_preserve_four_route_owner_residues.
+# Thirty-two public histories cross premium direction, activation slots 5/7,
+# four single/one-leg-batch transports and interrupted/clean retained delivery.
+# Input-owned K/F/owner/residue books reconcile 128 exact payouts and 2/3/5/6
+# custody atoms. Sixty-four complete Account rollbacks include successful funding
+# activation and retained CPI prefixes; exact route/retry owner endpoints agree.
+# Existing integral checkpoint and fractional-reset selectors remain controls.
+# AuthMark, unit ADL, zero fees, bounded arithmetic and explicit catchup only;
+# arbitrary queues, ADL, full U256/bigint boundaries and generic closure remain
+# open. Production/status unchanged. See astra_scope_r_fractional_checkpoint_routes_20260914.md.
 425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	OPEN
 # Row 426 partial conformance (2026-09-12): cu/inv_020_interrupted_refresh_fees.rs,
 # v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements.
@@ -1720,6 +1732,11 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # not discover an omitted unknown Hybrid observation or certify generic completeness.
 # Row426 remains OPEN; no new Hybrid-recipient cell or production/status change.
 # See astra_scope_i_observation_reward_carry_20260914.md for exact commands and limits.
+# Scope R (2026-09-14) adds fractional funding-checkpoint route evidence only.
+# Its favorable actions follow complete AuthMark catchup; O/V/I observation and
+# reward selectors remain adjacent controls. No new unknown-Hybrid omission or
+# recipient/liquidation evidence-completeness claim; row426 stays OPEN. Limits:
+# astra_scope_r_fractional_checkpoint_routes_20260914.md.
 426	LoF	BLOCKER	INV-020	INV-020,INV-024,INV-053,INV-054,INV-056,INV-061,INV-071,INV-072,INV-081,INV-086	missing-evidence+x-multi-step-refresh+x-liquidation	favorable-account-actions-require-complete-current-authenticated-observations	OPEN
 # Row 427 additional bounded conformance (2026-09-12): cu/inv_058_atomic_oi_fee_handoff.rs,
 # v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes.

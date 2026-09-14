@@ -6,7 +6,7 @@
 use super::*;
 
 #[path = "inv_045_retained_funding_retry.rs"]
-mod retained_funding_retry;
+pub(super) mod retained_funding_retry;
 
 #[path = "inv_045_checkpoint_replacement.rs"]
 mod checkpoint_replacement;

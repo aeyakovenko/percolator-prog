@@ -13,6 +13,9 @@ const SCALE: i128 = POS_SCALE as i128;
 #[path = "inv_045_fractional_reset_histories.rs"]
 mod fractional_reset_histories;
 
+#[path = "inv_045_fractional_checkpoint_routes.rs"]
+mod fractional_checkpoint_routes;
+
 struct Ledger {
     q: [[i128; 2]; 4],
     value: [i128; 4],
@@ -26,6 +29,8 @@ struct Ledger {
     funding_flows: [[u128; 4]; 4],
     slot: u64,
     targets: [i128; 2],
+    funding_targets: [i128; 2],
+    pending_funding: [Option<(u64, i128)>; 2],
     episode_price: [u64; 2],
     episode_slot: [u64; 2],
     rate_cap: i128,
@@ -49,6 +54,10 @@ impl Ledger {
             targets: [0, 1].map(|asset| {
                 i128::from(ANCHORS[asset]) + direction * if asset == 0 { 20 } else { -20 }
             }),
+            funding_targets: [0, 1].map(|asset| {
+                i128::from(ANCHORS[asset]) + direction * if asset == 0 { 20 } else { -20 }
+            }),
+            pending_funding: [None; 2],
             episode_price: ANCHORS,
             episode_slot: [0; 2],
             rate_cap,
@@ -67,10 +76,20 @@ impl Ledger {
     }
 
     fn publish(&mut self, asset: usize, target: i128) {
+        self.publish_at(asset, target, self.slot);
+    }
+
+    fn publish_at(&mut self, asset: usize, target: i128, clock: u64) {
         assert_ne!(self.targets[asset], target);
+        assert!(clock >= self.slot && self.pending_funding[asset].is_none());
         self.targets[asset] = target;
         self.episode_price[asset] = self.price[asset];
         self.episode_slot[asset] = self.slot;
+        if clock == self.slot {
+            self.funding_targets[asset] = target;
+        } else {
+            self.pending_funding[asset] = Some((clock, target));
+        }
     }
 
     fn advance(&mut self, slot: u64) {
@@ -84,7 +103,7 @@ impl Ledger {
                 );
                 let price = i128::from(self.episode_price[asset])
                     + distance.signum() * i128::from(movement);
-                let rate = ((self.target(asset) - price) * 1_000_000_000 / price)
+                let rate = ((self.funding_targets[asset] - price) * 1_000_000_000 / price)
                     .clamp(-self.rate_cap, self.rate_cap);
                 let funding = -(rate * price).div_euclid(1_000_000_000);
                 for actor in 0..4 {
@@ -93,6 +112,12 @@ impl Ledger {
                 }
                 self.price[asset] = price as u64;
                 self.funding[asset] += funding;
+                if let Some((boundary, target)) = self.pending_funding[asset] {
+                    if now == boundary {
+                        self.funding_targets[asset] = target;
+                        self.pending_funding[asset] = None;
+                    }
+                }
             }
         }
         self.slot = slot;
@@ -143,13 +168,15 @@ impl Ledger {
             );
             assert_eq!(profile.mark_ewma_e6 as i128, self.target(asset));
             assert_eq!(profile.oracle_target_price_e6, profile.mark_ewma_e6);
-            assert_eq!(profile.funding_mark_e6, profile.mark_ewma_e6);
+            assert_eq!(profile.funding_mark_e6 as i128, self.funding_targets[asset]);
             assert_eq!(
                 (
                     profile.funding_mark_pending_e6,
                     profile.funding_mark_pending_slot
                 ),
-                (0, 0)
+                self.pending_funding[asset]
+                    .map(|(slot, target)| (u64::try_from(target).unwrap(), slot))
+                    .unwrap_or((0, 0))
             );
             let k = (i128::from(self.price[asset]) - i128::from(ANCHORS[asset])) * ADL_ONE as i128;
             let f = self.funding[asset] * ADL_ONE as i128;

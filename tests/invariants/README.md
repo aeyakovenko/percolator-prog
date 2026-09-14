@@ -28,6 +28,33 @@ insurance recredit and slab retirement are outside this increment. See the
 [Scope P audit](astra_scope_p_fractional_cohort_recreation_20260914.md) for exact
 commands, owner comparison, fixed-artifact provenance, CU and remaining limits.
 
+## Scope R fractional checkpoint routes (2026-09-14)
+
+Owner: [cu/inv_045_fractional_checkpoint_routes.rs](cu/inv_045_fractional_checkpoint_routes.rs),
+mounted below `public_carry_order::generated_fractional_routes`. One selector,
+`v16_program_fractional_checkpoint_retries_preserve_four_route_owner_residues`,
+crosses both premium directions, two pending funding activation slots, all four
+single/one-leg-batch CPI/bilateral routes, and clean/interrupted delivery:
+**32 public LiteSVM histories**.
+
+Fractional owners retain signed reductions while price carry resets and the old
+funding mark remains owed. The input-owned price/K/F/owner book checks separate
+settlement residues, latent value and funding counters through exact retries and
+**128 resolved SPL payouts**. The interrupted histories contain **64 complete
+Account rollbacks**, including successful funding activation and retained CPI
+prefixes. All route/retry variants agree per owner for each direction/deadline;
+final **2/3/5/6 custody atoms** equal the independent residue, with zero currently
+valid source backing, liens, insurance or provider earnings. Expired untouched
+buckets may retain a raw Fresh tag; administrative normalization is outside scope.
+
+This composes dimensions absent from the integral retained-funding test and the
+fractional-reset tests without adding duplicate selectors. Rows **425/426 remain
+OPEN**. Two solvent AuthMark assets, unit ADL, zero fees, explicit catchup and
+bounded u64/i128 arithmetic limit the evidence; generic observation completeness,
+U256/bigint boundaries and arbitrary funding/ADL histories remain open. Production
+and machine statuses are unchanged. The [Scope R audit](astra_scope_r_fractional_checkpoint_routes_20260914.md)
+records the overlap review, exact selector/controls, supplied SBF and validation.
+
 ## Astra Scope L mixed obligations and fractional source expiry (2026-09-14)
 
 Owner: [cu/inv_039_mixed_role_fractional_retirement.rs](cu/inv_039_mixed_role_fractional_retirement.rs),
