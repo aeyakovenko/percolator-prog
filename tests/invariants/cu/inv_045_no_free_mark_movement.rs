@@ -3443,6 +3443,71 @@ fn v16_program_mark_writer_and_trade_exit_composition_is_source_complete() {
     assert!(quote.contains("mark_externality_notional"));
     assert!(quote.contains("fee_bps_for_two_sided_fee_paid"));
 
+    let crank = inv045_function_body(production, "handle_permissionless_crank_zero_copy");
+    for required in [
+        "reject_incomplete_account_health_observations_view(",
+        "let insurance_before = group.header.insurance.get();",
+        "let positions_before = portfolio_position_vector_view(&portfolio);",
+        ".permissionless_auto_crank_not_atomic(",
+        "AutoCrankPlanV16::Liquidate { asset_index: i }",
+        "let completed_liquidation = matches!(",
+        "PermissionlessProgressOutcomeV16::AccountCurrent",
+        "let selected_liquidation = matches!(",
+        "let liquidation_penalty_reclaimable = if selected_liquidation",
+        ".find(|(asset_index, _)| *asset_index == selected_fee_asset)",
+        "!profile_updates_mark_from_trade_view(&profile, authenticated_now_slot)",
+        "let retained_fee = group\n                .header\n                .insurance\n                .get()\n                .saturating_sub(insurance_before);",
+        "if completed_liquidation && liquidation_penalty_reclaimable",
+        "expect_portfolio_view_owner(&cranker, owner.key)?;",
+        "cranker\n                        .validate_with_market(&group.as_view())",
+        "let reward = core::cmp::min(reward, retained_fee);",
+        ".credit_account_from_insurance_not_atomic(&mut cranker, reward)",
+        "retained_for_domains = retained_fee\n                        .checked_sub(reward)",
+        "if selected_liquidation && !liquidation_penalty_reclaimable {\n                retained_for_domains = 0;\n            }",
+        "credit_market_fee_split_across_domains_view(",
+    ] {
+        assert!(
+            crank.contains(required),
+            "PermissionlessCrank reward/fee provenance lost {required}",
+        );
+    }
+    let health_gate = crank
+        .find("reject_incomplete_account_health_observations_view(")
+        .expect("health observation gate");
+    let insurance_snapshot = crank
+        .find("let insurance_before = group.header.insurance.get();")
+        .expect("post-maintenance insurance snapshot");
+    let engine_crank = health_gate
+        + crank[health_gate..]
+            .find(".permissionless_auto_crank_not_atomic(")
+            .expect("post-health-gate engine crank call");
+    let selected_fee_asset = crank
+        .find("let selected_fee_asset = match")
+        .expect("selected fee asset");
+    let reclaimability = crank
+        .find("let liquidation_penalty_reclaimable = if selected_liquidation")
+        .expect("liquidation reclaimability decision");
+    let retained_fee = crank
+        .find("let retained_fee = group")
+        .expect("retained fee");
+    let reward_credit = crank
+        .find(".credit_account_from_insurance_not_atomic(&mut cranker, reward)")
+        .expect("cranker reward credit");
+    let domain_split = crank
+        .find("credit_market_fee_split_across_domains_view(")
+        .expect("domain fee split");
+    assert!(
+        health_gate
+            < insurance_snapshot
+            && insurance_snapshot < engine_crank
+            && engine_crank < selected_fee_asset
+            && selected_fee_asset < reclaimability
+            && reclaimability < retained_fee
+            && retained_fee < reward_credit
+            && reward_credit < domain_split,
+        "PermissionlessCrank must refresh complete health, run the engine, classify selected liquidation provenance, then credit reward before domain split",
+    );
+
     // This exact production census includes four authoritative profile writes, two simulation
     // writes, and four compatibility mirrors. Initialization and retirement literals are pinned.
     assert_eq!(

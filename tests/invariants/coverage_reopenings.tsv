@@ -1323,6 +1323,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Exact 3762-atom payouts include eight restored SPL prefixes. No new Hybrid-recipient
 # cell, production correction or generic provenance reclassification claim. OPEN.
 # See astra_scope_i_observation_reward_carry_20260914.md for commands and limits.
+# Row422 source-composition hardening (2026-09-14): cu/inv_045_no_free_mark_movement.rs,
+# v16_program_mark_writer_and_trade_exit_composition_is_source_complete now pins
+# PermissionlessCrank reward/fee provenance. The gate requires complete-health
+# observation coverage before the post-maintenance engine crank, derives fee domains
+# from the engine-selected Liquidate asset, classifies reclaimability from the same
+# selected asset/profile, caps any cranker credit by retained_fee, zeroes
+# trade-driven/nonreclaimable liquidation penalties before domain credit, and orders
+# reward credit before the remaining domain split. This is current-route source
+# hardening only; arbitrary paid-origin/fresh-report reward histories remain OPEN.
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN
 # 423 partial conformance (2026-09-10): cu/inv_028_single_slot_admission.rs::v16_program_batch_admission_cannot_share_last_future_domain_slot.
 # Two individually fitting old-asset legs jointly need 29 domains: both batch orders reject atomically;

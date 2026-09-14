@@ -80,6 +80,24 @@ This is retained as substantive INV-073 evidence, but row **421 remains missing*
 does not prove full permissionless terminal market retirement, arbitrary insurance
 histories, every pending-claim composition, or maximum-shape terminal cleanup.
 
+## Row 422 liquidation-reward provenance source guard (2026-09-14)
+
+Owner: [cu/inv_045_no_free_mark_movement.rs](cu/inv_045_no_free_mark_movement.rs),
+`v16_program_mark_writer_and_trade_exit_composition_is_source_complete`.
+The current-surface source gate now pins the `PermissionlessCrank` liquidation
+reward ordering: complete health-observation coverage is checked before the
+engine-selected crank, insurance is snapshotted only after maintenance
+collection, the selected liquidation asset drives fee attribution, trade-driven
+mark penalties are not reclaimable as rewards or domain budgets, and any cranker
+credit is capped by the retained liquidation fee before the remaining atoms are
+split to domains.
+
+This strengthens row 422 against wrapper drift that would pay stale or
+trade-origin rewards from the wrong provenance path. Row **422 remains missing**:
+the new check is a source-composition guard over the current route, not a generic
+Hybrid reward-history generator or proof over arbitrary paid-origin, fresh-report,
+recipient, funding, maintenance, policy, and terminal-cohort histories.
+
 ## Row 426 current Hybrid rescue closure (2026-09-14)
 
 Owner: [cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs](cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs),
