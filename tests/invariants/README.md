@@ -1,5 +1,33 @@
 # Invariant-owned test coverage
 
+## Astra Scope N adjacent backing stock epochs (2026-09-14)
+
+Owner: [cu/inv_008_backing_earnings_stock_epochs.rs](cu/inv_008_backing_earnings_stock_epochs.rs),
+mounted under INV-024's `terminal_earnings_succession::backing_earnings_stock_epochs`
+to reuse its public Live utilization-fee fixture. This bounded INV-008/024/031/080/081
+product adds `WithdrawBackingBucket` and `WithdrawBackingBucketEarnings` to retained
+portfolio-withdrawal histories. It crosses two quantity sets, all six
+principal/earnings/donor-credit orders and atomic/split delivery: 24 histories,
+564 transactions, 336 exact rollbacks and 504 restored completed SPL transfers.
+Peak measured CU is 602,230 under a 900,000 envelope; maximum packet is 1,029 bytes.
+
+The provider's first 37-atom withdrawal consumes consent against 101 capital.
+Later donor-funded backing, 467 newly earned fee atoms, separate principal/earnings
+payouts and external capital deposits cannot revive it. The input-owned book checks
+capital, liens, typed reserves, ledger observations, donor/provider balances, both
+OI sides and exact fixed supply. Failed SPL suffixes restore each initial payout,
+both reclassification routes and the final exit. A duplicate final withdrawal
+also restores three successful signed outflows from three stock classes.
+
+Rows **415/428 remain OPEN**. The two backing entries remain `adjacent-only` in the
+[route matrix](inv_008_stock_epoch_routes.tsv): this does not establish standalone
+backing debit consumption. Principal uses its optional-ledger omission; earnings
+uses a ledger. Insurance is framed, with no new row428 debit theorem. Arbitrary
+histories, reserve identities/policy, other rails and terminal stock remain outside
+this product. Production and machine statuses are unchanged. Exact selectors,
+commands, owner comparison and validation are in the
+[Scope N audit](astra_scope_n_adjacent_backing_stock_epochs_20260914.md).
+
 ## Scope P fractional cohort debt through funded recreation (2026-09-14)
 
 Owner: [cu/inv_039_fractional_cohort_recreation.rs](cu/inv_039_fractional_cohort_recreation.rs),

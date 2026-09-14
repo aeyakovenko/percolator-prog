@@ -1,5 +1,9 @@
 # Scope G: complete direct signed-SPL-outflow handler inventory, not row closure.
 # The executable source gate joins this inventory to production and INV-024 effects.
+# Scope N: cu/inv_008_backing_earnings_stock_epochs.rs composes both backing
+# handlers with consumed portfolio consent, new fees and external replenishment.
+# They remain adjacent-only: no standalone backing debit-consumption theorem.
+# See astra_scope_n_adjacent_backing_stock_epochs_20260914.md for the exact owner.
 variant	handler	coverage	owner	remaining
 Withdraw	handle_withdraw	generated-live	cu/inv_008_generated_stock_reclassification.rs#v16_generated_retained_stock_reclassification_preserves_each_owners_budget	Fees, passive PnL and identity changes are adjacent owners; arbitrary compositions remain OPEN.
 WithdrawInsuranceAsset	handle_withdraw_insurance_asset	generated-live	cu/inv_008_generated_stock_reclassification.rs#v16_generated_retained_stock_reclassification_preserves_each_owners_budget	Shared Live authority epoch only; Resolved recredit, shutdown fallback, prior unexecuted consent and global policy remain OPEN.

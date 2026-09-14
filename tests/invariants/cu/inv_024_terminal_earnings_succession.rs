@@ -8,6 +8,9 @@ use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::
 #[path = "inv_024_terminal_reserve_destination_recovery.rs"]
 mod terminal_reserve_destination_recovery;
 
+#[path = "inv_008_backing_earnings_stock_epochs.rs"]
+mod backing_earnings_stock_epochs;
+
 #[path = "inv_024_terminal_earnings_expiry.rs"]
 mod terminal_earnings_expiry;
 

@@ -577,6 +577,16 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Rows415/428 remain OPEN; no production or machine-status change. New peak264052 CU.
 # Exact commands, fixed SBF and two baseline-inherited controls are recorded in
 # astra_scope_g_retained_stock_epochs_20260914.md. This is bounded conformance only.
+# Scope N (2026-09-14): cu/inv_008_backing_earnings_stock_epochs.rs adds a 24-history
+# public product for the two adjacent backing outflow owners: principal and earned
+# utilization fees become capital after the first portfolio withdrawal. Donor-funded
+# backing, fresh fee accrual, all six reclassification orders and atomic/split retry
+# preserve owner/class budgets. 564 transactions, 336 full rollbacks, 504 restored
+# SPL transfers, peak602230 CU. No cache-only or frozen-preflight probes retained.
+# Principal omits its optional ledger; earnings telemetry is exact. Standalone
+# backing consumption, terminal/other-rail histories and row428 remain OPEN.
+# Production/status records unchanged; exact selector and required commands in
+# astra_scope_n_adjacent_backing_stock_epochs_20260914.md and README Scope N.
 415	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-011,INV-024,INV-031,INV-064	retained-withdrawal+x-stock-replenishment+x-retry	a-value-withdrawal-intent-cannot-spend-stock-created-after-first-execution	OPEN
 # 416/429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_coalescence.rs,
 # v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements.
@@ -1889,6 +1899,9 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # adds cross-owner capital/insurance reclassification after consumed Live debits.
 # Shared authority epochs only; arbitrary stock, prior unexecuted consent, backing,
 # terminal recredit and global policy remain OPEN. See the Scope G audit above.
+# Scope N (2026-09-14) extends two adjacent backing handlers at row415, while the
+# insurer's 31 atoms and budgets remain framed. It makes no new insurance debit,
+# recredit, policy or standalone reserve-epoch claim; row428 remains OPEN.
 428	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	OPEN
 # Row 429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_exchange.rs,
 # v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders.
