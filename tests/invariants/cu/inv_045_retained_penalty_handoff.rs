@@ -4,13 +4,30 @@
 
 use super::*;
 
-#[test]
-fn v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup() {
+#[path = "inv_045_paid_origin_routes.rs"]
+mod paid_origin_routes;
+
+fn run_retained_handoff(
+    routes: Option<(bool, bool, bool)>,
+) -> ([i128; 5], [u128; 2], [u128; 4], u64) {
     const SHARE: u128 = 3_333;
     const FRESH_TARGET: u64 = 980_000;
+    let crank_limit = if routes.is_some() {
+        500_000
+    } else {
+        CRANK_CU_LIMIT
+    };
+    let submit = |env: &mut V16CuEnv,
+                  signer: &Keypair,
+                  instructions: &[Instruction],
+                  tracked: &[Pubkey],
+                  rejection: Option<(u8, InstructionError)>| {
+        submit_with_cu_limit(env, signer, instructions, tracked, rejection, crank_limit)
+    };
     let mut env = inv018_public_spl_market_with_params(
         6,
         V16CuMarketParams {
+            max_portfolio_assets: if routes.is_some() { 2 } else { 1 },
             max_abs_funding_e9_per_slot: 0,
             ..production_risk_params()
         },
@@ -63,6 +80,20 @@ fn v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup() {
         ENTRY,
         0,
     );
+    if routes.is_some() {
+        env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+        peak_trade = peak_trade.max(env.trade_asset_with_cu(
+            1,
+            &owners[4],
+            keeper,
+            &owners[1],
+            peer,
+            3 * POS_SCALE as i128,
+            100,
+            0,
+        ));
+        env.push_auth_mark_for_asset_as_admin(1, 1, 120);
+    }
     let mut tracked = vec![env.market, env.mint, env.vault, env.admin.pubkey(), initial];
     tracked.extend(portfolios);
     tracked.extend(tokens);
@@ -72,20 +103,30 @@ fn v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup() {
     assert_eq!(env.token_amount(env.vault) as u128, supply);
 
     set_test_clock(&mut env, 5, 1_000);
-    let clock_only = observe(&env, keeper, owners[4].pubkey(), Some(initial), None);
+    let clock_only = observe(
+        &env,
+        if routes.is_some() { trader_a } else { keeper },
+        owners[4].pubkey(),
+        Some(initial),
+        None,
+    );
     let mut peak_crank = submit(&mut env, &owners[4], &[clock_only], &tracked, None);
     assert_eq!(env.market_state().1.assets[0].slot_last, 5);
     assert_eq!(env.market_state().0.mark_ewma_last_slot, 1);
-    peak_trade = peak_trade.max(env.trade_asset_with_cu(
-        0,
-        &owners[2],
-        trader_a,
-        &owners[3],
-        trader_b,
-        POS_SCALE as i128,
-        900_000,
-        0,
-    ));
+    peak_trade = peak_trade.max(if let Some((batch, cpi, _)) = routes {
+        paid_origin_routes::discover(&mut env, &owners, portfolios, &mut tracked, batch, cpi)
+    } else {
+        env.trade_asset_with_cu(
+            0,
+            &owners[2],
+            trader_a,
+            &owners[3],
+            trader_b,
+            POS_SCALE as i128,
+            900_000,
+            0,
+        )
+    });
     let required = (2 * 100 * u128::from(ENTRY) * 77).div_ceil(10_000);
     let trade_bps = (required * 10_000).div_ceil(2 * u128::from(ACCEPTED_PRINT));
     let paid = fee(POS_SCALE, ACCEPTED_PRINT, trade_bps);
@@ -107,6 +148,7 @@ fn v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup() {
     let mut late_rollbacks = 0;
     let mut reward_rollbacks = 0;
     let mut liquidation_count = 0;
+    let mut missing_rollbacks = 0;
     let stale_price = ENTRY - ENTRY * 24 / 10_000;
     // Replacing the pending target restarts the cap anchor at the accepted price.
     let handoff_price = stale_price - stale_price * 24 / 10_000;
@@ -132,10 +174,42 @@ fn v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup() {
             Some(equivocal),
             Some(keeper),
         );
+        let missing = observe(&env, target, owners[4].pubkey(), None, None);
+        if let Some((_, _, publish_first)) = routes {
+            peak_reject = peak_reject.max(submit(
+                &mut env,
+                &owners[4],
+                &[missing.clone()],
+                &tracked,
+                Some((2, InstructionError::NotEnoughAccountKeys)),
+            ));
+            missing_rollbacks += 1;
+            if publish_first {
+                let publication =
+                    paid_origin_routes::refresh(&env, keeper, owners[4].pubkey(), report);
+                peak_reject = peak_reject.max(submit(
+                    &mut env,
+                    &owners[4],
+                    &[publication.clone(), missing.clone()],
+                    &tracked,
+                    Some((3, InstructionError::NotEnoughAccountKeys)),
+                ));
+                missing_rollbacks += 1;
+                let mut before_value = values(&env, portfolios);
+                peak_crank =
+                    peak_crank.max(submit(&mut env, &owners[4], &[publication], &tracked, None));
+                before_value[4] = FUNDS[4] as i128
+                    + rewards as i128
+                    + 3 * ((slot - 1) * 100 * 24 / 10_000) as i128;
+                assert_eq!(values(&env, portfolios), before_value);
+                census(&env, portfolios);
+            }
+        }
         let mut liquidated = false;
         for _ in 0..6 {
             let before = env.market_state().1;
             let before_values = values(&env, portfolios);
+            let keeper_before = env.portfolio_state(keeper);
             let before_cert = health_cert(&env.portfolio_state(target));
             if phase == 2
                 && before.assets[0].effective_price == price
@@ -145,6 +219,16 @@ fn v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup() {
                 break;
             }
             let peers = [peer, trader_a, trader_b].map(|key| env.svm.get_account(&key));
+            if routes.is_some() {
+                peak_reject = peak_reject.max(submit(
+                    &mut env,
+                    &owners[4],
+                    &[valid.clone(), missing.clone()],
+                    &tracked,
+                    Some((3, InstructionError::NotEnoughAccountKeys)),
+                ));
+                missing_rollbacks += 1;
+            }
             if phase != 0 {
                 peak_reject = peak_reject.max(submit(
                     &mut env,
@@ -166,6 +250,9 @@ fn v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup() {
                 None,
             ));
             let current = census(&env, portfolios);
+            let keeper_after = env.portfolio_state(keeper);
+            assert_eq!(keeper_after.legs, keeper_before.legs);
+            assert_eq!(keeper_after.pnl, keeper_before.pnl);
             let (profile, after) = env.market_state();
             assert_eq!(after.assets[0].effective_price, price, "phase={phase}");
             assert_eq!(
@@ -269,13 +356,21 @@ fn v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup() {
             phase != 2,
             "two liquidation episodes; final catchup cannot charge or reward again"
         );
+        if routes.is_some() && !census(&env, portfolios)[4] {
+            let ix = paid_origin_routes::refresh(&env, keeper, owners[4].pubkey(), report);
+            peak_crank = peak_crank.max(submit(&mut env, &owners[4], &[ix], &tracked, None));
+        }
         // Finish account-local ADL/source work before the next price boundary.
         for _ in 0..8 {
             for i in [1, 2, 3, 0] {
                 if census(&env, portfolios)[i] {
                     continue;
                 }
-                let ix = observe(&env, portfolios[i], owners[4].pubkey(), Some(report), None);
+                let ix = if routes.is_some() {
+                    paid_origin_routes::refresh(&env, portfolios[i], owners[4].pubkey(), report)
+                } else {
+                    observe(&env, portfolios[i], owners[4].pubkey(), Some(report), None)
+                };
                 peak_crank = peak_crank.max(submit(&mut env, &owners[4], &[ix], &tracked, None));
             }
             if census(&env, portfolios)[..4].iter().all(|value| *value) {
@@ -291,8 +386,26 @@ fn v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup() {
         assert_eq!(&group.insurance_domain_budget[..2], &budgets);
         assert_eq!(
             values(&env, portfolios)[4],
-            FUNDS[4] as i128 + rewards as i128
+            FUNDS[4] as i128
+                + rewards as i128
+                + if routes.is_some() {
+                    3 * ((slot - 1) * 100 * 24 / 10_000) as i128
+                } else {
+                    0
+                }
         );
+        if routes.is_some() {
+            let asset = group.assets[1];
+            let movement = (slot - 1) * 100 * 24 / 10_000;
+            assert_eq!(
+                (asset.effective_price, asset.k_long),
+                (100 + movement, movement as i128 * ADL_ONE as i128)
+            );
+            assert_eq!(
+                (asset.oi_eff_long_q, asset.oi_eff_short_q),
+                (3 * POS_SCALE, 3 * POS_SCALE)
+            );
+        }
         peak_reject = peak_reject.max(submit(
             &mut env,
             &owners[4],
@@ -310,25 +423,52 @@ fn v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup() {
         late_rollbacks >= 2,
         "fresh publication and liquidation both roll back"
     );
+    if routes.is_some() {
+        let before_values = values(&env, portfolios);
+        env.svm.expire_blockhash();
+        peak_trade = peak_trade.max(env.trade_asset_with_cu(
+            1,
+            &owners[4],
+            keeper,
+            &owners[1],
+            peer,
+            -3 * POS_SCALE as i128,
+            103,
+            0,
+        ));
+        assert_eq!(values(&env, portfolios), before_values);
+        assert_eq!(env.market_state().1.assets[1].oi_eff_long_q, 0);
+    }
     let payout = FUNDS[4] as u128 + rewards;
     let before_payout = values(&env, portfolios);
-    let payout_cu = env
-        .send(
-            env.withdraw_ix(keeper, payout),
-            vec![
-                AccountMeta::new(owners[4].pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(keeper, false),
-                AccountMeta::new(tokens[4], false),
-                AccountMeta::new(env.vault, false),
-                AccountMeta::new_readonly(env.vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ],
-            &[&owners[4]],
-        )
-        .expect("keeper realizes only principal and new liquidation rewards");
+    let withdrawal = Instruction {
+        program_id: env.program_id,
+        data: env.withdraw_ix(keeper, payout).encode(),
+        accounts: vec![
+            AccountMeta::new(owners[4].pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper, false),
+            AccountMeta::new(tokens[4], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+    };
+    if routes.is_some() {
+        let missing = observe(&env, target, owners[4].pubkey(), None, None);
+        peak_reject = peak_reject.max(submit(
+            &mut env,
+            &owners[4],
+            &[withdrawal.clone(), missing],
+            &tracked,
+            Some((3, InstructionError::NotEnoughAccountKeys)),
+        ));
+        missing_rollbacks += 1;
+    }
+    let payout_cu = submit(&mut env, &owners[4], &[withdrawal], &tracked, None);
     let mut expected = before_payout;
-    expected[4] = 0;
+    expected[4] -= payout as i128;
+    assert_eq!(expected[4], if routes.is_some() { 9 } else { 0 });
     assert_eq!(values(&env, portfolios), expected);
     assert_eq!(env.token_amount(tokens[4]) as u128, payout);
     assert!(tokens[..4].iter().all(|key| env.token_amount(*key) == 0));
@@ -354,12 +494,23 @@ fn v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup() {
         discovery + old_penalty
     );
     assert_cu_within("retained penalty trade", peak_trade, TRADE_CU_LIMIT);
-    assert_cu_within("retained penalty crank", peak_crank, CRANK_CU_LIMIT);
-    assert_cu_within(
-        "retained penalty rejection",
-        peak_reject,
-        2 * CRANK_CU_LIMIT,
-    );
+    assert_cu_within("retained penalty crank", peak_crank, crank_limit);
+    assert_cu_within("retained penalty rejection", peak_reject, 2 * crank_limit);
     assert_cu_within("retained penalty payout", payout_cu, CUSTODY_CU_LIMIT);
     println!("retained penalty: liquidations={liquidation_count} late_rollbacks={late_rollbacks} fixed_point_rollbacks=3 rewarded_rollbacks={reward_rollbacks} discovery={discovery} old_penalty={old_penalty} new_penalties={new_penalties} rewards={rewards} payout={payout} CU trade={peak_trade} crank={peak_crank} rejection={peak_reject} payout={payout_cu}");
+    if routes.is_some() {
+        assert!(missing_rollbacks >= 7);
+        eprintln!("Scope I paid origin: routes={routes:?}, missing_rollbacks={missing_rollbacks}, payout_rollbacks=1");
+    }
+    (
+        expected,
+        budgets,
+        [discovery, old_penalty, new_penalties, payout],
+        peak_trade.max(peak_crank).max(peak_reject).max(payout_cu),
+    )
+}
+
+#[test]
+fn v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup() {
+    run_retained_handoff(None);
 }

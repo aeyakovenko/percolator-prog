@@ -1,7 +1,7 @@
 //! INV-045 / row425: generated fractional K/F settlement across public routes.
 //! Independent signed-numerator accounting distinguishes price carry, K and F
 //! settlement floors, latent owner value, and unallocated custody residue.
-//! Fixed AuthMark targets, unit ADL, zero fees and solvent reductions only.
+//! Unit ADL, zero fees and solvent reductions only; the child replaces targets.
 
 use super::*;
 use rand::{Rng, SeedableRng};
@@ -9,6 +9,9 @@ use rand_xorshift::XorShiftRng;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
 const SCALE: i128 = POS_SCALE as i128;
+
+#[path = "inv_045_fractional_reset_histories.rs"]
+mod fractional_reset_histories;
 
 struct Ledger {
     q: [[i128; 2]; 4],
@@ -22,7 +25,9 @@ struct Ledger {
     snap_funding: [[i128; 2]; 4],
     funding_flows: [[u128; 4]; 4],
     slot: u64,
-    direction: i128,
+    targets: [i128; 2],
+    episode_price: [u64; 2],
+    episode_slot: [u64; 2],
     rate_cap: i128,
     latent_checks: usize,
     separate_floor_checks: usize,
@@ -41,7 +46,11 @@ impl Ledger {
             snap_funding: [[0; 2]; 4],
             funding_flows: [[0; 4]; 4],
             slot: 0,
-            direction,
+            targets: [0, 1].map(|asset| {
+                i128::from(ANCHORS[asset]) + direction * if asset == 0 { 20 } else { -20 }
+            }),
+            episode_price: ANCHORS,
+            episode_slot: [0; 2],
             rate_cap,
             latent_checks: 0,
             separate_floor_checks: 0,
@@ -49,20 +58,32 @@ impl Ledger {
     }
 
     fn target(&self, asset: usize) -> i128 {
-        i128::from(ANCHORS[asset]) + self.direction * if asset == 0 { 20 } else { -20 }
+        self.targets[asset]
     }
 
     fn carry(&self) -> [u64; 2] {
-        ANCHORS.map(|anchor| anchor * CAP_BPS * self.slot % 10_000)
+        [0, 1]
+            .map(|asset| ANCHORS[asset] * CAP_BPS * (self.slot - self.episode_slot[asset]) % 10_000)
+    }
+
+    fn publish(&mut self, asset: usize, target: i128) {
+        assert_ne!(self.targets[asset], target);
+        self.targets[asset] = target;
+        self.episode_price[asset] = self.price[asset];
+        self.episode_slot[asset] = self.slot;
     }
 
     fn advance(&mut self, slot: u64) {
         for now in self.slot + 1..=slot {
             for asset in 0..2 {
-                let sign = self.direction * if asset == 0 { 1 } else { -1 };
-                let price = i128::from(ANCHORS[asset])
-                    + sign * i128::from(ANCHORS[asset] * CAP_BPS * now / 10_000);
-                assert!((price - i128::from(ANCHORS[asset])).abs() < 20);
+                let distance = self.target(asset) - i128::from(self.episode_price[asset]);
+                let movement = ANCHORS[asset] * CAP_BPS * (now - self.episode_slot[asset]) / 10_000;
+                assert!(
+                    i128::from(movement) < distance.abs(),
+                    "no target arrival in this ledger"
+                );
+                let price = i128::from(self.episode_price[asset])
+                    + distance.signum() * i128::from(movement);
                 let rate = ((self.target(asset) - price) * 1_000_000_000 / price)
                     .clamp(-self.rate_cap, self.rate_cap);
                 let funding = -(rate * price).div_euclid(1_000_000_000);
@@ -236,10 +257,15 @@ impl Ledger {
 }
 
 fn reject_suffix(world: &mut World, ix: Instruction, actors: &[usize]) -> u64 {
+    reject_signed_suffix(world, ix, actors, false)
+}
+
+fn reject_signed_suffix(world: &mut World, ix: Instruction, actors: &[usize], admin: bool) -> u64 {
     let env = &mut world.env;
     env.svm.expire_blockhash();
     let signers: Vec<_> = std::iter::once(&env.payer)
         .chain(actors.iter().map(|actor| &world.owners[*actor]))
+        .chain(admin.then_some(&env.admin))
         .collect();
     let tx = Transaction::new_signed_with_payer(
         &[
