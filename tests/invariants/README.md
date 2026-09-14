@@ -1,5 +1,30 @@
 # Invariant-owned test coverage
 
+## Astra Scope L mixed obligations and fractional source expiry (2026-09-14)
+
+Owner: [cu/inv_039_mixed_role_fractional_retirement.rs](cu/inv_039_mixed_role_fractional_retirement.rs),
+mounted under INV-039's `mixed_role_resolution::fractional_retirement`.
+Thirty-two public LiteSVM histories retain the same portfolio's creditor and debtor
+obligations through fractional peer-source conversion, paired booking/close orders,
+two exact/late expiry deadlines, and final slab retirement. The input-derived book
+distinguishes 180,000 support atoms, 200,000 retired source face, a separate 20,000
+pending residual, and a 180,001-face peer receipt. The extra receipt atom is paid
+exactly; its remaining source backing stays reserved until its own later expiry.
+
+An idle provider commits 101 or 307 atoms from existing principal to an unrelated
+bucket. Its earlier expiry cannot change the completed users' entitlements or
+release the fractional source atom. Every user payout, full supply census, separate
+expiry, final burn and rent disposition is checked. The histories include 160
+complete Account rollback checks, 32 paid-receipt retries, 160 portfolio deletions
+and 32 slab tombstones. Scope J's exact-rate matrix and Scope D's insured
+claimant/provider/insurance overlap remain adjacent controls.
+
+Rows 419/435 remain OPEN; production and machine statuses are unchanged. This is
+bounded INV-039/024 composition evidence, not generic INV-086 equivalence or
+ADL, fractional cohort allocation, partial receipt funding or insurance recredit
+closure. The [Scope L audit](astra_scope_l_mixed_fractional_expiry_20260914.md)
+records the owner comparison, precise limits, fixed Scope W artifact and validation.
+
 ## Scope E retained policy and earned reserves (2026-09-13)
 
 Owner: [cu/inv_014_retained_policy_earned_reserves.rs](cu/inv_014_retained_policy_earned_reserves.rs),

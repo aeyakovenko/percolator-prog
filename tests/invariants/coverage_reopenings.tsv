@@ -898,6 +898,16 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # creditor/debtor portfolio remains a separate control. No fractional/ADL,
 # generic histories, status promotion or production change; row remains OPEN.
 # Exact commands and limitations: astra_scope_d_pending_reserve_roles_20260913.md.
+# Astra Scope L (2026-09-14): cu/inv_039_mixed_role_fractional_retirement.rs
+# extends Scope J's input-derived book to two fractional peer-source rates,
+# retaining the same portfolio's creditor/debtor attribution through distinct
+# provider/source expiry deadlines and final burn/rent-exact slab retirement.
+# 32 public histories, 160 complete rollback frames, 32 paid receipt retries,
+# 160 portfolio deletions; no claimant/provider/insurance overlap duplicate.
+# Integral quantity/B inputs and fully funded receipts only. ADL, fractional B
+# allocation, underfunded receipts, insurance recredit and arbitrary histories
+# remain OPEN. No production or status change; exact scope and validation are
+# recorded in astra_scope_l_mixed_fractional_expiry_20260914.md.
 419	LoF	BLOCKER	INV-039	INV-024,INV-037,INV-039,INV-041,INV-048,INV-066,INV-067,INV-073,INV-076,INV-081,INV-086	pending-obligation+x-resolution+x-close-order	obligation-attribution-persists-until-the-opposing-economic-debt-settles	OPEN
 # Rows 420/421 partial conformance (2026-09-10): cu/inv_073_absent_insurer_spent_retirement.rs,
 # v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion.
@@ -2044,4 +2054,11 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # checks coheld ATA totals AND separate remaining principal/insurance classes;
 # conserved owner/class reassignments fail. No generic mixed-role closure is
 # claimed, and the same-portfolio/fractional/ADL/recredit product stays OPEN.
+# Scope L adds the same-portfolio/fractional-source/expiry bounded product to
+# Scope J's sampled mixed-role cell. The independent book retains original debt,
+# quantified face discount and both rate/atom floors through exact user payouts.
+# The earlier provider expiry leaves the one reserved source atom untouched;
+# its own later expiry permits exact terminal burn without another user payout.
+# This does not generalize Scopes J/D or close the ADL, fractional cohort,
+# underfunded receipt, recredit or arbitrary mixed-role history dimensions.
 435	LoF	BLOCKER	INV-039	INV-039	pending-obligation+x-resolution+x-mixed-role-attribution	mixed-role-resolved-debt-attribution-preserves-owner-obligation-through-resolution	OPEN

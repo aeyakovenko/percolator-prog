@@ -1,6 +1,8 @@
 //! INV-024/037/039/066: one portfolio owns a pending creditor leg and an
 //! unsettled debtor leg in different domains through public resolved settlement.
 //! Integral inputs isolate role attribution from fractional cohort rounding.
+//! The child extends the input-derived book to fractional peer-source rates
+//! and two expiry deadlines; the original exact-rate matrix remains a control.
 
 use super::*;
 use crate::support::fuzz_model::{
@@ -8,6 +10,9 @@ use crate::support::fuzz_model::{
     verify_close_residual_partition,
 };
 use percolator::SOCIAL_LOSS_DEN;
+
+#[path = "inv_039_mixed_role_fractional_retirement.rs"]
+mod fractional_retirement;
 
 const DEPOSITS: [u128; 5] = [400_000, 180_000, 300_000, 250_000, 777];
 const GAIN: u128 = 200_000;
@@ -22,6 +27,7 @@ struct Book {
     charged: bool,
     debt_settled: bool,
     converted: bool,
+    provider_principal: u128,
     deleted: [bool; 5],
 }
 
@@ -45,13 +51,24 @@ impl Book {
         GAIN.saturating_sub(self.support_face() + RESIDUAL)
     }
 
+    fn peer_conversion(&self) -> u128 {
+        // Preserve both rate quantization and the subsequent atom floor.
+        let backing = self.debt - self.support();
+        let rate = backing * percolator::CREDIT_RATE_SCALE / self.debt;
+        self.debt * rate / percolator::CREDIT_RATE_SCALE
+    }
+
+    fn peer_receipt_face(&self) -> u128 {
+        self.debt - self.peer_conversion()
+    }
+
     fn payouts(&self) -> [u128; 5] {
         [
             DEPOSITS[0] + GAIN - RESIDUAL - self.debt - self.face_discount(),
             0,
             DEPOSITS[2] + self.debt,
             DEPOSITS[3],
-            DEPOSITS[4],
+            DEPOSITS[4] - self.provider_principal,
         ]
     }
 
@@ -210,7 +227,10 @@ impl Book {
             let due = if receipt.present {
                 assert_eq!(actor, 2);
                 assert!(self.booked && self.charged && self.debt_settled);
-                assert_eq!(receipt.terminal_positive_claim_face, self.support());
+                assert_eq!(
+                    receipt.terminal_positive_claim_face,
+                    self.peer_receipt_face()
+                );
                 assert_eq!(
                     receipt.prior_bound_contribution_num,
                     receipt.terminal_positive_claim_face * BOUND_SCALE
@@ -446,6 +466,7 @@ fn setup(reverse: bool, assets: [usize; 2], debt: u128) -> (AttributionWorld, Bo
         charged: false,
         debt_settled: false,
         converted: false,
+        provider_principal: 0,
         deleted: [false; 5],
     };
     assert_ne!(book.debt_k, 0);
