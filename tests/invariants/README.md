@@ -3566,6 +3566,48 @@ git diff --check && git diff --cached --check
 git show --format= --check HEAD
 ```
 
+## INV-073 dual-quote earned-fee progress (rows 420/433, 2026-09-14)
+
+Owner: [cu/inv_073_dual_quote_earnings_progress.rs](cu/inv_073_dual_quote_earnings_progress.rs),
+mounted by INV-073. Exact selector:
+`inv_073_no_permanent_user_lock::v16_program_absent_provider_dual_quote_earnings_share_one_ledger_and_close`.
+
+The existing public terminal earned-fee fixture now has an optional secondary
+SPL quote rail installed before deposits, backing, insurance and trades. Public
+trading still creates the same 875 earned-fee atoms, user settlement and
+owner-signed portfolio deletion. The provider key is then dropped; a keeper pays
+one absent provider's earned-fee claim through the same backing-domain ledger,
+splitting 17 and 858 atoms across primary->secondary and secondary->primary
+histories.
+
+Each history proves the first payout needs no provider signature, the suffix
+payment plus premature `CloseSlab` rolls back the suffix and ledger state exactly,
+and the unchanged suffix retry commits. Principal and insurance remain separate
+until their own unsigned terminal withdrawals. Final dual-vault `CloseSlab`
+sweeps only the raw quote surplus displaced by paying logical claims on the
+opposite rail; it does not mint entitlement from secondary liquidity.
+
+The oracle checks market config, authority profile, control epochs, ledger
+market/domain/authority binding, cumulative earnings withdrawn, source bucket
+fees, principal, insurance, provider/admin custody on both rails, stock census,
+reservation census, mint frames, vault lamports and tombstone state. The exact
+selector passes **1/1** with two histories and peak CU
+`[229320, 246174, 50629]`.
+
+Rows **420 and 433 remain OPEN**. This is bounded cross-rail earned-fee/ledger
+composition, not a generator or proof of native rails, arbitrary histories,
+Recovery/recredit, expiry races, custody disruption, multiple assets/providers,
+maximum shape, absent portfolio owners or absent market-authority closure.
+
+Validation command:
+
+```sh
+PERCOLATOR_FUZZ_SBF=/dev/shm/pr135-cont-sbf/deploy/percolator_prog.so \
+cargo test --locked --offline --test v16_cu \
+  inv_073_no_permanent_user_lock::v16_program_absent_provider_dual_quote_earnings_share_one_ledger_and_close \
+  -- --exact --nocapture --test-threads=1
+```
+
 ## INV-070/088 resolved claimant actionability after later cleanup (row 424, 2026-09-13)
 
 Owner: [cu/inv_088_resolved_actionability.rs](cu/inv_088_resolved_actionability.rs),

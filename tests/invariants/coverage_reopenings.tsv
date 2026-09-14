@@ -1131,6 +1131,19 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 # cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::replenished_provider_progress::v16_program_absent_provider_replenished_principal_reaches_terminal_close -- --exact --nocapture --test-threads=1
 # Test-only; no production change, implementation violation or status promotion.
+# Rows 420/433 bounded conformance (2026-09-14): cu/inv_073_dual_quote_earnings_progress.rs.
+# Selector: inv_073_no_permanent_user_lock::v16_program_absent_provider_dual_quote_earnings_share_one_ledger_and_close.
+# The public 875-atom earned-fee terminal fixture now installs a secondary SPL quote
+# rail before funding. Two histories split one absent provider's fee claim 17/858
+# across primary->secondary and secondary->primary, with one shared backing-domain
+# ledger. A suffix payment bundled with premature CloseSlab rolls back completely;
+# the retry commits, then unsigned principal/insurance withdrawals and dual-vault
+# CloseSlab preserve displaced raw quote surplus. This adds earned-fee/ledger
+# composition to row433's prior no-fee dual-quote reserve worlds and row420's
+# single-rail absent-provider fee exits. Exact selector PASS 1/1, peak CU
+# [229320,246174,50629]. Rows stay OPEN: no native rail, arbitrary histories,
+# Recovery/recredit, expiry races, custody disruption, multiple assets/providers,
+# maximum shape, absent portfolio owners or absent market-authority close.
 420	DoS	BLOCKER	INV-073	INV-018,INV-021,INV-026,INV-027,INV-032,INV-063,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	provider-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-provider-signature	OPEN
 # Row 421 bounded conformance (2026-09-12): cu/inv_073_frozen_insurance_remainder.rs,
 # v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement.

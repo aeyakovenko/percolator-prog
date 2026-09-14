@@ -76,6 +76,10 @@ pub(crate) use distinct_provider_disposition::verify_distinct_provider_dispositi
 mod native_provider_redemption;
 pub(crate) use native_provider_redemption::verify_native_provider_redemption;
 
+#[path = "inv_073_dual_quote_earnings_progress.rs"]
+mod dual_quote_earnings_progress;
+pub(crate) use dual_quote_earnings_progress::verify_dual_quote_earnings_progress;
+
 #[path = "inv_073_recovery_reserve_cleanup.rs"]
 mod recovery_reserve_cleanup;
 pub(crate) use recovery_reserve_cleanup::verify_recovery_reserve_cleanup;
@@ -97,6 +101,14 @@ struct TerminalEarningsWorld {
     wallets: [Pubkey; 5],
     tokens: [Pubkey; 5],
     portfolios: [Pubkey; 2],
+    mint_frame: solana_sdk::account::Account,
+}
+
+struct SecondaryQuoteRail {
+    mint: Pubkey,
+    vault: Pubkey,
+    provider_token: Pubkey,
+    admin_token: Pubkey,
     mint_frame: solana_sdk::account::Account,
 }
 
@@ -136,8 +148,45 @@ fn terminal_earnings_world_with_quote(
     insurance_share_bps: u16,
     native: bool,
 ) -> (TerminalEarningsWorld, [Keypair; 2]) {
+    let (world, users, secondary) = terminal_earnings_world_with_optional_secondary_quote(
+        terminal_exit,
+        freeze_authority,
+        insurance_share_bps,
+        native,
+        false,
+    );
+    assert!(secondary.is_none());
+    (world, users)
+}
+
+fn terminal_earnings_world_with_dual_spl_quote(
+    terminal_exit: bool,
+) -> (TerminalEarningsWorld, [Keypair; 2], SecondaryQuoteRail) {
+    let (world, users, secondary) =
+        terminal_earnings_world_with_optional_secondary_quote(terminal_exit, None, 0, false, true);
+    (
+        world,
+        users,
+        secondary.expect("dual quote fixture installs a secondary rail"),
+    )
+}
+
+fn terminal_earnings_world_with_optional_secondary_quote(
+    terminal_exit: bool,
+    freeze_authority: Option<Pubkey>,
+    insurance_share_bps: u16,
+    native: bool,
+    secondary_quote: bool,
+) -> (
+    TerminalEarningsWorld,
+    [Keypair; 2],
+    Option<SecondaryQuoteRail>,
+) {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_create_public_spl_mint;
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_freeze_authority;
     use inv_081_success_state_validity_over_complete_public_routes::inv081_public_native_market_with_params;
+    assert!(!secondary_quote || !native);
+    assert!(!secondary_quote || freeze_authority.is_none());
 
     let params = V16CuMarketParams {
         max_portfolio_assets: 1,
@@ -156,6 +205,29 @@ fn terminal_earnings_world_with_quote(
     let incumbent = Keypair::new();
     let successor = Keypair::new();
     let users = [Keypair::new(), Keypair::new()];
+    let secondary_keys = if secondary_quote {
+        let secondary_mint =
+            inv018_create_public_spl_mint(&mut env.svm, &env.payer, admin.pubkey(), 0);
+        let secondary_vault = create_ata_for_test(
+            &mut env.svm,
+            &env.payer,
+            env.vault_authority,
+            secondary_mint,
+        );
+        let secondary_provider_token =
+            create_ata_for_test(&mut env.svm, &env.payer, incumbent.pubkey(), secondary_mint);
+        let secondary_admin_token =
+            create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), secondary_mint);
+        env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+        Some((
+            secondary_mint,
+            secondary_vault,
+            secondary_provider_token,
+            secondary_admin_token,
+        ))
+    } else {
+        None
+    };
     for signer in [&incumbent, &successor, &users[0], &users[1]] {
         env.svm.airdrop(&signer.pubkey(), 1_000_000_000).unwrap();
     }
@@ -221,6 +293,38 @@ fn terminal_earnings_world_with_quote(
             .unwrap();
         }
     }
+    if let Some((secondary_mint, secondary_vault, _, _)) = secondary_keys {
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &secondary_mint,
+                &secondary_vault,
+                &admin.pubkey(),
+                &[],
+                EARNINGS,
+            )
+            .unwrap(),
+            &[&admin],
+        )
+        .unwrap();
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::set_authority(
+                &spl_token::ID,
+                &secondary_mint,
+                None,
+                spl_token::instruction::AuthorityType::MintTokens,
+                &admin.pubkey(),
+                &[],
+            )
+            .unwrap(),
+            &[&admin],
+        )
+        .unwrap();
+    }
     if !native {
         send_raw_tx(
             &mut env.svm,
@@ -243,6 +347,29 @@ fn terminal_earnings_world_with_quote(
     if !native {
         assert_eq!((mint.supply, mint.mint_authority), (SUPPLY, COption::None));
     }
+    let secondary_rail = secondary_keys.map(
+        |(secondary_mint, secondary_vault, secondary_provider_token, secondary_admin_token)| {
+            let secondary_mint_frame = env.svm.get_account(&secondary_mint).unwrap();
+            let secondary_mint_state = Mint::unpack(&secondary_mint_frame.data).unwrap();
+            assert_eq!(
+                (
+                    secondary_mint_state.supply,
+                    secondary_mint_state.mint_authority
+                ),
+                (EARNINGS, COption::None)
+            );
+            assert_eq!(env.token_amount(secondary_vault), EARNINGS);
+            assert_eq!(env.token_amount(secondary_provider_token), 0);
+            assert_eq!(env.token_amount(secondary_admin_token), 0);
+            SecondaryQuoteRail {
+                mint: secondary_mint,
+                vault: secondary_vault,
+                provider_token: secondary_provider_token,
+                admin_token: secondary_admin_token,
+                mint_frame: secondary_mint_frame,
+            }
+        },
+    );
     let portfolios = users.each_ref().map(|owner| {
         let key = Keypair::new();
         system_create_account_for_test(
@@ -375,6 +502,7 @@ fn terminal_earnings_world_with_quote(
                 mint_frame,
             },
             users,
+            secondary_rail,
         );
     }
     env.resolve();
@@ -436,6 +564,7 @@ fn terminal_earnings_world_with_quote(
             mint_frame,
         },
         users,
+        secondary_rail,
     )
 }
 
