@@ -56,9 +56,10 @@
 //! `v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledger` retains
 //! a publicly initialized insurance ledger across funded terminal beneficiary succession.
 //! A stale-ledger suffix rolls back the preceding SPL payout; omitting the optional ledger
-//! returns the exact reserve and permits slab close without the former beneficiary or operator.
-//! The current beneficiary signs payment and the market authority signs mechanical closure;
-//! this is bounded role-independent evidence, not permissionless retirement or row-421 closure.
+//! returns the exact reserve and permits slab close without the former beneficiary, current
+//! beneficiary, or operator signatures. The market authority still signs mechanical closure.
+//! This strengthens the terminal payout half of row 421 but intentionally leaves the broader
+//! permissionless CloseSlab requirement open.
 //!
 //! The absent-provider expiry witness pays a funded user and retires both staggered backing
 //! domains with no provider signature after funding. Expiry removes the entire principal claim;
@@ -832,7 +833,7 @@ fn v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledge
 
     let withdrawal_at = |amount: u64, attach_ledger: bool, authority_epoch| {
         let mut accounts = vec![
-            AccountMeta::new(beneficiary.pubkey(), true),
+            AccountMeta::new_readonly(beneficiary.pubkey(), false),
             AccountMeta::new(env.market, false),
             AccountMeta::new(tokens[1], false),
             AccountMeta::new(env.vault, false),
@@ -863,6 +864,7 @@ fn v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledge
     let valid_suffix = withdrawal_at(FUNDED - FIRST, false, start_authority_epoch + 1);
     assert_eq!(invalid_suffix.data, valid_suffix.data);
     assert_eq!(&invalid_suffix.accounts[..6], &valid_suffix.accounts);
+    assert!(prefix.accounts.iter().all(|meta| !meta.is_signer));
 
     let tracked = [
         env.market,
@@ -883,11 +885,11 @@ fn v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledge
     let tx = Transaction::new_signed_with_payer(
         &[heap_ix(), cu_ix(), prefix.clone(), invalid_suffix],
         Some(&env.payer.pubkey()),
-        &[&env.payer, &beneficiary],
+        &[&env.payer],
         env.svm.latest_blockhash(),
     );
-    assert_eq!(tx.message.header.num_required_signatures, 2);
-    payer.lamports -= 2 * FeeStructure::default().lamports_per_signature;
+    assert_eq!(tx.message.header.num_required_signatures, 1);
+    payer.lamports -= FeeStructure::default().lamports_per_signature;
     let failure = env
         .svm
         .send_transaction(tx)
@@ -918,13 +920,14 @@ fn v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledge
     let tx = Transaction::new_signed_with_payer(
         &[heap_ix(), cu_ix(), prefix, valid_suffix],
         Some(&env.payer.pubkey()),
-        &[&env.payer, &beneficiary],
+        &[&env.payer],
         env.svm.latest_blockhash(),
     );
+    assert_eq!(tx.message.header.num_required_signatures, 1);
     let payout = env
         .svm
         .send_transaction(tx)
-        .expect("current beneficiary can drain insurance");
+        .expect("fee payer can submit terminal insurance payout without beneficiary signature");
     assert_eq!(
         payout
             .logs
@@ -933,7 +936,7 @@ fn v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledge
             .count(),
         2
     );
-    payer.lamports -= 2 * FeeStructure::default().lamports_per_signature;
+    payer.lamports -= FeeStructure::default().lamports_per_signature;
     assert_eq!(env.svm.get_account(&env.payer.pubkey()).unwrap(), payer);
     check_stock(&env, FUNDED);
     for (key, account) in tracked.iter().zip(&before) {

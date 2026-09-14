@@ -32,6 +32,20 @@ The unchanged pre-fix artifact admitted the excess first open; the fixed artifac
 hash `1334bfb0cf58100a85b64999b03bb39ebcf9d8424ec6f4fcb159e5dc51a7f34c`
 rejects it and keeps the exact route live.
 
+## Row 421 terminal insurance payout update (2026-09-14)
+
+Owner: [cu/inv_073_no_permanent_user_lock.rs](cu/inv_073_no_permanent_user_lock.rs),
+`v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledger`.
+The selector now proves the terminal insurance payout transaction can be submitted
+by a fee payer only: neither the former beneficiary, the current beneficiary, nor
+the insurance operator signs. The destination remains bound to the configured
+beneficiary's canonical token account and the stale-ledger variant still rolls
+back the preceding SPL payout exactly.
+
+This is retained as substantive INV-073 evidence, but row **421 remains missing**.
+`CloseSlab` is still a separate market-authority-signed mechanical close, so this
+does not prove full permissionless terminal market retirement.
+
 ## Row 426 current Hybrid rescue closure (2026-09-14)
 
 Owner: [cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs](cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs),
