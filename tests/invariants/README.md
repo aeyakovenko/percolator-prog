@@ -147,6 +147,16 @@ This is retained as substantive INV-073 evidence, but row **421 remains missing*
 does not prove full permissionless terminal market retirement, arbitrary insurance
 histories, every pending-claim composition, or maximum-shape terminal cleanup.
 
+Additional row421 holdout coverage in
+`successor_custody_retry::v16_program_successor_custody_repair_retries_after_stale_former_insurance_ledger`
+composes beneficiary succession, missing successor SPL custody, a keeper-created
+ATA, and a stale former-beneficiary ledger in the same terminal transaction. The
+stale-ledger suffix proves exact rollback of the preceding custody creation and
+unsigned payout; omitting only the stale optional ledger lets the same fee-payer
+route complete the exact terminal reserve payment. This is net-new composition
+evidence for the row421 terminal payout family, but row **421 remains OPEN** for
+the broader permissionless retirement and arbitrary-history obligations above.
+
 ## Row 416 funded-role source composition (2026-09-14)
 
 Owner: [cu/inv_005_authority_incarnation_binding.rs](cu/inv_005_authority_incarnation_binding.rs),

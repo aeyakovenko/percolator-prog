@@ -92,6 +92,9 @@ mod recovery_claim_liability_exit;
 #[path = "inv_073_spent_insurance_terminal_exit.rs"]
 mod spent_insurance_terminal_exit;
 
+#[path = "inv_073_successor_custody_retry.rs"]
+mod successor_custody_retry;
+
 #[path = "inv_073_shared_holder_paid_reserves.rs"]
 mod shared_holder_paid_reserves;
 
