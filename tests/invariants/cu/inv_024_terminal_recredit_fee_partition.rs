@@ -8,6 +8,9 @@ use terminal_reserve_destination_recovery::land;
 #[path = "inv_024_depleted_reserve_beneficiary_succession.rs"]
 mod depleted_reserve_beneficiary_succession;
 
+#[path = "inv_073_terminal_progress_product.rs"]
+mod terminal_progress_product;
+
 const SHARE_BPS: u16 = 2_500;
 const INSURANCE_FEE: u64 = EARNINGS * SHARE_BPS as u64 / 10_000;
 const PROVIDER_FEE: u64 = EARNINGS - INSURANCE_FEE;
@@ -159,7 +162,11 @@ impl Entitlements {
 }
 
 fn terminal_fee_loss_world() -> (TerminalEarningsWorld, Keypair, Pubkey) {
-    let (mut world, users) = terminal_earnings_world_with_fee_share(false, None, SHARE_BPS);
+    terminal_fee_loss_world_with_quote(false)
+}
+
+fn terminal_fee_loss_world_with_quote(native: bool) -> (TerminalEarningsWorld, Keypair, Pubkey) {
+    let (mut world, users) = terminal_earnings_world_with_quote(false, None, SHARE_BPS, native);
     let insurer = Keypair::new();
     world
         .env

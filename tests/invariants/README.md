@@ -67,6 +67,30 @@ reward cohorts remain outside scope. The [Scope I audit](astra_scope_i_observati
 compares H/O/V/C and the existing owners, and records guarantees, limits, fixed
 Scope W artifact provenance and exact validation commands.
 
+## Astra Scope H terminal progress product (2026-09-14)
+
+Owner: [cu/inv_073_terminal_progress_product.rs](cu/inv_073_terminal_progress_product.rs),
+mounted below INV-024's `terminal_earnings_succession::terminal_recredit_fee_partition`.
+Two exact selectors enumerate classic/native quote rails, all eight
+provider/operator/insurance-beneficiary wallet masks, all twelve admissible
+principal/earnings/insurance/expiry orders, exact/late expiry, and partial/full
+insurance recovery with zero/nonzero remaining booked residue: 1,152 histories.
+Every reserve key is dropped, including wallet-present controls. One input-owned
+stock and recipient book checks each public continuation and complete Account
+rollback before unchanged retries, including same-address ATA repair and final
+slab closure. Earned fees coexist with spent-insurance recovery throughout the
+product; aggregate-neutral class and recipient mutations fail the same oracle.
+
+This adds bounded INV-073/024/025 evidence beyond the separate earned-fee wallet
+and recovered-native-custody families in Scopes N/B and the unspent-reserve
+families in Scopes X/L. All four rows 418/420/421/433 remain OPEN. The 192 native
+endpoints retaining 28 booked atoms explicitly stop after economic completion;
+their administrative retirement is unverified. Earlier user settlement/deletion
+is reused setup, and expiry normalization/final slab closure need the retained
+administrator. No production or machine-status changes. The
+[Scope H audit](astra_scope_h_terminal_progress_product_20260914.md) records the
+generator, oracle, prior-owner comparison, authority assumptions and validation.
+
 ## Scope E retained policy and earned reserves (2026-09-13)
 
 Owner: [cu/inv_014_retained_policy_earned_reserves.rs](cu/inv_014_retained_policy_earned_reserves.rs),

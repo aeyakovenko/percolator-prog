@@ -1,5 +1,16 @@
 # PR410-434 are post-hoc holdout/conformance misses; rows left OPEN still affect invariant status.
 # This is a coverage-fidelity ledger, not independent-discovery or whole-invariant proof evidence.
+# Astra Scope H bounded terminal conformance (2026-09-14), rows 418/420/421/433:
+# cu/inv_073_terminal_progress_product.rs enumerates classic/native rails, all
+# eight reserve-role wallet masks, twelve principal/fee/insurance/expiry words,
+# exact/late expiry and partial/full recredit beside earned fees: 1152 histories.
+# An input-owned class/recipient book, decreasing economic rank, complete Account
+# rollback/retry and ATA repair bind the finite public suffix. All reserve keys
+# are absent; administrative normalization and final CloseSlab retain admin.
+# Native endpoints with 28 booked atoms remain an explicit retirement exclusion.
+# All four rows remain OPEN; no production, inventory or invariant-status change.
+# See astra_scope_h_terminal_progress_product_20260914.md for comparison with
+# Scopes X/N/L/B, exact selectors, assumptions, artifact and validation results.
 # Scope S bounded INV-024 conformance for labels 410/429 (2026-09-13):
 # cu/inv_024_generated_expiring_roles.rs composes generated backing/beneficiary/
 # operator handoff-and-return orders with principal expiry and cleanup placement.
