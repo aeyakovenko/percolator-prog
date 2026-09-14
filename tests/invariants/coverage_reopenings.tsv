@@ -715,6 +715,16 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # first-risk consent and paid/live earned reserves in two bounded generators.
 # All handoffs are consensual; this adds no cold-admin replacement matrix or
 # arbitrary authority-containment theorem. Row remains OPEN; see Scope J audit.
+# Row416 source-composition hardening (2026-09-14):
+# cu/inv_005_authority_incarnation_binding.rs,
+# v16_program_funded_role_guard_and_oracle_handoff_are_source_complete pins the
+# current UpdateAssetAuthority funded-role branch. It requires all five backing
+# stock classes and both live insurance-domain budgets in the funded predicate,
+# keeps spent-insurance history out of transferrable authority, rejects
+# cold-admin-only funded handoffs before authority-epoch advancement/profile
+# persistence, and source-locks the five-field role write set including oracle
+# replacement. This complements the public cold-admin/funded-role witnesses but
+# is not a generic funded-history generator/proof. Row remains OPEN.
 416	LoF	PRIVILEGED	INV-005	INV-005,INV-020,INV-024,INV-027,INV-055	cold-admin+x-funded-role+x-authority-containment	correctly-signed-role-management-cannot-seize-an-incumbent-funded-role	OPEN
 # 417 partial conformance (2026-09-10): cu/inv_067_receipt_source_realization.rs::v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry.
 # Partial source realization plus an older receipt payout rolls back; retained claims survive

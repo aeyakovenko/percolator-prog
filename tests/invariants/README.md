@@ -80,6 +80,28 @@ This is retained as substantive INV-073 evidence, but row **421 remains missing*
 does not prove full permissionless terminal market retirement, arbitrary insurance
 histories, every pending-claim composition, or maximum-shape terminal cleanup.
 
+## Row 416 funded-role source composition (2026-09-14)
+
+Owner: [cu/inv_005_authority_incarnation_binding.rs](cu/inv_005_authority_incarnation_binding.rs),
+`v16_program_funded_role_guard_and_oracle_handoff_are_source_complete`.
+The current production source gate pins the `UpdateAssetAuthority` funded-role
+predicate and write set. It requires cold-admin-only funded handoffs to reject
+before authority-epoch advancement or oracle-profile persistence; it requires the
+funded predicate to include fresh, valid-liened, consumed-liened, impaired and
+earned backing stock plus both live insurance-domain budgets; and it requires
+the role match to write exactly one scoped authority field, including
+`oracle_authority`.
+
+This is paired with the existing public `cold_admin_handoff_scope`,
+`funded_role_zero_transition`, `cold_oracle_funded_containment`,
+`funded_oracle_succession`, and `funded_backing_succession` witnesses. Row **416
+remains missing**: the new check is a source-composition guard over the current
+handoff branch, not a generic funded-role generator over arbitrary histories,
+positions, claims, coalesced market roles, lifecycle states, clock/oracle
+schedules, or future handler restructurings.
+Detailed scope is in
+[inv_005_funded_role_source_composition_20260914.md](inv_005_funded_role_source_composition_20260914.md).
+
 ## Row 422 liquidation-reward provenance source guard (2026-09-14)
 
 Owner: [cu/inv_045_no_free_mark_movement.rs](cu/inv_045_no_free_mark_movement.rs),

@@ -10,6 +10,9 @@
 //! `v16_program_authority_handoffs_share_one_incoming_key_validator` source-locks both authority
 //! handoff handlers to one validator: the market authority cannot be burned, while the asset-admin
 //! role retains its explicitly authorized burn path.
+//! `v16_program_funded_role_guard_and_oracle_handoff_are_source_complete` source-locks the
+//! funded-role predicate and role write set behind the cold-admin handoff branch, including
+//! oracle replacement.
 //! `v16_program_oracle_authority_aba_is_asset_scoped_and_rolls_back_retained_prefix` retains
 //! same-key oracle requests for two assets across one asset's A-to-B-to-A rotation. It checks
 //! stale-epoch rollback, including an executed sibling prefix, and both scopes' live controls.
@@ -721,6 +724,82 @@ fn v16_program_authority_handoffs_share_one_incoming_key_validator() {
     let validator = &production[validator_start..validator_end];
     assert!(validator.contains("expect_signer(authority)?;"));
     assert!(validator.contains("authority.key.to_bytes() != *new_pubkey"));
+}
+
+#[test]
+fn v16_program_funded_role_guard_and_oracle_handoff_are_source_complete() {
+    let production = include_str!("../../../src/v16_program.rs");
+    let funded =
+        inv005_braced_block_after(production, "fn asset_authority_role_has_funded_value_view");
+    for required in [
+        "bucket.fresh_unliened_backing_num.get() != 0",
+        "bucket.valid_liened_backing_num.get() != 0",
+        "bucket.consumed_liened_backing_num.get() != 0",
+        "bucket.impaired_liened_backing_num.get() != 0",
+        "bucket.utilization_fee_earnings.get() != 0",
+        "slot.engine.insurance_domain_budget_long.get() != 0",
+        "slot.engine.insurance_domain_budget_short.get() != 0",
+        "ASSET_AUTH_INSURANCE | ASSET_AUTH_INSURANCE_OPERATOR",
+        "ASSET_AUTH_BACKING_BUCKET",
+        "ASSET_AUTH_ADMIN | ASSET_AUTH_ORACLE => false",
+    ] {
+        assert!(
+            funded.contains(required),
+            "funded-role predicate lost source term {required}",
+        );
+    }
+    assert!(
+        !funded.contains("insurance_domain_spent"),
+        "spent insurance counters are history, not transferrable funded-role authority"
+    );
+
+    let handoff = inv005_braced_block_after(production, "fn handle_update_asset_authority");
+    for required in [
+        "expect_incoming_authority(new_authority, &new_pubkey, true)?;",
+        "require_asset_generation_view(&group, asset_index, expected_market_id)?;",
+        "let admin_signed =\n            profile.asset_admin != [0u8; 32] && profile.asset_admin == current.key.to_bytes();",
+        "let current_signed = live_authority_matches(&current_value, current.key);",
+        "if !admin_signed && !current_signed {\n            return Err(PercolatorError::Unauthorized.into());\n        }",
+        "if admin_signed\n            && !current_signed\n            && asset_authority_role_has_funded_value_view(&group, asset_index, kind)?\n        {\n            return Err(PercolatorError::EngineLockActive.into());\n        }",
+        "advance_authority_epoch_view(&mut group, asset_index, expected_authority_epoch)?;",
+        "ASSET_AUTH_ADMIN => profile.asset_admin = new_pubkey",
+        "ASSET_AUTH_INSURANCE => profile.insurance_authority = new_pubkey",
+        "ASSET_AUTH_INSURANCE_OPERATOR => profile.insurance_operator = new_pubkey",
+        "ASSET_AUTH_BACKING_BUCKET => profile.backing_bucket_authority = new_pubkey",
+        "ASSET_AUTH_ORACLE => profile.oracle_authority = new_pubkey",
+        "write_oracle_profile_to_view(&mut group, asset_index, &profile)?;",
+    ] {
+        assert!(
+            handoff.contains(required),
+            "asset authority handoff lost source term {required}",
+        );
+    }
+
+    let funded_guard = handoff
+        .find("asset_authority_role_has_funded_value_view(&group, asset_index, kind)?")
+        .expect("funded-role guard");
+    let epoch_advance = handoff
+        .find("advance_authority_epoch_view(&mut group, asset_index, expected_authority_epoch)?;")
+        .expect("authority epoch advance");
+    let profile_write = handoff
+        .find("write_oracle_profile_to_view(&mut group, asset_index, &profile)?;")
+        .expect("profile persistence");
+    assert!(
+        funded_guard < epoch_advance && epoch_advance < profile_write,
+        "cold-admin-only funded handoff must reject before epoch advancement and profile persistence"
+    );
+
+    let match_start = handoff.find("match kind {").expect("role write match");
+    let match_end = handoff[match_start..]
+        .find("write_oracle_profile_to_view")
+        .map(|offset| match_start + offset)
+        .expect("profile write after match");
+    let role_writes = &handoff[match_start..match_end];
+    assert_eq!(
+        role_writes.matches("= new_pubkey").count(),
+        5,
+        "the role-write match must update exactly one of the five scoped authority fields"
+    );
 }
 
 #[test]
