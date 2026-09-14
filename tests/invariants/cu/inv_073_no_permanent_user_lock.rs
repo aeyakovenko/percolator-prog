@@ -6719,6 +6719,17 @@ fn inv073_source_defines_test(source: &str, function: &str) -> bool {
     })
 }
 
+fn inv073_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let start_offset = source
+        .find(start)
+        .unwrap_or_else(|| panic!("missing source section start {start}"));
+    let tail = &source[start_offset..];
+    let end_offset = tail
+        .find(end)
+        .unwrap_or_else(|| panic!("missing source section end {end}"));
+    &tail[..end_offset]
+}
+
 #[test]
 fn v16_program_terminal_disposition_and_administrative_retirement_are_source_complete() {
     const ENGINE_PIN: &str = "394fd0bf2cb7d73df425eb3754dc3be1a0c44336";
@@ -6895,6 +6906,65 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
         1,
         "CloseSlab must retain one canonical bounded scanner",
     );
+
+    let insurance = inv073_braced_body_after(production, "fn handle_withdraw_insurance_asset<'a>(");
+    assert_eq!(
+        insurance.matches("expect_signer(operator)?;").count(),
+        1,
+        "WithdrawInsuranceAsset must signer-gate only the live insurance route",
+    );
+    assert!(
+        insurance.contains(
+            "if mode != MarketModeV16::Resolved {\n                expect_signer(operator)?;"
+        ),
+        "terminal insurance payout must not depend on an operator/beneficiary signature",
+    );
+    assert!(
+        insurance.contains(
+            "let beneficiary = if mode == MarketModeV16::Live {\n                authorities.insurance_operator\n            } else {\n                authorities.insurance_authority\n            };"
+        ),
+        "resolved insurance payout must target the configured beneficiary, not the live operator",
+    );
+    assert!(
+        insurance.contains("!operator.is_signer"),
+        "unsigned resolved payout must require unencumbered beneficiary custody",
+    );
+    let resolved_insurance = inv073_source_between(
+        insurance,
+        "} else {\n                if group.header.materialized_portfolio_count.get() != 0",
+        "let available = market_insurance_withdraw_capacity_view(&group, asset_index)?;",
+    );
+    for guard in [
+        "group.header.materialized_portfolio_count.get() != 0\n                    || group.header.c_tot.get() != 0",
+        "if !live_authority_matches(&authorities.insurance_authority, operator.key)",
+        "require_authority_epoch_view(&group, asset_index, expected_authority_epoch)?;",
+        ".recredit_terminal_claim_free_residual_for_asset_not_atomic(asset_index)",
+        "(authorities.insurance_authority, Some(asset_index))",
+    ] {
+        assert!(
+            resolved_insurance.contains(guard),
+            "resolved WithdrawInsuranceAsset lost signer-free terminal guard {guard}",
+        );
+    }
+    assert!(
+        !resolved_insurance.contains("insurance_operator"),
+        "resolved insurance payout must not consult the live operator role",
+    );
+    for witness in [
+        "v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledger",
+        "v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close",
+        "v16_program_native_insurance_paid_prefix_survives_operator_free_redemption_retry",
+        "v16_program_recredited_insurance_switches_quote_rails_without_operator_signatures",
+        "v16_program_recredited_insurance_recreates_native_custody_without_role_signatures",
+    ] {
+        assert!(
+            include_str!("inv_073_no_permanent_user_lock.rs").contains(witness)
+                || include_str!("inv_073_native_insurance_ledger_progress.rs").contains(witness)
+                || include_str!("inv_073_recredited_insurance_quote_rails.rs").contains(witness)
+                || include_str!("inv_073_native_recredit_custody.rs").contains(witness),
+            "row421 source gate lost public SVM witness {witness}",
+        );
+    }
 
     let resolved = inv073_braced_body_after(production, "fn handle_close_resolved<'a>(");
     assert!(resolved.contains("expect_portfolio_view_owner(&portfolio, owner.key)?"));

@@ -64,9 +64,21 @@ the insurance operator signs. The destination remains bound to the configured
 beneficiary's canonical token account and the stale-ledger variant still rolls
 back the preceding SPL payout exactly.
 
+The source-composition gate
+`v16_program_terminal_disposition_and_administrative_retirement_are_source_complete`
+now also locks the current production `WithdrawInsuranceAsset` terminal branch:
+resolved payout uses the configured insurance beneficiary rather than the live
+operator, requires zero materialized portfolios and zero `c_tot`, consumes the
+current authority epoch, recredits claim-free residual before debit, and requires
+unencumbered unsigned beneficiary custody. The same gate points to the existing
+classic, native, recredited, quote-rail and custody-recreation SVM witnesses, so
+a future wrapper drift that reintroduces an operator signature dependency or
+changes the terminal payout guards fails before metadata can stay green.
+
 This is retained as substantive INV-073 evidence, but row **421 remains missing**.
 `CloseSlab` is still a separate market-authority-signed mechanical close, so this
-does not prove full permissionless terminal market retirement.
+does not prove full permissionless terminal market retirement, arbitrary insurance
+histories, every pending-claim composition, or maximum-shape terminal cleanup.
 
 ## Row 426 current Hybrid rescue closure (2026-09-14)
 

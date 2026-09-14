@@ -1218,6 +1218,17 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # deletion and administrative expiry/retirement; no native-primary booked retirement,
 # partial recredit, active peer claims at repair, ledgers, fees or maximum shapes.
 # See astra_scope_b_native_recredit_custody_20260913.md for artifact and validation.
+# Row421 source-composition hardening (2026-09-14): cu/inv_073_no_permanent_user_lock.rs,
+# v16_program_terminal_disposition_and_administrative_retirement_are_source_complete.
+# The gate now source-locks the resolved WithdrawInsuranceAsset branch: the only
+# operator signer check is the Live preflight, Resolved targets the configured
+# insurance beneficiary, requires zero materialized portfolios/c_tot, consumes the
+# current authority epoch, recredits claim-free residual before debit, rejects live
+# operator role use, and requires unencumbered custody for unsigned payment. It also
+# requires the classic/native/recredited/quote-rail/custody-recreation SVM witnesses
+# to remain mounted. Row421 remains OPEN because this is current-surface composition,
+# not arbitrary terminal-history generation, absent-admin retirement, maximum shape,
+# or every pending-claim/liability product.
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
 # Row 422 bounded policy-succession conformance (2026-09-12):
 # cu/inv_045_reward_policy_catchup.rs,
