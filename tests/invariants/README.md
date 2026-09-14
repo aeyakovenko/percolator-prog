@@ -1065,21 +1065,23 @@ Owner: [cu/inv_005_cold_oracle_funded_containment.rs](cu/inv_005_cold_oracle_fun
 mounted under `inv_005_authority_incarnation_binding::funded_oracle_succession::cold_oracle_funded_containment`.
 Requirement: `correctly-signed-role-management-cannot-seize-an-incumbent-funded-role`.
 
-Two public LiteSVM worlds place one incumbent's 17/29-atom backing buckets in
-asset 0/1. That incumbent also holds the oracle role, while the cold admin,
-incoming oracle, market admin and 23-atom portfolio owner are distinct keys.
+Four public LiteSVM worlds place one incumbent's 17/29-atom backing buckets in
+asset 0/1, crossing unchanged and changed AuthMark observations. That incumbent
+also holds the oracle role, while the cold admin, incoming oracle, market admin
+and 23-atom portfolio owner are distinct keys.
 System/SPL/ATA/wrapper instructions construct every economic Account and revoke
 mint authority at 69 atoms. Program loading, SOL airdrops and Clock warps are
 the only harness setup; no program-owned state is injected or edited.
 
 With both buckets positive, the portfolio owner withdraws 7 atoms, the cold admin
-replaces the oracle, and the incoming oracle publishes a same-price authenticated
-observation. All three instructions complete, including real SPL transfer, before
-a correctly signed cold-admin backing-role replacement rejects `EngineLockActive`
-at transaction instruction 5. Its epoch is current after the oracle replacement;
-this is a funded-role boundary, not stale consent or a missing signature. Complete
-tracked and compiled Accounts, including metadata and absence, must roll back;
-the fee payer alone loses the exact four-signature network fee.
+replaces the oracle, and the incoming oracle publishes either a same-price mark or
+a 100 -> 103 authenticated mark. All three instructions complete, including real
+SPL transfer and the staged mark update, before a correctly signed cold-admin
+backing-role replacement rejects `EngineLockActive` at transaction instruction 5.
+Its epoch is current after the oracle replacement; this is a funded-role boundary,
+not stale consent or a missing signature. Complete tracked and compiled Accounts,
+including metadata and absence, must roll back; the fee payer alone loses the
+exact four-signature network fee.
 
 Reusing the exact three-instruction prefix succeeds without the incumbent's
 signature. Only the oracle holder, subject authority epoch and observation
@@ -1097,9 +1099,9 @@ without incumbent consent**, composed with an authenticated observation and
 rollback of an unrelated owner's paid prefix. The related existing selector
 below requires incumbent oracle consent after cold-admin renunciation. Neither
 funded-role zeroing, cold-admin ABA, nor terminal beneficiary/submitter succession
-is exercised here. **Row 416 remains OPEN:** these are two bounded histories,
-not a generic generator/oracle. Nonzero positions, price changes, liened/impaired
-backing, earnings, insurance roles, other lifecycle states and arbitrary
+is exercised here. **Row 416 remains OPEN:** these are four bounded histories,
+not a generic generator/oracle. Nonzero positions, liened/impaired backing,
+earnings, insurance roles, other lifecycle states and arbitrary
 management histories remain outside this increment; invariant statuses stay put.
 
 Base: `1956232286aef7e651fe4e2e0d73321d169488a8`. Isolated worktree:
@@ -1108,9 +1110,10 @@ Base: `1956232286aef7e651fe4e2e0d73321d169488a8`. Isolated worktree:
 locally with platform-tools v1.52; SHA-256:
 `dc4b6b9b7b1e6ecfc960d52bd8084d8088bf3c7d4c323ba3e3ed5724a7a81b52`.
 
-Behavioral validation: the new exact selector passed 1/1 (two worlds, 0.80s,
-peak 56,000 CU); the existing consented-oracle selector passed 1/1 (four worlds,
-1.61s, peak 73,856 CU). No production bug or fix was needed.
+Behavioral validation after the price-change extension: the exact selector passed
+1/1 (four worlds, 1.85s, peak 55,944 CU) against the current PR135 SBF; the earlier
+consented-oracle selector passed 1/1 (four worlds, 1.61s, peak 73,856 CU). No
+production bug or fix was needed.
 
 Exact build and validation commands from that worktree:
 
