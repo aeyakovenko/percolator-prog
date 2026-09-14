@@ -14,6 +14,9 @@ use percolator::SOCIAL_LOSS_DEN;
 #[path = "inv_039_mixed_role_fractional_retirement.rs"]
 mod fractional_retirement;
 
+#[path = "inv_039_mixed_role_funding_resolution.rs"]
+mod funding_resolution;
+
 const DEPOSITS: [u128; 5] = [400_000, 180_000, 300_000, 250_000, 777];
 const GAIN: u128 = 200_000;
 const RESIDUAL: u128 = GAIN - DEPOSITS[1];

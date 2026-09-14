@@ -1,5 +1,25 @@
 # Invariant-owned test coverage
 
+## Row 435 mixed-role funding-order evidence (2026-09-14)
+
+Owner:
+[cu/inv_039_mixed_role_funding_resolution.rs](cu/inv_039_mixed_role_funding_resolution.rs),
+mounted under INV-039's `mixed_role_resolution::funding_resolution`. The selector
+`v16_program_mixed_roles_preserve_funding_attribution_through_resolution` builds
+four public LiteSVM worlds: both side orientations and two terminal close orders.
+Actor 0 first opens a valid-margin creditor leg whose public close leaves a
+zero-basis, nonzero-loss-weight pending claim, while a second asset keeps actor 0
+as debtor after six authenticated funding-bearing mark cranks. The test asserts
+nonzero funding indices before resolution, the simultaneous same-owner creditor
+and debtor legs, waiting-debt rollback, exact custody conservation, bounded
+terminal cleanup, and identical per-owner SPL payouts and residual vault custody
+across both close orders.
+
+This is a bounded INV-039/041/067 partition, not an arbitrary-history entitlement
+proof. Rows **419/435 remain OPEN**: ADL, underfunded receipts, reserve recredit,
+insurance, fees, CPI, multi-leg batch, maximum shape and the generic INV-086
+equivalence frontier remain outside this increment.
+
 ## Rows 411/413/415/420/423/424/428/433 evidence reconciliation (2026-09-14)
 
 Verified on the PR135 branch after the row-418 closure. This reconciles
