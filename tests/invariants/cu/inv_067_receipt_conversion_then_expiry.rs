@@ -24,6 +24,16 @@ const ORDERS: [[usize; 3]; 6] = [
     [4, 2, 0],
 ];
 
+fn assert_paid_token_balances(world: &World, paid: &[u128; 6]) {
+    let mut by_token = std::collections::BTreeMap::<Pubkey, u128>::new();
+    for (actor, amount) in paid.iter().enumerate() {
+        *by_token.entry(world.actors[actor].token).or_default() += *amount;
+    }
+    for (token, amount) in by_token {
+        assert_eq!(u128::from(world.env.token_amount(token)), amount);
+    }
+}
+
 fn junior(actor: usize, expired: bool) -> u128 {
     let face = FACES[actor] - if actor == 2 { CONVERTED } else { 0 };
     face * (501 + if expired { LATE_STOCK } else { 0 }) / DENOMINATOR
@@ -51,12 +61,7 @@ fn pay(world: &mut World, ix: &Instruction, actor: usize, due: u128, paid: &mut 
         allowed.extend([world.env.vault, world.actors[actor].token]);
     }
     world.assert_frame_except(&before, &allowed);
-    for (actor, amount) in paid.iter().enumerate() {
-        assert_eq!(
-            u128::from(world.env.token_amount(world.actors[actor].token)),
-            *amount
-        );
-    }
+    assert_paid_token_balances(world, paid);
     world.custody();
 }
 
@@ -158,11 +163,30 @@ fn check(
 
 #[test]
 fn v16_program_committed_conversion_then_late_expiry_preserves_receipt_attribution() {
+    run_committed_conversion_then_late_expiry(false);
+}
+
+pub(super) fn run_committed_conversion_then_late_expiry(coowned_receipts: bool) {
     let mut peak_cu = 0;
     let mut endpoint = None;
     for landing in [15, 17] {
         for order in ORDERS {
-            let mut world = World::before_receipts_with_staggered_sources();
+            let mut world = if coowned_receipts {
+                let owner = Keypair::new();
+                World::before_receipts_with_staggered_sources_and_owners([
+                    Keypair::from_bytes(&owner.to_bytes()).unwrap(),
+                    owner,
+                ])
+            } else {
+                World::before_receipts_with_staggered_sources()
+            };
+            if coowned_receipts {
+                assert_eq!(
+                    world.actors[0].owner.pubkey(),
+                    world.actors[4].owner.pubkey()
+                );
+                assert_eq!(world.actors[0].token, world.actors[4].token);
+            }
             let mut paid = [0; 6];
             for actor in [0, 4] {
                 for _ in 0..8 {
@@ -481,5 +505,10 @@ fn v16_program_committed_conversion_then_late_expiry_preserves_receipt_attributi
             peak_cu = peak_cu.max(world.peak_cu);
         }
     }
-    println!("INV-067 conversion then expiry: 12 worlds, 12 exact rollbacks, 72 portfolio closes, 12 slab closes; peak {peak_cu} CU");
+    let mode = if coowned_receipts {
+        "co-owned"
+    } else {
+        "separate-owner"
+    };
+    println!("INV-067 conversion then expiry ({mode}): 12 worlds, 12 exact rollbacks, 72 portfolio closes, 12 slab closes; peak {peak_cu} CU");
 }

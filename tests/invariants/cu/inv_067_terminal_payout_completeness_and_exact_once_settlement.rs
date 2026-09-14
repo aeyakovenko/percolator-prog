@@ -76,6 +76,9 @@ mod receipt_aborted_realization;
 #[path = "inv_067_receipt_conversion_then_expiry.rs"]
 mod receipt_conversion_then_expiry;
 
+#[path = "inv_067_receipt_coowned_conversion.rs"]
+mod receipt_coowned_conversion;
+
 #[path = "inv_067_receipt_overdue_history.rs"]
 mod receipt_overdue_history;
 

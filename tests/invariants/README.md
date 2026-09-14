@@ -23,6 +23,30 @@ discovery, funding/maintenance/policy products, arbitrary recipient histories,
 terminal reward cohorts, maximum shape, and unbounded whole-route entitlement
 remain outside this increment.
 
+## Row 417 co-owned receipt conversion/expiry evidence (2026-09-14)
+
+Owner:
+[cu/inv_067_receipt_coowned_conversion.rs](cu/inv_067_receipt_coowned_conversion.rs),
+mounted under INV-067's terminal-payout owner. The selector
+`v16_program_coowned_receipts_preserve_attribution_across_conversion_and_late_expiry`
+reuses the public staggered-source fixture from the existing conversion/expiry
+history, but assigns the two positive receipt portfolios to one owner and one SPL
+destination. It then commits the first source conversion, retains both claimant
+top-ups, lands exact/late second-source expiry in all six claimant orders, checks
+the rejected mixed-stock prefix rolls back a successful payout prefix exactly,
+and finishes every receipt, portfolio close, and slab close.
+
+The oracle remains per-portfolio: receipt face, prior bound, cumulative paid,
+portfolio incarnation, position epoch, source denominator, provider receivable,
+rounding residue, mint supply and shared SPL custody are all checked separately.
+This would catch a destination-level aggregate entitlement bug because the final
+shared-token total is not enough to prove either receipt was paid its own floor.
+
+This is bounded INV-010/024/029/063/066/067/068/070 evidence. Row **417 remains
+OPEN**: generated claimant faces, reordered authenticated expiry events,
+additional conversion/expiry lengths, fees, insurance, Recovery, alternate rails,
+maximum shape and unbounded whole-route entitlement remain outside this increment.
+
 ## Row 435 mixed-role funding-order evidence (2026-09-14)
 
 Owner:
