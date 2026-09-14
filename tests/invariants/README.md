@@ -29278,6 +29278,41 @@ git diff --cached --check
 git show --format= --check HEAD
 ```
 
+### INV-070/071/088 prefix custody actionability, row 424 (2026-09-14)
+
+Scope Q adds one bounded public LiteSVM selector:
+`inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_prefix_custody_actionability::v16_program_cached_prefix_custody_surplus_cannot_capitalize_spent_insurance`.
+Eight worlds cross both source sides, 61/307 atoms of later backing, and a control
+versus an 89-atom SPL transfer into custody after a successful scan parks at cursor 1.
+The earlier insurance is fully spent. The transfer preserves the complete market
+Account, so persisted prefix and accounting information cannot certify new insurance
+actionability merely because raw custody increased. The identical retained withdrawal
+rejects before expiry, then succeeds after authenticated expiry normalization with
+exact recovery `min(100 receivable, 100 spent, booked backing)`, or 61/100 atoms.
+An excess request still rejects when raw SPL custody can fund it.
+
+The product checks 44 commits, 44 complete-Account rollbacks, four independently
+rebuilt donation/control comparisons, and eight actual slab/vault closures. Successful
+wrapper/SPL logs prove execution of donation, expiry/payment, and burn/sweep/closure
+prefixes before failing suffixes. Input-owned entitlement, decoded stock/reservation
+censuses, resolved ledger framing, mint supply and exact rent refunds distinguish
+the insurance payout, 0/207 burned atoms and 0/89 externally supplied swept atoms.
+The economic/scan rank decreases on every committed wrapper continuation; custody
+transfer and Clock advancement do not lower it. Peak observed CU is **227,544**,
+below the shared **400,000** transaction limit.
+
+This composes spent-insurance actionability with custody arriving after a persisted
+prefix. Existing retired-slot reuse and scanner rediscovery selectors retain their
+ownership; no duplicate discovery claim is added. The shared recredit stock oracle
+now accepts an explicit user-to-vault transfer, with existing callers retaining zero.
+Production is unchanged. Row 424 remains **OPEN**, with no invariant-status promotion.
+Pending receipts, Recovery, other expiry consumers, native/dual custody, authority
+changes, maximum shapes and generic environmental invalidation are outside this
+finite increment. Artifact provenance, exact validation commands and the prior-test
+comparison are in [the Scope Q audit](pr135_scope_q_prefix_custody_actionability_20260914.md).
+The new exact selector, six adjacent controls and four metadata gates pass; its
+exact listing contains one test. Formatting and diff checks pass.
+
 ## Commands
 
 ```bash

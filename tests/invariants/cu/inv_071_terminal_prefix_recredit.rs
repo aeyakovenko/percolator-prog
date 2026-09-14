@@ -133,6 +133,33 @@ pub(crate) fn stocks_at_cursor(
     beneficiary_token: Pubkey,
     cursor: u128,
 ) {
+    stocks_with_custody_transfer(
+        env,
+        side,
+        backing,
+        normalized,
+        restored,
+        paid,
+        tokens,
+        beneficiary_token,
+        cursor,
+        0,
+    );
+}
+
+// A public transfer from the first paid user adds physical custody, not booked residual.
+pub(crate) fn stocks_with_custody_transfer(
+    env: &V16CuEnv,
+    side: usize,
+    backing: u64,
+    normalized: bool,
+    restored: u64,
+    paid: u64,
+    tokens: [Pubkey; 3],
+    beneficiary_token: Pubkey,
+    cursor: u128,
+    transferred: u64,
+) {
     let (cfg, group) = env.market_state();
     let market = env.svm.get_account(&env.market).unwrap();
     let header = market_group_header_bytes(&market.data);
@@ -158,12 +185,14 @@ pub(crate) fn stocks_at_cursor(
         .all(|asset| asset.oi_eff_long_q == 0 && asset.oi_eff_short_q == 0));
     assert_eq!(group.vault, u128::from(backing - paid));
     assert_eq!(group.insurance, insurance);
-    assert_eq!(tokens.map(|key| env.token_amount(key)), PAYOUTS);
+    let mut user_tokens = PAYOUTS;
+    user_tokens[0] -= transferred;
+    assert_eq!(tokens.map(|key| env.token_amount(key)), user_tokens);
     assert_eq!(env.token_amount(beneficiary_token), paid);
-    assert_eq!(env.token_amount(env.vault), backing - paid);
+    assert_eq!(env.token_amount(env.vault), backing - paid + transferred);
     let supply = CAPITAL.iter().sum::<u64>() + SPENT + backing;
     assert_eq!(
-        PAYOUTS.iter().sum::<u64>() + paid + env.token_amount(env.vault),
+        user_tokens.iter().sum::<u64>() + paid + env.token_amount(env.vault),
         supply
     );
     let mint = Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data).unwrap();

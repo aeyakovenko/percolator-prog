@@ -1434,6 +1434,20 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # the cursor after BackingExpired. Other environmental writers remain outside
 # this bounded increment. See pr135_scope_r_terminal_scan_conformance_20260913.md.
 # Row 424 is only a coverage label; its data fields and all statuses are unchanged.
+# 424 Scope Q custody/actionability product (2026-09-14):
+# cu/inv_070_terminal_prefix_custody_actionability.rs,
+# v16_program_cached_prefix_custody_surplus_cannot_capitalize_spent_insurance.
+# Eight public worlds cross source side, 61/307 booked backing and 0/89 unsolicited
+# SPL atoms after cursor 1. Raw custody preserves the complete market Account and
+# cannot enable the retained insurance payout before expiry or enlarge its later
+# 61/100 entitlement. Four independently rebuilt donation/control pairs have equal
+# recovery, burn and mint supply. Exact rollback covers donation/payment rejection,
+# executed expiry/payment prefixes, excess entitlement and final burn/sweep/closure.
+# PASS: 44 commits, 44 exact rollbacks, eight closures, peak 227544 CU <=400000.
+# No new scanner-rediscovery selector or production change. General invalidation,
+# pending receipts, Recovery, other custody rails and arbitrary histories stay OPEN.
+# Commands, prior-selector comparison and remaining limits:
+# pr135_scope_q_prefix_custody_actionability_20260914.md.
 424	LoF	PRIVILEGED	INV-070	INV-024,INV-025,INV-033,INV-041,INV-063,INV-069,INV-070,INV-071,INV-086,INV-088	persisted-cursor+x-time-reclassification+x-earlier-slot	any-environmental-transition-that-changes-actionability-invalidates-scanned-prefixes	OPEN
 # Row 425 bounded precrank coverage (2026-09-12): README.md#inv-045-precrank-carry-and-entitlement-row-425-2026-09-12.
 # Thirty-two public histories reduce positions before a market crank while carry is nonzero,
