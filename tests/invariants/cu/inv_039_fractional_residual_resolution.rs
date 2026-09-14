@@ -16,6 +16,9 @@ use percolator::{BOUND_SCALE, CREDIT_RATE_SCALE, SOCIAL_LOSS_DEN};
 #[path = "inv_039_fractional_cohort_recreation.rs"]
 mod cohort_recreation;
 
+#[path = "inv_039_mixed_role_fractional_cohort.rs"]
+mod mixed_role_fractional_cohort;
+
 #[derive(Clone, Copy, Debug)]
 struct Inputs {
     weights: [u128; 2],

@@ -1003,6 +1003,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # not another fractional-resolution or integral-recreation matrix. No ADL,
 # partial receipt, recredit, slab-retirement, production or status change.
 # Scope/validation: astra_scope_p_fractional_cohort_recreation_20260914.md.
+# Scope Y (2026-09-14): cu/inv_039_mixed_role_fractional_cohort.rs adds the
+# same-owner mixed creditor/debtor overlap to Scope P's fractional cohort:
+# actor0 keeps an asset-1 fractional B claim while owing actor4 an exact 37-atom
+# asset-2 debt. Eight public worlds compare against the same fractional baseline;
+# after debt normalization, all owner deltas match and the sole extra atom stays
+# explicit vault residue. No ADL, underfunded receipt, insurance recredit,
+# CPI/batch, maximum-shape, production or status change. Scope/validation:
+# astra_scope_y_mixed_fractional_cohort_20260914.md.
 419	LoF	BLOCKER	INV-039	INV-024,INV-037,INV-039,INV-041,INV-048,INV-066,INV-067,INV-073,INV-076,INV-081,INV-086	pending-obligation+x-resolution+x-close-order	obligation-attribution-persists-until-the-opposing-economic-debt-settles	OPEN
 # Rows 420/421 partial conformance (2026-09-10): cu/inv_073_absent_insurer_spent_retirement.rs,
 # v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion.
@@ -2274,4 +2282,8 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # debt when its settled debtor's address receives a fresh ID and signed capital.
 # The fresh incarnation has no new exposure; it is not a same-portfolio mixed
 # creditor/debtor proof. Scope J/L and D remain controls, and row 435 stays OPEN.
+# Scope Y adds the bounded same-owner/fractional-B overlap: actor0 is both the
+# fractional claimant and a cross-asset debtor, and the paired public baseline
+# proves the debt-normalized owner vector with only explicit vault residue. ADL,
+# underfunded receipts, recredit, arbitrary histories and max shape remain OPEN.
 435	LoF	BLOCKER	INV-039	INV-039	pending-obligation+x-resolution+x-mixed-role-attribution	mixed-role-resolved-debt-attribution-preserves-owner-obligation-through-resolution	OPEN
