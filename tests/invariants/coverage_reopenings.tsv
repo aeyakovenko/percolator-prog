@@ -1227,6 +1227,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # See pr135_scope_v_hybrid_reward_provenance_20260913.md for commands and limits.
 # Authenticated-origin conformance only; no stale trade-origin reclassification
 # claim, production change, independent discovery or invariant-status promotion.
+# Scope I bounded conformance (2026-09-14): cu/inv_045_paid_origin_routes.rs,
+# under retained_penalty_handoff. Four paid-discovery transports x two observation
+# orders carry old retained penalties into fresh liquidation and full catchup with
+# an exposed AuthMark recipient. Eight histories preserve 1540072 discovery atoms,
+# 5987 old penalty atoms, 2762 fresh reward atoms and distinct 9-atom recipient PnL.
+# Exact 3762-atom payouts include eight restored SPL prefixes. No new Hybrid-recipient
+# cell, production correction or generic provenance reclassification claim. OPEN.
+# See astra_scope_i_observation_reward_carry_20260914.md for commands and limits.
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN
 # 423 partial conformance (2026-09-10): cu/inv_028_single_slot_admission.rs::v16_program_batch_admission_cannot_share_last_future_domain_slot.
 # Two individually fitting old-asset legs jointly need 29 domains: both batch orders reject atomically;
@@ -1493,6 +1501,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # no successful inline accrual, arbitrary histories or generic closure is claimed.
 # Row425 remains OPEN; machine statuses are unchanged. No production change.
 # See pr135_scope_c_carry_observation_conformance_20260913.md for commands and limits.
+# Scope I bounded conformance (2026-09-14): cu/inv_045_fractional_reset_histories.rs,
+# under generated_fractional_routes. Thirty-two histories combine fractional K/F
+# owners, three nonzero resets per asset after price movement, four transports,
+# publication/reduction order and different owner cadences. The independent ledger
+# reconciles 128 exact payouts with 12/15 residue atoms; 192 resets and 320 complete
+# Account rollbacks, peak 474375 CU. Fixed anchors, monotone targets, solvent owners,
+# unit ADL and explicit accrual bound the family; pending queues, source consumption,
+# other modes and generic arithmetic remain open. No production/status change.
+# See astra_scope_i_observation_reward_carry_20260914.md for commands and limits.
 425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	OPEN
 # Row 426 partial conformance (2026-09-12): cu/inv_020_interrupted_refresh_fees.rs,
 # v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements.
@@ -1628,6 +1645,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # generic authenticated-observation completeness. Row426 stays OPEN; production
 # and machine classifications are unchanged. Commands, artifact hashes and limits:
 # pr135_scope_c_carry_observation_conformance_20260913.md.
+# Scope I bounded conformance (2026-09-14): cu/inv_045_paid_origin_routes.rs reuses
+# retained-penalty and current-certificate owners with an active AuthMark recipient.
+# Eight trade-origin histories include 84 missing-declared-tail rollbacks around
+# refresh, liquidation and actual SPL payout, followed by successful retries;
+# peak 382424 CU. Favorable actions use complete current market evidence; this does
+# not discover an omitted unknown Hybrid observation or certify generic completeness.
+# Row426 remains OPEN; no new Hybrid-recipient cell or production/status change.
+# See astra_scope_i_observation_reward_carry_20260914.md for exact commands and limits.
 426	LoF	BLOCKER	INV-020	INV-020,INV-024,INV-053,INV-054,INV-056,INV-061,INV-071,INV-072,INV-081,INV-086	missing-evidence+x-multi-step-refresh+x-liquidation	favorable-account-actions-require-complete-current-authenticated-observations	OPEN
 # Row 427 additional bounded conformance (2026-09-12): cu/inv_058_atomic_oi_fee_handoff.rs,
 # v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes.

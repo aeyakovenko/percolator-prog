@@ -44,6 +44,29 @@ records the comparison with Scopes A/Q/E, limits, fixed SBF and exact commands.
 New selectors pass 2/2 and metadata gates 4/4; adjacent controls pass 12/14, with
 both failures reproduced on the untouched base and documented in the audit.
 
+## Astra Scope I observation, reward provenance and fractional resets (2026-09-14)
+
+[cu/inv_045_fractional_reset_histories.rs](cu/inv_045_fractional_reset_histories.rs)
+adds 32 public two-asset histories under `generated_fractional_routes`: fractional
+K/F owners, three nonzero target resets per asset, four trade transports, different
+owner cadences and publication/reduction orders. Independent owner residues explain
+128 exact resolved SPL payouts and the final 12/15 custody atoms. There are 192
+nonzero resets and 320 complete Account rollbacks; peak measured CU is 474375.
+
+[cu/inv_045_paid_origin_routes.rs](cu/inv_045_paid_origin_routes.rs) adds eight
+histories under `retained_penalty_handoff`. Four paid-discovery routes and two
+observation orders preserve old discovery/penalty stock through fresh liquidation
+and full target catchup. An active AuthMark recipient keeps its own 9-atom PnL
+separate from a 2762-atom reward and a 3762-atom SPL payout. Eight payout prefixes
+are among 84 missing-declared-tail rollbacks; peak measured CU is 382424.
+
+Rows 422/425/426 remain OPEN. These are bounded history increments, with no new
+Hybrid-recipient cell, production correction or machine-status change. Unknown
+omitted observations, arbitrary provenance/carry histories and full terminal
+reward cohorts remain outside scope. The [Scope I audit](astra_scope_i_observation_reward_carry_20260914.md)
+compares H/O/V/C and the existing owners, and records guarantees, limits, fixed
+Scope W artifact provenance and exact validation commands.
+
 ## Scope E retained policy and earned reserves (2026-09-13)
 
 Owner: [cu/inv_014_retained_policy_earned_reserves.rs](cu/inv_014_retained_policy_earned_reserves.rs),
