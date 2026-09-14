@@ -172,6 +172,11 @@ the role match to write exactly one scoped authority field, including
 This is paired with the existing public `cold_admin_handoff_scope`,
 `funded_role_zero_transition`, `cold_oracle_funded_containment`,
 `funded_oracle_succession`, and `funded_backing_succession` witnesses.
+`cold_oracle_insurance_containment` adds the complementary insurance-funded
+oracle-coholder lane: a cold admin can rotate observation power and land an
+authenticated mark while the incumbent's live insurance-domain budgets remain
+payable only by that incumbent, and a cold-admin attempt to seize the funded
+insurance role rolls back the preceding user SPL withdrawal plus oracle prefix.
 `impaired_backing_containment` adds the row's previously missing backing-stock
 cell: a public trade/crank/expiry sequence leaves `impaired_liened_backing_num`
 as the only nonzero funded bucket term, then a cold-admin rotation plus a real
