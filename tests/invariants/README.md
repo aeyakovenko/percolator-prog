@@ -28894,6 +28894,19 @@ It committed no successful force-close progress, so the prototype was removed. T
 readiness limit for that call, not a persistent-DoS finding or proof that no bounded alternative
 exists. Full-shape force close and rewarded maintenance remain open alongside the other gaps above.
 
+Current-head reconfirmation, 2026-09-14: a finding-blind row-423/INV-077 probe rebuilt the same
+public shape on PR135 at `5855caac` / engine `394fd0bf`. Both portfolios held fourteen active legs;
+the LP held all twenty-eight value-bearing source records. After an authenticated mark moved asset
+13 and admin shutdown entered Recovery, one keeper-only `PermissionlessCrank` succeeded under the
+CU guard but left the LP source-rank unchanged at `(27, 27000000000000000)`; the next crank returned
+`EngineNonProgress`. Subsequent `ForceCloseAbandonedAsset` calls with full, half, and one-`POS_SCALE`
+`close_q` each exhausted the transaction meter at the same point (`ProgramFailedToComplete`, program
+log 1,399,676 of 1,399,700 CU). The red selector was removed from PR135 because it is not a green
+invariant witness and there is no wrapper-side fix in this branch. This remains an uncovered
+permissionless max-shape recovery-continuation gap: owner-signed `ForfeitRecoveryLeg` is separately
+bounded, so classification as a qualifying user DoS requires the normal `scripts/loop.md` fixed-head
+evidence and threat-model call.
+
 Additional full-shape B-settlement evidence, 2026-09-08:
 [`v16_program_public_full_shape_b_backlog_has_bounded_settlement`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)
 constructs fourteen active long legs and twenty-eight value-bearing, unliened source records through
