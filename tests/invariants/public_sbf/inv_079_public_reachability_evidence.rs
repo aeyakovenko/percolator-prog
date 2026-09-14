@@ -351,7 +351,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 109,
+        consumers, 110,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
 }
@@ -770,14 +770,14 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
         rows += 1;
     }
 
-    assert_eq!(rows, 165, "refresh the dated GitHub finding snapshot");
+    assert_eq!(rows, 166, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(
         missing, 18,
         "post-PR135 counterexamples remain missing generic invariant-owned discovery coverage"
     );
     assert_eq!(
-        independent, 130,
+        independent, 131,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
@@ -947,7 +947,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             &[67],
             include_str!("../cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"),
         ),
-        (71, &[71], include_str!("../cu/inv_071_crank_progress.rs")),
+        (
+            71,
+            &[71, 45],
+            include_str!("../cu/inv_071_crank_progress.rs"),
+        ),
         (
             73,
             &[73],
@@ -1020,6 +1024,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "mark-movement-reserve-must-remain-encumbered"
                     | "mark-movement-cost-must-cover-liquidation-extraction"
                     | "mark-movement-fees-must-be-bilaterally-supported"
+                    | "all-economic-routes-preserve-canonical-fractional-accrual-carry"
                     | "composite-price-is-rounded-once-after-exact-composition"
                     | "omitted-observation-cannot-erase-balanced-rounded-transfer"
                     | "fractional-cap-residue-must-accumulate-to-target"

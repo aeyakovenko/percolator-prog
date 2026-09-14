@@ -162,7 +162,7 @@
 422	LoF	BLOCKER	INV-045	missing	[BLOCKER LoF] Preserve Hybrid liquidation reward provenance
 423	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Prevent latent source-domain exhaustion
 424	LoF	PRIVILEGED	INV-070	missing	[PRIVILEGED LoF] Restart terminal scan after backing expiry
-425	LoF	BLOCKER	INV-045	missing	[BLOCKER LoF] Preserve oracle cap carry across interleaved trades
+425	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Preserve oracle cap carry across interleaved trades
 426	LoF	BLOCKER	INV-020	missing	[BLOCKER LoF] Require current Hybrid evidence before health refresh
 428	LoF	BLOCKER	INV-008	missing	[BLOCKER LoF] Consume insurance withdrawal epoch on retained debit
 429	LoF	PRIVILEGED	INV-024	missing	[PRIVILEGED LoF] Preserve shutdown reserve beneficiaries

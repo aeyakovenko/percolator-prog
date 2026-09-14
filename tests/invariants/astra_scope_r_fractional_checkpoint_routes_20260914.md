@@ -8,9 +8,11 @@ All source edits, build outputs and index operations belong to this worktree.
 Protected checkouts were read only. No production, fixture source, dependency,
 wire or machine-status change is included.
 
-Rows **425 and 426 remain OPEN**. No implementation/invariant mismatch was
-established. This is one new bounded public LiteSVM product for INV-045/038/085/086,
-not a production fix or whole-invariant closure.
+At the time of this scope, rows **425 and 426 remained OPEN** and no implementation
+/ invariant mismatch was established. The later row-425 canonical-accrual
+regression in [README.md](README.md#row-425-canonical-accrual-carry-closure-2026-09-14)
+now covers row 425; row 426 remains open. This scope remains one bounded public
+LiteSVM product for INV-045/038/085/086, not a whole-invariant closure.
 
 ## Ownership Review
 

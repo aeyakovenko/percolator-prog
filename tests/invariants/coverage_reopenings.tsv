@@ -1599,7 +1599,7 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # AuthMark, unit ADL, zero fees, bounded arithmetic and explicit catchup only;
 # arbitrary queues, ADL, full U256/bigint boundaries and generic closure remain
 # open. Production/status unchanged. See astra_scope_r_fractional_checkpoint_routes_20260914.md.
-425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	OPEN
+425	LoF	BLOCKER	INV-045	INV-010,INV-024,INV-038,INV-041,INV-045,INV-052,INV-071,INV-085,INV-086,INV-088	fractional-carry+x-trade-crank-interleaving+x-entitlement	all-economic-routes-preserve-canonical-fractional-accrual-carry	COVERED
 # Row 426 partial conformance (2026-09-12): cu/inv_020_interrupted_refresh_fees.rs,
 # v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements.
 # Sixteen public worlds compare explicit/automatic maintenance collection after
