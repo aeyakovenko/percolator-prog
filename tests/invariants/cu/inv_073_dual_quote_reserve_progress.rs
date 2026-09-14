@@ -346,7 +346,8 @@ fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_
                     ]
                 }))
                 .collect::<Vec<_>>();
-            let check = |env: &V16CuEnv, paid: [[u64; 2]; 3], closed: bool| {
+            let check =
+                |env: &V16CuEnv, paid: [[u64; 2]; 3], insurance_debits: u64, closed: bool| {
                 let remaining: [u64; 3] =
                     std::array::from_fn(|kind| CLAIMS[kind] - paid[kind].iter().sum::<u64>());
                 let paid_by_rail: [u64; 2] =
@@ -475,7 +476,9 @@ fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_
                         (0, 0)
                     );
                 }
-                assert_eq!(env.control_sequences(0), sequences);
+                let mut expected_sequences = sequences;
+                expected_sequences.authority_epoch += insurance_debits;
+                assert_eq!(env.control_sequences(0), expected_sequences);
                 assert_eq!(
                     state::read_asset_oracle_profile(&market.data, 0).unwrap(),
                     profile
@@ -500,7 +503,8 @@ fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_
                     .unwrap();
             };
             let mut paid = [[0u64; 2]; 3];
-            check(&env, paid, false);
+            let mut insurance_debits = 0;
+            check(&env, paid, insurance_debits, false);
             let order = if reverse { [2, 1, 0] } else { [0, 1, 2] };
             for round in 0..2 {
                 for kind in order {
@@ -515,14 +519,14 @@ fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_
                         ProgInstruction::WithdrawInsuranceAsset {
                             asset_index: 0,
                             market_id: env.asset_market_id(0),
-                            authority_epoch: sequences.authority_epoch,
+                            authority_epoch: env.control_sequences(0).authority_epoch,
                             amount: amount.into(),
                         }
                     } else {
                         ProgInstruction::WithdrawBackingBucket {
                             domain: kind as u16,
                             market_id: env.asset_market_id(0),
-                            authority_epoch: sequences.authority_epoch,
+                            authority_epoch: env.control_sequences(0).authority_epoch,
                             amount: amount.into(),
                         }
                     };
@@ -551,9 +555,10 @@ fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_
                     ];
                     peak[0] = peak[0].max(execute(&mut env, ix, &[], &tracked, &changed));
                     paid[kind][rail] += amount;
+                    insurance_debits += u64::from(kind == 2);
                     payments += 1;
                     assert_eq!(before - env.market_state().1.vault, amount.into());
-                    check(&env, paid, false);
+                    check(&env, paid, insurance_debits, false);
                 }
             }
             assert_eq!(env.market_state().1.vault, 0);
@@ -571,7 +576,7 @@ fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_
                     AccountMeta::new(rails[1].admin_token, false),
                 ],
                 data: ProgInstruction::CloseSlab {
-                    authority_epoch: sequences.authority_epoch,
+                    authority_epoch: env.control_sequences(0).authority_epoch,
                 }
                 .encode(),
             };
@@ -584,7 +589,7 @@ fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_
                 rails[1].admin_token,
             ];
             peak[1] = peak[1].max(execute(&mut env, close, &[&admin], &tracked, &changed));
-            check(&env, paid, true);
+            check(&env, paid, insurance_debits, true);
             let tombstone_rent = env
                 .svm
                 .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN);

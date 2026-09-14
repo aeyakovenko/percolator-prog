@@ -303,10 +303,9 @@ pub(crate) fn verify_terminal_public_reserve_disposition() {
                 accounts,
                 data: ix.encode(),
             };
-            let payout = |kind, amount| reserve_payout(&env, wallets, tokens, ledger, kind, amount);
-            let prefixes = std::array::from_fn::<_, 3, _>(|kind| payout(kind, PREFIX[kind]));
-            let tails =
-                std::array::from_fn::<_, 3, _>(|kind| payout(kind, STOCK[kind] - PREFIX[kind]));
+            let payout = |env: &V16CuEnv, kind, amount| {
+                reserve_payout(env, wallets, tokens, ledger, kind, amount)
+            };
             let close = wrap(
                 ProgInstruction::CloseSlab {
                     authority_epoch: epoch,
@@ -321,9 +320,21 @@ pub(crate) fn verify_terminal_public_reserve_disposition() {
                     AccountMeta::new(env.mint, false),
                 ],
             );
-            let mut unsigned_close = close.clone();
-            unsigned_close.accounts[0].is_signer = false;
-            let stock = |env: &V16CuEnv, paid: [u64; 3], expired: bool| {
+            let close_at = |env: &V16CuEnv| {
+                let mut ix = close.clone();
+                ix.data = ProgInstruction::CloseSlab {
+                    authority_epoch: env.control_sequences(0).authority_epoch,
+                }
+                .encode();
+                ix
+            };
+            let unsigned_close = |env: &V16CuEnv| {
+                let mut ix = close_at(env);
+                ix.accounts[0].is_signer = false;
+                ix
+            };
+            let stock =
+                |env: &V16CuEnv, paid: [u64; 3], expired: bool, insurance_debits: u64| {
                 let amounts = [PAYOUTS[0], PAYOUTS[1], paid[0] + paid[1], 0, paid[2]];
                 for ((key, frame), amount) in tokens.into_iter().zip(&token_frames).zip(amounts) {
                     let mut expected = frame.clone();
@@ -399,7 +410,10 @@ pub(crate) fn verify_terminal_public_reserve_disposition() {
                     .unwrap(),
                     profile
                 );
-                assert_eq!(env.control_sequences(0).authority_epoch, epoch);
+                assert_eq!(
+                    env.control_sequences(0).authority_epoch,
+                    epoch + insurance_debits
+                );
                 assert_eq!(env.token_amount(admin_token), 0);
                 let mut image = env.svm.get_account(&env.market).unwrap();
                 state::market_view_mut(&mut image.data)
@@ -422,11 +436,14 @@ pub(crate) fn verify_terminal_public_reserve_disposition() {
                 }
             };
             let mut paid = [0; 3];
-            stock(&env, paid, false);
+            let mut insurance_debits = 0;
+            stock(&env, paid, false, insurance_debits);
             for kind in order {
+                let prefix = payout(&env, kind, PREFIX[kind]);
+                let rejected_close = unsigned_close(&env);
                 peak = peak.max(land(
                     &mut env,
-                    &[prefixes[kind].clone(), unsigned_close.clone()],
+                    &[prefix.clone(), rejected_close],
                     &[],
                     &tracked,
                     &[],
@@ -434,9 +451,9 @@ pub(crate) fn verify_terminal_public_reserve_disposition() {
                     None,
                     Some((3, PercolatorError::ExpectedSigner)),
                 ));
-                stock(&env, paid, false);
+                stock(&env, paid, false, insurance_debits);
                 for destination in encumbered[usize::from(kind == 2)] {
-                    let mut blocked = prefixes[kind].clone();
+                    let mut blocked = payout(&env, kind, PREFIX[kind]);
                     blocked.accounts[if kind == 1 { 3 } else { 2 }].pubkey = destination;
                     peak = peak.max(land(
                         &mut env,
@@ -448,13 +465,13 @@ pub(crate) fn verify_terminal_public_reserve_disposition() {
                         None,
                         Some((2, PercolatorError::InvalidTokenAccount)),
                     ));
-                    stock(&env, paid, false);
+                    stock(&env, paid, false, insurance_debits);
                 }
                 let actor = if kind == 2 { 4 } else { 2 };
                 let allowed = [env.market, env.vault, ledger, tokens[actor]];
                 peak = peak.max(land(
                     &mut env,
-                    &[prefixes[kind].clone()],
+                    &[prefix],
                     &[],
                     &tracked,
                     &allowed,
@@ -463,14 +480,16 @@ pub(crate) fn verify_terminal_public_reserve_disposition() {
                     None,
                 ));
                 paid[kind] += PREFIX[kind];
-                stock(&env, paid, false);
+                insurance_debits += u64::from(kind == 2);
+                stock(&env, paid, false, insurance_debits);
             }
             if expire {
                 env.svm.warp_to_slot(100);
                 let allowed = [env.market];
+                let close_ix = close_at(&env);
                 peak = peak.max(land(
                     &mut env,
-                    &[close.clone()],
+                    &[close_ix],
                     &[&admin],
                     &tracked,
                     &allowed,
@@ -478,15 +497,16 @@ pub(crate) fn verify_terminal_public_reserve_disposition() {
                     None,
                     None,
                 ));
-                stock(&env, paid, true);
+                stock(&env, paid, true, insurance_debits);
             }
             for kind in order.into_iter().rev() {
                 if expire && kind == 0 {
                     continue;
                 }
+                let blocked_close = close_at(&env);
                 peak = peak.max(land(
                     &mut env,
-                    &[close.clone()],
+                    &[blocked_close],
                     &[&admin],
                     &tracked,
                     &[],
@@ -496,9 +516,10 @@ pub(crate) fn verify_terminal_public_reserve_disposition() {
                 ));
                 let actor = if kind == 2 { 4 } else { 2 };
                 let allowed = [env.market, env.vault, ledger, tokens[actor]];
+                let tail = payout(&env, kind, STOCK[kind] - PREFIX[kind]);
                 peak = peak.max(land(
                     &mut env,
-                    &[tails[kind].clone()],
+                    &[tail],
                     &[],
                     &tracked,
                     &allowed,
@@ -507,7 +528,8 @@ pub(crate) fn verify_terminal_public_reserve_disposition() {
                     None,
                 ));
                 paid[kind] = STOCK[kind];
-                stock(&env, paid, expire);
+                insurance_debits += u64::from(kind == 2);
+                stock(&env, paid, expire, insurance_debits);
             }
             let rent = env
                 .svm
@@ -515,9 +537,10 @@ pub(crate) fn verify_terminal_public_reserve_disposition() {
             let refund =
                 env.svm.get_account(&env.market).unwrap().lamports + vault_frame.lamports - rent;
             let allowed = [env.market, env.vault, env.mint];
+            let final_close = close_at(&env);
             peak = peak.max(land(
                 &mut env,
-                &[close],
+                &[final_close],
                 &[&admin],
                 &tracked,
                 &allowed,

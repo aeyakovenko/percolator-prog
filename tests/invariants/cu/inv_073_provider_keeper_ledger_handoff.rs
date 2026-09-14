@@ -154,7 +154,9 @@ pub(crate) fn verify_provider_keeper_ledger_handoff() {
                          expired: bool| {
                 assert_eq!(env.svm.get_account(&wallets[2]), missing_wallet);
                 assert_eq!(env.market_state().0, config);
-                assert_eq!(env.control_sequences(0), sequences);
+                let mut expected_sequences = sequences;
+                expected_sequences.authority_epoch += u64::from(insurance != 0);
+                assert_eq!(env.control_sequences(0), expected_sequences);
                 let mut market = env.svm.get_account(&env.market).unwrap();
                 assert_eq!(
                     state::read_asset_oracle_profile(&market.data, 0).unwrap(),
@@ -308,6 +310,11 @@ pub(crate) fn verify_provider_keeper_ledger_handoff() {
                 None,
             ));
             let expired = delivery == 100;
+            let mut close = close;
+            close.data = ProgInstruction::CloseSlab {
+                authority_epoch: env.control_sequences(0).authority_epoch,
+            }
+            .encode();
             let principal = if expired { PRINCIPAL_PREFIX } else { BACKING };
             let remaining_principal = payout(&env, ledgers[0], 0, BACKING - PRINCIPAL_PREFIX);
             let continuation = if expired {

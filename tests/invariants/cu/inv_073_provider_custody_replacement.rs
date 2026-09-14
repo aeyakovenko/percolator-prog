@@ -260,7 +260,9 @@ pub(crate) fn verify_provider_custody_replacement() {
                     state::read_asset_oracle_profile(&market.data, 0).unwrap(),
                     profile
                 );
-                assert_eq!(env.control_sequences(0), sequences);
+                let mut expected_sequences = sequences;
+                expected_sequences.authority_epoch += u64::from(paid[2] != 0);
+                assert_eq!(env.control_sequences(0), expected_sequences);
                 crate::support::fuzz_model::assert_market_stock_census(
                     "provider custody replacement",
                     &group,
@@ -354,6 +356,11 @@ pub(crate) fn verify_provider_custody_replacement() {
             ));
             paid[2] = INSURANCE;
             stock(&env, paid, expired, true);
+            let mut close = close;
+            close.data = ProgInstruction::CloseSlab {
+                authority_epoch: env.control_sequences(0).authority_epoch,
+            }
+            .encode();
 
             let rent = env
                 .svm

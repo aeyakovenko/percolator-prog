@@ -379,7 +379,7 @@ fn v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement
 
             let custody_keys = [destinations[0], destinations[1], env.vault];
             let custody_frames = custody_keys.map(|key| env.svm.get_account(&key).unwrap());
-            let stock = |env: &V16CuEnv, paid: [u64; 2]| {
+            let stock = |env: &V16CuEnv, paid: [u64; 2], debits: [u64; 2]| {
                 let frame = env.svm.get_account(&env.market).unwrap();
                 let group = env.market_state().1;
                 let remaining = SUPPLY - paid.iter().sum::<u64>();
@@ -480,15 +480,18 @@ fn v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement
                 );
                 assert_eq!(env.svm.get_account(&env.mint), Some(mint_frame.clone()));
                 for asset in 0..2 {
+                    let mut expected_sequences = sequences[asset];
+                    expected_sequences.authority_epoch += debits[asset];
                     assert_eq!(
                         state::read_asset_oracle_profile(&frame.data, asset).unwrap(),
                         profiles[asset]
                     );
-                    assert_eq!(env.control_sequences(asset), sequences[asset]);
+                    assert_eq!(env.control_sequences(asset), expected_sequences);
                 }
             };
             let mut paid = [PREFIX, 0];
-            stock(&env, paid);
+            let mut debits = [0u64; 2];
+            stock(&env, paid, debits);
             for (actor, amount) in [(0, 13), (1, 24), (0, 27)] {
                 let ix = withdrawal(
                     &env,
@@ -503,7 +506,8 @@ fn v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement
                 let changed = [env.market, env.vault, destinations[actor]];
                 peak[2] = peak[2].max(land(&mut env, &[ix], &[], &tracked, &changed, 0));
                 paid[actor] += amount;
-                stock(&env, paid);
+                debits[assets[actor]] += 1;
+                stock(&env, paid, debits);
                 assert_eq!(before - env.market_state().1.insurance, amount.into());
             }
             assert_eq!(paid, [47, 24]);
@@ -520,7 +524,7 @@ fn v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement
                     AccountMeta::new(secondary_token, false),
                 ],
                 data: ProgInstruction::CloseSlab {
-                    authority_epoch: sequences[0].authority_epoch,
+                    authority_epoch: env.control_sequences(0).authority_epoch,
                 }
                 .encode(),
             };
@@ -557,7 +561,7 @@ fn v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement
                     assert_eq!(frame.lamports, tombstone_rent);
                     break;
                 }
-                stock(&env, paid);
+                stock(&env, paid, debits);
                 assert!(env.market_state().0.terminal_slab_scan_progress > cursor);
             }
             assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));

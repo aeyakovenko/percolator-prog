@@ -10936,7 +10936,9 @@ pub mod processor {
             let market_data = market_ai.try_borrow_data()?;
             let (cfg, mode, _, market_id, _, _) =
                 state::read_market_trade_preflight(&market_data, asset_index)?;
-            expect_signer(operator)?;
+            if mode != MarketModeV16::Resolved {
+                expect_signer(operator)?;
+            }
             if market_id != expected_market_id {
                 return Err(PercolatorError::AssetGenerationMismatch.into());
             }
@@ -10970,8 +10972,7 @@ pub mod processor {
             }
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
             let authorities = domain_authorities_from_view(&group, &cfg, long_domain)?;
-            let mut live_debit_epoch_asset = None;
-            let ledger_authority = if live_mode {
+            let (ledger_authority, debit_epoch_asset) = if live_mode {
                 let shutdown_drain =
                     live_domain_withdraw_health_or_shutdown_view(&cfg, &group, long_domain)?;
                 let local_authorized =
@@ -10984,12 +10985,12 @@ pub mod processor {
                 }
                 let epoch_asset_index = if local_authorized { asset_index } else { 0 };
                 require_authority_epoch_view(&group, epoch_asset_index, expected_authority_epoch)?;
-                live_debit_epoch_asset = Some(epoch_asset_index);
-                if admin_shutdown_authorized && !local_authorized {
+                let ledger_authority = if admin_shutdown_authorized && !local_authorized {
                     cfg.marketauth
                 } else {
                     authorities.insurance_authority
-                }
+                };
+                (ledger_authority, Some(epoch_asset_index))
             } else {
                 if group.header.materialized_portfolio_count.get() != 0
                     || group.header.c_tot.get() != 0
@@ -11003,7 +11004,7 @@ pub mod processor {
                 group
                     .recredit_terminal_claim_free_residual_for_asset_not_atomic(asset_index)
                     .map_err(map_v16_error)?;
-                authorities.insurance_authority
+                (authorities.insurance_authority, Some(asset_index))
             };
             let available = market_insurance_withdraw_capacity_view(&group, asset_index)?;
             if amount > available
@@ -11049,8 +11050,8 @@ pub mod processor {
             {
                 write_or_init_insurance_ledger(data, ledger, *initialized)?;
             }
-            if let Some(epoch_asset) = live_debit_epoch_asset {
-                // Consume signed Live debit consent even when telemetry is omitted.
+            if let Some(epoch_asset) = debit_epoch_asset {
+                // Consume signed debit consent even when telemetry is omitted.
                 advance_authority_epoch_view(&mut group, epoch_asset, expected_authority_epoch)?;
             }
         }

@@ -154,7 +154,9 @@ pub(crate) fn verify_frozen_reserve_replacement() {
             (0, 0, 0)
         );
         assert_eq!(group.source_claim_bound_total_num, 0);
-        assert_eq!(env.control_sequences(0), authority);
+        let mut expected_authority = authority;
+        expected_authority.authority_epoch += u64::from(paid[2] != 0);
+        assert_eq!(env.control_sequences(0), expected_authority);
         assert_eq!(
             state::read_asset_oracle_profile(&image.data, 0).unwrap(),
             profile
@@ -274,14 +276,24 @@ pub(crate) fn verify_frozen_reserve_replacement() {
         ];
         let completion_bytes = bincode::serialize(&completion).unwrap();
         let mut rejected = completion.clone();
-        rejected.push(reserve_payout(
+        let mut invalid = reserve_payout(
             &env,
             wallets,
             tokens,
             ledger,
             invalid_kind,
             1,
-        ));
+        );
+        if kind == 2 {
+            invalid.data = ProgInstruction::WithdrawBackingBucket {
+                domain: invalid_kind as u16,
+                market_id: env.asset_market_id(0),
+                authority_epoch: env.control_sequences(0).authority_epoch + 1,
+                amount: 1,
+            }
+            .encode();
+        }
+        rejected.push(invalid);
         peaks[1] = peaks[1].max(land(
             &mut env,
             &rejected,
@@ -331,7 +343,7 @@ pub(crate) fn verify_frozen_reserve_replacement() {
             AccountMeta::new(env.mint, false),
         ],
         data: ProgInstruction::CloseSlab {
-            authority_epoch: authority.authority_epoch,
+            authority_epoch: env.control_sequences(0).authority_epoch,
         }
         .encode(),
     };

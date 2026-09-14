@@ -282,7 +282,7 @@ fn v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close
                 spl_token::instruction::sync_native(&spl_token::ID, &env.vault).unwrap(),
                 spl_token::instruction::sync_native(&spl_token::ID, &recipient).unwrap(),
             ];
-            let check = |env: &V16CuEnv, paid: u64, synced: bool| {
+            let check = |env: &V16CuEnv, paid: u64, synced: bool, debits: u64| {
                 let market = env.svm.get_account(&env.market).unwrap();
                 let (current_cfg, group) = state::read_market(&market.data).unwrap();
                 let remaining = FUNDED - paid;
@@ -316,7 +316,9 @@ fn v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close
                     .iter()
                     .all(|value| *value == 0));
                 assert!(group.insurance_domain_spent.iter().all(|value| *value == 0));
-                assert_eq!(env.control_sequences(0), sequences);
+                let mut expected_sequences = sequences;
+                expected_sequences.authority_epoch += debits;
+                assert_eq!(env.control_sequences(0), expected_sequences);
                 assert_eq!(
                     state::read_asset_oracle_profile(&market.data, 0).unwrap(),
                     profile
@@ -412,13 +414,15 @@ fn v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close
             };
             let mut paid = 0;
             let mut synced = false;
-            check(&env, paid, synced);
+            let mut debits = 0;
+            check(&env, paid, synced, debits);
             for (index, amount) in [FIRST, FUNDED - FIRST].into_iter().enumerate() {
                 if index == usize::from(!sync_before_first) {
                     peak[1] = peak[1].max(execute(&mut env, &sync, &[], &tracked, &custody, 0));
                     synced = true;
-                    check(&env, paid, synced);
+                    check(&env, paid, synced, debits);
                 }
+                let authority_epoch = env.control_sequences(0).authority_epoch;
                 let ix = Instruction {
                     program_id: env.program_id,
                     accounts: vec![
@@ -433,7 +437,7 @@ fn v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close
                     data: ProgInstruction::WithdrawInsuranceAsset {
                         asset_index: 0,
                         market_id: env.asset_market_id(0),
-                        authority_epoch: sequences.authority_epoch,
+                        authority_epoch,
                         amount: amount.into(),
                     }
                     .encode(),
@@ -444,9 +448,10 @@ fn v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close
                 let changes = [env.market, env.vault, recipient, ledger];
                 peak[2] = peak[2].max(execute(&mut env, &[ix], &[], &tracked, &changes, 0));
                 paid += amount;
+                debits += 1;
                 payments += 1;
                 assert_eq!(before - env.market_state().1.insurance, amount.into());
-                check(&env, paid, synced);
+                check(&env, paid, synced, debits);
             }
             assert_eq!(paid, FUNDED);
             assert!(synced);
@@ -463,7 +468,7 @@ fn v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close
                     AccountMeta::new_readonly(spl_token::ID, false),
                 ],
                 data: ProgInstruction::CloseSlab {
-                    authority_epoch: sequences.authority_epoch,
+                    authority_epoch: env.control_sequences(0).authority_epoch,
                 }
                 .encode(),
             };
@@ -673,7 +678,7 @@ fn v16_program_native_insurance_paid_prefix_survives_operator_free_redemption_re
                 data: ProgInstruction::WithdrawInsuranceAsset {
                     asset_index: 0,
                     market_id: env.asset_market_id(0),
-                    authority_epoch: sequences.authority_epoch,
+                    authority_epoch: env.control_sequences(0).authority_epoch,
                     amount: amount.into(),
                 }
                 .encode(),
@@ -776,7 +781,9 @@ fn v16_program_native_insurance_paid_prefix_survives_operator_free_redemption_re
             assert_eq!(env.market_state(), expected_market);
             let market = env.svm.get_account(&env.market).unwrap();
             assert_eq!(market.lamports, resolved.lamports);
-            assert_eq!(env.control_sequences(0), sequences);
+            let mut expected_sequences = sequences;
+            expected_sequences.authority_epoch += index as u64 + 1;
+            assert_eq!(env.control_sequences(0), expected_sequences);
             assert_eq!(
                 state::read_asset_oracle_profile(&market.data, 0).unwrap(),
                 profile
@@ -862,7 +869,7 @@ fn v16_program_native_insurance_paid_prefix_survives_operator_free_redemption_re
                 AccountMeta::new_readonly(spl_token::ID, false),
             ],
             data: ProgInstruction::CloseSlab {
-                authority_epoch: sequences.authority_epoch,
+                authority_epoch: env.control_sequences(0).authority_epoch,
             }
             .encode(),
         };

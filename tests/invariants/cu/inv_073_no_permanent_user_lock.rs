@@ -830,7 +830,7 @@ fn v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledge
     };
     check_stock(&env, 0);
 
-    let withdrawal = |amount: u64, attach_ledger: bool| {
+    let withdrawal_at = |amount: u64, attach_ledger: bool, authority_epoch| {
         let mut accounts = vec![
             AccountMeta::new(beneficiary.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -851,15 +851,16 @@ fn v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledge
             data: ProgInstruction::WithdrawInsuranceAsset {
                 asset_index: 0,
                 market_id: env.asset_market_id(0),
-                authority_epoch: env.control_sequences(0).authority_epoch,
+                authority_epoch,
                 amount: amount.into(),
             }
             .encode(),
         }
     };
-    let prefix = withdrawal(FIRST, false);
-    let invalid_suffix = withdrawal(FUNDED - FIRST, true);
-    let valid_suffix = withdrawal(FUNDED - FIRST, false);
+    let start_authority_epoch = env.control_sequences(0).authority_epoch;
+    let prefix = withdrawal_at(FIRST, false, start_authority_epoch);
+    let invalid_suffix = withdrawal_at(FUNDED - FIRST, true, start_authority_epoch + 1);
+    let valid_suffix = withdrawal_at(FUNDED - FIRST, false, start_authority_epoch + 1);
     assert_eq!(invalid_suffix.data, valid_suffix.data);
     assert_eq!(&invalid_suffix.accounts[..6], &valid_suffix.accounts);
 

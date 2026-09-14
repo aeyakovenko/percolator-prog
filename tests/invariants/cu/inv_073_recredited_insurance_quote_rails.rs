@@ -260,33 +260,37 @@ pub(super) fn finish(
         );
         meta.compute_units_consumed
     };
-    let withdrawal = |rail: usize, amount: u64| Instruction {
-        program_id: env.program_id,
+    let program_id = env.program_id;
+    let market_key = env.market;
+    let market_id = env.asset_market_id(asset as u16);
+    let vault_authority = env.vault_authority;
+    let withdrawal_at = |rail: usize, amount: u64, authority_epoch: u64| Instruction {
+        program_id,
         accounts: vec![
             AccountMeta::new_readonly(absent[0], false),
-            AccountMeta::new(env.market, false),
+            AccountMeta::new(market_key, false),
             AccountMeta::new(recipients[rail], false),
             AccountMeta::new(vaults[rail], false),
-            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(vault_authority, false),
             AccountMeta::new_readonly(spl_token::ID, false),
         ],
         data: ProgInstruction::WithdrawInsuranceAsset {
             asset_index: asset as u16,
-            market_id: env.asset_market_id(asset as u16),
-            authority_epoch: sequences[asset].authority_epoch,
+            market_id,
+            authority_epoch,
             amount: amount.into(),
         }
         .encode(),
     };
+    let withdrawal = |env: &V16CuEnv, rail: usize, amount: u64| {
+        withdrawal_at(rail, amount, env.control_sequences(asset).authority_epoch)
+    };
     let first_rail = usize::from(secondary_first);
     let last_rail = 1 - first_rail;
-    let first = withdrawal(first_rail, FIRST);
-    let last = withdrawal(last_rail, entitlement - FIRST);
-    let excess = withdrawal(last_rail, entitlement - FIRST + 1);
-    let almost_last = withdrawal(last_rail, entitlement - FIRST - 1);
-    let two = withdrawal(first_rail, 2);
-    let replay = withdrawal(first_rail, 1);
-    for ix in [&first, &last, &excess, &almost_last, &two, &replay] {
+    for ix in [
+        withdrawal(env, first_rail, FIRST),
+        withdrawal(env, last_rail, entitlement - FIRST),
+    ] {
         assert!(ix.accounts.iter().all(|meta| !meta.is_signer));
         assert!(!ix
             .accounts
@@ -317,7 +321,12 @@ pub(super) fn finish(
                 state::read_asset_oracle_profile(&market.data, index).unwrap(),
                 profiles[index]
             );
-            assert_eq!(env.control_sequences(index), sequences[index]);
+            let mut expected_sequences = sequences[index];
+            if index == asset {
+                expected_sequences.authority_epoch +=
+                    u64::from(paid[0] != 0) + u64::from(paid[1] != 0);
+            }
+            assert_eq!(env.control_sequences(index), expected_sequences);
             assert_eq!(
                 env.svm.get_account(&recipients[index]),
                 Some(token_image(&recipient_frames[index], paid[index]))
@@ -371,6 +380,9 @@ pub(super) fn finish(
     let mut peak = [0u64; 3];
     // Each rejecting suffix has enough raw custody; the shared claim is its limit.
     assert!(env.token_amount(vaults[last_rail]) >= entitlement - FIRST + 1);
+    let epoch = env.control_sequences(asset).authority_epoch;
+    let first = withdrawal_at(first_rail, FIRST, epoch);
+    let excess = withdrawal_at(last_rail, entitlement - FIRST + 1, epoch + 1);
     peak[0] = land(env, &[first.clone(), excess], false, &[], Some(3));
     assert_eq!(
         env.market_state(),
@@ -378,16 +390,21 @@ pub(super) fn finish(
         "failed other-rail suffix restores unbooked recovery"
     );
     let changes = [env.market, vaults[first_rail], recipients[first_rail]];
+    let first = withdrawal(env, first_rail, FIRST);
     peak[1] = land(env, &[first], false, &changes, None);
     let mut paid = [0u64; 2];
     paid[first_rail] = FIRST;
     check(env, paid);
 
     assert!(env.token_amount(vaults[first_rail]) >= 2);
+    let epoch = env.control_sequences(asset).authority_epoch;
+    let almost_last = withdrawal_at(last_rail, entitlement - FIRST - 1, epoch);
+    let two = withdrawal_at(first_rail, 2, epoch + 1);
     peak[0] = peak[0].max(land(env, &[almost_last, two], false, &[], Some(3)));
     check(env, paid);
     let before = entitlement - paid.iter().sum::<u64>();
     let changes = [env.market, vaults[last_rail], recipients[last_rail]];
+    let last = withdrawal(env, last_rail, entitlement - FIRST);
     peak[1] = peak[1].max(land(env, &[last], false, &changes, None));
     paid[last_rail] = entitlement - FIRST;
     assert_eq!(before, paid[last_rail]);
@@ -395,6 +412,7 @@ pub(super) fn finish(
     assert_eq!(env.market_state().1.insurance, 0);
     assert_eq!(env.market_state().1.vault, BURN.into());
     assert!(env.token_amount(vaults[first_rail]) >= 1);
+    let replay = withdrawal(env, first_rail, 1);
     peak[0] = peak[0].max(land(env, &[replay], false, &[], Some(2)));
     check(env, paid);
 
@@ -414,7 +432,12 @@ pub(super) fn finish(
         env.mint,
         admin.pubkey(),
     ];
-    peak[2] = land(env, &[close.clone()], true, &changes, None);
+    let mut final_close = close.clone();
+    final_close.data = ProgInstruction::CloseSlab {
+        authority_epoch: env.control_sequences(0).authority_epoch,
+    }
+    .encode();
+    peak[2] = land(env, &[final_close], true, &changes, None);
     let tombstone = env.svm.get_account(&env.market).unwrap();
     assert_closed_market_tombstone(&tombstone);
     assert_eq!(tombstone.lamports, tombstone_rent);

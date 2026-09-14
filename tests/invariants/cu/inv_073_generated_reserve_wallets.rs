@@ -19,6 +19,7 @@ const LIMIT: u64 = 600_000;
 struct ClaimBook {
     due: [u64; 3],
     paid: [u64; 3],
+    insurance_debits: u64,
     expired: bool,
 }
 
@@ -221,6 +222,14 @@ pub(crate) fn verify_generated_reserve_wallets() {
                     };
                     let mut unsigned_close = close.clone();
                     unsigned_close.accounts[0].is_signer = false;
+                    let close_at = |env: &V16CuEnv| {
+                        let mut ix = close.clone();
+                        ix.data = ProgInstruction::CloseSlab {
+                            authority_epoch: env.control_sequences(0).authority_epoch,
+                        }
+                        .encode();
+                        ix
+                    };
                     let check = |env: &V16CuEnv, book: &ClaimBook, created: [bool; 2]| {
                         let group = env.market_state().1;
                         let remaining = book.remaining();
@@ -310,7 +319,9 @@ pub(crate) fn verify_generated_reserve_wallets() {
                             state::read_asset_oracle_profile(&market.data, 0).unwrap(),
                             profile
                         );
-                        assert_eq!(env.control_sequences(0), sequences);
+                        let mut expected_sequences = sequences;
+                        expected_sequences.authority_epoch += book.insurance_debits;
+                        assert_eq!(env.control_sequences(0), expected_sequences);
                         assert_market_stock_census(
                             "generated reserve wallets",
                             &group,
@@ -351,6 +362,7 @@ pub(crate) fn verify_generated_reserve_wallets() {
                     let mut book = ClaimBook {
                         due,
                         paid: [0; 3],
+                        insurance_debits: 0,
                         expired: false,
                     };
                     let mut seen = [false; 3];
@@ -361,9 +373,10 @@ pub(crate) fn verify_generated_reserve_wallets() {
                             if book.remaining()[0] > 0 {
                                 let before_rank = book.rank();
                                 let market_key = env.market;
+                                let close_ix = close_at(&env);
                                 peak = peak.max(land(
                                     &mut env,
-                                    &[close.clone()],
+                                    &[close_ix],
                                     &[&admin],
                                     &tracked,
                                     &[market_key],
@@ -440,6 +453,7 @@ pub(crate) fn verify_generated_reserve_wallets() {
                         created[role] = true;
                         let before_rank = book.rank();
                         book.paid[kind] += amount;
+                        book.insurance_debits += u64::from(kind == 2);
                         assert_eq!(before_rank - book.rank(), amount);
                         payments += 1;
                         late_fees += usize::from(kind == 1 && book.expired);
@@ -477,9 +491,10 @@ pub(crate) fn verify_generated_reserve_wallets() {
                     let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();
                     expected_admin.lamports += refund;
                     let allowed = [env.market, env.vault, env.mint];
+                    let final_close = close_at(&env);
                     peak = peak.max(land(
                         &mut env,
-                        &[close],
+                        &[final_close],
                         &[&admin],
                         &tracked,
                         &allowed,

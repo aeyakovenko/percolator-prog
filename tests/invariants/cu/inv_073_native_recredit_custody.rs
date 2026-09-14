@@ -306,10 +306,15 @@ pub(super) fn finish(
         );
         meta.compute_units_consumed
     };
+    let payer_key = env.payer.pubkey();
+    let program_id = env.program_id;
+    let market_key = env.market;
+    let market_id = env.asset_market_id(asset as u16);
+    let vault_authority = env.vault_authority;
     let repair = |rail: usize| Instruction {
         program_id: associated_token_program_id(),
         accounts: vec![
-            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(payer_key, true),
             AccountMeta::new(recipients[rail], false),
             AccountMeta::new_readonly(absent[0], false),
             AccountMeta::new_readonly(mints[rail], false),
@@ -318,65 +323,72 @@ pub(super) fn finish(
         ],
         data: vec![1],
     };
-    let payment = |rail: usize, amount: u64| Instruction {
-        program_id: env.program_id,
+    let payment = |env: &V16CuEnv, rail: usize, amount: u64| Instruction {
+        program_id,
         accounts: vec![
             AccountMeta::new_readonly(absent[0], false),
-            AccountMeta::new(env.market, false),
+            AccountMeta::new(market_key, false),
             AccountMeta::new(recipients[rail], false),
             AccountMeta::new(vaults[rail], false),
-            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(vault_authority, false),
             AccountMeta::new_readonly(spl_token::ID, false),
         ],
         data: ProgInstruction::WithdrawInsuranceAsset {
             asset_index: asset as u16,
-            market_id: env.asset_market_id(asset as u16),
-            authority_epoch: sequences[asset].authority_epoch,
+            market_id,
+            authority_epoch: env.control_sequences(asset).authority_epoch,
             amount: amount.into(),
         }
         .encode(),
     };
     let native_total = NATIVE_PAYMENTS.iter().sum::<u64>();
     let classic_amount = entitlement - native_total;
-    let classic = vec![repair(0), payment(0, classic_amount)];
-    let mut native_prefix = Vec::new();
-    if sync {
-        for key in [native.vault, native.recipient] {
-            native_prefix.push(spl_token::instruction::sync_native(&spl_token::ID, &key).unwrap());
-        }
-    }
-    // The existing close authority redeems only the donated old custody. Recreate
-    // unencumbered custody before the wrapper pays the beneficiary's recovered claim.
-    native_prefix.push(
-        spl_token::instruction::close_account(
-            &spl_token::ID,
-            &native.recipient,
-            &absent[0],
-            &env.payer.pubkey(),
-            &[],
-        )
-        .unwrap(),
-    );
-    native_prefix.push(repair(1));
-    native_prefix.push(payment(1, NATIVE_PAYMENTS[0]));
-    let native_tail = vec![payment(1, NATIVE_PAYMENTS[1])];
     let events = if native_first {
         [
-            (1, NATIVE_PAYMENTS[0], native_prefix),
-            (0, classic_amount, classic),
-            (1, NATIVE_PAYMENTS[1], native_tail),
+            (1, NATIVE_PAYMENTS[0], 1usize),
+            (0, classic_amount, 0usize),
+            (1, NATIVE_PAYMENTS[1], 2usize),
         ]
     } else {
         [
-            (0, classic_amount, classic),
-            (1, NATIVE_PAYMENTS[0], native_prefix),
-            (1, NATIVE_PAYMENTS[1], native_tail),
+            (0, classic_amount, 0usize),
+            (1, NATIVE_PAYMENTS[0], 1usize),
+            (1, NATIVE_PAYMENTS[1], 2usize),
         ]
     };
     let mut paid = [0u64; 2];
     let mut recreated = false;
+    let mut debits = 0u64;
     let mut peak = 0;
-    for (rail, amount, prefix) in events {
+    for (rail, amount, event) in events {
+        let prefix = match event {
+            0 => vec![repair(0), payment(env, 0, classic_amount)],
+            1 => {
+                let mut prefix = Vec::new();
+                if sync {
+                    for key in [native.vault, native.recipient] {
+                        prefix.push(spl_token::instruction::sync_native(&spl_token::ID, &key).unwrap());
+                    }
+                }
+                // The existing close authority redeems only the donated old custody. Recreate
+                // unencumbered custody before the wrapper pays the beneficiary's recovered claim.
+                prefix.push(
+                    spl_token::instruction::close_account(
+                        &spl_token::ID,
+                        &native.recipient,
+                        &absent[0],
+                        &env.payer.pubkey(),
+                        &[],
+                    )
+                    .unwrap(),
+                );
+                prefix.push(repair(1));
+                prefix.push(payment(env, 1, NATIVE_PAYMENTS[0]));
+                prefix
+            }
+            2 => vec![payment(env, 1, NATIVE_PAYMENTS[1])],
+            _ => unreachable!(),
+        };
         let rank_before = entitlement - paid.iter().sum::<u64>();
         let creates = prefix
             .iter()
@@ -392,6 +404,7 @@ pub(super) fn finish(
             false,
         ));
         paid[rail] += amount;
+        debits += 1;
         if rail == 1 {
             recreated = true;
         }
@@ -414,7 +427,11 @@ pub(super) fn finish(
         metadata.data.clone_from(&market_frame.data);
         assert_eq!(metadata, market_frame);
         for index in 0..2 {
-            assert_eq!(env.control_sequences(index), sequences[index]);
+            let mut expected_sequences = sequences[index];
+            if index == asset {
+                expected_sequences.authority_epoch += debits;
+            }
+            assert_eq!(env.control_sequences(index), expected_sequences);
             assert_eq!(
                 state::read_asset_oracle_profile(&market.data, index).unwrap(),
                 profiles[index]
@@ -532,7 +549,12 @@ pub(super) fn finish(
         env.mint,
         admin.pubkey(),
     ];
-    peak = peak.max(land(env, &[close.clone()], true, &changed, 0, false));
+    let mut final_close = close.clone();
+    final_close.data = ProgInstruction::CloseSlab {
+        authority_epoch: env.control_sequences(0).authority_epoch,
+    }
+    .encode();
+    peak = peak.max(land(env, &[final_close], true, &changed, 0, false));
     let tombstone = env.svm.get_account(&env.market).unwrap();
     assert_closed_market_tombstone(&tombstone);
     assert_eq!(tombstone.lamports, tombstone_rent);

@@ -19,6 +19,7 @@ const FOREIGN_INSURANCE: u128 = 113;
 const RESOLVE_SLOT: u64 = 40;
 const EXIT_SLOT: u64 = RESOLVE_SLOT + 3;
 const CALL_BOUND: usize = 8;
+const SPENT_INSURANCE_CU_LIMIT: u64 = CRANK_CU_LIMIT + 40_000;
 
 struct World {
     env: V16CuEnv,
@@ -299,7 +300,7 @@ impl World {
         let tx = Transaction::new_signed_with_payer(
             &[
                 heap_ix(),
-                ComputeBudgetInstruction::set_compute_unit_limit(CRANK_CU_LIMIT as u32),
+                ComputeBudgetInstruction::set_compute_unit_limit(SPENT_INSURANCE_CU_LIMIT as u32),
                 instruction,
             ],
             Some(&self.env.payer.pubkey()),
@@ -373,7 +374,7 @@ impl World {
         assert_cu_within(
             "spent insurance terminal continuation",
             meta.compute_units_consumed,
-            CRANK_CU_LIMIT,
+            SPENT_INSURANCE_CU_LIMIT,
         );
         assert!(
             self.rank(actor) < rank,

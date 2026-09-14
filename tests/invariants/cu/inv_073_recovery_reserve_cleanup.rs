@@ -129,27 +129,19 @@ pub(crate) fn verify_recovery_reserve_cleanup() {
             (1_050 * POS_SCALE, 1_050 * POS_SCALE)
         );
         assert_eq!(recovery.backing_provider_earnings_total, EARNINGS.into());
-        let reserves: [Instruction; 3] = std::array::from_fn(|kind| {
-            reserve_payout(
-                &env,
-                wallets,
-                tokens,
-                ledger,
-                kind,
-                [BACKING, EARNINGS, INSURANCE][kind],
-            )
-        });
+        let reserve_amounts = [BACKING, EARNINGS, INSURANCE];
+        let reserve = |env: &V16CuEnv, kind: usize| {
+            reserve_payout(env, wallets, tokens, ledger, kind, reserve_amounts[kind])
+        };
 
         // Recovery has not yet granted terminal spending authority. Custody repair
         // completes first, so only the signature boundary can satisfy this check.
         if order[0] == 0 {
             for kind in 0..3 {
+                let reserve_ix = reserve(&env, kind);
                 peak = peak.max(land(
                     &mut env,
-                    &[
-                        repairs[usize::from(kind == 2)].clone(),
-                        reserves[kind].clone(),
-                    ],
+                    &[repairs[usize::from(kind == 2)].clone(), reserve_ix],
                     &[],
                     &tracked,
                     &[],
@@ -303,12 +295,10 @@ pub(crate) fn verify_recovery_reserve_cleanup() {
         assert_eq!(env.market_state().1.materialized_portfolio_count, 1);
         if order[0] == 0 {
             for kind in 0..3 {
+                let reserve_ix = reserve(&env, kind);
                 peak = peak.max(land(
                     &mut env,
-                    &[
-                        repairs[usize::from(kind == 2)].clone(),
-                        reserves[kind].clone(),
-                    ],
+                    &[repairs[usize::from(kind == 2)].clone(), reserve_ix],
                     &[],
                     &tracked,
                     &[],
@@ -324,12 +314,13 @@ pub(crate) fn verify_recovery_reserve_cleanup() {
         // earnings really pay and initialize the ledger, then a wrong-role payout
         // rejects. All compiled/tracked Accounts, including absent custody, return
         // exactly to the one-portfolio prefix; only the two-signature fee persists.
-        let mut wrong_destination = reserves[2].clone();
+        let mut wrong_destination = reserve(&env, 2);
         wrong_destination.accounts[2].pubkey = tokens[2];
+        let earnings = reserve(&env, 1);
         let rejected = [
             cleanup[last].clone(),
             repairs[0].clone(),
-            reserves[1].clone(),
+            earnings,
             repairs[1].clone(),
             wrong_destination,
         ];
@@ -382,9 +373,10 @@ pub(crate) fn verify_recovery_reserve_cleanup() {
             let actor = if kind == 2 { 4 } else { 2 };
             let allowed = [env.market, env.vault, tokens[actor], ledger];
             let rent = if created[destination] { 0 } else { token_rent };
+            let reserve_ix = reserve(&env, kind);
             peak = peak.max(land(
                 &mut env,
-                &[repairs[destination].clone(), reserves[kind].clone()],
+                &[repairs[destination].clone(), reserve_ix],
                 &[],
                 &tracked,
                 &allowed,
@@ -393,7 +385,7 @@ pub(crate) fn verify_recovery_reserve_cleanup() {
                 None,
             ));
             created[destination] = true;
-            paid[kind] = [BACKING, EARNINGS, INSURANCE][kind];
+            paid[kind] = reserve_amounts[kind];
             let image = env.svm.get_account(&env.market).unwrap();
             let (_, group) = env.market_state();
             let remaining = BACKING + EARNINGS + INSURANCE - paid.iter().sum::<u64>();

@@ -122,7 +122,9 @@ pub(crate) fn verify_terminal_reserve_close_retry() {
                 group.source_credit[1].provider_receivable_num,
                 u128::from(PROFIT) * BOUND_SCALE
             );
-            assert_eq!(env.control_sequences(0), authority);
+            let mut expected_authority = authority;
+            expected_authority.authority_epoch += u64::from(paid[2] != 0);
+            assert_eq!(env.control_sequences(0), expected_authority);
             assert_eq!(
                 state::read_asset_oracle_profile(&image.data, 0).unwrap(),
                 profile
@@ -204,7 +206,7 @@ pub(crate) fn verify_terminal_reserve_close_retry() {
                 AccountMeta::new(env.mint, false),
             ],
             data: ProgInstruction::CloseSlab {
-                authority_epoch: authority.authority_epoch,
+                authority_epoch: env.control_sequences(0).authority_epoch,
             }
             .encode(),
         };
@@ -221,26 +223,50 @@ pub(crate) fn verify_terminal_reserve_close_retry() {
         stock(&env, prefix);
         // Keep the exact reserve instructions across rollback; only refresh transaction blockhashes.
         let stock_amounts = [BACKING, EARNINGS, INSURANCE];
-        let mut retirement = [2, 1, 0]
-            .into_iter()
-            .map(|kind| {
-                reserve_payout(
-                    &env,
-                    wallets,
-                    tokens,
-                    ledger,
-                    kind,
-                    stock_amounts[kind] - prefix[kind],
-                )
-            })
-            .collect::<Vec<_>>();
+        let base_epoch = env.control_sequences(0).authority_epoch;
+        let mut insurance_debits = 0;
+        let mut retirement = Vec::new();
+        for kind in [2, 1, 0] {
+            let amount = stock_amounts[kind] - prefix[kind];
+            let mut ix = reserve_payout(&env, wallets, tokens, ledger, kind, amount);
+            let authority_epoch = base_epoch + insurance_debits;
+            ix.data = match kind {
+                0 => ProgInstruction::WithdrawBackingBucket {
+                    domain: 1,
+                    market_id: env.asset_market_id(0),
+                    authority_epoch,
+                    amount: amount.into(),
+                },
+                1 => ProgInstruction::WithdrawBackingBucketEarnings {
+                    domain: 1,
+                    market_id: env.asset_market_id(0),
+                    authority_epoch,
+                    amount: amount.into(),
+                },
+                2 => ProgInstruction::WithdrawInsuranceAsset {
+                    asset_index: 0,
+                    market_id: env.asset_market_id(0),
+                    authority_epoch,
+                    amount: amount.into(),
+                },
+                _ => unreachable!(),
+            }
+            .encode();
+            retirement.push(ix);
+            insurance_debits += u64::from(kind == 2 && amount != 0);
+        }
         for ix in &retirement {
             assert!(ix.accounts.iter().all(|meta| !meta.is_signer));
         }
-        retirement.push(close.clone());
+        let mut retirement_close = close.clone();
+        retirement_close.data = ProgInstruction::CloseSlab {
+            authority_epoch: base_epoch + insurance_debits,
+        }
+        .encode();
+        retirement.push(retirement_close.clone());
         let retirement_bytes = bincode::serialize(&retirement).unwrap();
         let mut repeated_close = retirement.clone();
-        repeated_close.push(close.clone());
+        repeated_close.push(retirement_close);
         rejection_peak = rejection_peak.max(land(
             &mut env,
             &repeated_close,

@@ -207,14 +207,14 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                                 ProgInstruction::WithdrawInsuranceAsset {
                                     asset_index: 0,
                                     market_id: env.asset_market_id(0),
-                                    authority_epoch: sequences.authority_epoch,
+                                    authority_epoch: env.control_sequences(0).authority_epoch,
                                     amount: amount.into(),
                                 }
                             } else {
                                 ProgInstruction::WithdrawBackingBucket {
                                     domain: kind as u16,
                                     market_id: env.asset_market_id(0),
-                                    authority_epoch: sequences.authority_epoch,
+                                    authority_epoch: env.control_sequences(0).authority_epoch,
                                     amount: amount.into(),
                                 }
                             };
@@ -235,6 +235,7 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                                      paid: [[u64; 2]; 3],
                                      redeemed: [u64; 2],
                                      present: [bool; 2],
+                                     insurance_debits: u64,
                                      expired: bool,
                                      synced: bool| {
                             let paid_by_rail: [u64; 2] = std::array::from_fn(|rail| {
@@ -351,7 +352,9 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                                 }
                             }
                             assert_eq!(market.lamports, market_frame.lamports);
-                            assert_eq!(env.control_sequences(0), sequences);
+                            let mut expected_sequences = sequences;
+                            expected_sequences.authority_epoch += insurance_debits;
+                            assert_eq!(env.control_sequences(0), expected_sequences);
                             assert_eq!(
                                 state::read_asset_oracle_profile(&market.data, 0).unwrap(),
                                 profile
@@ -380,7 +383,9 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                         let mut paid = [[0; 2]; 3];
                         let mut redeemed = [0; 2];
                         let mut present = [true; 2];
-                        let mut rank = check(&env, paid, redeemed, present, false, synced);
+                        let mut insurance_debits = 0;
+                        let mut rank =
+                            check(&env, paid, redeemed, present, insurance_debits, false, synced);
                         for kind in 0..3 {
                             let ix = payout(&env, kind, native_rail, PREFIX[kind]);
                             let recipient = usize::from(kind == 2);
@@ -388,8 +393,17 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                             peak =
                                 peak.max(land(&mut env, &[ix], &[], &tracked, &changed, 0, false));
                             paid[kind][native_rail] += PREFIX[kind];
+                            insurance_debits += u64::from(kind == 2);
                             payments += 1;
-                            let next_rank = check(&env, paid, redeemed, present, false, synced);
+                            let next_rank = check(
+                                &env,
+                                paid,
+                                redeemed,
+                                present,
+                                insurance_debits,
+                                false,
+                                synced,
+                            );
                             assert_eq!(rank - next_rank, PREFIX[kind]);
                             rank = next_rank;
                         }
@@ -443,15 +457,28 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                         }
                         drop(holders);
                         let wallet_frames = wallets.map(|key| env.svm.get_account(&key));
-                        check(&env, paid, redeemed, present, false, synced);
+                        check(
+                            &env,
+                            paid,
+                            redeemed,
+                            present,
+                            insurance_debits,
+                            false,
+                            synced,
+                        );
                         let mut expired = false;
                         for kind in [0, 1, 2] {
                             if expire && kind == 1 {
                                 env.svm.warp_to_slot(100);
                                 let changed = [env.market];
+                                let mut close = close.clone();
+                                close.data = ProgInstruction::CloseSlab {
+                                    authority_epoch: env.control_sequences(0).authority_epoch,
+                                }
+                                .encode();
                                 peak = peak.max(land(
                                     &mut env,
-                                    &[close.clone()],
+                                    &[close],
                                     &[&admin],
                                     &tracked,
                                     &changed,
@@ -460,8 +487,15 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                                 ));
                                 expired = true;
                                 normalizations += 1;
-                                let next_rank =
-                                    check(&env, paid, redeemed, present, expired, synced);
+                                let next_rank = check(
+                                    &env,
+                                    paid,
+                                    redeemed,
+                                    present,
+                                    insurance_debits,
+                                    expired,
+                                    synced,
+                                );
                                 assert_eq!(rank - next_rank, CLAIMS[1] - PREFIX[1]);
                                 rank = next_rank;
                                 continue;
@@ -495,7 +529,15 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                             let mut rejected = batch.clone();
                             rejected.push(unsigned_close.clone());
                             peak = peak.max(land(&mut env, &rejected, &[], &tracked, &[], 0, true));
-                            check(&env, paid, redeemed, present, expired, synced);
+                            check(
+                                &env,
+                                paid,
+                                redeemed,
+                                present,
+                                insurance_debits,
+                                expired,
+                                synced,
+                            );
                             let changed = [
                                 env.market,
                                 rails[rail].vault,
@@ -513,8 +555,17 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                             present[recipient] = true;
                             repairs += usize::from(repair);
                             paid[kind][rail] += CLAIMS[kind] - PREFIX[kind];
+                            insurance_debits += u64::from(kind == 2);
                             payments += 1;
-                            let next_rank = check(&env, paid, redeemed, present, expired, synced);
+                            let next_rank = check(
+                                &env,
+                                paid,
+                                redeemed,
+                                present,
+                                insurance_debits,
+                                expired,
+                                synced,
+                            );
                             assert_eq!(rank - next_rank, CLAIMS[kind] - PREFIX[kind]);
                             rank = next_rank;
                         }
@@ -529,7 +580,15 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                                 false,
                             ));
                             synced = true;
-                            check(&env, paid, redeemed, present, expired, synced);
+                            check(
+                                &env,
+                                paid,
+                                redeemed,
+                                present,
+                                insurance_debits,
+                                expired,
+                                synced,
+                            );
                         }
                         let retired = if expire { CLAIMS[1] - PREFIX[1] } else { 0 };
                         assert_eq!(rank, 0);
@@ -558,6 +617,11 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                             rails[1].admin_token,
                             rails[0].mint,
                         ];
+                        let mut close = close;
+                        close.data = ProgInstruction::CloseSlab {
+                            authority_epoch: env.control_sequences(0).authority_epoch,
+                        }
+                        .encode();
                         peak = peak.max(land(
                             &mut env,
                             &[close],

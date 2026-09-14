@@ -146,7 +146,7 @@ pub(super) fn finish(
         ],
         data: vec![1],
     };
-    let withdrawal = |amount: u64| Instruction {
+    let withdrawal = |env: &V16CuEnv, amount: u64| Instruction {
         program_id: env.program_id,
         accounts: vec![
             AccountMeta::new_readonly(absent[0], false),
@@ -164,14 +164,20 @@ pub(super) fn finish(
         }
         .encode(),
     };
-    let payments = [withdrawal(37), withdrawal(entitlement - 37)];
-    assert!(payments
-        .iter()
-        .flat_map(|ix| &ix.accounts)
-        .all(|meta| !meta.is_signer));
+    let close_at = |env: &V16CuEnv, extra_epoch: u64| {
+        let mut ix = close.clone();
+        ix.data = ProgInstruction::CloseSlab {
+            authority_epoch: env.control_sequences(0).authority_epoch + extra_epoch,
+        }
+        .encode();
+        ix
+    };
+    let prefix_payment = withdrawal(env, 37);
+    let rejected_close = close_at(env, u64::from(asset == 0));
+    assert!(prefix_payment.accounts.iter().all(|meta| !meta.is_signer));
     let mut peak = land(
         env,
-        &[repair.clone(), payments[0].clone(), close.clone()],
+        &[repair.clone(), prefix_payment, rejected_close],
         true,
         &[],
         0,
@@ -182,18 +188,18 @@ pub(super) fn finish(
 
     let changed = [env.market, env.vault, destination];
     let mut paid = 0;
-    for (index, amount) in [37, entitlement - 37].into_iter().enumerate() {
-        let instructions = if index == 0 {
-            vec![repair.clone(), payments[index].clone()]
+    for (step, amount) in [37, entitlement - 37].into_iter().enumerate() {
+        let instructions = if step == 0 {
+            vec![repair.clone(), withdrawal(env, amount)]
         } else {
-            vec![payments[index].clone()]
+            vec![withdrawal(env, amount)]
         };
         peak = peak.max(land(
             env,
             &instructions,
             false,
             &changed,
-            if index == 0 { rent } else { 0 },
+            if step == 0 { rent } else { 0 },
             None,
         ));
         let rank_before = entitlement - paid;
@@ -235,12 +241,16 @@ pub(super) fn finish(
             }
         );
         let market = env.svm.get_account(&env.market).unwrap();
-        for index in [0, 1] {
+        for asset_index in [0, 1] {
+            let mut expected_sequences = sequences[asset_index];
+            if asset_index == asset {
+                expected_sequences.authority_epoch += step as u64 + 1;
+            }
             assert_eq!(
-                state::read_asset_oracle_profile(&market.data, index).unwrap(),
-                profiles[index]
+                state::read_asset_oracle_profile(&market.data, asset_index).unwrap(),
+                profiles[asset_index]
             );
-            assert_eq!(env.control_sequences(index), sequences[index]);
+            assert_eq!(env.control_sequences(asset_index), expected_sequences);
         }
         assert_market_stock_census(
             "absent-wallet recredit",
@@ -265,7 +275,8 @@ pub(super) fn finish(
     let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();
     expected_admin.lamports += market_rent + vault_frame.lamports - tombstone_rent;
     let changed = [env.market, env.vault, env.mint, admin.pubkey()];
-    peak = peak.max(land(env, &[close.clone()], true, &changed, 0, None));
+    let final_close = close_at(env, 0);
+    peak = peak.max(land(env, &[final_close], true, &changed, 0, None));
     let tombstone = env.svm.get_account(&env.market).unwrap();
     assert_closed_market_tombstone(&tombstone);
     assert_eq!(tombstone.lamports, tombstone_rent);

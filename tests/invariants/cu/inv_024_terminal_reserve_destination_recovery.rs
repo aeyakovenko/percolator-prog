@@ -209,7 +209,8 @@ fn v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_v
         };
         let repairs = [repair(2), repair(2), repair(4)];
         let amounts = [BACKING, EARNINGS, INSURANCE];
-        let payouts: [Instruction; 3] = std::array::from_fn(|kind| {
+        let reserve_payout_at =
+            |env: &V16CuEnv, kind: usize, authority_epoch: u64| -> Instruction {
             let actor = if kind == 2 { 4 } else { 2 };
             let mut accounts = vec![
                 AccountMeta::new(wallets[actor], true),
@@ -228,7 +229,6 @@ fn v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_v
                 accounts.push(AccountMeta::new(ledgers[1], false));
             }
             let market_id = env.asset_market_id(0);
-            let authority_epoch = env.control_sequences(0).authority_epoch;
             let ix = match kind {
                 0 => ProgInstruction::WithdrawBackingBucket {
                     domain: 1,
@@ -255,7 +255,11 @@ fn v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_v
                 accounts,
                 data: ix.encode(),
             }
-        });
+        };
+        let reserve_payout = |env: &V16CuEnv, kind: usize| -> Instruction {
+            reserve_payout_at(env, kind, env.control_sequences(0).authority_epoch)
+        };
+        let payouts: [Instruction; 3] = std::array::from_fn(|kind| reserve_payout(&env, kind));
         let misdirected = payouts.clone().map(|mut ix| {
             ix.accounts[0].is_signer = false;
             let destination = if ix.accounts.len() == 7 && ix.accounts[2].pubkey == ledgers[0] {
@@ -413,39 +417,39 @@ fn v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_v
                     &[],
                     0,
                     None,
-                    Some((
-                        3,
-                        if kind == 2 {
-                            PercolatorError::ExpectedSigner
-                        } else {
-                            PercolatorError::InvalidTokenAccount
-                        },
-                    )),
+                    Some((3, PercolatorError::InvalidTokenAccount)),
                 ));
                 stock(&env, [0; 3], [false; 2]);
                 let other = if kind == 2 { 0 } else { 2 };
                 let signer = if kind == 2 { &admin } else { &incumbent };
+                let mut current_misdirected = if kind == 2 {
+                    reserve_payout_at(&env, other, env.control_sequences(0).authority_epoch + 1)
+                } else {
+                    payouts[other].clone()
+                };
+                current_misdirected.accounts[0].is_signer = false;
+                let destination = if current_misdirected.accounts.len() == 7
+                    && current_misdirected.accounts[2].pubkey == ledgers[0]
+                {
+                    3
+                } else {
+                    2
+                };
+                current_misdirected.accounts[destination].pubkey = tokens[3];
                 peak_cu = peak_cu.max(land(
                     &mut env,
                     &[
                         repairs[kind].clone(),
                         payouts[kind].clone(),
                         repairs[other].clone(),
-                        misdirected[other].clone(),
+                        current_misdirected,
                     ],
                     &[signer],
                     &tracked,
                     &[],
                     0,
                     None,
-                    Some((
-                        5,
-                        if other == 2 {
-                            PercolatorError::ExpectedSigner
-                        } else {
-                            PercolatorError::InvalidTokenAccount
-                        },
-                    )),
+                    Some((5, PercolatorError::InvalidTokenAccount)),
                 ));
                 stock(&env, [0; 3], [false; 2]);
             }
@@ -460,9 +464,10 @@ fn v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_v
             if kind != 0 {
                 allowed.push(ledgers[reserve]);
             }
+            let payout = reserve_payout(&env, kind);
             peak_cu = peak_cu.max(land(
                 &mut env,
-                &[repairs[kind].clone(), payouts[kind].clone()],
+                &[repairs[kind].clone(), payout],
                 &[signer],
                 &tracked,
                 &allowed,
