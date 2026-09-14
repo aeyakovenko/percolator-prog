@@ -86,6 +86,7 @@ INV-028	source-lien/authenticated-expiry-routes	v16_program_expired_source_lien_
 INV-028	cross-domain-rounding/public-exit-matrix	v16_program_cross_domain_rounding_exit_matrix_preserves_bounded_exit	fractional-source-domains-must-have-a-bounded-public-unwind	306
 INV-028	flat-source-lien/terminal-claim-routes	v16_program_flat_source_lien_route_matrix_preserves_bounded_claim_exit	flat-backed-claim-must-have-bounded-terminal-conversion	364
 INV-028	source-capacity/admission-order-matrix	v16_program_source_capacity_admission_order_matrix_rejects_unreserved_risk	admitted-live-leg-must-reserve-a-settlement-source-slot	270,379
+INV-028	source-capacity/used-generation-latent-reservation	v16_program_used_generation_admission_reserves_latent_capacity_through_exact_exit	surviving-live-legs-reserve-latent-domains-before-risk-admission	423
 INV-028	shared-expiry/provider-lien-provenance	v16_program_shared_expiry_progress_matrix_preserves_terminal_progress	expired-provider-lien-retirement-must-preserve-provenance-and-terminal-progress	300
 INV-077	max-source/conversion-amount-matrix	v16_program_max_source_conversion_and_owner_exit_are_bounded	max-source-backed-claim-conversion-must-fit-one-bounded-step	357
 INV-077	max-source/resolved-close-order-matrix	v16_program_max_shape_resolved_close_order_matrix_is_bounded_and_fair	max-source-terminal-claim-must-have-a-bounded-close-step	359
@@ -129,3 +130,4 @@ INV-012	asset-generation/matcher-grant-frontier	v16_program_retained_matcher_gra
 INV-010	matcher-mutation/revoke-order	v16_program_matcher_mutation_order_rejects_revoked_capability	stale-matcher-enable-cannot-revive-revoked-value-authority	393
 INV-027	flat-reopen/fee-history	v16_program_flat_reopen_fee_history_precedes_new_exposure	all-accrued-liabilities-precede-every-risk-increasing-admission-even-after-flat-account-history	434
 INV-070	native-terminal-booked-residue	v16_program_native_booked_residue_escheats_after_fee_recredit_completion	native-booked-residue-must-not-burn-native-mint-or-block-terminal-close	418
+INV-073	terminal-reserve/unsigned-partial-payout-orders	v16_program_terminal_public_reserve_disposition_preserves_value_across_orders	resolved-reserve-payouts-preserve-beneficiary-value-without-beneficiary-signatures	433

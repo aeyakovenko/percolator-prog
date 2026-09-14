@@ -773,11 +773,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
     assert_eq!(rows, 166, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(
-        missing, 16,
+        missing, 14,
         "post-PR135 counterexamples remain missing generic invariant-owned discovery coverage"
     );
     assert_eq!(
-        independent, 133,
+        independent, 135,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
@@ -864,6 +864,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             28,
             &[28, 30],
             include_str!("../cu/inv_028_source_domain_realizability_cap.rs"),
+        ),
+        (
+            28,
+            &[28],
+            include_str!("../cu/inv_028_generation_capacity_admission.rs"),
         ),
         (
             31,
@@ -1059,6 +1064,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "fractional-source-domains-must-have-a-bounded-public-unwind"
                     | "flat-backed-claim-must-have-bounded-terminal-conversion"
                     | "admitted-live-leg-must-reserve-a-settlement-source-slot"
+                    | "surviving-live-legs-reserve-latent-domains-before-risk-admission"
                     | "expired-provider-lien-retirement-must-preserve-provenance-and-terminal-progress"
                     | "max-source-backed-claim-conversion-must-fit-one-bounded-step"
                     | "max-source-terminal-claim-must-have-a-bounded-close-step"
@@ -1097,6 +1103,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "unsigned-lp-cannot-inherit-preexisting-settlement-cohort"
                     | "fresh-counterparty-must-not-inherit-preexisting-settlement-cohort"
                     | "all-accrued-liabilities-precede-every-risk-increasing-admission-even-after-flat-account-history"
+                    | "resolved-reserve-payouts-preserve-beneficiary-value-without-beneficiary-signatures"
             ),
             "unknown independent oracle: {}",
             fields[3]
@@ -1983,18 +1990,26 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
         })
         .collect::<std::collections::BTreeMap<_, _>>();
 
-    let missing_findings = include_str!("../open_findings.tsv")
+    let benchmark_evidence = include_str!("../open_findings.tsv")
         .lines()
         .filter(|line| !line.starts_with('#') && !line.is_empty())
-        .filter_map(|line| {
+        .map(|line| {
             let fields = line.split('\t').collect::<Vec<_>>();
-            (fields.get(4) == Some(&"missing")).then(|| {
-                fields[0]
-                    .parse::<u16>()
-                    .expect("numeric missing finding PR")
-            })
+            (
+                fields[0].parse::<u16>().expect("numeric finding PR"),
+                fields[4],
+            )
         })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let missing_findings = benchmark_evidence
+        .iter()
+        .filter_map(|(pr, evidence)| (*evidence == "missing").then_some(*pr))
         .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        benchmark_evidence.get(&428),
+        Some(&"missing"),
+        "Live debit coverage does not qualify Resolved epoch consumption"
+    );
 
     let mut saw_header = false;
     let mut prior_pr = 0u16;
@@ -2062,8 +2077,20 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
         }
     }
     assert!(saw_header, "coverage-reopening header is missing");
+    // Independent mechanism coverage does not close these broader obligations.
+    let independently_discovered_open_findings = reopening_prs
+        .iter()
+        .filter(|pr| benchmark_evidence.get(pr) == Some(&"independent-discovery"))
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        independently_discovered_open_findings,
+        [423, 433].into_iter().collect(),
+        "only explicitly qualified discoveries retain broader OPEN obligations"
+    );
     let expected_reopenings = missing_findings
         .union(&conformance_prs)
+        .chain(&independently_discovered_open_findings)
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(reopening_prs, expected_reopenings);
