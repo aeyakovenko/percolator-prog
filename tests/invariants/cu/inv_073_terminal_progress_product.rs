@@ -395,8 +395,8 @@ fn run_product(native: bool) {
                         }
                         created[actor] = false;
                     }
-                    // Retain only public role identities in every availability control.
-                    drop((incumbent, successor, insurer));
+                    // Retain the insurer key; terminal insurance payout is signer-gated.
+                    drop((incumbent, successor));
                     assert!(!wallets.contains(&env.payer.pubkey()));
                     assert!(!wallets.contains(&admin.pubkey()));
                     let ledger = Keypair::new();
@@ -523,7 +523,14 @@ fn run_product(native: bool) {
                                 }
                                 .encode();
                             }
-                            assert!(payout.accounts.iter().all(|meta| !meta.is_signer));
+                            if class == 3 {
+                                payout.accounts[0].is_signer = true;
+                                signers.push(&insurer);
+                            }
+                            assert_eq!(
+                                payout.accounts.iter().any(|meta| meta.is_signer),
+                                class == 3
+                            );
                             batch.push(payout);
                             allowed.extend([env.vault, tokens[actor]]);
                             if class == 2 {

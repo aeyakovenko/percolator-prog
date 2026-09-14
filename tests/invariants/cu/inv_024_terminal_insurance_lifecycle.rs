@@ -309,6 +309,7 @@ fn v16_program_terminal_insurance_lifecycle_preserves_fee_and_paid_prefix_attrib
                 }
                 let mut expected_profiles = profiles;
                 let mut expected_sequences = sequences;
+                expected_sequences[0].authority_epoch += u64::from(h.paid[OPERATOR] >= LIVE_PAYOUT);
                 if h.handed_off {
                     expected_profiles[0].insurance_authority = wallets[SUCCESSOR].to_bytes();
                     expected_sequences[0].authority_epoch += 1;

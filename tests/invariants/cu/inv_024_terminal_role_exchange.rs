@@ -18,7 +18,9 @@ fn reserve(
     ledger: Pubkey,
 ) -> Instruction {
     let mut ix = payout(world, role, actor, amount, epoch, ledger);
-    ix.accounts[0].is_signer = false;
+    if role != INSURER {
+        ix.accounts[0].is_signer = false;
+    }
     if role == INSURER {
         ix.accounts.push(AccountMeta::new(ledger, false));
     }

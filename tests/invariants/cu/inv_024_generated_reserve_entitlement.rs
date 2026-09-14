@@ -171,11 +171,16 @@ fn payment(
     let actor = book.owner(class);
     let ledger = ledgers[actor - 2][if class == PRINCIPAL { FEES } else { class }];
     let mut ix = payout(world, class, actor, amount, epoch + book.rotations, ledger);
-    ix.accounts[0].is_signer = false;
+    if class != INSURER {
+        ix.accounts[0].is_signer = false;
+    }
     if class == INSURER {
         ix.accounts.push(AccountMeta::new(ledger, false));
     }
-    assert!(!ix.accounts.iter().any(|meta| meta.is_signer));
+    assert_eq!(
+        ix.accounts.iter().any(|meta| meta.is_signer),
+        class == INSURER
+    );
     ix
 }
 

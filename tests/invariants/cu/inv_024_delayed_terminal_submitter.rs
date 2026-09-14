@@ -81,10 +81,18 @@ fn v16_program_delayed_terminal_cleanup_preserves_earned_fees_across_submitter_c
             // their bytes through both delay boundaries and every payer change.
             let fee_prefix = reserve_payout(&env, wallets, tokens, ledger, 1, PREFIX);
             let fee_tail = reserve_payout(&env, wallets, tokens, ledger, 1, EARNINGS - PREFIX);
-            let insurance = reserve_payout(&env, wallets, tokens, ledger, 2, INSURANCE);
-            for ix in [&fee_prefix, &fee_tail, &insurance] {
-                assert!(ix.accounts.iter().all(|account| !account.is_signer));
-            }
+            let mut insurance = reserve_payout(&env, wallets, tokens, ledger, 2, INSURANCE);
+            insurance.accounts[0].is_signer = true;
+            assert!(fee_prefix.accounts.iter().all(|account| !account.is_signer));
+            assert!(fee_tail.accounts.iter().all(|account| !account.is_signer));
+            assert_eq!(
+                insurance
+                    .accounts
+                    .iter()
+                    .filter(|account| account.is_signer)
+                    .count(),
+                1
+            );
             env.resolve();
             assert_eq!(env.market_state().1.resolved_slot, 2);
             env.svm
@@ -420,7 +428,7 @@ fn v16_program_delayed_terminal_cleanup_preserves_earned_fees_across_submitter_c
             peak = peak.max(land(
                 &mut env,
                 &[insurance],
-                &[],
+                &[&insurer],
                 &tracked,
                 &allowed,
                 0,

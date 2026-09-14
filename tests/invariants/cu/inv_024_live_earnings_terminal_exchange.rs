@@ -328,7 +328,9 @@ fn v16_program_live_successor_accrual_survives_terminal_role_exchange() {
     assert_eq!(world.env.svm.get_account(&ledgers[0]), old_ledger);
     for (role, actor, amount) in [(PRINCIPAL, 4, BACKING), (INSURER, 2, INSURANCE)] {
         let mut ix = payout(&world, role, actor, amount, epoch, ledgers[1]);
-        ix.accounts[0].is_signer = false;
+        if role != INSURER {
+            ix.accounts[0].is_signer = false;
+        }
         peaks[0] = peaks[0].max(land(&mut world, &ledgers, &[ix], None));
         paid[actor] += amount;
         if role == PRINCIPAL {

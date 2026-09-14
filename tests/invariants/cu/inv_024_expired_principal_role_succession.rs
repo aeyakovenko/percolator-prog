@@ -55,7 +55,9 @@ fn reserve(
         world.env.control_sequences(0).authority_epoch,
         ledger,
     );
-    ix.accounts[0].is_signer = false;
+    if role != INSURER {
+        ix.accounts[0].is_signer = false;
+    }
     if role == INSURER {
         ix.accounts.push(AccountMeta::new(ledger, false));
     }

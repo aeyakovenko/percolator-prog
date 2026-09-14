@@ -34,6 +34,9 @@ impl Stocks {
         self.insurance[2 * asset] -= long;
         self.insurance[2 * asset + 1] -= amount - long;
         self.wallets[recipient] += amount;
+        if self.mode == MarketModeV16::Live {
+            self.epochs[asset] += 1;
+        }
     }
 
     fn check(&self, env: &V16CuEnv) {
@@ -617,7 +620,7 @@ fn v16_program_shutdown_operator_departure_preserves_terminal_beneficiary_and_ba
             stocks.check(&env);
             assert_eq!(
                 env.control_sequences(asset as usize).authority_epoch,
-                epoch + 2
+                epoch + 3
             );
             let data = env.svm.get_account(&env.market).unwrap().data;
             let profile = state::read_asset_oracle_profile(&data, asset as usize).unwrap();

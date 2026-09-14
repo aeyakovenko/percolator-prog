@@ -601,7 +601,11 @@ fn v16_retained_close_policy_return_preserves_earned_reserves_through_terminal_p
             let mut wrong = payout(&h.world, INSURER, 3, 1, controls.authority_epoch, h.ledger);
             wrong.accounts[0].is_signer = false;
             let failed = h.sign(&[fee_tail.clone(), wrong]);
-            h.deliver(failed, Some((3, PercolatorError::Unauthorized)), [1, 1, 0]);
+            h.deliver(
+                failed,
+                Some((3, PercolatorError::ExpectedSigner)),
+                [1, 1, 0],
+            );
             h.check(paid, true, 0, PAID_PREFIX, 0);
             h.call(&[fee_tail], [1, 1, 0]);
             paid[2] = PROVIDER;
@@ -616,7 +620,9 @@ fn v16_retained_close_policy_return_preserves_earned_reserves_through_terminal_p
                     controls.authority_epoch,
                     h.ledger,
                 );
-                ix.accounts[0].is_signer = false;
+                if role != INSURER {
+                    ix.accounts[0].is_signer = false;
+                }
                 h.call(&[ix], [1, 1, 0]);
                 paid[actor] += amount;
                 h.check(

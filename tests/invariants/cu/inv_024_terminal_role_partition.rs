@@ -182,9 +182,18 @@ fn v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution()
                     let mut role_tokens = tokens;
                     role_wallets[4] = wallets[insurer];
                     role_tokens[4] = tokens[insurer];
-                    let ix = reserve_payout(&env, role_wallets, role_tokens, ledger, kind, amount);
-                    assert!(!ix.accounts.iter().any(|meta| meta.is_signer));
+                    let mut ix =
+                        reserve_payout(&env, role_wallets, role_tokens, ledger, kind, amount);
+                    if kind == 2 {
+                        ix.accounts[0].is_signer = true;
+                    }
+                    assert_eq!(ix.accounts.iter().any(|meta| meta.is_signer), kind == 2);
                     let recipient = if kind == 2 { insurer } else { 2 };
+                    let insurance_signers = match (kind, insurer) {
+                        (2, 2) => vec![&incumbent],
+                        (2, 3) => vec![&successor],
+                        _ => vec![],
+                    };
                     let allowed = [env.market, env.vault, tokens[recipient]]
                         .into_iter()
                         .chain((kind == 1).then_some(ledger))
@@ -192,7 +201,7 @@ fn v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution()
                     peak = peak.max(land(
                         &mut env,
                         &[ix],
-                        &[],
+                        &insurance_signers,
                         &tracked,
                         &allowed,
                         0,

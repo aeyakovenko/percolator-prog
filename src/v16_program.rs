@@ -10936,9 +10936,7 @@ pub mod processor {
             let market_data = market_ai.try_borrow_data()?;
             let (cfg, mode, _, market_id, _, _) =
                 state::read_market_trade_preflight(&market_data, asset_index)?;
-            if mode != MarketModeV16::Resolved {
-                expect_signer(operator)?;
-            }
+            expect_signer(operator)?;
             if market_id != expected_market_id {
                 return Err(PercolatorError::AssetGenerationMismatch.into());
             }

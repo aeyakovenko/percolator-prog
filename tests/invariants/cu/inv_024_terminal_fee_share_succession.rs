@@ -157,7 +157,7 @@ fn insurance_payout(
         world.env.control_sequences(0).authority_epoch,
         ledger,
     );
-    ix.accounts[0].is_signer = world.env.market_state().1.mode == MarketModeV16::Live;
+    ix.accounts[0].is_signer = true;
     ix.accounts.push(AccountMeta::new(ledger, false));
     ix
 }
@@ -230,6 +230,7 @@ fn v16_program_terminal_fee_share_succession_preserves_operator_paid_history() {
     let ix = insurance_payout(&world, 3, OPERATOR_PREFIX[0], ledgers[1]);
     peak = peak.max(land(&mut world, &ledgers, &[ix], None));
     book.pay_insurance(3, OPERATOR_PREFIX[0]);
+    book.epoch += 1;
     book.check(&world);
     insurance_record(
         &world,
@@ -284,12 +285,13 @@ fn v16_program_terminal_fee_share_succession_preserves_operator_paid_history() {
         portfolios
     );
     let mut sequences = policy_sequences;
-    sequences.authority_epoch += 1;
+    sequences.authority_epoch += 2;
     assert_eq!(world.env.control_sequences(0), sequences);
     book.check(&world);
     let ix = insurance_payout(&world, 3, OPERATOR_PREFIX[1], ledgers[2]);
     peak = peak.max(land(&mut world, &ledgers, &[ix], None));
     book.pay_insurance(3, OPERATOR_PREFIX[1]);
+    book.epoch += 1;
     book.check(&world);
     let insurance_tail =
         INSURANCE + INITIAL_INSURANCE_FEE + INSURANCE_FEE - OPERATOR_PREFIX.iter().sum::<u64>();

@@ -358,7 +358,7 @@ fn v16_retained_trade_and_payout_consent_diverge_across_live_recipient_successio
                 peaks[3] = peaks[3].max(land(&mut f, &successor, destination, tx, None, [1, 0, 0]));
                 assert_eq!(
                     f.env.control_sequences(asset).authority_epoch,
-                    original_epoch + 2
+                    original_epoch + 3
                 );
                 peaks[1] = peaks[1].max(land(
                     &mut f,

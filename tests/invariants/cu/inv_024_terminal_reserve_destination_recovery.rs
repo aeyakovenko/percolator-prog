@@ -35,15 +35,34 @@ pub(super) fn land(
     .collect::<Vec<_>>();
     let mut signatures = vec![&env.payer];
     signatures.extend_from_slice(signers);
-    let tx = Transaction::new_signed_with_payer(
-        &instructions,
-        Some(&env.payer.pubkey()),
-        &signatures,
-        env.svm.latest_blockhash(),
-    );
+    if ixs
+        .iter()
+        .flat_map(|ix| &ix.accounts)
+        .any(|meta| meta.is_signer && meta.pubkey == env.admin.pubkey())
+        && !signatures
+            .iter()
+            .any(|signer| signer.pubkey() == env.admin.pubkey())
+    {
+        signatures.push(&env.admin);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    signatures.retain(|signer| seen.insert(signer.pubkey()));
+    let message = solana_sdk::message::Message::new(&instructions, Some(&env.payer.pubkey()));
+    if std::env::var_os("PERCOLATOR_DEBUG_SIGNERS").is_some() {
+        let required =
+            message.account_keys[..usize::from(message.header.num_required_signatures)].to_vec();
+        let supplied = signatures
+            .iter()
+            .map(|signer| signer.pubkey())
+            .collect::<Vec<_>>();
+        eprintln!("terminal reserve signers required={required:?} supplied={supplied:?}");
+    }
+    let mut tx = Transaction::new_unsigned(message);
+    tx.try_sign(&signatures, env.svm.latest_blockhash())
+        .expect("terminal reserve transaction signs");
     assert_eq!(
         usize::from(tx.message.header.num_required_signatures),
-        1 + signers.len()
+        signatures.len()
     );
     assert_eq!(tx.message.account_keys[0], env.payer.pubkey());
     tx.verify().unwrap();
@@ -394,7 +413,14 @@ fn v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_v
                     &[],
                     0,
                     None,
-                    Some((3, PercolatorError::InvalidTokenAccount)),
+                    Some((
+                        3,
+                        if kind == 2 {
+                            PercolatorError::ExpectedSigner
+                        } else {
+                            PercolatorError::InvalidTokenAccount
+                        },
+                    )),
                 ));
                 stock(&env, [0; 3], [false; 2]);
                 let other = if kind == 2 { 0 } else { 2 };
@@ -412,7 +438,14 @@ fn v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_v
                     &[],
                     0,
                     None,
-                    Some((5, PercolatorError::InvalidTokenAccount)),
+                    Some((
+                        5,
+                        if other == 2 {
+                            PercolatorError::ExpectedSigner
+                        } else {
+                            PercolatorError::InvalidTokenAccount
+                        },
+                    )),
                 ));
                 stock(&env, [0; 3], [false; 2]);
             }

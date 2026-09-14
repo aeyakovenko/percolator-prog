@@ -178,7 +178,12 @@ fn run_cleanup(native: bool) {
                             }
                             .encode();
                         }
-                        assert!(ix.accounts.iter().all(|meta| !meta.is_signer));
+                        if class == 3 {
+                            ix.accounts[0].is_signer = true;
+                            signers.push(&insurer);
+                        } else {
+                            assert!(ix.accounts.iter().all(|meta| !meta.is_signer));
+                        }
                         allowed.extend([env.vault, tokens[if class == 3 { 4 } else { 2 }]]);
                         if class == 2 {
                             allowed.push(ledger);

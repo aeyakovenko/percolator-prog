@@ -238,7 +238,9 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
                 state::read_asset_oracle_profile(&image.data, 0).unwrap(),
                 profile
             );
-            assert_eq!(env.control_sequences(0), sequences);
+            let mut expected_sequences = sequences;
+            expected_sequences.authority_epoch += u64::from(operator_paid != 0);
+            assert_eq!(env.control_sequences(0), expected_sequences);
             assert_eq!(
                 profile.backing_bucket_authority,
                 provider.pubkey().to_bytes()
@@ -298,12 +300,13 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
         let insurance_payout = |env: &V16CuEnv, actor, amount| {
             let mut ix = reserve_payout(env, wallets, tokens, ledgers[0], 2, amount);
             ix.accounts[0].pubkey = wallets[actor];
+            ix.accounts[0].is_signer = true;
             ix.accounts[2].pubkey = tokens[actor];
             ix.accounts.push(AccountMeta::new(ledgers[1], false));
             ix
         };
         let retained_operator = insurance_payout(&env, 3, LIVE_PAID);
-        assert!(!retained_operator.accounts[0].is_signer);
+        assert!(retained_operator.accounts[0].is_signer);
         env.payer = operator.insecure_clone();
         let allowed = [env.market, env.vault, tokens[3], ledgers[1]];
         peak = peak.max(land(
@@ -334,7 +337,7 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
             } else {
                 ProgInstruction::ResolveMarket {
                     asset_generation_frontier: env.market_state().1.next_market_id,
-                    authority_epoch: epoch,
+                    authority_epoch: env.control_sequences(0).authority_epoch,
                 }
             }
             .encode(),
@@ -348,19 +351,29 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
             backing_payout,
             insurance_payout(&env, 4, TERMINAL_PREFIX),
         ];
-        assert!(prefix[1..]
-            .iter()
-            .flat_map(|ix| &ix.accounts)
-            .all(|meta| !meta.is_signer));
-        let signers = if permissionless { vec![] } else { vec![&admin] };
+        assert_eq!(
+            prefix[1..]
+                .iter()
+                .flat_map(|ix| &ix.accounts)
+                .filter(|meta| meta.is_signer)
+                .count(),
+            1
+        );
+        let signers = if permissionless {
+            vec![&insurer]
+        } else {
+            vec![&admin, &insurer]
+        };
         let mut rejected = prefix.to_vec();
         rejected.push(retained_operator);
+        let mut rejected_signers = signers.clone();
+        rejected_signers.push(&operator);
         // All three prefix instructions complete, including two SPL transfers and
         // both ledger writes. Rejection must also restore the Live market mode.
         peak = peak.max(land(
             &mut env,
             &rejected,
-            &signers,
+            &rejected_signers,
             &tracked,
             &[],
             0,
@@ -368,6 +381,35 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
             Some((5, PercolatorError::Unauthorized)),
         ));
         check(&env, false, [0, LIVE_PAID, 0]);
+        let resolve = Instruction {
+            program_id: env.program_id,
+            accounts: if permissionless {
+                vec![AccountMeta::new(env.market, false)]
+            } else {
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ]
+            },
+            data: if permissionless {
+                ProgInstruction::ResolveStalePermissionless { now_slot: 7 }
+            } else {
+                ProgInstruction::ResolveMarket {
+                    asset_generation_frontier: env.market_state().1.next_market_id,
+                    authority_epoch: env.control_sequences(0).authority_epoch,
+                }
+            }
+            .encode(),
+        };
+        let mut backing_payout = reserve_payout(&env, wallets, tokens, ledgers[0], 0, PRINCIPAL);
+        backing_payout
+            .accounts
+            .push(AccountMeta::new(ledgers[0], false));
+        let prefix = [
+            resolve,
+            backing_payout,
+            insurance_payout(&env, 4, TERMINAL_PREFIX),
+        ];
         let allowed = [
             env.market, env.vault, tokens[2], tokens[4], ledgers[0], ledgers[1],
         ];
@@ -380,7 +422,7 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
         peak = peak.max(land(
             &mut env,
             &[tail],
-            &[],
+            &[&insurer],
             &tracked,
             &allowed,
             0,
@@ -401,7 +443,7 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
                 AccountMeta::new(env.mint, false),
             ],
             data: ProgInstruction::CloseSlab {
-                authority_epoch: epoch,
+                authority_epoch: env.control_sequences(0).authority_epoch,
             }
             .encode(),
         };

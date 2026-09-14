@@ -265,7 +265,7 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
             .into_iter()
             .flat_map(|first| [2, 3].map(|role| (first, role)))
         {
-            let (mut world, _insurer, admin_token) = terminal_fee_loss_world();
+            let (mut world, insurer, admin_token) = terminal_fee_loss_world();
             let ledger = Keypair::new();
             system_create_account_for_test(
                 &mut world.env.svm,
@@ -345,14 +345,18 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
             let mut book = Entitlements::default();
             check(&world, &book);
             let payout = |world: &TerminalEarningsWorld, kind, amount| {
-                reserve_payout(
+                let mut ix = reserve_payout(
                     &world.env,
                     world.wallets,
                     world.tokens,
                     ledger,
                     kind,
                     amount,
-                )
+                );
+                if kind == 2 {
+                    ix.accounts[0].is_signer = true;
+                }
+                ix
             };
             let mut source_principal = payout(&world, 0, SOURCE_PRINCIPAL);
             source_principal.data = ProgInstruction::WithdrawBackingBucket {
@@ -379,10 +383,15 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
                 let ix = payout(&world, kind, amount);
                 let recipient = world.tokens[if kind == 2 { 4 } else { 2 }];
                 let allowed = [world.env.market, world.env.vault, recipient];
+                let signers = if kind == 2 {
+                    vec![&insurer]
+                } else {
+                    Vec::new()
+                };
                 peak = peak.max(land(
                     &mut world.env,
                     &[ix],
-                    &[],
+                    &signers,
                     &tracked,
                     &allowed,
                     0,
@@ -419,7 +428,7 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
             peak = peak.max(land(
                 &mut world.env,
                 &[fees.clone(), premature],
-                &[],
+                &[&insurer],
                 &tracked,
                 &[],
                 0,
@@ -433,7 +442,7 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
             peak = peak.max(land(
                 &mut world.env,
                 &[close.clone(), fees.clone(), overdraw],
-                &[&world.admin],
+                &[&world.admin, &insurer],
                 &tracked,
                 &[],
                 0,
@@ -476,10 +485,15 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
                     .into_iter()
                     .chain((kind == 1).then_some(ledger))
                     .collect::<Vec<_>>();
+                let signers = if kind == 2 {
+                    vec![&insurer]
+                } else {
+                    Vec::new()
+                };
                 peak = peak.max(land(
                     &mut world.env,
                     &[ix],
-                    &[],
+                    &signers,
                     &tracked,
                     &allowed,
                     0,
@@ -501,7 +515,7 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
                     peak = peak.max(land(
                         &mut world.env,
                         &[fees, repeated],
-                        &[],
+                        &[&insurer],
                         &tracked,
                         &[],
                         0,

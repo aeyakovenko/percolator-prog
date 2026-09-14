@@ -339,7 +339,9 @@ fn v16_program_last_portfolio_cleanup_cannot_confer_reserve_entitlement_on_submi
                     redirect.accounts[0].pubkey = submitter_wallets[payer_role];
                     assert!(!redirect.accounts[0].is_signer);
                 }
-                let error = if replace_authority {
+                let error = if kind == 2 && !replace_authority {
+                    PercolatorError::ExpectedSigner
+                } else if replace_authority {
                     PercolatorError::Unauthorized
                 } else {
                     PercolatorError::InvalidTokenAccount
@@ -369,20 +371,24 @@ fn v16_program_last_portfolio_cleanup_cannot_confer_reserve_entitlement_on_submi
             None,
         ));
         check(&env, [0, FEE_PREFIX, 0], true);
-        let tail = [
+        let mut tail = [
             reserve_payout(&env, wallets, tokens, ledger, 0, BACKING),
             reserve_payout(&env, wallets, tokens, ledger, 1, EARNINGS - FEE_PREFIX),
             reserve_payout(&env, wallets, tokens, ledger, 2, INSURANCE),
         ];
-        assert!(tail
-            .iter()
-            .flat_map(|ix| &ix.accounts)
-            .all(|meta| !meta.is_signer));
+        tail[2].accounts[0].is_signer = true;
+        assert_eq!(
+            tail.iter()
+                .flat_map(|ix| &ix.accounts)
+                .filter(|meta| meta.is_signer)
+                .count(),
+            1
+        );
         let allowed = [env.market, env.vault, ledger, tokens[2], tokens[4]];
         peaks[2] = peaks[2].max(land(
             &mut env,
             &tail,
-            &[],
+            &[&insurer],
             &tracked,
             &allowed,
             0,

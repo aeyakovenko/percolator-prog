@@ -486,7 +486,7 @@ fn v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback() 
                 amount: recovered.into(),
             },
             vec![
-                AccountMeta::new_readonly(insurer.pubkey(), false),
+                AccountMeta::new_readonly(insurer.pubkey(), true),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(role_tokens[0], false),
                 AccountMeta::new(env.vault, false),
@@ -494,9 +494,16 @@ fn v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback() 
                 AccountMeta::new_readonly(spl_token::ID, false),
             ],
         );
-        assert!(withdrawal.accounts.iter().all(|meta| !meta.is_signer));
-        // Reserve holders and users supply no signatures for any cleanup continuation.
-        drop((insurer, provider, operator, owners, donor));
+        assert_eq!(
+            withdrawal
+                .accounts
+                .iter()
+                .filter(|meta| meta.is_signer)
+                .count(),
+            1
+        );
+        // Users and unrelated reserve roles supply no signatures for cleanup continuation.
+        drop((provider, operator, owners, donor));
         env.svm.warp_to_slot(EXPIRY);
         let prefix = [deletion, close.clone(), withdrawal];
         let rejected = prefix
@@ -507,7 +514,7 @@ fn v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback() 
         peaks[1] = peaks[1].max(land(
             &mut env,
             &rejected,
-            &[&admin],
+            &[&admin, &insurer],
             &tracked,
             &[],
             0,
@@ -521,7 +528,7 @@ fn v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback() 
         peaks[2] = peaks[2].max(land(
             &mut env,
             &prefix,
-            &[&admin],
+            &[&admin, &insurer],
             &tracked,
             &allowed,
             0,
