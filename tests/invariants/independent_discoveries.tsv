@@ -47,6 +47,7 @@ INV-014	control-supersession/backing-fee-policy	v16_program_superseded_control_m
 INV-014	fee-consent/live-base-fee-hike	v16_program_fee_consent_operation_matrix_discovers_unsigned_debits	signer-debit-never-exceeds-consented-fee-terms	256
 INV-036	fee-consent/bilateral-base-fee	v16_program_fee_consent_operation_matrix_discovers_unsigned_debits	signer-debit-never-exceeds-consented-fee-terms	310
 INV-014	fee-consent/cpi-base-fee	v16_program_fee_consent_operation_matrix_discovers_unsigned_debits	signer-debit-never-exceeds-consented-fee-terms	313
+INV-014	fee-consent/retained-single-cpi-taker-cap	v16_program_fee_consent_operation_matrix_discovers_unsigned_debits	signer-debit-never-exceeds-consented-fee-terms	411
 INV-014	fee-consent/retained-single-cpi-taker-base-fee	v16_program_fee_consent_operation_matrix_discovers_unsigned_debits	signer-debit-never-exceeds-consented-fee-terms	432
 INV-036	fee-consent/cpi-caller-fee	v16_program_fee_consent_operation_matrix_discovers_unsigned_debits	signer-debit-never-exceeds-consented-fee-terms	224
 INV-036	fee-consent/permissionless-activation	v16_program_fee_consent_operation_matrix_discovers_unsigned_debits	signer-debit-never-exceeds-consented-fee-terms	314
@@ -130,4 +131,6 @@ INV-012	asset-generation/matcher-grant-frontier	v16_program_retained_matcher_gra
 INV-010	matcher-mutation/revoke-order	v16_program_matcher_mutation_order_rejects_revoked_capability	stale-matcher-enable-cannot-revive-revoked-value-authority	393
 INV-027	flat-reopen/fee-history	v16_program_flat_reopen_fee_history_precedes_new_exposure	all-accrued-liabilities-precede-every-risk-increasing-admission-even-after-flat-account-history	434
 INV-070	native-terminal-booked-residue	v16_program_native_booked_residue_escheats_after_fee_recredit_completion	native-booked-residue-must-not-burn-native-mint-or-block-terminal-close	418
+INV-070	terminal-scan/backing-expiry-prefix	v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry	terminal-scan-must-rediscover-earlier-actionable-reserves-after-expiry	424
+INV-073	terminal-reserve/absent-provider-public-claims	v16_program_terminal_public_reserve_disposition_preserves_value_across_orders	resolved-reserve-payouts-preserve-beneficiary-value-without-beneficiary-signatures	420
 INV-073	terminal-reserve/unsigned-partial-payout-orders	v16_program_terminal_public_reserve_disposition_preserves_value_across_orders	resolved-reserve-payouts-preserve-beneficiary-value-without-beneficiary-signatures	433

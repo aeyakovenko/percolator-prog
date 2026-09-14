@@ -773,11 +773,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
     assert_eq!(rows, 166, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(
-        missing, 14,
+        missing, 11,
         "post-PR135 counterexamples remain missing generic invariant-owned discovery coverage"
     );
     assert_eq!(
-        independent, 135,
+        independent, 138,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
@@ -965,6 +965,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             include_str!("../cu/inv_070_native_booked_residue_cleanup.rs"),
         ),
         (
+            70,
+            &[70, 24, 25, 33, 41, 63, 69, 71, 86, 88],
+            include_str!("../cu/inv_070_terminal_scan_recredit.rs"),
+        ),
+        (
             71,
             &[71, 45],
             include_str!("../cu/inv_071_crank_progress.rs"),
@@ -1095,6 +1100,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "account-local-expired-close-preserves-unrelated-resolved-exit"
                     | "recovery-escalation-reaches-public-resolved-continuation"
                     | "native-booked-residue-must-not-burn-native-mint-or-block-terminal-close"
+                    | "terminal-scan-must-rediscover-earlier-actionable-reserves-after-expiry"
                     | "successful-crank-cannot-consume-zero-delta-price-time"
                     | "recovery-required-transition-must-not-rollback-funded-survivor-progress"
                     | "prospective-loss-in-lapsed-domain-must-have-bounded-terminal-continuation"
@@ -2085,7 +2091,7 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         independently_discovered_open_findings,
-        [423, 433].into_iter().collect(),
+        [411, 420, 423, 424, 433].into_iter().collect(),
         "only explicitly qualified discoveries retain broader OPEN obligations"
     );
     let expected_reopenings = missing_findings
