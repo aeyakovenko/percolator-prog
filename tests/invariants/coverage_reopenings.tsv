@@ -453,9 +453,12 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # transports, two restored fee policies, explicit/withdrawal collection and either
 # trader as temporary funded fee authority. 32 retained exact first admissions,
 # 128 full rollbacks and 64 owner exits check input-derived maintenance, trading
-# fees and insurance domains. No standalone deferred-fee, lag or junior-support
-# closure; row remains OPEN. Scope J audit records exact scope and validation.
-413	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-first-risk	all-accrued-liabilities-precede-every-risk-increasing-admission	OPEN
+# fees and insurance domains. The later direct selector removes the flat-account
+# trade-fee skip and proves an unprefixed oversized first open rejects against
+# post-fee equity with exact rollback, while the exact first open remains live.
+# Old SBF /dev/shm/pr135-cont-build/deploy/percolator_prog.so admitted the same
+# oversized standalone first open; fixed SBF 1334bfb0cf58100a85b64999b03bb39ebcf9d8424ec6f4fcb159e5dc51a7f34c rejects it.
+413	LoF	BLOCKER	INV-027	INV-010,INV-024,INV-027,INV-044,INV-053,INV-060,INV-062,INV-081	flat-account+x-elapsed-fee+x-first-risk	all-accrued-liabilities-precede-every-risk-increasing-admission	COVERED
 # Row 414 bounded response conformance (2026-09-12): cu/inv_012_reused_asset_return_binding.rs,
 # v16_program_reused_asset_requires_current_generation_and_fresh_matcher_output.
 # Genuine close responses survive two public used-slot replacements at the same price
@@ -1919,10 +1922,13 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Scope N (2026-09-14) extends two adjacent backing handlers at row415, while the
 # insurer's 31 atoms and budgets remain framed. It makes no new insurance debit,
 # recredit, policy or standalone reserve-epoch claim; row428 remains OPEN.
-# 2026-09-14 reconciliation: the exact Scope E Live debit selector passes
-# independently. Resolved debits still do not consume that epoch; terminal
-# consumption/recredit remains unqualified, so benchmark 428 stays missing.
-428	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	OPEN
+# 2026-09-14 closure: cu/inv_014_reserve_debit_epoch.rs independently checks
+# both Live and Resolved insurance debits, with and without telemetry ledgers.
+# Each successful public debit consumes exactly the authorizing reserve authority
+# epoch, while all market/SPL stock and unrelated asset sequences are framed.
+# This closes row428's normalized retained-debit epoch-consumption claim. Row415
+# remains OPEN for arbitrary retained withdrawal stock-replenishment/retry words.
+428	LoF	BLOCKER	INV-008	INV-008,INV-010,INV-024,INV-031,INV-064,INV-080,INV-081	retained-insurance-withdrawal+x-stock-epoch+x-retry	a-value-withdrawal-intent-cannot-spend-insurance-stock-after-its-bound-epoch-changes	COVERED
 # Row 429 bounded conformance (2026-09-12): cu/inv_024_terminal_role_exchange.rs,
 # v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_orders.
 # Twelve public resolved histories exchange funded backing/insurance holders across

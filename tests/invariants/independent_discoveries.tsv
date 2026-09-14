@@ -134,3 +134,5 @@ INV-070	native-terminal-booked-residue	v16_program_native_booked_residue_escheat
 INV-070	terminal-scan/backing-expiry-prefix	v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry	terminal-scan-must-rediscover-earlier-actionable-reserves-after-expiry	424
 INV-073	terminal-reserve/absent-provider-public-claims	v16_program_terminal_public_reserve_disposition_preserves_value_across_orders	resolved-reserve-payouts-preserve-beneficiary-value-without-beneficiary-signatures	420
 INV-073	terminal-reserve/unsigned-partial-payout-orders	v16_program_terminal_public_reserve_disposition_preserves_value_across_orders	resolved-reserve-payouts-preserve-beneficiary-value-without-beneficiary-signatures	433
+INV-027	flat-first-risk/direct-maintenance-crystallization	v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled	all-accrued-liabilities-precede-every-risk-increasing-admission	413
+INV-008	reserve-debit/live-resolved-authority-epoch	v16_resolved_insurance_debit_consumes_reserve_authority_epoch	successful-insurance-debit-consumes-authorizing-reserve-authority-epoch	428

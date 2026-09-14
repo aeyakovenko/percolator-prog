@@ -23,11 +23,11 @@
 //! The joint-admission sibling composes uncollected maintenance with rounded nontraded target
 //! lag at an exact risk boundary, comparing direct admission to public crank settlement on
 //! all four transports and either constrained party. It does not cover flat first-risk fees.
-//! The flat first-admission transaction below covers explicit public fee synchronization and
-//! refresh, including rollback of that prefix and exact owner payouts after admission. It does
-//! not certify a standalone first open at the uncollected-fee margin boundary.
+//! The flat first-admission transaction below covers standalone and prefixed public fee
+//! crystallization before first risk. An oversized standalone first open must fail against
+//! post-fee equity and roll back exactly; the exact first open remains live.
 //! The joint-admission owner's standalone sibling covers sufficiently funded first
-//! opens and their deferred-fee owner exits (reopening 413 remains open).
+//! opens with crystallized fees and exact owner exits.
 //! The withdrawal-prefix first-admission test instead realizes flat fees implicitly while SPL
 //! pays both owners: a later margin rejection must undo those transfers and fee debits together.
 //!
@@ -340,22 +340,51 @@ fn v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled() {
         };
         let too_large = trade(&env, EXCESS);
         let exact = trade(&env, SIZE);
-        let submit = |env: &mut V16CuEnv, instructions: &[Instruction]| {
+        let submit = |env: &mut V16CuEnv, instructions: &[Instruction], include_keeper| {
             env.svm.expire_blockhash();
             let mut all = vec![heap_ix(), cu_ix()];
             all.extend_from_slice(instructions);
-            let tx = Transaction::new_signed_with_payer(
-                &all,
-                Some(&env.payer.pubkey()),
-                &[&env.payer, &owners[0], &owners[1], &owners[2]][..],
-                env.svm.latest_blockhash(),
-            );
+            let tx = if include_keeper {
+                Transaction::new_signed_with_payer(
+                    &all,
+                    Some(&env.payer.pubkey()),
+                    &[&env.payer, &owners[0], &owners[1], &owners[2]][..],
+                    env.svm.latest_blockhash(),
+                )
+            } else {
+                Transaction::new_signed_with_payer(
+                    &all,
+                    Some(&env.payer.pubkey()),
+                    &[&env.payer, &owners[0], &owners[1]][..],
+                    env.svm.latest_blockhash(),
+                )
+            };
             env.svm.send_transaction(tx)
         };
-        let mut attempt = prefix.clone();
-        attempt.push(too_large);
         let before = snapshot(&env);
-        let failure = submit(&mut env, &attempt).expect_err("first risk must fit post-fee equity");
+        let failure = submit(&mut env, std::slice::from_ref(&too_large), false)
+            .expect_err("standalone first risk must fit post-fee equity");
+        assert_eq!(
+            failure.err,
+            TransactionError::InstructionError(
+                2,
+                InstructionError::Custom(PercolatorError::EngineInvalidConfig as u32)
+            ),
+            "{label}: {failure:?}"
+        );
+        assert_eq!(
+            snapshot(&env),
+            before,
+            "{label}: standalone fee collection rolls back with failed first open"
+        );
+        check(&env, [false; 2], false, [0; 2]);
+        peak_cu = peak_cu.max(failure.meta.compute_units_consumed);
+
+        let mut attempt = prefix.clone();
+        attempt.push(too_large.clone());
+        let before = snapshot(&env);
+        let failure =
+            submit(&mut env, &attempt, true).expect_err("first risk must fit post-fee equity");
         assert_eq!(
             failure.err,
             TransactionError::InstructionError(
@@ -375,7 +404,8 @@ fn v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled() {
         if atomic {
             attempt.pop();
             attempt.push(exact);
-            let meta = submit(&mut env, &attempt).expect("complete first-admission transaction");
+            let meta =
+                submit(&mut env, &attempt, true).expect("complete first-admission transaction");
             peak_cu = peak_cu.max(meta.compute_units_consumed);
         } else {
             for (index, instruction) in prefix.iter().enumerate() {
@@ -466,7 +496,7 @@ fn v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled() {
         assert_eq!(env.token_amount(env.vault) as u128, 2 * FEE);
     }
     assert_cu_within("flat first-admission transaction", peak_cu, 1_400_000);
-    println!("INV-027 flat first admission: 2 prefix rollbacks, 2 admissions, 4 exact payouts; peak bundle CU={peak_cu}");
+    println!("INV-027 flat first admission: 4 first-open rollbacks, 2 admissions, 4 exact payouts; peak bundle CU={peak_cu}");
 }
 
 #[test]

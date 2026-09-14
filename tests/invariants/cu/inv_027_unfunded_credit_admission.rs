@@ -376,15 +376,11 @@ fn v16_program_unfunded_cross_asset_credit_cannot_precede_admission_liabilities(
                         3
                     );
                     let peer = env.portfolio_state(portfolios[1]);
-                    // The ample-headroom first-ever counterparty retains deferred
-                    // fees until its next live risk increase (standalone control).
+                    // The ample-headroom first-ever counterparty also crystallizes
+                    // elapsed maintenance before accepting its first live leg.
                     assert_eq!(
                         (peer.capital.get(), peer.pnl.get(), peer.last_fee_slot.get()),
-                        if backed {
-                            (principal[1], 0, ADMISSION)
-                        } else {
-                            (deposits[1], 0, START)
-                        }
+                        (principal[1], 0, ADMISSION)
                     );
                     assert_eq!(active_leg_for_asset(&peer, 2).basis_pos_q, -size);
                     let peer_cert = health_cert(&peer);
@@ -443,7 +439,7 @@ fn v16_program_unfunded_cross_asset_credit_cannot_precede_admission_liabilities(
                         }
                     );
                     assert_eq!(own_source.source_claim_impaired_num.get(), 0);
-                    assert_eq!(group.insurance, if backed { 4 * FEE } else { FEE });
+                    assert_eq!(group.insurance, if backed { 4 * FEE } else { 2 * FEE });
                     assert_eq!(
                         group.c_tot,
                         deposits.iter().sum::<u128>()

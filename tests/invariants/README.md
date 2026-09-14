@@ -1,27 +1,36 @@
 # Invariant-owned test coverage
 
-## Rows 411/420/423/424/428/433 evidence reconciliation (2026-09-14)
+## Rows 411/413/420/423/424/428/433 evidence reconciliation (2026-09-14)
 
 Verified on the PR135 branch after the row-418 closure. This reconciles
-benchmark evidence metadata only; all six broader `coverage_reopenings.tsv`
-obligations stay OPEN and invariant verdicts are unchanged.
+benchmark evidence metadata for rows 411/420/423/424/433, closes row 413's
+direct first-admission reopening, and closes row 428's normalized reserve-debit
+epoch-consumption claim. The broader rows 411/420/423/424/433 stay OPEN; row
+415 remains the separate stock-replenishment/retry frontier.
 
 | Row | Benchmark evidence | Verified scope and remaining qualification |
 | --- | --- | --- |
 | 411 | `independent-discovery` | The generic INV-014 fee-consent matrix includes the retained single-CPI taker-cap condition and the direct CU selectors isolate taker consent from permissive LP consent. This reconciles the narrow taker-cap mechanism; the broader route inventory for every fee-bearing path remains OPEN. |
+| 413 | `independent-discovery` | Direct no-prefix first opens now crystallize elapsed maintenance before margin admission. The selector rejects an over-large stale-flat first open with exact rollback, admits only the exact post-fee open, and preserves the existing prefixed first-admission rollback/exit checks. Row 413 is `COVERED`. |
 | 420 | `independent-discovery` | The terminal public reserve family covers unsigned provider principal/earnings payment orders, exact recipient and stock accounting, rollback, and seniority gates. This reconciles the absent-provider payment mechanism; owner-signed portfolio deletion and admin-signed mechanical slab closure remain separate requirements. |
 | 423 | `independent-discovery` | Scope W independently rejects admission while surviving legs reserve latent domains, then checks exact exits in 24 histories. This is the wrapper's 28-domain reservation mechanism with bilateral Live materialization, not engine implementation equivalence or every future settlement resource. |
 | 424 | `independent-discovery` | The terminal scan-recredit selector checks scanner-first and withdrawal-first continuations after later expiry, then proves the earlier beneficiary's entitlement and cursor reset. This reconciles the backing-expiry prefix-restart mechanism; all environmental writers and the full benchmark severity claim remain outside this evidence. |
-| 428 | `missing` | Scope E independently covers Live debit consumption. The current Resolved branch does not advance the withdrawal epoch; terminal consumption/recredit remains unqualified. The row-level label stays missing for that subcase. |
+| 428 | `independent-discovery` | A public Live/Resolved selector now proves each successful insurance debit consumes exactly the authorizing reserve authority epoch, with and without telemetry ledgers. The production Resolved branch now shares the same epoch consumption as Live. This closes row 428's normalized epoch-consumption finding; row 415 still owns arbitrary stock-replenishment/retry histories. |
 | 433 | `independent-discovery` | Twelve histories cover unsigned principal/earnings/insurance payments in all six orders, with partial payouts and fresh/expired principal. The seniority control preserves Live consent and resolved wind-down gates. Owner-signed portfolio deletion and admin-signed mechanical slab closure remain separate requirements; this is not unrestricted permissionless retirement. |
 
 Independent provenance and the recorded original assertion failures are in the
 [Scope W audit](pr135_scope_w_latent_source_capacity_admission_20260913.md),
 [Scope E audit](pr135_scope_e_retained_debit_20260913.md), and
 [terminal reserve audit](terminal_public_reserves_audit_20260912.md). Historical
-notes below that retain `missing` for 411/420/423/424/433 or describe the Live
-428 correction as wholly held out are superseded by this reconciliation; their
+notes below that retain `missing` for 411/413/420/423/424/428/433 or describe the
+Live-only 428 correction as held out are superseded by this reconciliation; their
 broader coverage limits still apply.
+
+Row 413 additionally changed production behavior in [src/v16_program.rs](../../src/v16_program.rs):
+flat accounts no longer skip maintenance-fee crystallization before trade admission.
+The unchanged pre-fix artifact admitted the excess first open; the fixed artifact
+hash `1334bfb0cf58100a85b64999b03bb39ebcf9d8424ec6f4fcb159e5dc51a7f34c`
+rejects it and keeps the exact route live.
 
 ## Row 426 current Hybrid rescue closure (2026-09-14)
 
@@ -27357,27 +27366,29 @@ Verdicts mean:
 
 ## Known-finding benchmark
 
-The current TSV has 166 rows: 138 `independent-discovery`, 17 `nonqualifying`, and 11 `missing`.
+The current TSV has 166 rows: 140 `independent-discovery`, 17 `nonqualifying`, and 9 `missing`.
 These are recorded evidence dispositions, not new impact or severity acceptance under
 `scripts/loop.md`. Historical severity strings, including `REAL`, are not current classification
 labels; this documentation audit does not reclassify or promote any finding.
 
 Row 428's live GitHub title is normalized to `[BLOCKER LoF] Consume insurance withdrawal epoch on
-retained debit`. It remains `missing`/`OPEN` for the unqualified Resolved consumption subcase; its
-Live debit correction and independent Scope E coverage are present.
+retained debit`. It is now covered by the public Live/Resolved reserve-debit epoch selector; row
+415 remains the broader retained withdrawal stock-replenishment/retry frontier.
 
 `open_findings.tsv` includes the historical 2026-08-03 snapshot of 143 open PRs whose titles identify
 a public-route LoF or DoS class. It maps every row to a primary invariant. That dated snapshot has 0
 **Direct regression** rows, 0 **Missing** rows, 126 **Independent discovery** rows, and seventeen
-**Nonqualifying** rows. PRs 410, 413, 415 through 419, 421, 422, 428, 429, and 435 remain appended as 11
-**Missing** rows, including 428's still-unqualified Resolved subcase. PR 411 is covered by the
+**Nonqualifying** rows. PRs 410, 415 through 419, 421, 422, 429, and 435 remain appended as 9
+**Missing** rows. PR 411 is covered by the
 narrow retained single-CPI taker-cap case in the generic INV-014 fee-consent matrix; PR 412 is now covered by
-the independent generic INV-012 retained matcher-grant position-episode oracle; PR 425 is covered by
+the independent generic INV-012 retained matcher-grant position-episode oracle; PR 413 is covered by the
+direct flat first-admission maintenance crystallization regression; PR 425 is covered by
 the canonical accrual carry regression; PR 426 is covered by the current-Hybrid rescue regression;
+PR 428 is covered by the Live/Resolved reserve-debit epoch-consumption selector;
 PR 432 is covered by the independent generic INV-014 fee-consent matrix through its retained single-CPI taker-base-fee
 case; PR 434 is covered by the independent INV-027 flat-reopen fee-history selector; PRs 420/423/424/433
 have the qualified discovery mappings documented above; and PR 418 is covered by the native
-booked-residue regression. The 138 independent
+booked-residue regression. The 140 independent
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older
 `tests/support/open_lof_manifest.rs` retains the executable adapter mapping for its 99-LoF snapshot:

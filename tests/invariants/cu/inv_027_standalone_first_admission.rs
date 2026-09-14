@@ -1,6 +1,7 @@
-//! INV-027/024/053/080: standalone first admission followed by exact deferred-fee
-//! collection and owner exit. Both owners remain solvent after all elapsed fees;
-//! this does not certify admission at a margin boundary with uncollected fees.
+//! INV-027/024/053/080: standalone first admission crystallizes elapsed fees
+//! before risk, then preserves exact owner exit. Both owners remain solvent after
+//! all elapsed fees; the adjacent boundary selector rejects insufficient post-fee
+//! first risk.
 //! System/SPL/ATA/wrapper instructions create every economic account.
 
 use super::*;
@@ -326,7 +327,7 @@ fn v16_program_standalone_first_admission_preserves_deferred_fee_owner_entitleme
             check(&env, false, false, false, [0; 2]);
             // The successful admission contains exactly one wrapper instruction.
             submit(&mut env, vec![open], false, TRADE_CU_LIMIT);
-            check(&env, true, true, false, [0; 2]);
+            check(&env, true, true, true, [0; 2]);
 
             let close = trade(&env, -direction * QUANTITY, 0);
             let bad_owner = withdrawal(&env, 0, 1, 1);
@@ -336,7 +337,7 @@ fn v16_program_standalone_first_admission_preserves_deferred_fee_owner_entitleme
                 true,
                 TRADE_CU_LIMIT + CUSTODY_CU_LIMIT,
             );
-            check(&env, true, true, false, [0; 2]);
+            check(&env, true, true, true, [0; 2]);
             submit(&mut env, vec![close], false, TRADE_CU_LIMIT);
             check(&env, true, false, true, [0; 2]);
 
