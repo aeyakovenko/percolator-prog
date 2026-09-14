@@ -119,7 +119,7 @@ fn trade(w: &World, pair: usize, q: i128, price: u64, batch: bool) -> Instructio
     }
 }
 
-fn payout(w: &World, actor: usize) -> Instruction {
+pub(super) fn payout(w: &World, actor: usize) -> Instruction {
     Instruction {
         program_id: w.env.program_id,
         accounts: vec![

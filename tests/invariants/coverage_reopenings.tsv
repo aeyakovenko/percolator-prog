@@ -1381,6 +1381,18 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Row423 remains OPEN; this fully funded finite family does not close generic
 # admission/resource/lifecycle coverage. Machine invariant statuses are unchanged.
 # See pr135_scope_w_latent_source_capacity_admission_20260913.md for results and limits.
+# 423/427 Astra Scope K bounded composition (2026-09-14):
+# cu/inv_058_capacity_claim_composition.rs links 26 historical sources plus two
+# latent domains with three disjoint pairs sharing a side-OI cap. Sixteen public
+# histories materialize all 28 claims after headroom transfer and a reverse mark,
+# then preserve owner/domain attribution through ranked terminal redemption.
+# Exact rollback includes completed admission/handoff and SPL-paying prefixes.
+# PASS: 16 full tables, 664 exact rollbacks, 600 ranked terminal calls and 96
+# rolled-back SPL-paying prefixes; peak 1180147 CU, measured packets <=976 bytes.
+# Rows 417/423/424/427 remain OPEN: no expired stock, haircut receipts, persisted
+# scan restart, generic resource theorem or maximum composite shape is added.
+# Production and machine verdicts are unchanged. Commands, measurements and limits:
+# astra_scope_k_capacity_oi_claims_20260914.md.
 423	DoS	BLOCKER	INV-028	INV-028,INV-031,INV-057,INV-073,INV-077,INV-078,INV-082,INV-089	historical-capacity+x-latent-domain+x-position-admission	risk-admission-reserves-every-future-settlement-resource-needed-for-exit	OPEN
 # 424 partial public coverage (2026-09-10): cu/inv_070_terminal_prefix_reuse.rs::v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback covers admin/permissionless reuse behind cursor 2, live success controls, exact terminal rejection/expiry-prefix rollback, and bounded close. General actionability invalidation remains OPEN; see README's retired-slot reuse entry.
 # 424 partial public coverage (2026-09-12): cu/inv_071_terminal_prefix_recredit.rs::v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement.

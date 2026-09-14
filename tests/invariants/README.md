@@ -114,6 +114,27 @@ records comparisons with Scopes E/M/P/S/T, exact commands, artifact provenance,
 controls and limits. Rows 410/411/413/416/429 remain OPEN; machine classifications
 and production sources are unchanged.
 
+## Astra Scope K source capacity and side-OI claims (2026-09-14)
+
+Owner: [cu/inv_058_capacity_claim_composition.rs](cu/inv_058_capacity_claim_composition.rs),
+mounted below INV-058's `atomic_oi_fee_handoff::multi_asset`.
+Sixteen public LiteSVM histories combine 26 historical claimant domains, two
+reserved settlement domains and three unequal pairs at the shared side-OI cap.
+The constrained pair gives or receives headroom before a second mark episode
+materializes its full 28-source table. Input-derived owner/domain claims survive
+both position directions, single/batch routes, claimant orders, executed-prefix
+rollback and ranked permissionless terminal payouts with six positions open.
+The selector passes with 664 exact rollbacks, 600 ranked terminal calls and
+96 rolled-back SPL-paying prefixes; peak measured CU is 1180147.
+
+This links Scope W's source capacity and Scope F's cap/PnL histories. It adds
+bounded INV-058/028 evidence, with adjacent attribution, exact-once consumption,
+rollback and liveness checks. Rows 417/423/424/427 remain OPEN. Expiry-funded
+receipt reclassification and persisted scan invalidation remain separate products
+owned by U/R and their siblings. Production and machine verdicts are unchanged.
+The [Scope K audit](astra_scope_k_capacity_oi_claims_20260914.md) records the
+coverage comparison, remaining dimensions, fixed artifact and exact validation.
+
 ## Scope E retained policy and earned reserves (2026-09-13)
 
 Owner: [cu/inv_014_retained_policy_earned_reserves.rs](cu/inv_014_retained_policy_earned_reserves.rs),

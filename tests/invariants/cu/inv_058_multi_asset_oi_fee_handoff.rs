@@ -19,6 +19,9 @@ mod existing_leg_fee_competition;
 #[path = "inv_058_pnl_terminal_handoff.rs"]
 mod pnl_terminal_handoff;
 
+#[path = "inv_058_capacity_claim_composition.rs"]
+mod capacity_claim_composition;
+
 const ASSETS: usize = 2;
 const HANDOFF_FEE_BPS: u64 = 100;
 type Legs = Vec<(u16, i128)>;
@@ -39,15 +42,16 @@ struct World {
 
 impl World {
     fn new() -> Self {
-        let mut env = inv018_public_spl_market_with_params(
-            6,
-            V16CuMarketParams {
-                max_portfolio_assets: ASSETS as u16,
-                initial_price: PRICE,
-                ..V16CuMarketParams::default()
-            },
-        );
-        for asset in 0..ASSETS {
+        Self::with_params(V16CuMarketParams {
+            max_portfolio_assets: ASSETS as u16,
+            initial_price: PRICE,
+            ..V16CuMarketParams::default()
+        })
+    }
+
+    fn with_params(params: V16CuMarketParams) -> Self {
+        let mut env = inv018_public_spl_market_with_params(6, params);
+        for asset in 0..params.max_portfolio_assets {
             env.configure_auth_mark_for_asset_as_admin(asset as u16, 0, PRICE);
         }
         let owners: [Keypair; ACTORS] = std::array::from_fn(|_| Keypair::new());
