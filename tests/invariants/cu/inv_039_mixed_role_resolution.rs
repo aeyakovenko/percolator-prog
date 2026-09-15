@@ -3,6 +3,9 @@
 //! Integral inputs isolate role attribution from fractional cohort rounding.
 //! The child extends the input-derived book to fractional peer-source rates
 //! and two expiry deadlines; the original exact-rate matrix remains a control.
+//! The shutdown matrix moves the actual creditor/debtor assets into Recovery
+//! before resolution. Their unpaid obligations retain the same owner book,
+//! including rollback of a successful shutdown before a rejected suffix.
 
 use super::*;
 use crate::support::fuzz_model::{
@@ -609,4 +612,224 @@ fn v16_program_mixed_creditor_debtor_roles_preserve_owner_entitlement_through_re
     assert!(waits > 0);
     assert_eq!(receipt_retries, 32);
     println!("INV-039 mixed creditor/debtor: {worlds} worlds, {waits} exact waiting rejections, {receipt_retries} paid receipt retries; peak resolved CU={peak}");
+}
+
+fn shutdown_with_rollback(world: &mut AttributionWorld, asset: usize, peak: &mut u64) {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let admin = world.env.admin.insecure_clone();
+    let authority = admin.pubkey().to_bytes();
+    let shutdown = Instruction {
+        program_id: world.env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(world.env.market, false),
+        ],
+        data: ProgInstruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_SHUTDOWN,
+            asset_index: asset as u16,
+            market_id: world.env.asset_market_id(asset as u16),
+            authority_epoch: world.env.control_sequences(0).authority_epoch,
+            now_slot: 10,
+            initial_price: 0,
+            max_init_fee: u128::MAX,
+            insurance_authority: authority,
+            insurance_operator: authority,
+            backing_bucket_authority: authority,
+            oracle_authority: authority,
+        }
+        .encode(),
+    };
+    let denied = Instruction {
+        program_id: world.env.program_id,
+        accounts: vec![
+            AccountMeta::new(world.actors[0].owner.pubkey(), false),
+            AccountMeta::new(world.env.market, false),
+            AccountMeta::new(world.actors[0].portfolio, false),
+        ],
+        data: world
+            .env
+            .close_portfolio_ix(world.actors[0].portfolio)
+            .encode(),
+    };
+    let before = world.frame();
+    let group_before = world.env.market_state().1;
+    assert_eq!(
+        group_before.assets[asset].lifecycle,
+        AssetLifecycleV16::Active
+    );
+    world.env.svm.expire_blockhash();
+    let tx = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), shutdown.clone(), denied],
+        Some(&world.env.payer.pubkey()),
+        &[&world.env.payer, &admin],
+        world.env.svm.latest_blockhash(),
+    );
+    tx.verify().unwrap();
+    assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
+    let failure = world
+        .env
+        .svm
+        .send_transaction(tx)
+        .expect_err("unsigned close suffix");
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(
+            3,
+            InstructionError::Custom(PercolatorError::ExpectedSigner as u32),
+        )
+    );
+    assert_eq!(
+        failure
+            .meta
+            .logs
+            .iter()
+            .filter(|line| { **line == format!("Program {} success", world.env.program_id) })
+            .count(),
+        1,
+        "shutdown must execute before the rejected suffix"
+    );
+    assert_cu_within(
+        "mixed-role shutdown rollback",
+        failure.meta.compute_units_consumed,
+        CUSTODY_CU_LIMIT,
+    );
+    *peak = (*peak).max(failure.meta.compute_units_consumed);
+    assert_eq!(
+        world.frame(),
+        before,
+        "shutdown rollback includes all owner and custody Accounts"
+    );
+
+    // Reuse the exact authorized bytes: rollback must restore lifecycle and epoch.
+    let cu = send_raw_tx(&mut world.env.svm, &world.env.payer, shutdown, &[&admin])
+        .expect("retained shutdown after rollback");
+    assert_cu_within("mixed-role shutdown", cu, CUSTODY_CU_LIMIT);
+    *peak = (*peak).max(cu);
+    let group = world.env.market_state().1;
+    assert_eq!(group.assets[asset].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(group.source_credit, group_before.source_credit);
+    for (key, account) in before {
+        if key != world.env.market {
+            assert_eq!(world.env.svm.get_account(&key), account);
+        }
+    }
+}
+
+#[test]
+fn v16_program_mixed_role_shutdown_preserves_pending_debt_and_terminal_entitlement() {
+    let mut worlds = 0;
+    let mut shutdowns = 0;
+    let mut peak = 0;
+    let mut waits = 0;
+    let mut receipts = 0;
+    for debt in [36_000, 240_000] {
+        let mut normalized = None;
+        for reverse in [false, true] {
+            for assets in [[1, 2], [2, 1]] {
+                for recovery in [&[0][..], &[1][..], &[0, 1][..], &[1, 0][..]] {
+                    for order in [[0, 2, 1, 3, 4], [1, 2, 0, 4, 3]] {
+                        let (mut world, mut book) = setup(reverse, assets, debt);
+                        let sibling = world.env.market_state().1.assets[0];
+                        for &role in recovery {
+                            shutdown_with_rollback(&mut world, assets[role], &mut peak);
+                            shutdowns += 1;
+                            book.check(&world);
+                            assert!(!book.booked && !book.charged && !book.debt_settled);
+                        }
+                        let before = world.frame();
+                        let cu = world.env.resolve();
+                        assert_cu_within("mixed-role Recovery resolve", cu, CUSTODY_CU_LIMIT);
+                        peak = peak.max(cu);
+                        assert_eq!(world.env.market_state().1.mode, MarketModeV16::Resolved);
+                        for (key, account) in before {
+                            if key != world.env.market {
+                                assert_eq!(world.env.svm.get_account(&key), account);
+                            }
+                        }
+                        book.check(&world);
+                        assert!(!book.booked && !book.charged && !book.debt_settled);
+                        world.env.svm.warp_to_slot(15);
+                        for round in 0..16 {
+                            let before = world.frame();
+                            for actor in order {
+                                if !resolved_portfolio_is_terminal(
+                                    &world.env,
+                                    world.actors[actor].portfolio,
+                                ) {
+                                    waits += usize::from(book.close(&mut world, actor, &mut peak));
+                                }
+                            }
+                            if world
+                                .actors
+                                .iter()
+                                .all(|a| resolved_portfolio_is_terminal(&world.env, a.portfolio))
+                            {
+                                break;
+                            }
+                            assert_ne!(
+                                world.frame(),
+                                before,
+                                "no mixed-role Recovery progress in round {round}"
+                            );
+                        }
+                        assert!(book.booked && book.charged && book.debt_settled);
+                        for actor in order {
+                            let a = &world.actors[actor];
+                            assert!(resolved_portfolio_is_terminal(&world.env, a.portfolio));
+                            if resolved_receipt(&world.env.portfolio_state(a.portfolio)).present {
+                                let before = world.frame();
+                                let cu = world.payout(actor, true).expect("paid receipt retry");
+                                assert_cu_within(
+                                    "mixed-role Recovery paid retry",
+                                    cu,
+                                    CUSTODY_CU_LIMIT,
+                                );
+                                peak = peak.max(cu);
+                                assert_eq!(world.frame(), before);
+                                receipts += 1;
+                            }
+                            let before = world.frame();
+                            let a = &world.actors[actor];
+                            let cu = world.env.close_portfolio_with_cu(&a.owner, a.portfolio);
+                            assert_cu_within("mixed-role Recovery deletion", cu, CUSTODY_CU_LIMIT);
+                            peak = peak.max(cu);
+                            for (key, account) in before {
+                                if ![world.env.market, a.owner.pubkey(), a.portfolio].contains(&key)
+                                {
+                                    assert_eq!(world.env.svm.get_account(&key), account);
+                                }
+                            }
+                            book.deleted[actor] = true;
+                            book.check(&world);
+                        }
+                        let group = world.env.market_state().1;
+                        assert_eq!(
+                            (
+                                group.vault,
+                                group.c_tot,
+                                group.pnl_pos_tot,
+                                group.materialized_portfolio_count
+                            ),
+                            (book.face_discount(), 0, 0, 0)
+                        );
+                        assert_eq!(group.assets[0], sibling);
+                        let paid: [u128; 5] = std::array::from_fn(|i| {
+                            world.env.token_amount(world.actors[i].token) as u128
+                        });
+                        assert_eq!(paid, book.payouts());
+                        let outcome = (paid, group.vault);
+                        assert_eq!(*normalized.get_or_insert(outcome), outcome,
+                            "shutdown role/order, asset index, side and payout order preserve owner attribution");
+                        worlds += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(worlds, 64);
+    assert_eq!(shutdowns, 96);
+    assert_eq!(receipts, 64);
+    assert!(waits > 0);
+    println!("INV-039 mixed-role shutdown: {worlds} worlds, {shutdowns} successful-prefix rollbacks and retained shutdowns, {waits} waiting rollbacks, {receipts} paid receipt retries; peak CU={peak}");
 }

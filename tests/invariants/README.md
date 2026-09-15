@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## Lane 9 mixed-role shutdown and pending debt (2026-09-15)
+
+The existing [INV-039 mixed-role owner](cu/inv_039_mixed_role_resolution.rs)
+now checks shutdown of the actual pending-creditor asset, unsettled-debtor asset,
+or both in either order before resolution. Sixty-four public LiteSVM histories
+reuse its input-derived owner book across both debt/support regimes, mirrored
+sides and asset assignments, and two payout orders. Ninety-six successful
+shutdown prefixes roll back with a rejected suffix, then the same authorized
+instruction bytes commit. All histories preserve pending loss weight until
+booking and charging, reconcile each owner's terminal SPL entitlement, and
+delete all five portfolios. Peak observed CU is 212,217 against a 300,000 bound.
+
+This adds shutdown of the assets carrying the mixed obligations to the existing
+direct-resolution and unrelated-sibling-restart coverage. Rows **419/435 remain
+OPEN**, and INV-039 remains `REFUTED_CURRENT`. Production and machine metadata
+are unchanged. Funding, fees, ADL, native custody, arbitrary histories and slab
+retirement are outside this increment. See the [Lane 9 report](lane9_pending_loss_debt_20260915.md)
+for the overlap review, artifact provenance, exact commands and limitations.
+
 ## Lane 6 recreated-counterparty cumulative limits (2026-09-15)
 
 The existing INV-058 selector
