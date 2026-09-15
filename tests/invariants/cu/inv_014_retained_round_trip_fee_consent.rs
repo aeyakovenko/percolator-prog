@@ -5,6 +5,9 @@
 
 use super::*;
 
+#[path = "inv_014_retained_oracle_role_close.rs"]
+mod retained_oracle_role_close;
+
 const OPEN_CAP: u64 = 99;
 const RAISED_BPS: u64 = 37;
 

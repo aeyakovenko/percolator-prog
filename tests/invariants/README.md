@@ -1,5 +1,31 @@
 # Invariant-owned test coverage
 
+## Lane 1 retained close across funded oracle management (2026-09-15)
+
+Owner: [cu/inv_014_retained_oracle_role_close.rs](cu/inv_014_retained_oracle_role_close.rs),
+mounted under INV-014's `retained_single_cpi_policy_history::retained_round_trip_fee_consent`.
+The selector `v16_retained_close_preserves_fee_consent_after_funded_oracle_role_handoff`
+composes trading-earned insurance, a cold admin sharing the LP role, and a close
+signed before oracle succession and fee-policy changes. Four public LiteSVM worlds
+cover both position orientations and both insurance beneficiary/operator takeover
+suffixes. A successful charged close rolls back with forbidden role management;
+the permitted oracle rotation preserves funded ownership; a subsequent fee hike
+cannot spend the taker's retained consent despite permissive LP consent. Restored
+policy executes the unchanged retained close, consumes its position episodes,
+and leaves both owners exact public SPL withdrawals.
+
+The regression detects two isolated implementation mutations: removal of the
+single-CPI taker cap and an oracle write that also replaces funded insurance
+roles. These are sensitivity checks, not historical exploit reproductions.
+Production code is unchanged. Maximum observed new-test CU is 199,219 against
+the existing 500,000-CU bundle bound.
+
+Rows **411/416 remain OPEN**; **432 remains COVERED** for its normalized
+single-CPI consent claim. Adjacent rows **412/414/415/428 remain COVERED**.
+INV-001 through INV-014 retain their existing sampled aggregate dispositions.
+The [Lane 1 audit](lane1_retained_conformance_20260915.md) records overlap,
+row-by-row qualifications, exact commands, artifacts, and validation results.
+
 ## Row 422 paid-origin Hybrid-recipient evidence (2026-09-14)
 
 Owner:
