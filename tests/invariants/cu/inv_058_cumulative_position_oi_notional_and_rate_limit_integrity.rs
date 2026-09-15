@@ -711,7 +711,10 @@ fn v16_program_recreated_counterparty_preserves_post_transition_cumulative_limit
 
             // Fill the shared ceiling while moving each counterleg fragment to actor 2.
             // Actor 0 stays capped during recreation; actor 1 cannot reset that exposure.
-            for size in [direction * (max - 1), direction] {
+            // Seed actor 2 while OI has headroom: a new long leg attaches before the
+            // donor's long reduction, so transferring max-1 first hits the transient
+            // side cap. The remaining fragment resizes the already established leg.
+            for size in [direction, direction * (max - 1)] {
                 ledger.trade(&mut env, route, 0, 1, &[(0, size)], true);
                 ledger.trade(&mut env, other_route, 1, 2, &[(0, size)], true);
             }

@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## Lane 6 recreated-counterparty cumulative limits (2026-09-15)
+
+The existing INV-058 selector
+`v16_program_recreated_counterparty_preserves_post_transition_cumulative_limits`
+now transfers its one-atom fragment before `max - 1`. A fresh baseline build
+reproduced `EngineInvalidLeg` before recreation: attaching the recipient's new
+long leg temporarily double-counts the large fragment before reducing the donor.
+The intended final state is within the limits, but that setup ordering is rejected.
+Seeding the recipient while headroom is available gives a public continuation.
+
+The unchanged conformance assertions now complete in all eight worlds: 250 public
+transactions, 80 exact rejections, and peak successful CU 232,878. Both roles,
+all four transports, same-address recreation, two-asset rollback, exact headroom
+reuse, cross-zero, and final flatness remain covered. This is test maintenance;
+the original large-first transfer restriction is not fixed. Row **427 remains
+OPEN**, and INV-058's machine disposition remains `REFUTED_CURRENT`.
+See the [Lane 6 report](lane6_cumulative_limit_conformance_20260915.md) for the
+baseline failure, source diagnosis, public-route limits, and verification commands.
+
 ## Lane 1 retained close across funded oracle management (2026-09-15)
 
 Owner: [cu/inv_014_retained_oracle_role_close.rs](cu/inv_014_retained_oracle_role_close.rs),
