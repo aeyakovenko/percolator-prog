@@ -66,6 +66,25 @@ arbitrary schedules, maximum shape and generic equivalence remain outside this
 increment. The [Lane 18 report](lane18_pending_loss_debt_attribution_20260915.md)
 records the oracle, overlap review, exact commands, artifact hashes and limits.
 
+## Lane 15 competing Hybrid reward recipients and CPI exits (2026-09-15)
+
+The existing [dual-Hybrid owner](cu/inv_045_hybrid_recipient_provenance.rs)
+adds 128 public LiteSVM histories in which either participant in the recipient
+trade earns the liquidation reward. A rival's successful liquidation prefix
+rolls back before the winner commits. Both identities then attempt the completed
+episode; after a recipient reduction, the rival can refresh the target's health
+certificate without receiving or redirecting any reward. Each history switches
+between CPI and non-CPI reductions, with an unsigned CPI maker, authenticated
+matcher execution, full prefix rollback and exact SPL reward withdrawal.
+
+This adds competing recipients and recipient route switching to Lane 12's
+same-slot target replacements. The source penalty, insurance-domain remainder,
+both recipient entitlements and external payouts are checked independently.
+**Row 422 remains OPEN/missing; INV-045 remains `REFUTED_CURRENT`.** Maximum
+shape, native custody, arbitrary report histories and whole-cohort terminal
+redemption remain outside this increment. See the [Lane 15 report](lane15_hybrid_reward_competing_recipients_20260915.md)
+for the exact invariant, non-overlap review, artifacts and validation.
+
 ## Lane 9 mixed-role shutdown and pending debt (2026-09-15)
 
 The existing [INV-039 mixed-role owner](cu/inv_039_mixed_role_resolution.rs)
