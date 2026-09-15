@@ -31,7 +31,7 @@ pub(crate) struct World {
 #[derive(Clone, Copy)]
 enum SourceShape {
     Single,
-    Staggered,
+    Staggered(u16),
     SplitClaimants,
 }
 
@@ -81,7 +81,21 @@ impl World {
     }
 
     pub(super) fn before_receipts_with_staggered_sources_and_owners(owners: [Keypair; 2]) -> Self {
-        Self::build_before_receipts(owners, None, BACKING, SourceShape::Staggered, 0)
+        Self::before_receipts_with_staggered_claimants(owners, 14)
+    }
+
+    pub(super) fn before_receipts_with_staggered_claimants(
+        owners: [Keypair; 2],
+        first_claimant_lots: u16,
+    ) -> Self {
+        assert!((1..40).contains(&first_claimant_lots));
+        Self::build_before_receipts(
+            owners,
+            None,
+            BACKING,
+            SourceShape::Staggered(first_claimant_lots),
+            0,
+        )
     }
 
     pub(super) fn before_receipts_with_split_source_claimants() -> Self {
@@ -103,18 +117,26 @@ impl World {
     ) -> Self {
         // Allocate and initialize through System/SPL/wrapper instructions, including the
         // initial collateral endowment. LiteSVM only supplies programs, clock and signer SOL.
-        let staggered_sources = matches!(source_shape, SourceShape::Staggered);
+        let staggered_sources = matches!(source_shape, SourceShape::Staggered(_));
         let split_claimants = matches!(source_shape, SourceShape::SplitClaimants);
         let asset_count = if staggered_sources { 3 } else { 2 };
         let mut deposits = DEPOSITS.to_vec();
         let mut faces = FACES.to_vec();
-        let trades = if staggered_sources {
+        let trades = if let SourceShape::Staggered(first_lots) = source_shape {
             // Split the same 250 debtor capital, 100 backing and 1,000 claim face
             // across two independent source domains, without changing token supply.
             deposits[3] = 100;
             deposits.push(150);
             faces.push(0);
-            vec![(0, 1, 0, 14), (4, 1, 0, 26), (2, 3, 1, 8), (2, 5, 2, 12)]
+            let first_lots = i128::from(first_lots);
+            faces[0] = first_lots as u128 * 50;
+            faces[4] = (40 - first_lots) as u128 * 50;
+            vec![
+                (0, 1, 0, first_lots),
+                (4, 1, 0, 40 - first_lots),
+                (2, 3, 1, 8),
+                (2, 5, 2, 12),
+            ]
         } else if split_claimants {
             // Preserve total capital and face, but share one source's fractional rate.
             deposits[2] = 350;

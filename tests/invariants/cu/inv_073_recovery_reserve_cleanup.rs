@@ -7,6 +7,9 @@
 //! histories begin with exposed Recovery positions and earned fees. Unlike rows
 //! 420/421's expiry/exhaustion histories, all three reserve claims survive and are
 //! actually paid. This is classic SPL only, adding no row418 token-variant matrix.
+//! A retained provider request also crosses an insurance debit's epoch change:
+//! rejection rolls back custody repair and payment, then fresh public requests
+//! finish both reserve classes without reviving the already-paid prefix.
 //! Owner and reserve keys are dropped before force-close. The market authority
 //! still participates in resolution and mechanical deletion/retirement: row433 OPEN.
 
@@ -374,6 +377,32 @@ pub(crate) fn verify_recovery_reserve_cleanup() {
             let allowed = [env.market, env.vault, tokens[actor], ledger];
             let rent = if created[destination] { 0 } else { token_rent };
             let reserve_ix = reserve(&env, kind);
+            let stale_provider = if kind == 2 {
+                let next_kind = if first == 0 { 1 } else { 0 };
+                let retained = reserve(&env, next_kind);
+                // Insurance consumes the shared asset authority epoch. A provider
+                // suffix captured before that debit must undo both repair and payout.
+                peak = peak.max(land(
+                    &mut env,
+                    &[
+                        repairs[destination].clone(),
+                        reserve_ix.clone(),
+                        retained.clone(),
+                    ],
+                    &[],
+                    &tracked,
+                    &[],
+                    0,
+                    None,
+                    Some((4, PercolatorError::EngineStale)),
+                ));
+                rollbacks += 1;
+                Some(retained)
+            } else {
+                None
+            };
+            let prior_stock = env.market_state().1.vault;
+            let prior_epoch = env.control_sequences(0).authority_epoch;
             peak = peak.max(land(
                 &mut env,
                 &[repairs[destination].clone(), reserve_ix],
@@ -386,9 +415,34 @@ pub(crate) fn verify_recovery_reserve_cleanup() {
             ));
             created[destination] = true;
             paid[kind] = reserve_amounts[kind];
+            assert_eq!(
+                env.control_sequences(0).authority_epoch,
+                prior_epoch + u64::from(kind == 2)
+            );
+            if let Some(retained) = stale_provider {
+                peak = peak.max(land(
+                    &mut env,
+                    &[retained],
+                    &[],
+                    &tracked,
+                    &[],
+                    0,
+                    None,
+                    Some((2, PercolatorError::EngineStale)),
+                ));
+                rollbacks += 1;
+            }
             let image = env.svm.get_account(&env.market).unwrap();
             let (_, group) = env.market_state();
             let remaining = BACKING + EARNINGS + INSURANCE - paid.iter().sum::<u64>();
+            assert_eq!(
+                prior_stock - u128::from(remaining),
+                u128::from(reserve_amounts[kind])
+            );
+            assert!(
+                u128::from(remaining) < prior_stock,
+                "public reserve payment lowers unpaid stock"
+            );
             assert_eq!(
                 (
                     group.c_tot,
@@ -531,7 +585,8 @@ pub(crate) fn verify_recovery_reserve_cleanup() {
             "row433 Recovery cleanup: order={order:?}, user_calls={calls:?}/16, reserves={paid:?}"
         );
     }
-    assert_eq!(rollbacks, 8);
+    assert_eq!(rollbacks, 12);
+    assert_cu_within("Recovery reserve cleanup and epoch retry", peak, 800_000);
     eprintln!(
         "row433 Recovery reserve cleanup: 2 worlds, {rollbacks} exact rollbacks, peak={peak} CU"
     );

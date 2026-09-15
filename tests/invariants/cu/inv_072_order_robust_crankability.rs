@@ -1366,7 +1366,8 @@ fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence
         "oracle_tail.len() < oracle_account_count",
         "oracle_account_count != oracle_profile.oracle_leg_count as usize",
         "if !oracle_tail.is_empty()",
-        "reject_missing_pending_liquidation_observations_view",
+        "if (summary.stale || summary.liquidatable) && !summary.b_stale",
+        "reject_incomplete_account_health_observations_view",
     ] {
         assert!(
             zero_copy.contains(guard),
@@ -1385,9 +1386,12 @@ fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence
     let live_dispatch = zero_copy
         .rfind("permissionless_auto_crank_not_atomic(")
         .expect("live auto-crank dispatch");
+    let health_coverage = zero_copy
+        .find("reject_incomplete_account_health_observations_view(")
+        .expect("complete account health observation guard");
     assert!(
-        recovery < parser && expired < parser && parser < live_dispatch,
-        "Recovery/expired-close committed-state dispatch must precede the shared Live parser, which must precede Live selection",
+        recovery < parser && expired < parser && parser < health_coverage && health_coverage < live_dispatch,
+        "Recovery/expired-close dispatch precedes the Live parser; complete health observations precede Live selection",
     );
 
     let public_handler = production

@@ -26,6 +26,34 @@ INV-001 through INV-014 retain their existing sampled aggregate dispositions.
 The [Lane 1 audit](lane1_retained_conformance_20260915.md) records overlap,
 row-by-row qualifications, exact commands, artifacts, and validation results.
 
+## Lane 2 terminal progress and payout conformance (2026-09-15)
+
+The existing INV-067 overdue-source history generator now varies the first
+claimant's public trade size from 1 through 39 lots and independently selects
+separate or shared-owner SPL custody. It retains the original deterministic
+histories, adds one-lot/mirrored/equal-face boundaries, and compares split and
+grouped execution with per-portfolio floor entitlements, exact rejected-prefix
+rollback, and a source-work/unpaid-value/receipt-count progress rank. All 66
+worlds complete six portfolio deletions and slab retirement; generated rounding
+residue is burned exactly and rent returns to its designated recipient.
+
+The existing INV-073 Recovery reserve cleanup witness now retains principal or
+earnings requests across an insurance debit's authority-epoch change. The stale
+suffix rolls back ATA creation and the insurance payout; a committed insurance
+payment makes the retained request stale, and a refreshed unsigned provider
+request completes the remaining entitlement. Both original payout orders still
+finish all user, provider and insurance claims and administrative retirement.
+
+Validation also corrected INV-072's stale helper-name assertion: the source gate
+now requires complete health-observation coverage for stale or liquidatable
+accounts before Live selection while preserving the terminal bypass ordering.
+
+This adds bounded INV-063/064/066/067/068/069/070/071/073/077/078/082
+composition evidence. Rows **417/420/421/433 remain OPEN**, with their existing
+benchmark evidence labels unchanged. Related nonqualifying rows are not promoted.
+Full commands, results, row verdicts and remaining gaps are recorded in the
+[Lane 2 report](lane2_terminal_conformance_20260915.md). No production code changed.
+
 ## Row 422 paid-origin Hybrid-recipient evidence (2026-09-14)
 
 Owner:

@@ -1,6 +1,8 @@
 //! INV-067 / row 417: generated claimant cadence while two source stocks are overdue.
 //! The public fixture supplies deposits and trades; the oracle consumes only action words.
 //! Split and grouped execution must converge despite deferred claims and aborted groups.
+//! Claim sizes and shared custody vary independently of transaction cadence. The
+//! oracle keeps each portfolio's floor separate even when destinations coincide.
 //! This bounded, fixed-population generator does not close the OPEN row.
 
 use super::{late_expiry::World, *};
@@ -11,7 +13,6 @@ use proptest::{
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
 const CLAIMANTS: [usize; 2] = [0, 4];
-const FACES: [u128; 6] = [700, 0, 1_000, 0, 1_300, 0];
 const SOURCES: [(usize, u128, u128, u64); 2] = [(3, 161, 400, 13), (5, 189, 600, 15)];
 const SUPPLY: u128 = 3_852;
 
@@ -32,12 +33,19 @@ impl Action {
 
 #[derive(Clone, Debug)]
 struct History {
+    first_claimant_lots: u16,
+    coowned: bool,
     landing: u64,
     claims: Vec<Vec<usize>>,
     groups: Vec<(usize, bool)>,
 }
 
 impl History {
+    fn faces(&self) -> [u128; 6] {
+        let first = u128::from(self.first_claimant_lots) * 50;
+        [first, 0, 1_000, 0, 2_000 - first, 0]
+    }
+
     fn word(&self) -> Vec<Action> {
         assert_eq!(self.claims.len(), 5);
         let mut word = Vec::new();
@@ -59,14 +67,16 @@ struct Identity {
 
 #[derive(Clone)]
 struct Oracle {
+    faces: [u128; 6],
     source_steps: usize,
     paid: [u128; 6],
     present: [bool; 2],
 }
 
 impl Oracle {
-    fn new() -> Self {
+    fn new(faces: [u128; 6]) -> Self {
         let mut oracle = Self {
+            faces,
             source_steps: 0,
             paid: [0; 6],
             present: [true; 2],
@@ -86,10 +96,22 @@ impl Oracle {
     }
 
     fn entitlement(&self, actor: usize) -> u128 {
-        FACES[actor] * self.residual() / FACES.iter().sum::<u128>()
+        self.faces[actor] * self.residual() / self.faces.iter().sum::<u128>()
+    }
+
+    fn rank(&self) -> (usize, u128, usize) {
+        (
+            4 - self.source_steps,
+            [0, 2, 4]
+                .map(|actor| 1_000 + self.entitlement(actor) - self.paid[actor])
+                .iter()
+                .sum(),
+            self.present.iter().filter(|&&present| present).count(),
+        )
     }
 
     fn apply(&mut self, action: Action) -> u128 {
+        let rank = self.rank();
         let actor = action.actor();
         let before = self.paid[actor];
         match action {
@@ -112,7 +134,13 @@ impl Oracle {
                 }
             }
         }
-        self.paid[actor].checked_sub(before).unwrap()
+        let due = self.paid[actor].checked_sub(before).unwrap();
+        if matches!(action, Action::Source) || due != 0 || self.rank().2 < rank.2 {
+            assert!(self.rank() < rank, "needed continuation lowers rank");
+        } else {
+            assert_eq!(self.rank(), rank, "already-current retry is inert");
+        }
+        due
     }
 
     fn check(&self, world: &World, receipts: &[ResolvedPayoutReceiptV16; 2], ids: &[Identity]) {
@@ -201,8 +229,9 @@ impl Oracle {
                 ));
             }
             assert!(self.paid[actor] - 1_000 <= self.entitlement(actor));
-            assert!(self.entitlement(actor) <= FACES[actor]);
+            assert!(self.entitlement(actor) <= self.faces[actor]);
         }
+        let mut by_token = std::collections::BTreeMap::<Pubkey, u128>::new();
         for (actor, identity) in ids.iter().enumerate() {
             let portfolio = world.actors[actor].portfolio;
             assert_eq!(world.env.portfolio_id(portfolio), identity.id);
@@ -217,10 +246,10 @@ impl Oracle {
                 .unwrap(),
                 identity.provenance
             );
-            assert_eq!(
-                u128::from(world.env.token_amount(world.actors[actor].token)),
-                self.paid[actor]
-            );
+            *by_token.entry(world.actors[actor].token).or_default() += self.paid[actor];
+        }
+        for (token, paid) in by_token {
+            assert_eq!(u128::from(world.env.token_amount(token)), paid);
         }
         world.custody();
     }
@@ -239,6 +268,8 @@ struct Evidence {
     rollbacks: usize,
     paying_rollbacks: usize,
     release_rollbacks: usize,
+    portfolio_closes: usize,
+    slab_calls: usize,
     peak_cu: u64,
 }
 
@@ -247,7 +278,21 @@ fn run(
     split: bool,
     evidence: &mut Evidence,
 ) -> (ResolvedPayoutLedgerV16, [u128; 6]) {
-    let mut world = World::before_receipts_with_staggered_sources();
+    let first_owner = Keypair::new();
+    let second_owner = if history.coowned {
+        first_owner.insecure_clone()
+    } else {
+        Keypair::new()
+    };
+    let mut world = World::before_receipts_with_staggered_claimants(
+        [first_owner, second_owner],
+        history.first_claimant_lots,
+    );
+    assert_eq!(
+        world.actors[0].token == world.actors[4].token,
+        history.coowned
+    );
+    let faces = history.faces();
     for actor in CLAIMANTS {
         for _ in 0..8 {
             if world.receipt(actor).present {
@@ -272,10 +317,10 @@ fn run(
     for (index, actor) in CLAIMANTS.into_iter().enumerate() {
         let receipt = receipts[index];
         assert!(receipt.present && !receipt.finalized);
-        assert_eq!(receipt.terminal_positive_claim_face, FACES[actor]);
+        assert_eq!(receipt.terminal_positive_claim_face, faces[actor]);
         assert_eq!(
             receipt.prior_bound_contribution_num,
-            FACES[actor] * BOUND_SCALE
+            faces[actor] * BOUND_SCALE
         );
         assert_eq!(receipt.live_released_face_at_receipt, 0);
     }
@@ -284,7 +329,7 @@ fn run(
         world.payout(4, true),
         world.payout(2, false),
     ];
-    let mut oracle = Oracle::new();
+    let mut oracle = Oracle::new(faces);
     oracle.check(&world, &receipts, &ids);
     world.env.svm.warp_to_slot(history.landing);
     // Both deadlines have passed, but neither reserve nor old receipt has changed.
@@ -369,6 +414,10 @@ fn run(
     };
 
     let word = history.word();
+    assert!(
+        word.len() <= 44,
+        "four source steps and at most forty scheduled claims"
+    );
     let mut cursor = 0;
     let mut group = 0;
     while cursor < word.len() {
@@ -383,15 +432,23 @@ fn run(
     for index in [1 - first, first, first, 1 - first, 0, 1] {
         execute(&[Action::Claim(index)], false);
     }
-    assert_eq!(oracle.paid, [1_198, 0, 1_283, 0, 1_368, 0]);
+    assert_eq!(
+        oracle.paid,
+        std::array::from_fn(|actor| if faces[actor] == 0 {
+            0
+        } else {
+            1_000 + faces[actor] * 851 / 3_000
+        })
+    );
     assert_eq!(oracle.present, [false; 2]);
+    assert_eq!(oracle.rank(), (0, 0, 0));
     let ledger = world.env.market_state().1.resolved_payout_ledger;
     let rounding = oracle.residual()
         - [0, 2, 4]
             .map(|actor| oracle.entitlement(actor))
             .iter()
             .sum::<u128>();
-    assert_eq!(rounding, 2);
+    assert!(rounding < 3, "at most one fractional atom per claimant");
     assert_eq!(world.env.market_state().1.vault, rounding);
     assert_eq!(oracle.paid.iter().sum::<u128>() + rounding + 1, SUPPLY);
     let before = world.frame();
@@ -412,6 +469,141 @@ fn run(
     );
     oracle.check(&world, &receipts, &ids);
     evidence.commits += 1;
+    // Economic completion is permissionless. Mechanical deletion and slab close
+    // retain their existing owner/admin authority requirements.
+    for actor in (0..world.actors.len()).rev() {
+        let portfolio = world.actors[actor].portfolio;
+        assert!(resolved_portfolio_is_terminal(&world.env, portfolio));
+        let before = world.frame();
+        let count = world.env.market_state().1.materialized_portfolio_count;
+        let rent = world.env.svm.get_account(&portfolio).unwrap().lamports;
+        let market_rent = world
+            .env
+            .svm
+            .get_account(&world.env.market)
+            .unwrap()
+            .lamports;
+        let cu = world
+            .env
+            .close_portfolio_with_cu(&world.actors[actor].owner, portfolio);
+        world.peak_cu = world.peak_cu.max(cu);
+        assert_eq!(
+            world.env.market_state().1.materialized_portfolio_count,
+            count - 1
+        );
+        assert_eq!(
+            world
+                .env
+                .svm
+                .get_account(&world.env.market)
+                .unwrap()
+                .lamports,
+            market_rent + rent
+        );
+        assert!(world
+            .env
+            .svm
+            .get_account(&portfolio)
+            .is_none_or(|account| account.lamports == 0 && account.data.is_empty()));
+        world.assert_frame_except(&before, &[world.env.market, portfolio]);
+        world.custody();
+        evidence.portfolio_closes += 1;
+    }
+    let before_close = world.frame();
+    let market_rent = world
+        .env
+        .svm
+        .get_account(&world.env.market)
+        .unwrap()
+        .lamports;
+    let vault_rent = world
+        .env
+        .svm
+        .get_account(&world.env.vault)
+        .unwrap()
+        .lamports;
+    let mut expected_admin = world
+        .env
+        .svm
+        .get_account(&world.env.admin.pubkey())
+        .unwrap();
+    let tombstone_rent = world
+        .env
+        .svm
+        .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN);
+    expected_admin.lamports += market_rent + vault_rent - tombstone_rent;
+    let mut expected_mint = world.env.svm.get_account(&world.env.mint).unwrap();
+    let mut mint = Mint::unpack(&expected_mint.data).unwrap();
+    mint.supply -= u64::try_from(rounding).unwrap();
+    Mint::pack(mint, &mut expected_mint.data).unwrap();
+    let close = Instruction {
+        program_id: world.env.program_id,
+        accounts: vec![
+            AccountMeta::new(world.env.admin.pubkey(), true),
+            AccountMeta::new(world.env.market, false),
+            AccountMeta::new(world.env.vault, false),
+            AccountMeta::new_readonly(world.env.vault_authority, false),
+            AccountMeta::new(world.provider_token, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(world.env.mint, false),
+        ],
+        data: ProgInstruction::CloseSlab {
+            authority_epoch: world.env.control_sequences(0).authority_epoch,
+        }
+        .encode(),
+    };
+    let mut closed = false;
+    for _ in 0..8 {
+        let before = world.frame();
+        world
+            .land(&[close.clone()], true)
+            .expect("bounded terminal cleanup");
+        evidence.slab_calls += 1;
+        assert_ne!(
+            world.frame(),
+            before,
+            "accepted slab continuation changes state"
+        );
+        let market = world.env.svm.get_account(&world.env.market).unwrap();
+        if market.data.len() == percolator_prog::constants::HEADER_LEN {
+            assert_closed_market_tombstone(&market);
+            assert_eq!(market.lamports, tombstone_rent);
+            closed = true;
+            break;
+        }
+        world.assert_frame_except(&before, &[world.env.market]);
+        assert_eq!(world.env.market_state().1.vault, rounding);
+    }
+    assert!(
+        closed,
+        "all generated receipt histories retire within eight slab calls"
+    );
+    assert!(world
+        .env
+        .svm
+        .get_account(&world.env.vault)
+        .is_none_or(|account| account.lamports == 0 && account.data.is_empty()));
+    assert_eq!(
+        world.env.svm.get_account(&world.env.mint),
+        Some(expected_mint)
+    );
+    assert_eq!(
+        world.env.svm.get_account(&world.env.admin.pubkey()),
+        Some(expected_admin)
+    );
+    world.assert_frame_except(
+        &before_close,
+        &[
+            world.env.market,
+            world.env.vault,
+            world.env.mint,
+            world.env.admin.pubkey(),
+        ],
+    );
+    assert_eq!(
+        u128::from(mint.supply),
+        oracle.paid.iter().sum::<u128>() + 1
+    );
     assert_cu_within("generated overdue receipt history", world.peak_cu, 900_000);
     evidence.peak_cu = evidence.peak_cu.max(world.peak_cu);
     evidence.worlds += 1;
@@ -445,21 +637,42 @@ fn v16_program_generated_overdue_source_histories_preserve_receipt_identity_and_
         ),
     ] {
         verify(History {
+            first_claimant_lots: 14,
+            coowned: false,
             landing,
             claims,
             groups,
         });
     }
+    // Boundary faces include a one-lot claimant, its mirror, and equal faces.
+    // Shared custody must still pay the sum of floors, never the floor of a sum.
+    for first_claimant_lots in [1, 20, 39] {
+        for coowned in [false, true] {
+            verify(History {
+                first_claimant_lots,
+                coowned,
+                landing: 15,
+                claims: vec![vec![0, 1]; 5],
+                groups: vec![(4, true)],
+            });
+        }
+    }
     let strategy = (
+        1u16..40,
+        any::<bool>(),
         15u64..=63,
         prop::collection::vec(prop::collection::vec(0usize..2, 0..=8), 5),
         prop::collection::vec((1usize..=4, any::<bool>()), 1..=6),
     )
-        .prop_map(|(landing, claims, groups)| History {
-            landing,
-            claims,
-            groups,
-        });
+        .prop_map(
+            |(first_claimant_lots, coowned, landing, claims, groups)| History {
+                first_claimant_lots,
+                coowned,
+                landing,
+                claims,
+                groups,
+            },
+        );
     TestRunner::new_with_rng(
         Config {
             cases: 24,
@@ -479,12 +692,14 @@ fn v16_program_generated_overdue_source_histories_preserve_receipt_identity_and_
     let evidence = evidence.into_inner();
     assert!(evidence.paying_rollbacks > 0 && evidence.release_rollbacks > 0);
     println!(
-        "INV-067 row 417: {} worlds, {} commits, {} rollbacks ({} paying, {} release), peak {} CU",
+        "INV-067 row 417: {} worlds, {} commits, {} rollbacks ({} paying, {} release), {} portfolio closes, {} slab calls, peak {} CU",
         evidence.worlds,
         evidence.commits,
         evidence.rollbacks,
         evidence.paying_rollbacks,
         evidence.release_rollbacks,
+        evidence.portfolio_closes,
+        evidence.slab_calls,
         evidence.peak_cu
     );
 }
