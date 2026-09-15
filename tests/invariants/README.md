@@ -1,5 +1,26 @@
 # Invariant-owned test coverage
 
+## Lane 16 full-market Hybrid progress (2026-09-15)
+
+The existing [Hybrid/source/backlog owner](cu/inv_077_hybrid_source_backlog.rs)
+adds one public LiteSVM witness combining all **5,782 configured market slots**,
+fourteen live legs, twenty-eight value-bearing sources, a 64-slot backlog and
+all **sixteen observation hints**. The two highest market indices join the
+fourteen held assets. Seventeen keeper-only cranks strictly reduce the selected
+pending-slot sum from 1,024 to zero; the final 48-reference call uses
+**1,241,192 CU** and fits a **486-byte signed transaction**. Account settlement,
+fourteen matched reductions, claim conversion, exact **1,902,000 / 2,098,000**
+SPL payouts and both portfolio closures complete the 38-call continuation.
+Slab rent is funded through a public System Program transfer before growth.
+
+This composes the occupancy and hint boundaries with Lane 7's funded source and
+backlog shape. Reports still use three shared feeds, and only fourteen assets
+carry exposure. **Row 423 remains OPEN; INV-077 remains OPEN_EVIDENCE.** Distinct-
+feed maxima, Recovery, liquidation and other lifecycle/fee/funding products
+remain open. No production fix or new security finding is claimed. The
+[Lane 16 report](lane16_maxshape_progress_cu_20260915.md) records overlap,
+artifact provenance, exact CU, commands, fixture corrections and limitations.
+
 ## Lane 9 mixed-role shutdown and pending debt (2026-09-15)
 
 The existing [INV-039 mixed-role owner](cu/inv_039_mixed_role_resolution.rs)
@@ -29132,6 +29153,13 @@ selectors fail construction, so they provide no current combined-shape CU result
 14-leg/28-source/64-slot-backlog product with a final 42-reference call and exact
 owner exit. Its 1,222,978-CU maximum applies only to that successful Live schedule;
 the original liquidation/Recovery products and wider occupancy frontier remain open.
+
+[Lane 16](lane16_maxshape_progress_cu_20260915.md) extends that owner with the
+5,782-configured-slot/14-leg/28-source/64-slot-backlog/16-hint product. Seventeen
+strict-progress cranks peak at 1,241,192 CU, followed by complete owner payouts
+and closures. The final 48-reference transaction is 486 bytes, with three
+distinct feeds. This covers that Live full-market continuation only; it does
+not close distinct-feed maxima, Recovery, liquidation, or row 423 as a whole.
 
 Additional maximum-hint/full-portfolio evidence, 2026-09-08:
 [`v16_bpf_full_14_leg_16_hint_three_feed_refresh_is_bounded`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)

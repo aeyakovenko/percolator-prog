@@ -35,8 +35,10 @@
 //! The separate hybrid_source_backlog owner constructs fourteen Hybrid legs and twenty-eight
 //! value-bearing sources using complete current reports, then measures two-chunk catch-up,
 //! full-report recertification, all reductions, conversion, exact SPL payouts and portfolio closes.
-//! Its final catch-up call supplies 42 references to three shared feeds. This is a Live, fourteen-
-//! market-slot, zero-fee/funding, unliened-source witness, not maximum market occupancy or Recovery.
+//! Its fourteen-market-slot control supplies 42 references to three shared feeds. A second public
+//! construction fills all 5,782 market slots and uses all sixteen hints, including the two highest
+//! indices, with 48 references. Both are Live, zero-fee/funding, unliened-source owner exits;
+//! neither composes distinct-feed maxima, Recovery or liquidation.
 //! Finally, a fully public maximum-market construction appends all 5,782 configured assets after
 //! both funded portfolios already hold fourteen legs and twenty-eight source records. Thirty
 //! bounded automatic cranks refresh both accounts, unilateral reduction lands below 1.179M CU,
