@@ -80,6 +80,34 @@ promotion. The [Lane 3 report](lane3_entitlement_stock_conformance_20260915.md)
 records the independent oracle, overlap review, existing capacity/expiry/reserve
 controls, commands, and bounded INV-024 through INV-039/041/086 coverage limits.
 
+## Lane 4 current-evidence and bounded-progress verification (2026-09-15)
+
+Base: `d809e9a5`, engine `394fd0bf`. The isolated Lane 4 work extends existing
+public-route owners rather than adding another reward or target-staging fixture:
+
+- INV-045's paid-origin Hybrid-recipient matrix now includes single and batch CPI
+  discovery, for eight route/publication-order worlds with identical reward,
+  retained penalty, domain budgets and SPL payout.
+- The caught-up Hybrid reward selector now requires exact rollback for an old
+  report before renewing it for liquidation, owner reduction and keeper payout.
+- The PR264/265/332/333 target-staging selector now checks both single and batch
+  CPI continuations after each authenticated or trade-driven target writer.
+- INV-053 shares its maximum-leg omission fixture with a new fourteen-distinct-feed
+  Hybrid case: every omitted or prior-slot report rejects atomically, then the
+  complete current set refreshes health in 901,162 CU.
+- INV-077's three-feed/two-chunk backlog selector now checks a strictly decreasing
+  pending-slot sum, recertifies both accounts, and completes fourteen reductions,
+  exact owner withdrawal and close. Maximum required-step CU is 747,789.
+  The short-side B-budget witness retains its per-call CU ceiling and exact
+  accounting instead of requiring equality to an obsolete historical CU count.
+
+Rows **422/427/423 remain OPEN** and **426 remains COVERED**. There is no production
+change or aggregate-status promotion. The wider runs also exposed baseline
+failures, including older observation histories and two Hybrid max-shape fixture
+constructions; passing source/index gates do not certify those executions.
+See [the Lane 4 report](lane4_conformance_d809_20260915.md) for exact commands,
+artifact hashes, changed files, row verdicts, passing scope and residual failures.
+
 ## Row 422 paid-origin Hybrid-recipient evidence (2026-09-14)
 
 Owner:

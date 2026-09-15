@@ -23109,9 +23109,18 @@ pub fn reproduce_composite_oracle_rounding(
 }
 
 pub fn reproduce_unstaged_mark_target(
-    mut seed: [u8; 32],
+    seed: [u8; 32],
     case: TargetStagingCase,
 ) -> Result<TargetStagingReproduction, String> {
+    reproduce_unstaged_mark_target_on_route(seed, case, TradeRoute::Cpi)
+}
+
+pub fn reproduce_unstaged_mark_target_on_route(
+    mut seed: [u8; 32],
+    case: TargetStagingCase,
+    route: TradeRoute,
+) -> Result<TargetStagingReproduction, String> {
+    assert!(matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi));
     seed[0] ^= match case {
         TargetStagingCase::AuthMarkPush => 0x32,
         TargetStagingCase::EwmaMarkPush => 0xa2,
@@ -23260,9 +23269,9 @@ pub fn reproduce_unstaged_mark_target(
     }
 
     let before_rejection = tracked_economic_accounts(&env);
-    let stale_increase_error = env
-        .trade_cpi(attacker, lp, 0, ATTACK_SIZE_Q, 0, 0)
-        .expect_err("stale-price CPI risk increase must reject");
+    let stale_increase_error =
+        execute_trade_route(&mut env, route, attacker, lp, 0, ATTACK_SIZE_Q, 0, 0)
+            .expect_err("stale-price CPI risk increase must reject");
     let stale_increase_rejected = stale_increase_error.contains("Custom(21)")
         || stale_increase_error.contains("custom program error: 0x15");
     let rejected_exact_rollback = tracked_economic_accounts(&env) == before_rejection;
@@ -23277,7 +23286,7 @@ pub fn reproduce_unstaged_mark_target(
     let lagging_risk_reduction_landed = if lagging_position_q == 0 {
         true
     } else {
-        env.trade_cpi(attacker, lp, 0, -lagging_position_q, 0, 0)
+        execute_trade_route(&mut env, route, attacker, lp, 0, -lagging_position_q, 0, 0)
             .map_err(|error| format!("{case:?} lagging risk reduction rejected: {error}"))?;
         !portfolio_has_active_asset(&env.primary_portfolio(attacker), 0)
             && !portfolio_has_active_asset(&env.primary_portfolio(lp), 0)
@@ -23320,12 +23329,12 @@ pub fn reproduce_unstaged_mark_target(
         ));
     }
 
-    let post_commit_trade = env
-        .trade_cpi(attacker, lp, 0, ATTACK_SIZE_Q, 0, 0)
-        .map_err(|error| format!("{case:?} post-commit CPI trade rejected: {error}"))?;
-    let post_commit_exit = env
-        .trade_cpi(attacker, lp, 0, -ATTACK_SIZE_Q, 0, 0)
-        .map_err(|error| format!("{case:?} post-commit CPI exit rejected: {error}"))?;
+    let post_commit_trade =
+        execute_trade_route(&mut env, route, attacker, lp, 0, ATTACK_SIZE_Q, 0, 0)
+            .map_err(|error| format!("{case:?} post-commit CPI trade rejected: {error}"))?;
+    let post_commit_exit =
+        execute_trade_route(&mut env, route, attacker, lp, 0, -ATTACK_SIZE_Q, 0, 0)
+            .map_err(|error| format!("{case:?} post-commit CPI exit rejected: {error}"))?;
     let attacker_flat = env.primary_portfolio(attacker);
     let victim_flat = env.primary_portfolio(lp);
     if portfolio_has_active_asset(&attacker_flat, 0) || portfolio_has_active_asset(&victim_flat, 0)

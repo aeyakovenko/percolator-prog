@@ -71,21 +71,31 @@ fn v16_program_pr264_pr265_pr332_pr333_targets_stage_before_stale_cpi() {
         TargetStagingCase::EwmaSingleTrade,
         TargetStagingCase::EwmaBatchTrade,
     ] {
-        let reproduction = reproduce_unstaged_mark_target([0x32; 32], case)
-            .unwrap_or_else(|error| panic!("{case:?} target-staging protection failed: {error}"));
-        assert_eq!(reproduction.blocker, KnownBlocker::UnstagedMarkTarget);
-        assert_eq!(reproduction.case, case);
-        assert_eq!(reproduction.engine_target, reproduction.wrapper_target);
-        assert!(reproduction.engine_epoch_advanced);
-        assert!(reproduction.stale_increase_rejected);
-        assert!(reproduction.rejected_exact_rollback);
-        assert!(reproduction.lagging_risk_reduction_landed);
-        assert!(reproduction.post_commit_trade_landed);
-        assert!(reproduction.post_commit_exit_landed);
-        assert_eq!(reproduction.moved_engine_mark, reproduction.wrapper_target);
-        assert_eq!(reproduction.attacker_profit, 0);
-        assert_eq!(reproduction.victim_capital_loss, 0);
-        assert!(reproduction.max_cu < support::v16_svm::TX_CU_LIMIT);
+        for route in [TradeRoute::Cpi, TradeRoute::BatchCpi] {
+            let reproduction = if route == TradeRoute::Cpi {
+                reproduce_unstaged_mark_target([0x32; 32], case)
+            } else {
+                support::fuzz_model::reproduce_unstaged_mark_target_on_route(
+                    [0x32; 32], case, route,
+                )
+            }
+            .unwrap_or_else(|error| {
+                panic!("{case:?} {route:?} target-staging protection failed: {error}")
+            });
+            assert_eq!(reproduction.blocker, KnownBlocker::UnstagedMarkTarget);
+            assert_eq!(reproduction.case, case);
+            assert_eq!(reproduction.engine_target, reproduction.wrapper_target);
+            assert!(reproduction.engine_epoch_advanced);
+            assert!(reproduction.stale_increase_rejected);
+            assert!(reproduction.rejected_exact_rollback);
+            assert!(reproduction.lagging_risk_reduction_landed);
+            assert!(reproduction.post_commit_trade_landed);
+            assert!(reproduction.post_commit_exit_landed);
+            assert_eq!(reproduction.moved_engine_mark, reproduction.wrapper_target);
+            assert_eq!(reproduction.attacker_profit, 0);
+            assert_eq!(reproduction.victim_capital_loss, 0);
+            assert!(reproduction.max_cu < support::v16_svm::TX_CU_LIMIT);
+        }
     }
 }
 

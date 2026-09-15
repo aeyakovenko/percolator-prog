@@ -290,6 +290,15 @@ fn v16_program_caught_up_hybrid_reward_uses_selected_asset_provenance_in_both_hi
             assert_eq!(env.token_amount(env.vault), vault);
         }
 
+        let before_stale_liquidation = frame(&env, &keys);
+        let stale = crank(&mut env, target, hints.clone(), &[report], true)
+            .expect_err("caught-up price does not replace current Hybrid health evidence");
+        assert!(is_engine_non_progress_error(&stale), "{stale}");
+        assert_eq!(frame(&env, &keys), before_stale_liquidation);
+        let now = env.svm.get_sysvar::<Clock>();
+        report = env.set_pyth_price_with_conf(&feed, REPORT as i64, -6, 0, now.unix_timestamp);
+        keys.push(report);
+
         let fee_at = |quantity: u128, price: u64| {
             ((quantity * price as u128).div_ceil(POS_SCALE) * 5).div_ceil(10_000)
         };
@@ -302,6 +311,13 @@ fn v16_program_caught_up_hybrid_reward_uses_selected_asset_provenance_in_both_hi
             max_cu = max_cu.max(crank(&mut env, target, hints.clone(), &[report], true).unwrap());
             let after = env.market_state().1;
             assert_eq!(after.assets[1].effective_price, REPORT);
+            let market = env.svm.get_account(&env.market).unwrap();
+            let current_profile = state::read_asset_oracle_profile(&market.data, 1).unwrap();
+            assert_eq!(current_profile.last_good_oracle_slot, now.slot);
+            assert_eq!(
+                current_profile.oracle_target_publish_time,
+                now.unix_timestamp
+            );
             assert_eq!(after.assets[0].effective_price, ENTRY);
             assert_eq!(
                 (

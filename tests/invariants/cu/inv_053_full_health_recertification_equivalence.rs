@@ -947,15 +947,48 @@ fn v16_bpf_auth_mark_target_effective_lag_counts_toward_liquidation_health() {
 
 #[test]
 fn v16_program_max_shape_refresh_rejects_each_single_omitted_pending_leg() {
+    run_max_shape_refresh_omission_matrix(false);
+}
+
+#[test]
+fn v16_program_max_shape_hybrid_refresh_requires_each_current_report() {
+    run_max_shape_refresh_omission_matrix(true);
+}
+
+fn run_max_shape_refresh_omission_matrix(hybrid: bool) {
     const ASSET_COUNT: u16 = 14;
     const INITIAL_MARK: u64 = 100;
     const MOVED_MARK: u64 = 95;
     const REFRESH_SLOT: u64 = 2;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(ASSET_COUNT, 1_000, 1_000, 500);
-    env.svm.warp_to_slot(1);
+    set_test_clock(&mut env, 1, 100);
+    let feeds: Vec<_> = (0..ASSET_COUNT)
+        .map(|asset| [0xa0 + asset as u8; 32])
+        .collect();
+    let mut old_reports = Vec::new();
     for asset_index in 0..ASSET_COUNT {
-        env.configure_auth_mark_for_asset_as_admin(asset_index, 1, INITIAL_MARK);
+        if hybrid {
+            let feed = feeds[asset_index as usize];
+            let report = env.set_pyth_price_with_conf(&feed, INITIAL_MARK as i64, -6, 0, 100);
+            env.try_configure_hybrid_asset_with_conf_filter_cu(
+                asset_index,
+                1,
+                0,
+                [feed, [0; 32], [0; 32]],
+                &[report],
+                1,
+                100,
+                0,
+                0,
+                100,
+                100,
+            )
+            .expect("configure distinct public Hybrid feed");
+            old_reports.push(report);
+        } else {
+            env.configure_auth_mark_for_asset_as_admin(asset_index, 1, INITIAL_MARK);
+        }
     }
 
     let long_owner = Keypair::new();
@@ -986,77 +1019,151 @@ fn v16_program_max_shape_refresh_rejects_each_single_omitted_pending_leg() {
     )
     .expect("open maximum-shape public portfolio");
 
-    env.svm.warp_to_slot(REFRESH_SLOT);
+    set_test_clock(&mut env, REFRESH_SLOT, 101);
+    let mut current_reports = Vec::new();
     for asset_index in 0..ASSET_COUNT {
-        env.push_auth_mark_for_asset_as_admin(asset_index, REFRESH_SLOT, MOVED_MARK);
+        if hybrid {
+            current_reports.push(env.set_pyth_price_with_conf(
+                &feeds[asset_index as usize],
+                MOVED_MARK as i64,
+                -6,
+                0,
+                101,
+            ));
+        } else {
+            env.push_auth_mark_for_asset_as_admin(asset_index, REFRESH_SLOT, MOVED_MARK);
+        }
     }
     let market_before = env.svm.get_account(&env.market).unwrap();
     let long_before = env.svm.get_account(&long).unwrap();
     let short_before = env.svm.get_account(&short).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let mut external_keys = vec![env.mint, long_owner.pubkey(), short_owner.pubkey()];
+    external_keys.extend(old_reports.iter().chain(&current_reports).copied());
+    let external_before: Vec<_> = external_keys
+        .iter()
+        .map(|key| env.svm.get_account(key))
+        .collect();
+    if hybrid {
+        for asset in 0..ASSET_COUNT as usize {
+            let profile = state::read_asset_oracle_profile(&market_before.data, asset).unwrap();
+            assert_eq!(profile.last_good_oracle_slot, 1);
+            assert_eq!(profile.oracle_target_publish_time, 100);
+            assert_eq!(
+                env.market_state().1.assets[asset].raw_oracle_target_price,
+                INITIAL_MARK
+            );
+        }
+    }
 
     for omitted in 0..ASSET_COUNT {
-        let observations = (0..ASSET_COUNT)
-            .filter(|asset_index| *asset_index != omitted)
-            .map(|asset_index| CrankObservationHint {
-                asset_index,
-                oracle_accounts: 0,
-            })
-            .collect();
-        env.svm.expire_blockhash();
-        let error = env
-            .send(
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: REFRESH_SLOT,
-                    observations,
-                },
-                vec![
-                    AccountMeta::new(env.payer.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(long, false),
-                ],
-                &[],
-            )
-            .expect_err("omitting any pending active leg must reject full-account refresh");
-        assert!(
-            error.contains("Custom(22)") || error.contains("custom program error: 0x16"),
-            "omitting asset {omitted} reached the wrong guard: {error}"
-        );
-        assert_eq!(
-            env.svm.get_account(&env.market).unwrap(),
-            market_before,
-            "omitting asset {omitted} mutated market state"
-        );
-        assert_eq!(
-            env.svm.get_account(&long).unwrap(),
-            long_before,
-            "omitting asset {omitted} mutated the refreshed portfolio"
-        );
-        assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
-        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+        // Replay is structurally complete and still within timestamp freshness.
+        // Per-asset current-slot provenance must still precede full refresh.
+        for replay in if hybrid {
+            &[false, true][..]
+        } else {
+            &[false][..]
+        } {
+            let observations = (0..ASSET_COUNT)
+                .filter(|asset_index| *replay || *asset_index != omitted)
+                .map(|asset_index| CrankObservationHint {
+                    asset_index,
+                    oracle_accounts: u8::from(hybrid),
+                })
+                .collect();
+            let mut accounts = vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ];
+            for (asset, &report) in current_reports.iter().enumerate() {
+                if asset == omitted as usize {
+                    if *replay {
+                        accounts.push(AccountMeta::new_readonly(old_reports[asset], false));
+                    }
+                } else {
+                    accounts.push(AccountMeta::new_readonly(report, false));
+                }
+            }
+            env.svm.expire_blockhash();
+            let error = env
+                .send(
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: if *replay { u64::MAX } else { REFRESH_SLOT },
+                        observations,
+                    },
+                    accounts,
+                    &[],
+                )
+                .expect_err("omitting any pending active leg must reject full-account refresh");
+            assert!(
+                error.contains("Custom(22)") || error.contains("custom program error: 0x16"),
+                "omitting asset {omitted} reached the wrong guard: {error}"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "omitting asset {omitted} mutated market state"
+            );
+            assert_eq!(
+                env.svm.get_account(&long).unwrap(),
+                long_before,
+                "omitting asset {omitted} mutated the refreshed portfolio"
+            );
+            assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+            assert_eq!(
+                external_keys
+                    .iter()
+                    .map(|key| env.svm.get_account(key))
+                    .collect::<Vec<_>>(),
+                external_before
+            );
+        }
     }
 
     let asset_indices = (0..ASSET_COUNT).collect::<Vec<_>>();
+    let mut observations = crank_observations_for_assets(&asset_indices);
+    for observation in &mut observations {
+        observation.oracle_accounts = u8::from(hybrid);
+    }
+    let mut accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(long, false),
+    ];
+    accounts.extend(
+        current_reports
+            .iter()
+            .map(|key| AccountMeta::new_readonly(*key, false)),
+    );
     env.svm.expire_blockhash();
     let refresh_cu = env
         .send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: REFRESH_SLOT,
-                observations: crank_observations_for_assets(&asset_indices),
+                observations,
             },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(long, false),
-            ],
+            accounts,
             &[],
         )
         .expect("complete maximum-shape observation set must retain refresh liveness");
-    println!("INV-053 complete 14-leg AuthMark refresh CU: {refresh_cu}");
-    assert_cu_within("maximum-shape complete refresh", refresh_cu, 900_000);
+    println!("INV-053 complete 14-leg refresh hybrid={hybrid} CU: {refresh_cu}");
+    assert_cu_within(
+        "maximum-shape complete refresh",
+        refresh_cu,
+        if hybrid { 1_000_000 } else { 900_000 },
+    );
 
     let after = env.market_state().1;
     let long_after = env.portfolio_state(long);
+    assert!(health_cert(&long_after).valid);
+    assert_eq!(
+        long_after.capital.get(),
+        10_000_000 - u128::from(ASSET_COUNT) * u128::from(INITIAL_MARK - MOVED_MARK)
+    );
+    assert_eq!(long_after.pnl.get(), 0);
+    assert_eq!(after.insurance, 0);
     for asset_index in 0..ASSET_COUNT as usize {
         assert_eq!(after.assets[asset_index].effective_price, MOVED_MARK);
         assert_eq!(
@@ -1065,6 +1172,14 @@ fn v16_program_max_shape_refresh_rejects_each_single_omitted_pending_leg() {
                 .unsigned_abs(),
             POS_SCALE
         );
+        assert_eq!(after.assets[asset_index].oi_eff_long_q, POS_SCALE);
+        assert_eq!(after.assets[asset_index].oi_eff_short_q, POS_SCALE);
+        if hybrid {
+            let market = env.svm.get_account(&env.market).unwrap();
+            let profile = state::read_asset_oracle_profile(&market.data, asset_index).unwrap();
+            assert_eq!(profile.last_good_oracle_slot, REFRESH_SLOT);
+            assert_eq!(profile.oracle_target_publish_time, 101);
+        }
     }
     assert_eq!(
         health_cert(&long_after).cert_oracle_epoch,
@@ -1072,6 +1187,13 @@ fn v16_program_max_shape_refresh_rejects_each_single_omitted_pending_leg() {
     );
     assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(
+        external_keys
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>(),
+        external_before
+    );
 }
 
 #[test]

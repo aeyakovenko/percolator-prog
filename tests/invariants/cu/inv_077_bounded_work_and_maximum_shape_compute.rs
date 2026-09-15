@@ -3477,6 +3477,19 @@ fn v16_bpf_public_full_14_leg_three_feed_max_backlog_has_bounded_refresh_schedul
     );
     let final_slot = start_slots[0] + 2 * percolator::V16_MAX_ACCRUAL_PATH_STEPS as u64;
     let vault_before = env.token_amount(env.vault);
+    let short_before = env.svm.get_account(&short);
+    let custody_before = [env.vault, env.mint].map(|key| env.svm.get_account(&key));
+    let backlog = |group: &MarketGroupV16| {
+        group.assets[..ASSET_COUNT as usize]
+            .iter()
+            .map(|asset| final_slot.checked_sub(asset.slot_last).unwrap())
+            .sum::<u64>()
+    };
+    let mut remaining = backlog(&before_group);
+    assert_eq!(
+        remaining,
+        u64::from(ASSET_COUNT) * 2 * percolator::V16_MAX_ACCRUAL_PATH_STEPS as u64
+    );
 
     set_test_clock(&mut env, final_slot, 200);
     let moved_oracles = [
@@ -3532,6 +3545,17 @@ fn v16_bpf_public_full_14_leg_three_feed_max_backlog_has_bounded_refresh_schedul
         assert_cu_within("14-leg three-feed max-backlog crank", cu, 1_375_000);
 
         let (_, group) = env.market_state();
+        let next = backlog(&group);
+        assert!(
+            next < remaining,
+            "step {step}: required catchup must reduce backlog"
+        );
+        remaining = next;
+        assert_eq!(env.svm.get_account(&short), short_before);
+        assert_eq!(
+            [env.vault, env.mint].map(|key| env.svm.get_account(&key)),
+            custody_before
+        );
         if step == 0 {
             assert!(
                 group.assets[0].slot_last < final_slot,
@@ -3548,6 +3572,8 @@ fn v16_bpf_public_full_14_leg_three_feed_max_backlog_has_bounded_refresh_schedul
 
     let after = env.portfolio_state(long);
     let (_, after_group) = env.market_state();
+    assert_eq!(remaining, 0);
+    assert!(health_cert(&after).valid);
     for asset_index in 0..ASSET_COUNT as usize {
         assert_eq!(after_group.assets[asset_index].slot_last, final_slot);
         assert_eq!(after_group.assets[asset_index].effective_price, MOVED_MARK);
@@ -3566,7 +3592,98 @@ fn v16_bpf_public_full_14_leg_three_feed_max_backlog_has_bounded_refresh_schedul
     );
     assert_eq!(env.token_amount(env.vault), vault_before);
     assert_eq!(after_group.vault, before_group.vault);
-    println!("v16 all-14 three-feed 64-slot staggered refresh max CU: {max_cu}");
+    let expected_capital =
+        before.capital.get() - u128::from(ASSET_COUNT) * u128::from(MARK - MOVED_MARK);
+    assert_eq!(after.capital.get(), expected_capital);
+    assert_eq!(after.pnl.get(), 0);
+    assert_eq!(after_group.insurance, before_group.insurance);
+
+    // The bounded observation schedule must leave an executable owner exit.
+    let long_before_peer_refresh = env.svm.get_account(&long);
+    let peer_refresh_cu = env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: final_slot,
+            observations: vec![],
+        },
+    );
+    assert_cu_within(
+        "post-backlog counterparty refresh",
+        peer_refresh_cu,
+        1_375_000,
+    );
+    assert_eq!(env.svm.get_account(&long), long_before_peer_refresh);
+    assert!(health_cert(&env.portfolio_state(short)).valid);
+    let owner_refresh_cu = env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: final_slot,
+            observations: vec![],
+        },
+    );
+    assert_cu_within(
+        "post-backlog owner recertification",
+        owner_refresh_cu,
+        1_375_000,
+    );
+    assert_eq!(
+        health_cert(&env.portfolio_state(long)).cert_risk_epoch,
+        env.market_state().1.risk_epoch
+    );
+    let mut exit_cu = 0;
+    for asset in (0..ASSET_COUNT).rev() {
+        env.svm.expire_blockhash();
+        let cu = env
+            .try_trade_asset_with_cu(
+                asset,
+                &long_owner,
+                long,
+                &short_owner,
+                short,
+                -(POS_SCALE as i128),
+                MOVED_MARK,
+                0,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "post-backlog asset {asset}: {error}; long={:?}; short={:?}",
+                    health_cert(&env.portfolio_state(long)),
+                    health_cert(&env.portfolio_state(short))
+                )
+            });
+        assert_cu_within("post-backlog owner reduction", cu, 1_375_000);
+        exit_cu = exit_cu.max(cu);
+        let group = env.market_state().1;
+        assert_eq!(group.assets[asset as usize].oi_eff_long_q, 0);
+        assert_eq!(group.assets[asset as usize].oi_eff_short_q, 0);
+        for portfolio in [long, short] {
+            assert_eq!(
+                percolator::active_bitmap_count_ones(active_bitmap(
+                    &env.portfolio_state(portfolio)
+                )),
+                u32::from(asset)
+            );
+        }
+    }
+    assert_eq!(env.portfolio_state(long).capital.get(), expected_capital);
+    let (destination, withdrawal_cu) = env.withdraw_with_cu(&long_owner, long, expected_capital);
+    assert_cu_within(
+        "post-backlog owner withdrawal",
+        withdrawal_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(destination) as u128, expected_capital);
+    assert_eq!(
+        env.token_amount(env.vault) as u128,
+        u128::from(vault_before) - expected_capital
+    );
+    assert_eq!(
+        env.market_state().1.vault,
+        u128::from(vault_before) - expected_capital
+    );
+    let close_cu = env.close_portfolio_with_cu(&long_owner, long);
+    assert_cu_within("post-backlog portfolio close", close_cu, CUSTODY_CU_LIMIT);
+    println!("v16 all-14 three-feed 64-slot progress CU: refresh={max_cu} peer_refresh={peer_refresh_cu} owner_refresh={owner_refresh_cu} exit={exit_cu} withdrawal={withdrawal_cu} close={close_cu}");
 }
 
 #[test]
