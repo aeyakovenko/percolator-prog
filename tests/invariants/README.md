@@ -40,6 +40,32 @@ remains OPEN/missing**; production and machine statuses are unchanged. This is
 bounded INV-024/063/067/068/073 evidence. See the [Lane 17 report](lane17_resolved_receipt_late_expiry_20260915.md)
 for exact validation, public-route constraints and the remaining products.
 
+## Lane 18 mixed-role native slab retirement (2026-09-15)
+
+The existing [INV-039 retirement owner](cu/inv_039_mixed_role_fractional_retirement.rs)
+adds 24 public LiteSVM histories carrying a zero-basis pending creditor and an
+unsettled cross-asset debtor through native payouts and actual slab retirement.
+The input-derived owner book covers partial/full source-support consumption,
+including a fractional peer receipt, mirrored sides, two close orders, and
+zero/raw/synchronized surplus. Each owner redeems and recreates native custody;
+a paid receipt cannot pay again into the recreated account. Source residue of
+4,000/20,000 atoms ultimately reaches the distinct asset-0 insurance beneficiary,
+while the administrator receives only donated surplus and exact rent refunds.
+
+All 24 markets close, with 24 waiting rollbacks, 168 successful-prefix rollbacks,
+120 native redemptions/recreations and 48 bounded retirement calls. Peak measured
+CU is 209,306 under a 300,000 bound. Exact Account frames, lamport conservation,
+stock/reservation censuses, pending-weight aggregates and per-owner entitlements
+separate this axis from Lane 9 shutdown ordering and Lane 3 funding/insurance.
+The existing classic retirement product uses a burn; this product exercises
+native escheat after mixed debt and paid-receipt custody recreation.
+
+No implementation bug was found. Rows **419/435 remain OPEN/missing** and
+INV-039 remains `REFUTED_CURRENT`. ADL, underfunded receipts, reserve recredit,
+arbitrary schedules, maximum shape and generic equivalence remain outside this
+increment. The [Lane 18 report](lane18_pending_loss_debt_attribution_20260915.md)
+records the oracle, overlap review, exact commands, artifact hashes and limits.
+
 ## Lane 9 mixed-role shutdown and pending debt (2026-09-15)
 
 The existing [INV-039 mixed-role owner](cu/inv_039_mixed_role_resolution.rs)

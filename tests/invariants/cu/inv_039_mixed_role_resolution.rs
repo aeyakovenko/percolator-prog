@@ -333,12 +333,27 @@ impl Book {
                     .sum::<u128>(),
             DEPOSITS.iter().sum::<u128>()
         );
-        assert_eq!(
-            Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
-                .unwrap()
-                .supply as u128,
-            DEPOSITS.iter().sum::<u128>()
-        );
+        if env.mint == spl_token::native_mint::ID {
+            for (key, owner) in std::iter::once((env.vault, env.vault_authority))
+                .chain(world.actors.iter().map(|a| (a.token, a.owner.pubkey())))
+            {
+                let account = env.svm.get_account(&key).unwrap();
+                let token = TokenAccount::unpack(&account.data).unwrap();
+                let COption::Some(rent) = token.is_native else {
+                    panic!("native custody must retain its rent reserve");
+                };
+                assert_eq!(account.owner, spl_token::ID);
+                assert_eq!((token.owner, token.mint), (owner, env.mint));
+                assert_eq!(account.lamports, rent + token.amount);
+            }
+        } else {
+            assert_eq!(
+                Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+                    .unwrap()
+                    .supply as u128,
+                DEPOSITS.iter().sum::<u128>()
+            );
+        }
         assert_eq!(group.insurance, 0);
         assert_market_stock_census(
             "mixed-role resolution",
@@ -388,21 +403,31 @@ impl Book {
 }
 
 fn setup(reverse: bool, assets: [usize; 2], debt: u128) -> (AttributionWorld, Book) {
-    let mut world = AttributionWorld::new_with_deposits(
-        reverse,
-        V16CuMarketParams {
-            max_portfolio_assets: 3,
-            initial_price: 1_000_000,
-            maintenance_margin_bps: 1_000,
-            initial_margin_bps: 1_000,
-            max_price_move_bps_per_slot: 500,
-            max_abs_funding_e9_per_slot: 0,
-            liquidation_fee_bps: 0,
-            max_bankrupt_close_lifetime_slots: 1_000,
-            ..V16CuMarketParams::default()
-        },
-        DEPOSITS,
-    );
+    setup_with_quote(reverse, assets, debt, false)
+}
+
+fn setup_with_quote(
+    reverse: bool,
+    assets: [usize; 2],
+    debt: u128,
+    native: bool,
+) -> (AttributionWorld, Book) {
+    let params = V16CuMarketParams {
+        max_portfolio_assets: 3,
+        initial_price: 1_000_000,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        max_abs_funding_e9_per_slot: 0,
+        liquidation_fee_bps: 0,
+        max_bankrupt_close_lifetime_slots: 1_000,
+        ..V16CuMarketParams::default()
+    };
+    let mut world = if native {
+        fractional_retirement::native_world(reverse, params)
+    } else {
+        AttributionWorld::new_with_deposits(reverse, params, DEPOSITS)
+    };
     let sign = if reverse { -1i128 } else { 1 };
     for (pair, holder, debtor, lots) in [(0, 0, 1, 1), (1, 2, 0, 2)] {
         world.env.trade_asset_with_cu(
