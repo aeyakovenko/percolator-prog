@@ -36,6 +36,24 @@ pending claims, maximum shapes and absent-admin retirement remain open.
 See the [Lane 10 report](lane10_terminal_insurance_conformance_20260915.md)
 for the overlap review, public-route limits, artifacts and validation commands.
 
+## Lane 11 consumed backing across funded oracle overlap (2026-09-15)
+
+The existing [consumed-backing owner](cu/inv_005_consumed_backing_containment.rs)
+now adds sixteen public LiteSVM worlds: both side domains, Active/DrainOnly,
+cold-admin/market-admin oracle successors, and oracle round trips before/after
+the final earned fee atom. The incumbent oracle also owns backing whose principal
+has already been repaid. After fees are paid, only a consumed receivable protects
+that role. Oracle succession preserves its ownership, revokes the old observer,
+and invalidates old fee/observation epochs even when the oracle key returns.
+
+The new selector checks 112 exact rollbacks (80 with completed SPL prefixes),
+typed stock and fee attribution, account program/token owners, rent, and 32 exact
+owner withdrawals. The original four-world selector remains. This adds bounded
+INV-005/020/024/027/036/055 coverage; row **416 remains OPEN/missing** and all
+machine dispositions are unchanged. No production change was required. The
+[Lane 11 report](lane11_funded_oracle_containment_20260915.md) records the
+non-duplication review, commands, results, and remaining gaps.
+
 ## Lane 6 recreated-counterparty cumulative limits (2026-09-15)
 
 The existing INV-058 selector

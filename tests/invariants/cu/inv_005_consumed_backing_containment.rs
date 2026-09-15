@@ -6,8 +6,10 @@
 //! stale maturity rolls back a valid cold-admin rotation; a fresh oracle report
 //! restores payout without renewing the expired backing or transferring the role.
 //! This is bounded privileged containment, with public System/SPL/wrapper setup.
+//! The oracle-overlap product also crosses the last earned atom: observation
+//! succession cannot transfer a consumed-only reserve or revive an old epoch.
 
-use super::cold_admin_earned_reserve::{land, wrap};
+use super::cold_admin_earned_reserve::{land as land_inner, wrap};
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 
@@ -19,8 +21,249 @@ const EXPIRY: u64 = 100;
 const DEADLINE: u64 = 112;
 const PROFIT: u128 = 5_000;
 
+fn land(
+    env: &mut V16CuEnv,
+    instructions: &[Instruction],
+    signers: &[&Keypair],
+    tracked: &[Pubkey],
+    changed: &[Pubkey],
+    rejection: Option<(u8, PercolatorError, usize)>,
+) -> u64 {
+    let frames = changed
+        .iter()
+        .map(|key| (*key, env.svm.get_account(key).unwrap()))
+        .collect::<Vec<_>>();
+    let cu = land_inner(env, instructions, signers, tracked, changed, rejection);
+    for (key, mut before) in frames {
+        let after = env.svm.get_account(&key).unwrap();
+        assert_eq!(after.owner, before.owner, "account program owner: {key}");
+        assert_eq!(after.lamports, before.lamports, "account rent: {key}");
+        assert_eq!(after.executable, before.executable);
+        assert_eq!(after.rent_epoch, before.rent_epoch);
+        assert_eq!(after.data.len(), before.data.len());
+        if before.owner == spl_token::ID {
+            let mut token = TokenAccount::unpack(&before.data).unwrap();
+            token.amount = TokenAccount::unpack(&after.data).unwrap().amount;
+            TokenAccount::pack(token, &mut before.data).unwrap();
+            assert_eq!(after, before, "only SPL amount may change: {key}");
+        }
+    }
+    cu
+}
+
+fn earnings_at_epoch(
+    env: &V16CuEnv,
+    template: &Instruction,
+    domain: u16,
+    epoch: u64,
+) -> Instruction {
+    Instruction {
+        data: ProgInstruction::WithdrawBackingBucketEarnings {
+            domain,
+            market_id: env.asset_market_id(0),
+            authority_epoch: epoch,
+            amount: 1,
+        }
+        .encode(),
+        ..template.clone()
+    }
+}
+
+fn oracle_round_trip(
+    env: &mut V16CuEnv,
+    domain: u16,
+    mark: u64,
+    provider: &Keypair,
+    cold: &Keypair,
+    successor: &Keypair,
+    prefix_signer: &Keypair,
+    prefix: &Instruction,
+    earnings_prefix: bool,
+    tracked: &[Pubkey],
+) -> [u64; 2] {
+    let market = env.market;
+    let market_id = env.asset_market_id(0);
+    let program_id = env.program_id;
+    let economy = env.market_state();
+    let original_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&market).unwrap().data, 0).unwrap();
+    let original_sequences = env.control_sequences(0);
+    let epoch = original_sequences.authority_epoch;
+    let observation = original_sequences.oracle_observation;
+    assert_eq!(
+        original_profile.oracle_authority,
+        provider.pubkey().to_bytes()
+    );
+    assert_eq!(
+        original_profile.backing_bucket_authority,
+        provider.pubkey().to_bytes()
+    );
+    assert_eq!(original_profile.asset_admin, cold.pubkey().to_bytes());
+    let rotation = |kind, from: Pubkey, to: Pubkey, authority_epoch| Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(from, true),
+            AccountMeta::new_readonly(to, true),
+            AccountMeta::new(market, false),
+        ],
+        data: ProgInstruction::UpdateAssetAuthority {
+            asset_index: 0,
+            market_id,
+            authority_epoch,
+            kind,
+            new_pubkey: to.to_bytes(),
+        }
+        .encode(),
+    };
+    let observe = |signer: Pubkey, authority_epoch, observation_sequence| Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(signer, true),
+            AccountMeta::new(market, false),
+        ],
+        data: ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            market_id,
+            authority_epoch,
+            observation_sequence,
+            now_slot: u64::MAX,
+            mark_e6: mark,
+        }
+        .encode(),
+    };
+    let payout = |env: &V16CuEnv, epoch| {
+        if earnings_prefix {
+            earnings_at_epoch(env, prefix, domain, epoch)
+        } else {
+            prefix.clone()
+        }
+    };
+    let handoff = rotation(
+        processor::ASSET_AUTH_ORACLE,
+        cold.pubkey(),
+        successor.pubkey(),
+        epoch,
+    );
+    let report = observe(successor.pubkey(), epoch + 1, observation + 1);
+    let seize = rotation(
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        cold.pubkey(),
+        cold.pubkey(),
+        epoch + 1,
+    );
+    let mut peak = [0; 2];
+    let mut bundle_signers = vec![cold, successor, prefix_signer];
+    bundle_signers.sort_by_key(|key| key.pubkey());
+    bundle_signers.dedup_by_key(|key| key.pubkey());
+    let fresh_prefix = payout(env, epoch + 1);
+    peak[0] = peak[0].max(land(
+        env,
+        &[handoff.clone(), report.clone(), fresh_prefix.clone(), seize],
+        &bundle_signers,
+        tracked,
+        &[],
+        Some((5, PercolatorError::EngineLockActive, 1)),
+    ));
+
+    let mut management_signers = vec![cold, successor];
+    management_signers.sort_by_key(|key| key.pubkey());
+    management_signers.dedup_by_key(|key| key.pubkey());
+    assert!(!management_signers
+        .iter()
+        .any(|key| key.pubkey() == provider.pubkey()));
+    peak[1] = peak[1].max(land(
+        env,
+        &[handoff, report],
+        &management_signers,
+        tracked,
+        &[market],
+        None,
+    ));
+    let mut expected_profile = original_profile;
+    expected_profile.oracle_authority = successor.pubkey().to_bytes();
+    let mut expected_sequences = original_sequences;
+    expected_sequences.authority_epoch += 1;
+    expected_sequences.oracle_observation += 1;
+    assert_eq!(env.market_state(), economy);
+    assert_eq!(env.control_sequences(0), expected_sequences);
+    assert_eq!(
+        state::read_asset_oracle_profile(&env.svm.get_account(&market).unwrap().data, 0).unwrap(),
+        expected_profile
+    );
+
+    let mut prefix_signers = vec![prefix_signer, provider];
+    prefix_signers.sort_by_key(|key| key.pubkey());
+    prefix_signers.dedup_by_key(|key| key.pubkey());
+    peak[0] = peak[0].max(land(
+        env,
+        &[
+            fresh_prefix,
+            observe(provider.pubkey(), epoch + 1, observation + 2),
+        ],
+        &prefix_signers,
+        tracked,
+        &[],
+        Some((3, PercolatorError::Unauthorized, 1)),
+    ));
+    let return_oracle = rotation(
+        processor::ASSET_AUTH_ORACLE,
+        successor.pubkey(),
+        provider.pubkey(),
+        epoch + 1,
+    );
+    peak[1] = peak[1].max(land(
+        env,
+        &[
+            return_oracle,
+            observe(provider.pubkey(), epoch + 2, observation + 2),
+        ],
+        &[successor, provider],
+        tracked,
+        &[market],
+        None,
+    ));
+    expected_sequences.authority_epoch += 1;
+    expected_sequences.oracle_observation += 1;
+    assert_eq!(env.market_state(), economy);
+    assert_eq!(env.control_sequences(0), expected_sequences);
+    assert_eq!(
+        state::read_asset_oracle_profile(&env.svm.get_account(&market).unwrap().data, 0).unwrap(),
+        original_profile
+    );
+    // The same oracle key is back, but neither its old observation epoch nor
+    // the provider's retained fee request may spend the replacement incarnation.
+    let stale = if earnings_prefix {
+        prefix.clone()
+    } else {
+        observe(provider.pubkey(), epoch, observation + 3)
+    };
+    let fresh_prefix = payout(env, epoch + 2);
+    peak[0] = peak[0].max(land(
+        env,
+        &[fresh_prefix, stale],
+        &prefix_signers,
+        tracked,
+        &[],
+        Some((3, PercolatorError::EngineStale, 1)),
+    ));
+    peak
+}
+
 #[test]
 fn v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only() {
+    run_consumed_backing(None);
+}
+
+#[test]
+fn v16_program_consumed_backing_oracle_overlap_preserves_last_fee_and_user_exit() {
+    for successor_is_cold in [false, true] {
+        for before_last_fee in [false, true] {
+            run_consumed_backing(Some((successor_is_cold, before_last_fee)));
+        }
+    }
+}
+
+fn run_consumed_backing(oracle_overlap: Option<(bool, bool)>) {
     let mut peak = [0; 3]; // rejection, management/payout, owner exit
     for domain in [0u16, 1] {
         let (mark, final_size) = if domain == 1 {
@@ -57,8 +300,23 @@ fn v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only(
                 provider.pubkey().to_bytes(),
             )
             .unwrap();
+            let oracle = if oracle_overlap.is_some() {
+                &provider
+            } else {
+                &admin
+            };
+            if oracle_overlap.is_some() {
+                env.try_update_per_asset_authority_with_cu(
+                    &admin,
+                    Some(&provider),
+                    0,
+                    processor::ASSET_AUTH_ORACLE,
+                    provider.pubkey().to_bytes(),
+                )
+                .unwrap();
+            }
             env.svm.warp_to_slot(1);
-            env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+            env.configure_auth_mark_for_asset_with_authority(0, oracle, 1, PRICE);
             env.configure_permissionless_resolve_with_cu(DEADLINE - 2, 2);
             env.update_backing_fee_policy_with_cu(domain, RATE, 0);
             let wallets = actors.map(|actor| {
@@ -179,7 +437,7 @@ fn v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only(
                 0,
             );
             env.svm.warp_to_slot(2);
-            env.push_auth_mark_for_asset_as_admin(0, 2, mark);
+            env.push_auth_mark_for_asset_with_authority(0, oracle, 2, mark);
             for i in [1, 0] {
                 env.crank(
                     portfolios[i],
@@ -271,7 +529,33 @@ fn v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only(
             assert_eq!(ledger_initial.total_earnings_atoms, earned);
             assert_eq!(ledger_initial.total_earnings_withdrawn_atoms, 0);
             assert_eq!(initial.0.last_good_oracle_slot, 2);
+            let check_owners = |env: &V16CuEnv| {
+                for key in [market, ledger, portfolios[0], portfolios[1]] {
+                    assert_eq!(env.svm.get_account(&key).unwrap().owner, env.program_id);
+                }
+                assert_eq!(env.svm.get_account(&env.mint).unwrap().owner, spl_token::ID);
+                for (key, owner) in wallets
+                    .into_iter()
+                    .zip(actors.map(Signer::pubkey))
+                    .chain([(vault, env.vault_authority)])
+                {
+                    let account = env.svm.get_account(&key).unwrap();
+                    assert_eq!(account.owner, spl_token::ID);
+                    let token = TokenAccount::unpack(&account.data).unwrap();
+                    assert_eq!(token.owner, owner);
+                    assert_eq!(token.mint, env.mint);
+                    assert_eq!(token.delegate, COption::None);
+                    assert_eq!(token.close_authority, COption::None);
+                }
+                for (portfolio, owner) in portfolios.into_iter().zip(&owners) {
+                    assert_eq!(
+                        env.portfolio_state(portfolio).owner,
+                        owner.pubkey().to_bytes()
+                    );
+                }
+            };
             let check_value = |env: &V16CuEnv, paid: u128| {
+                check_owners(env);
                 let (_, group) = env.market_state();
                 let mut expected = initial.1.clone();
                 expected.vault -= paid;
@@ -389,12 +673,6 @@ fn v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only(
                 cold.pubkey(),
                 epoch + 1,
             );
-            let consent = rotation(
-                processor::ASSET_AUTH_BACKING_BUCKET,
-                provider.pubkey(),
-                cold.pubkey(),
-                epoch + 1,
-            );
             let earnings = |amount| {
                 wrap(
                     &env,
@@ -430,7 +708,7 @@ fn v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only(
                     authority_epoch: epoch + 1,
                 },
                 vec![
-                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(oracle.pubkey(), true),
                     AccountMeta::new(market, false),
                 ],
             );
@@ -496,6 +774,50 @@ fn v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only(
             ));
             check_value(&env, earned - 1);
 
+            let user_prefix = wrap(
+                &env,
+                env.withdraw_ix(portfolios[0], 1),
+                vec![
+                    AccountMeta::new(owners[0].pubkey(), true),
+                    AccountMeta::new(market, false),
+                    AccountMeta::new(portfolios[0], false),
+                    AccountMeta::new(wallets[0], false),
+                    AccountMeta::new(vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+            );
+            if let Some((successor_is_cold, true)) = oracle_overlap {
+                let observed = oracle_round_trip(
+                    &mut env,
+                    domain,
+                    mark,
+                    &provider,
+                    &cold,
+                    if successor_is_cold { &cold } else { &admin },
+                    &provider,
+                    &last,
+                    true,
+                    &tracked,
+                );
+                peak[0] = peak[0].max(observed[0]);
+                peak[1] = peak[1].max(observed[1]);
+                expected_sequences.authority_epoch += 2;
+                expected_sequences.oracle_observation += 2;
+                check_value(&env, earned - 1);
+            }
+            let last = earnings_at_epoch(&env, &last, domain, expected_sequences.authority_epoch);
+            let replace_funded = wrap(
+                &env,
+                ProgInstruction::UpdateAssetAuthority {
+                    asset_index: 0,
+                    market_id: env.asset_market_id(0),
+                    authority_epoch: expected_sequences.authority_epoch,
+                    kind: processor::ASSET_AUTH_BACKING_BUCKET,
+                    new_pubkey: cold.pubkey().to_bytes(),
+                },
+                replace_funded.accounts.clone(),
+            );
             // Paying even the last earned atom cannot erase the consumed
             // receivable. The completed SPL payout rolls back with management.
             peak[0] = peak[0].max(land(
@@ -516,10 +838,44 @@ fn v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only(
                 None,
             ));
             check_value(&env, earned);
-            assert_eq!(env.control_sequences(0).authority_epoch, epoch + 1);
+            if let Some((successor_is_cold, false)) = oracle_overlap {
+                let observed = oracle_round_trip(
+                    &mut env,
+                    domain,
+                    mark,
+                    &provider,
+                    &cold,
+                    if successor_is_cold { &cold } else { &admin },
+                    &owners[0],
+                    &user_prefix,
+                    false,
+                    &tracked,
+                );
+                peak[0] = peak[0].max(observed[0]);
+                peak[1] = peak[1].max(observed[1]);
+                expected_sequences.authority_epoch += 2;
+                expected_sequences.oracle_observation += 2;
+                check_value(&env, earned);
+            }
+            assert_eq!(env.control_sequences(0), expected_sequences);
 
             // Incumbent consent remains sufficient for the consumed-only role;
             // the historical ledger and all paid value retain their attribution.
+            let consent = wrap(
+                &env,
+                ProgInstruction::UpdateAssetAuthority {
+                    asset_index: 0,
+                    market_id: env.asset_market_id(0),
+                    authority_epoch: expected_sequences.authority_epoch,
+                    kind: processor::ASSET_AUTH_BACKING_BUCKET,
+                    new_pubkey: cold.pubkey().to_bytes(),
+                },
+                vec![
+                    AccountMeta::new(provider.pubkey(), true),
+                    AccountMeta::new_readonly(cold.pubkey(), true),
+                    AccountMeta::new(market, false),
+                ],
+            );
             peak[1] = peak[1].max(land(
                 &mut env,
                 &[consent],
@@ -572,7 +928,10 @@ fn v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only(
             assert_eq!(env.market_state().1.c_tot, 0);
             assert_eq!(env.market_state().1.vault, 0);
             assert_eq!(env.token_amount(vault), 0);
+            check_owners(&env);
         }
     }
-    eprintln!("INV-005 consumed backing containment: worlds=4, exact_rollbacks=16, SPL-prefix rollbacks=8, last-atom payouts=4, owner exits=8; peak CU={peak:?}");
+    eprintln!("INV-005 consumed backing containment: overlap={oracle_overlap:?}, worlds=4, exact_rollbacks={}, SPL-prefix rollbacks={}, last-atom payouts=4, owner exits=8; peak CU={peak:?}",
+        if oracle_overlap.is_some() { 28 } else { 16 },
+        if oracle_overlap.is_some() { 20 } else { 8 });
 }
