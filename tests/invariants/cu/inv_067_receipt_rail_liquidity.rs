@@ -1,6 +1,8 @@
 //! Row 417: two unequal receipt holders compete for one canonical secondary reserve.
 //! A one-atom-short batch rolls back expiry and the first SPL payout; either public
 //! replenishment or a different funded rail must preserve both original claim identities.
+//! Classic and native secondary custody must agree, including retained claims across
+//! raw lamport replenishment and split/grouped SyncNative. This remains a finite matrix.
 
 use super::{late_expiry::World, *};
 use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
@@ -23,18 +25,40 @@ fn install_secondary(env: &mut V16CuEnv) {
     env.update_base_unit_mints_with_cu(env.mint, mint);
 }
 
+fn install_native_secondary(env: &mut V16CuEnv) {
+    // LiteSVM lacks the SPL native mint genesis account. Only this external fixture
+    // is installed; all custody, funding, receipts and expiry use public instructions.
+    let mint = spl_token::native_mint::ID;
+    env.svm
+        .set_account(
+            mint,
+            Account {
+                lamports: env.svm.minimum_balance_for_rent_exemption(Mint::LEN),
+                data: make_mint_data_with_decimals(spl_token::native_mint::DECIMALS),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.update_base_unit_mints_with_cu(env.mint, mint);
+}
+
 struct Rail {
     mint: Pubkey,
     vault: Pubkey,
     source: Pubkey,
     destinations: [Pubkey; 5],
     funded: u64,
+    native: bool,
+    donated: u64,
 }
 
 impl Rail {
     fn new(world: &mut World) -> Self {
         let env = &mut world.env;
         let mint = Pubkey::new_from_array(env.market_state().0.secondary_collateral_mint);
+        let native = mint == spl_token::native_mint::ID;
         let vault = create_ata_for_test(&mut env.svm, &env.payer, env.vault_authority, mint);
         let source = create_ata_for_test(&mut env.svm, &env.payer, env.admin.pubkey(), mint);
         let destinations = std::array::from_fn(|actor| {
@@ -45,10 +69,13 @@ impl Rail {
                 mint,
             )
         });
-        send_raw_tx(
-            &mut env.svm,
-            &env.payer,
-            spl_token::instruction::mint_to(
+        let funding = if native {
+            vec![
+                system_instruction::transfer(&env.admin.pubkey(), &source, SECONDARY_SUPPLY),
+                spl_token::instruction::sync_native(&spl_token::ID, &source).unwrap(),
+            ]
+        } else {
+            vec![spl_token::instruction::mint_to(
                 &spl_token::ID,
                 &mint,
                 &source,
@@ -56,16 +83,17 @@ impl Rail {
                 &[],
                 SECONDARY_SUPPLY,
             )
-            .unwrap(),
-            &[&env.admin],
-        )
-        .unwrap();
+            .unwrap()]
+        };
+        send_raw_ixs(&mut env.svm, &env.payer, funding, &[&env.admin]).unwrap();
         Self {
             mint,
             vault,
             source,
             destinations,
             funded: 0,
+            native,
+            donated: 0,
         }
     }
 
@@ -136,11 +164,18 @@ impl Rail {
                     .iter()
                     .map(|key| env.token_amount(*key) as u128)
                     .sum::<u128>(),
-            SECONDARY_SUPPLY as u128
+            u128::from(SECONDARY_SUPPLY + self.donated)
         );
         for (mint, supply) in [
             (env.mint, PRIMARY_SUPPLY),
-            (self.mint, SECONDARY_SUPPLY as u128),
+            (
+                self.mint,
+                if self.native {
+                    0
+                } else {
+                    SECONDARY_SUPPLY as u128
+                },
+            ),
         ] {
             assert_eq!(
                 Mint::unpack(&env.svm.get_account(&mint).unwrap().data)
@@ -148,6 +183,24 @@ impl Rail {
                     .supply as u128,
                 supply
             );
+        }
+        for key in [self.vault, self.source]
+            .into_iter()
+            .chain(self.destinations)
+        {
+            let account = env.svm.get_account(&key).unwrap();
+            let token = TokenAccount::unpack(&account.data).unwrap();
+            assert_eq!(account.owner, spl_token::ID);
+            assert_eq!(token.mint, self.mint);
+            assert_eq!(token.state, AccountState::Initialized);
+            if self.native {
+                let COption::Some(rent) = token.is_native else {
+                    panic!("secondary native custody lost its rent reserve");
+                };
+                assert_eq!(account.lamports, rent + token.amount);
+            } else {
+                assert_eq!(token.is_native, COption::None);
+            }
         }
         for actor in 0..5 {
             assert!(
@@ -158,15 +211,32 @@ impl Rail {
     }
 }
 
-#[test]
-fn v16_program_late_expiry_claimant_orders_share_secondary_liquidity_without_losing_receipts() {
+#[derive(Debug, PartialEq)]
+struct Endpoint {
+    replenish: bool,
+    ledger: ResolvedPayoutLedgerV16,
+    paid: [u128; 5],
+    vaults: [u64; 2],
+}
+
+fn run(native: bool, grouped_sync: bool) -> (Vec<Endpoint>, u64) {
     let mut peak_cu = 0;
-    let mut worlds = 0;
+    let mut endpoints = Vec::new();
     for landing in [13, 14] {
         for order in [[0, 4], [4, 0]] {
             for first_claim_route in [false, true] {
                 for replenish in [false, true] {
-                    let mut world = World::before_receipts_with_setup(install_secondary);
+                    if grouped_sync && !replenish {
+                        continue;
+                    }
+                    let mut world = if native {
+                        World::before_receipts_with_quote_decimals(
+                            install_native_secondary,
+                            spl_token::native_mint::DECIMALS,
+                        )
+                    } else {
+                        World::before_receipts_with_setup(install_secondary)
+                    };
                     for actor in [0, 4] {
                         for _ in 0..8 {
                             if world.receipt(actor).present {
@@ -252,9 +322,87 @@ fn v16_program_late_expiry_claimant_orders_share_secondary_liquidity_without_los
                     rail.check(&world);
 
                     if replenish {
-                        rail.fund(&mut world, 1);
+                        let mut retry = batch.to_vec();
+                        if native {
+                            let before = rail.frame(&world);
+                            world
+                                .land(
+                                    &[system_instruction::transfer(
+                                        &world.env.admin.pubkey(),
+                                        &rail.vault,
+                                        1,
+                                    )],
+                                    true,
+                                )
+                                .unwrap();
+                            world.assert_frame_except(
+                                &before,
+                                &[world.env.admin.pubkey(), rail.vault],
+                            );
+                            let unsynced = rail.frame(&world);
+                            assert_eq!(world.env.token_amount(rail.vault), SECONDARY_SUPPLY - 1);
+                            let failure = world.land(&batch, false).expect_err(
+                                "raw native lamports cannot satisfy retained token payout before sync",
+                            );
+                            assert_eq!(
+                                failure.err,
+                                TransactionError::InstructionError(
+                                    4,
+                                    InstructionError::Custom(
+                                        PercolatorError::InvalidTokenAccount as u32
+                                    ),
+                                )
+                            );
+                            assert_eq!(rail.frame(&world), unsynced);
+                            let sync =
+                                spl_token::instruction::sync_native(&spl_token::ID, &rail.vault)
+                                    .unwrap();
+                            retry.insert(0, sync.clone());
+                            let mut aborted = retry.clone();
+                            aborted.push(Instruction {
+                                program_id: solana_sdk::system_program::ID,
+                                accounts: vec![],
+                                data: vec![],
+                            });
+                            let failure = world.land(&aborted, false).expect_err(
+                                "a rejected suffix restores native sync, expiry and both paid receipts",
+                            );
+                            assert_eq!(
+                                failure.err,
+                                TransactionError::InstructionError(
+                                    6,
+                                    InstructionError::InvalidInstructionData,
+                                )
+                            );
+                            for (program, successes) in
+                                [(world.env.program_id, 3), (spl_token::ID, 3)]
+                            {
+                                assert_eq!(
+                                    failure
+                                        .meta
+                                        .logs
+                                        .iter()
+                                        .filter(
+                                            |line| **line == format!("Program {program} success")
+                                        )
+                                        .count(),
+                                    successes
+                                );
+                            }
+                            assert_eq!(rail.frame(&world), unsynced);
+                            rail.funded += 1;
+                            rail.donated += 1;
+                            if !grouped_sync {
+                                world.land(&[sync], false).unwrap();
+                                world.assert_frame_except(&unsynced, &[rail.vault]);
+                                rail.check(&world);
+                                retry.remove(0);
+                            }
+                        } else {
+                            rail.fund(&mut world, 1);
+                        }
                         let before = rail.frame(&world);
-                        world.land(&batch, false).expect(
+                        world.land(&retry, false).expect(
                             "unchanged expiry and claim bytes retry with exact shared liquidity",
                         );
                         world.assert_frame_except(
@@ -519,13 +667,79 @@ fn v16_program_late_expiry_claimant_orders_share_secondary_liquidity_without_los
                         rounding as u64 + rail.funded
                     );
                     assert_eq!(world.env.token_amount(world.provider_token), 1);
+                    endpoints.push(Endpoint {
+                        replenish,
+                        ledger: group.resolved_payout_ledger,
+                        paid: std::array::from_fn(|actor| rail.paid(&world, actor)),
+                        vaults: [
+                            world.env.token_amount(world.env.vault),
+                            world.env.token_amount(rail.vault),
+                        ],
+                    });
+                    if native {
+                        for actor in 0..5 {
+                            let before = rail.frame(&world);
+                            let owner = &world.actors[actor].owner;
+                            let destination = rail.destinations[actor];
+                            let custody = world.env.svm.get_account(&destination).unwrap();
+                            let token = TokenAccount::unpack(&custody.data).unwrap();
+                            let COption::Some(rent) = token.is_native else {
+                                panic!("native payout must remain redeemable");
+                            };
+                            let mut expected_owner =
+                                world.env.svm.get_account(&owner.pubkey()).unwrap();
+                            expected_owner.lamports += rent + token.amount;
+                            let cu = send_raw_tx(
+                                &mut world.env.svm,
+                                &world.env.payer,
+                                spl_token::instruction::close_account(
+                                    &spl_token::ID,
+                                    &destination,
+                                    &owner.pubkey(),
+                                    &owner.pubkey(),
+                                    &[],
+                                )
+                                .unwrap(),
+                                &[owner],
+                            )
+                            .expect("owner unwraps the exact terminal receipt payout");
+                            world.peak_cu = world.peak_cu.max(cu);
+                            assert_eq!(
+                                world.env.svm.get_account(&owner.pubkey()),
+                                Some(expected_owner)
+                            );
+                            assert!(world.env.svm.get_account(&destination).is_none_or(
+                                |account| account.lamports == 0 && account.data.is_empty(),
+                            ));
+                            world.assert_frame_except(&before, &[owner.pubkey(), destination]);
+                        }
+                    }
                     assert_cu_within("shared-rail bounded progress", world.peak_cu, 500_000);
                     peak_cu = peak_cu.max(world.peak_cu);
-                    worlds += 1;
                 }
             }
         }
     }
-    assert_eq!(worlds, 16);
-    println!("INV-067 row 417: {worlds} shared-rail worlds, 16 late-expiry paid-prefix rollbacks, 8 exact-liquidity retries, 8 mixed-rail exits; peak suffix CU {peak_cu}");
+    assert_eq!(endpoints.len(), if grouped_sync { 8 } else { 16 });
+    (endpoints, peak_cu)
+}
+
+#[test]
+fn v16_program_late_expiry_claimant_orders_share_secondary_liquidity_without_losing_receipts() {
+    let (classic, classic_cu) = run(false, false);
+    let (split, split_cu) = run(true, false);
+    let (grouped, grouped_cu) = run(true, true);
+    assert_eq!(
+        classic, split,
+        "native split-sync endpoint differs from SPL"
+    );
+    assert_eq!(
+        classic
+            .iter()
+            .filter(|endpoint| endpoint.replenish)
+            .collect::<Vec<_>>(),
+        grouped.iter().collect::<Vec<_>>(),
+        "native grouped-sync endpoint differs from SPL"
+    );
+    println!("INV-067 row 417: 40 shared-rail worlds, 40 late-expiry paid-prefix rollbacks, 16 unsynced-native rollbacks, 16 sync/payout-prefix rollbacks, 24 exact-liquidity retries, 16 mixed-rail exits, 120 native custody closes; peak CU classic={classic_cu}, native_split={split_cu}, native_grouped={grouped_cu}");
 }

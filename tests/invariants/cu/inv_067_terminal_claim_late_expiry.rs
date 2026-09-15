@@ -42,7 +42,7 @@ impl World {
     }
 
     pub(crate) fn before_receipts_with_claimant_owners(claimant_owners: [Keypair; 2]) -> Self {
-        Self::build_before_receipts(claimant_owners, None, BACKING, SourceShape::Single, 0)
+        Self::build_before_receipts(claimant_owners, None, BACKING, SourceShape::Single, 0, 0)
     }
 
     pub(super) fn before_receipts_with_maintenance_fee(rate: u128) -> Self {
@@ -52,6 +52,7 @@ impl World {
             BACKING,
             SourceShape::Single,
             rate,
+            0,
         )
     }
 
@@ -63,16 +64,25 @@ impl World {
             backing,
             SourceShape::Single,
             0,
+            0,
         )
     }
 
     pub(super) fn before_receipts_with_setup(setup: fn(&mut V16CuEnv)) -> Self {
+        Self::before_receipts_with_quote_decimals(setup, 0)
+    }
+
+    pub(super) fn before_receipts_with_quote_decimals(
+        setup: fn(&mut V16CuEnv),
+        decimals: u8,
+    ) -> Self {
         Self::build_before_receipts(
             [Keypair::new(), Keypair::new()],
             Some(setup),
             BACKING,
             SourceShape::Single,
             0,
+            decimals,
         )
     }
 
@@ -95,6 +105,7 @@ impl World {
             BACKING,
             SourceShape::Staggered(first_claimant_lots),
             0,
+            0,
         )
     }
 
@@ -105,6 +116,7 @@ impl World {
             BACKING,
             SourceShape::SplitClaimants,
             0,
+            0,
         )
     }
 
@@ -114,6 +126,7 @@ impl World {
         backing: u128,
         source_shape: SourceShape,
         maintenance_fee_per_slot: u128,
+        quote_decimals: u8,
     ) -> Self {
         // Allocate and initialize through System/SPL/wrapper instructions, including the
         // initial collateral endowment. LiteSVM only supplies programs, clock and signer SOL.
@@ -181,7 +194,7 @@ impl World {
                 &mint.pubkey(),
                 &admin.pubkey(),
                 None,
-                0,
+                quote_decimals,
             )
             .unwrap(),
             &[],

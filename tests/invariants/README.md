@@ -19,6 +19,26 @@ OPEN**, and INV-058's machine disposition remains `REFUTED_CURRENT`.
 See the [Lane 6 report](lane6_cumulative_limit_conformance_20260915.md) for the
 baseline failure, source diagnosis, public-route limits, and verification commands.
 
+## Lane 8 native receipt liquidity across late expiry (2026-09-15)
+
+The existing [INV-067 shared-liquidity matrix](cu/inv_067_receipt_rail_liquidity.rs)
+now compares its sixteen classic-SPL worlds with twenty-four native-secondary
+worlds. Unequal retained receipt top-ups compete for 232 atoms against 233 atoms
+due after backing expiry. A raw one-lamport replenishment still requires
+`SyncNative`; a rejected suffix restores synchronization, expiry and both
+payouts. Separate and bundled synchronization converge to the classic receipt
+ledger, owner entitlements and vault balances. All five portfolios close, and
+native destinations unwrap to their owners with exact value and rent refunds.
+
+This adds the native-custody/late-expiry/shared-receipt intersection absent from
+the classic liquidity matrix, Lane 2's generated claimant cadence, and the
+separate native terminal-PnL sync witness. It extends the existing selector and
+fixture instead of duplicating them. Row **417 remains OPEN** with stronger
+bounded coverage; rows **411/416/419/420/421/433/435** and all authoritative
+statuses retain their prior dispositions. No production change was required.
+See the [Lane 8 report](lane8_native_receipt_liquidity_20260915.md) for the
+non-duplication review, exact commands, results and remaining gaps.
+
 ## Lane 1 retained close across funded oracle management (2026-09-15)
 
 Owner: [cu/inv_014_retained_oracle_role_close.rs](cu/inv_014_retained_oracle_role_close.rs),
