@@ -19,6 +19,23 @@ are unchanged. Funding, fees, ADL, native custody, arbitrary histories and slab
 retirement are outside this increment. See the [Lane 9 report](lane9_pending_loss_debt_20260915.md)
 for the overlap review, artifact provenance, exact commands and limitations.
 
+## Lane 10 paid insurance across beneficiary succession (2026-09-15)
+
+The existing [successor-custody owner](cu/inv_073_successor_custody_retry.rs)
+adds six public LiteSVM worlds: classic/native rails and a payment below, at,
+or above the first insurance domain's balance before beneficiary handoff.
+The former beneficiary keeps that exact prefix; keeper-created successor custody
+receives only the remainder without either beneficiary or the operator signing.
+Old-recipient and stale-epoch requests reject, a stale-ledger suffix rolls back
+ATA creation/payment, and both recipient balances survive closure rollback and
+exact rent settlement. The original zero-prefix selector remains as a control.
+
+This strengthens bounded INV-067/070/071/073/078/082 coverage. **Row 421 remains
+OPEN/missing** and machine statuses are unchanged. Provider/late-expiry products,
+pending claims, maximum shapes and absent-admin retirement remain open.
+See the [Lane 10 report](lane10_terminal_insurance_conformance_20260915.md)
+for the overlap review, public-route limits, artifacts and validation commands.
+
 ## Lane 6 recreated-counterparty cumulative limits (2026-09-15)
 
 The existing INV-058 selector
