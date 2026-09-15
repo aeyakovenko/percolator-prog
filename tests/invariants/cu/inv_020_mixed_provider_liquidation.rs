@@ -240,6 +240,18 @@ fn v16_program_mixed_provider_liquidation_omissions_preserve_exact_entitlements(
                     );
                 }
                 set_test_clock(&mut env, 2, 102);
+                let old = observation(&env, target, &owners[2], Some(keeper), &legs, &full);
+                peak[1] = peak[1].max(transact(
+                    &mut env,
+                    &owners[2],
+                    &[old],
+                    &portfolios,
+                    Some((2, PercolatorError::EngineNonProgress)),
+                ));
+                for (i, leg) in legs.iter().enumerate() {
+                    write_epoch_matrix_leg(&mut env, *leg, CURRENT[i], 102, 2);
+                }
+                rollbacks += 1;
                 let old_pyth = EpochMatrixLeg {
                     account: Pubkey::new_unique(),
                     ..legs[0]
@@ -453,6 +465,6 @@ fn v16_program_mixed_provider_liquidation_omissions_preserve_exact_entitlements(
             }
         }
     }
-    assert_eq!((worlds, rollbacks), (8, 40));
+    assert_eq!((worlds, rollbacks), (8, 48));
     println!("INV-020 mixed-provider liquidation: worlds={worlds}, exact_rollbacks={rollbacks}, CU [stage,reject,late_rollback,action,payout]={peak:?}");
 }

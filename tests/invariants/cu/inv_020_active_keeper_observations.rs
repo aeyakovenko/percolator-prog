@@ -322,6 +322,18 @@ fn v16_program_active_keeper_reward_recertifies_unrelated_loss_across_partial_re
                 );
                 let refresh =
                     observation(&env, target, &owners[2], Some(keeper), report, &target_only);
+                peak[1] = peak[1].max(transact(
+                    &mut env,
+                    &[&owners[2]],
+                    &[refresh],
+                    &tracked,
+                    Some((2, PercolatorError::EngineNonProgress)),
+                ));
+                let report = env.set_pyth_price_with_conf(&feed, CURRENT[0] as i64, -6, 0, 102);
+                rollbacks += 1;
+                tracked.push(report);
+                let refresh =
+                    observation(&env, target, &owners[2], Some(keeper), report, &target_only);
                 peak[0] = peak[0].max(transact(
                     &mut env,
                     &[&owners[2]],
@@ -537,6 +549,6 @@ fn v16_program_active_keeper_reward_recertifies_unrelated_loss_across_partial_re
             }
         }
     }
-    assert_eq!((worlds, rollbacks), (8, 16));
+    assert_eq!((worlds, rollbacks), (8, 24));
     println!("active keeper: {worlds} worlds, {rollbacks} exact rollbacks; CU [observation/liquidation,rejection,trade,payout]={peak:?}; economics={reference:?}");
 }

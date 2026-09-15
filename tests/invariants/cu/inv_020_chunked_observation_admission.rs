@@ -240,7 +240,7 @@ fn v16_program_chunked_mixed_observations_gate_full_refresh_and_preserve_claims(
                     assert!(cert.valid);
                     assert!(cert.cert_oracle_epoch < env.market_state().1.oracle_epoch);
                 }
-                let tracked = [
+                let mut tracked = vec![
                     env.market,
                     portfolios[0],
                     portfolios[1],
@@ -272,13 +272,33 @@ fn v16_program_chunked_mixed_observations_gate_full_refresh_and_preserve_claims(
                     before_omission,
                     "the omitted observation must undo the real second Hybrid prefix"
                 );
+                let error = refresh(&mut env, portfolios[0], report, reverse, true)
+                    .expect_err("complete prior-slot reports cannot authorize health refresh");
+                assert!(is_engine_non_progress_error(&error), "{label}: {error}");
+                assert_eq!(frame(&env, &tracked), before_omission);
 
                 let mut profit = i128::from(direction) * 15 * (400 + 700);
                 let mut remaining_units = 400i128;
                 let mut previous = [100 + direction * 15, 100 - direction * 15];
+                let mut report = report;
                 for elapsed in 64..=67 {
                     if elapsed > 64 {
                         set_test_clock(&mut env, elapsed, 102 + (elapsed - 64) as i64);
+                    }
+                    report = env.set_pyth_price_with_conf(
+                        &feed,
+                        targets[0] as i64,
+                        -6,
+                        0,
+                        102 + (elapsed - 64) as i64,
+                    );
+                    tracked.push(report);
+                    if elapsed == 64 {
+                        let before = frame(&env, &tracked);
+                        let error = refresh(&mut env, portfolios[0], report, reverse, false)
+                            .expect_err("renewed Hybrid still cannot replace the pending AuthMark");
+                        assert!(is_engine_non_progress_error(&error), "{label}: {error}");
+                        assert_eq!(frame(&env, &tracked), before);
                     }
                     for portfolio in portfolios {
                         let before = frame(&env, &tracked);
@@ -305,6 +325,7 @@ fn v16_program_chunked_mixed_observations_gate_full_refresh_and_preserve_claims(
                         }
                     }
                     let accepted = assert_prefix(&env, elapsed, direction);
+                    assert_eq!(profiles(&env)[0].last_good_oracle_slot, elapsed);
                     if elapsed > 64 {
                         profit += remaining_units * (accepted[0] as i128 - previous[0] as i128)
                             - 700 * (accepted[1] as i128 - previous[1] as i128);

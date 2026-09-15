@@ -210,6 +210,17 @@ fn v16_program_cpi_active_keeper_observations_preserve_admission_and_payout() {
                     &[&owners[2]],
                     &[refresh],
                     &tracked,
+                    Some((2, PercolatorError::EngineNonProgress)),
+                ));
+                let report = env.set_pyth_price_with_conf(&feed, CURRENT[0] as i64, -6, 0, 102);
+                rollbacks += 1;
+                tracked.push(report);
+                let refresh = observation(&env, target, &owners[2], Some(keeper), report, &[0, 1]);
+                peak = peak.max(transact(
+                    &mut env,
+                    &[&owners[2]],
+                    &[refresh],
+                    &tracked,
                     None,
                 ));
                 assert_current_short(&env, target, 130_000, 209_000);
@@ -458,6 +469,6 @@ fn v16_program_cpi_active_keeper_observations_preserve_admission_and_payout() {
             }
         }
     }
-    assert_eq!((worlds, rollbacks), (8, 28));
+    assert_eq!((worlds, rollbacks), (8, 36));
     println!("CPI active keeper: {worlds} worlds, {rollbacks} exact rollbacks; peak CU={peak}; economics={reference:?}");
 }

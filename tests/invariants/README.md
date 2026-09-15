@@ -39,6 +39,27 @@ statuses retain their prior dispositions. No production change was required.
 See the [Lane 8 report](lane8_native_receipt_liquidity_20260915.md) for the
 non-duplication review, exact commands, results and remaining gaps.
 
+## Lane 5 current observation conformance (2026-09-15)
+
+The fourteen INV-020 baseline failures listed in Lane 4 reproduce on `e1394241`:
+67 other INV-020 selectors pass. All fourteen failures are stale expectations
+that reuse prior-slot Hybrid provenance for account-health refresh. The existing
+owners now supply renewed external reports at the health boundary while retaining
+their exact balances, fees, certificates, public exits and rollback assertions.
+The full INV-020 selection passes all 81 selectors with unchanged production SBF.
+
+The generated current-Hybrid owner additionally closes a coverage gap: thirty-two
+route/order/history worlds now reject each role's well-formed report omission and
+prior-slot replay, then assert current-slot provenance and complete health. Its
+160 new freshness rollbacks supplement the existing malformed-tail, successful
+prefix, payout and intent rollback checks. Disabling only the current-slot guard
+in a disposable build is detected by three updated public-route selectors.
+
+Row **426 remains COVERED**; rows **416/422 remain OPEN** and INV-020 remains sampled
+open evidence. No production or machine-status changes are made. The
+[Lane 5 report](lane5_current_observation_conformance_20260915.md) records all
+fourteen selector verdicts, changed files, commands, artifacts and coverage limits.
+
 ## Lane 1 retained close across funded oracle management (2026-09-15)
 
 Owner: [cu/inv_014_retained_oracle_role_close.rs](cu/inv_014_retained_oracle_role_close.rs),

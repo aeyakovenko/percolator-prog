@@ -133,6 +133,20 @@ fn v16_program_selected_provider_assignment_preserves_fee_domains_and_owner_exit
                 }
                 assert_eq!(env.portfolio_state(target).capital.get(), DEPOSITS[1]);
                 set_test_clock(&mut env, 2, 102);
+                assert_eq!(frame(&env, &immutable_keys), immutable);
+                let old = observation(&env, target, &owners[2], Some(keeper), &legs, &full);
+                peak[1] = peak[1].max(transact(
+                    &mut env,
+                    &owners[2],
+                    &[old],
+                    &tracked,
+                    Some((2, PercolatorError::EngineNonProgress)),
+                ));
+                for (asset, leg) in legs.iter().enumerate() {
+                    write_epoch_matrix_leg(&mut env, *leg, CURRENT[asset], 102, 2);
+                }
+                let immutable = frame(&env, &immutable_keys);
+                rollbacks += 1;
 
                 // A valid sibling report cannot stand in for the selected asset's configured key.
                 let mut substituted = legs;
@@ -401,6 +415,6 @@ fn v16_program_selected_provider_assignment_preserves_fee_domains_and_owner_exit
             }
         }
     }
-    assert_eq!((worlds, rollbacks), (8, 40));
+    assert_eq!((worlds, rollbacks), (8, 48));
     println!("selected-provider assignment: worlds={worlds}, exact_rollbacks={rollbacks}, terminal_calls={terminal_calls}, CU [action,rollback,withdrawal,terminal]={peak:?}");
 }

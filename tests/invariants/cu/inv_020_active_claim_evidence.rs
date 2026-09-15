@@ -363,6 +363,7 @@ fn v16_program_active_claim_conversion_distinguishes_current_cert_from_complete_
 
             // Current authenticated catchup, not closing the unrelated leg, opens conversion.
             set_test_clock(&mut env, 4, 103);
+            let report = env.set_pyth_price_with_conf(&feed, target as i64, -6, 0, 103);
             for portfolio in [claimant, peer] {
                 max_refresh = max_refresh.max(observe(&mut env, portfolio, report));
             }

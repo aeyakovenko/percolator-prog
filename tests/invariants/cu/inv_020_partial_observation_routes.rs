@@ -331,6 +331,8 @@ fn v16_program_partial_observation_three_leg_reductions_match_single_and_batch()
                     // The omitted AuthMark siblings retain pending accrual. Hybrid discovery
                     // can progress, but it must leave both owners and their old certificates alone.
                     set_test_clock(&mut env, 65, 103);
+                    let report =
+                        env.set_pyth_price_with_conf(&[0xab; 32], PRICES[0] as i64, -6, 0, 103);
                     peak = peak.max(crank(&mut env, portfolios[2], report, &[0]));
                     let partial = env.market_state().1;
                     assert_eq!([0, 1, 2].map(|i| partial.assets[i].slot_last), [64, 32, 32]);
@@ -471,6 +473,7 @@ fn v16_program_partial_sibling_observations_cannot_expand_single_or_batch_risk_c
                 .iter()
                 .all(|a| a.slot_last == 32));
             set_test_clock(&mut env, 65, 103);
+            let report = env.set_pyth_price_with_conf(&[0xab; 32], prices[0] as i64, -6, 0, 103);
             for _ in 0..2 {
                 peak = peak.max(crank(
                     &mut env,
@@ -493,7 +496,8 @@ fn v16_program_partial_sibling_observations_cannot_expand_single_or_batch_risk_c
             }
             let market = env.svm.get_account(&env.market).unwrap();
             let hybrid = state::read_asset_oracle_profile(&market.data, 0).unwrap();
-            assert_eq!(hybrid.oracle_target_publish_time, 101);
+            assert_eq!(hybrid.oracle_target_publish_time, 103);
+            assert_eq!(hybrid.last_good_oracle_slot, 65);
             assert_eq!(hybrid.oracle_leg_prices_e6, [prices[0], 0, 0]);
             let loss = state::read_asset_oracle_profile(&market.data, 2).unwrap();
             assert_eq!(loss.mark_ewma_e6, prices[2]);

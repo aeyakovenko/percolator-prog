@@ -201,7 +201,7 @@ fn v16_program_observation_abort_restores_liquidation_reward_payout_and_intent()
                 None,
             ));
             let accounts_before_catchup = frame(&env, &portfolios);
-            set_test_clock(&mut env, 64, 101);
+            set_test_clock(&mut env, 64, 102);
             peak_cu = peak_cu.max(submit(
                 &mut env,
                 &owners[2],
@@ -217,6 +217,17 @@ fn v16_program_observation_abort_restores_liquidation_reward_payout_and_intent()
             assert_eq!(env.portfolio_position_epoch(short), position_epoch);
             assert_eq!(env.portfolio_state(keeper).capital.get(), DEPOSITS[2]);
             let mut history = vec![checkpoint(&env, portfolios, tokens)];
+            peak_cu = peak_cu.max(submit(
+                &mut env,
+                &owners[2],
+                &[full],
+                &tracked,
+                Some((2, PercolatorError::EngineNonProgress)),
+            ));
+            let report = env.set_pyth_price_with_conf(&feed, CURRENT[0] as i64, -6, 0, 102);
+            rollbacks += 1;
+            tracked.push(report);
+            let full = crank_ix(&env, portfolios, &owners[2], report, &order, u64::MAX);
 
             // The clean world measures the payout. Interrupted worlds retain its exact
             // amount and their own current intent bytes before the reward exists.
@@ -369,7 +380,7 @@ fn v16_program_observation_abort_restores_liquidation_reward_payout_and_intent()
             worlds += 1;
         }
     }
-    assert_eq!((worlds, rollbacks), (4, 8));
+    assert_eq!((worlds, rollbacks), (4, 12));
     assert!(certificate_checks >= 8);
     println!("row426 reward payout rollback: {worlds} public worlds, 4 post-SPL aborts, {rollbacks} exact rollbacks, {certificate_checks} full-refresh comparisons, payout={} atoms; peak={peak_cu} CU", expected_payout.unwrap());
 }

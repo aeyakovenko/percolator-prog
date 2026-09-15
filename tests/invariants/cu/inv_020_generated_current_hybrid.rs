@@ -307,6 +307,7 @@ fn v16_program_generated_current_hybrid_recipient_routes_match_full_health_and_r
     let mut placement_rejections = [0; 2];
     let mut exit_rollbacks = 0;
     let mut health_checks = 0;
+    let mut freshness_rejections = 0;
     let mut peak = 0;
     for cpi in [false, true] {
         for batch in [false, true] {
@@ -324,7 +325,74 @@ fn v16_program_generated_current_hybrid_recipient_routes_match_full_health_and_r
                             [0, 1, 2].map(|i| w.env.market_state().1.assets[i].slot_last),
                             [32; 3]
                         );
-                        peak = peak.max(w.send(&[stage], None));
+                        peak = peak.max(w.send(
+                            &[stage],
+                            Some((
+                                2,
+                                InstructionError::Custom(PercolatorError::EngineNonProgress as u32),
+                            )),
+                        ));
+                        for asset in [0, 2] {
+                            let profile = state::read_asset_oracle_profile(
+                                &w.env.svm.get_account(&w.env.market).unwrap().data,
+                                asset,
+                            )
+                            .unwrap();
+                            assert_eq!(profile.last_good_oracle_slot, 0);
+                            assert_eq!(profile.oracle_leg_publish_times, [101, 0, 0]);
+                        }
+                        freshness_rejections += 1;
+                        let prior_reports = w.reports;
+                        w.reports = [0, 1].map(|i| {
+                            w.env.set_pyth_price_with_conf(
+                                &[[0xd1; 32], [0xd2; 32]][i],
+                                [CURRENT[0], KEEPER_PRICE][i] as i64,
+                                -6,
+                                0,
+                                102,
+                            )
+                        });
+                        w.tracked.extend(w.reports);
+                        // Each health role must supply its own current Hybrid evidence. Remove
+                        // both the hint and account for omissions so these reach the health guard.
+                        for provider in 0..2 {
+                            let target = provider + 1;
+                            for omitted in [false, true] {
+                                let mut reports = w.reports;
+                                reports[provider] = prior_reports[provider];
+                                let mut ix = w.observe(target, false, reports.map(Some));
+                                if omitted {
+                                    let ProgInstruction::PermissionlessCrank {
+                                        now_slot,
+                                        mut observations,
+                                    } = ProgInstruction::decode(&ix.data).unwrap()
+                                    else {
+                                        unreachable!()
+                                    };
+                                    observations
+                                        .retain(|hint| hint.asset_index != 2 * provider as u16);
+                                    ix.accounts
+                                        .retain(|meta| meta.pubkey != prior_reports[provider]);
+                                    ix.data = ProgInstruction::PermissionlessCrank {
+                                        now_slot,
+                                        observations,
+                                    }
+                                    .encode();
+                                }
+                                peak = peak.max(w.send(
+                                    &[ix],
+                                    Some((
+                                        2,
+                                        InstructionError::Custom(
+                                            PercolatorError::EngineNonProgress as u32,
+                                        ),
+                                    )),
+                                ));
+                                freshness_rejections += 1;
+                            }
+                        }
+                        let current = w.current(1, false);
+                        peak = peak.max(w.send(&[current], None));
                         assert_current_short(&w.env, w.portfolios[1], 130_000, 209_000);
                         assert_eq!(w.certificate(1).certified_liq_deficit, 79_000);
                         health_checks += 1;
@@ -352,10 +420,9 @@ fn v16_program_generated_current_hybrid_recipient_routes_match_full_health_and_r
                                 asset,
                             )
                             .unwrap();
-                            assert_eq!(profile.oracle_leg_publish_times, [101, 0, 0]);
+                            assert_eq!(profile.oracle_leg_publish_times, [102, 0, 0]);
                             assert_eq!(profile.oracle_leg_prices_e6, [price, 0, 0]);
-                            // Reusing the report during catchup does not renew its provenance.
-                            assert_eq!(profile.last_good_oracle_slot, 0);
+                            assert_eq!(profile.last_good_oracle_slot, 64);
                         }
                         let liquidate = w.current(1, true);
                         let admit = w.trade(&[3], POS_SCALE as i128, batch);
@@ -569,10 +636,11 @@ fn v16_program_generated_current_hybrid_recipient_routes_match_full_health_and_r
         }
     }
     assert_eq!(worlds, 32);
+    assert_eq!(freshness_rejections, 160);
     assert_eq!(role_rejections, [128; 3]);
     assert_eq!(error_rejections, [192; 2]);
     assert_eq!(placement_rejections, [192; 2]);
     assert_eq!(exit_rollbacks, 40);
     assert_eq!(health_checks, 224);
-    println!("current Hybrid: {worlds} worlds, role/error/placement rejections={role_rejections:?}/{error_rejections:?}/{placement_rejections:?}, {exit_rollbacks} exit rollbacks, {health_checks} double health checks, peak CU={peak}; economics={reference:?}");
+    println!("current Hybrid: {worlds} worlds, {freshness_rejections} freshness rollbacks, role/error/placement rejections={role_rejections:?}/{error_rejections:?}/{placement_rejections:?}, {exit_rollbacks} exit rollbacks, {health_checks} double health checks, peak CU={peak}; economics={reference:?}");
 }

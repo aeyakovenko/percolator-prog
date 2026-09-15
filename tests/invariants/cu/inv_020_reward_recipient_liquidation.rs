@@ -361,6 +361,27 @@ fn recipient_routes(cpi: bool, interrupted: bool) -> (Outcome, u64, usize) {
             peak = peak.max(transact(
                 &mut env,
                 &[&owners[2]],
+                &[ix],
+                &tracked,
+                Some((2, PercolatorError::EngineNonProgress)),
+            ));
+            // Keep the recipient's old components for the incoherent-epoch control below.
+            let target_report =
+                env.set_pyth_price_with_conf(&feeds[0], CURRENT[0] as i64, -6, 0, 102);
+            rollbacks += 1;
+            tracked.push(target_report);
+            let target_reports = [target_report, reports[1], reports[2]];
+            let ix = observation(
+                &env,
+                target,
+                &owners[2],
+                Some(keeper),
+                target_reports,
+                &[0, 1],
+            );
+            peak = peak.max(transact(
+                &mut env,
+                &[&owners[2]],
                 &[ix.clone()],
                 &tracked,
                 None,
@@ -630,7 +651,7 @@ fn recipient_routes(cpi: bool, interrupted: bool) -> (Outcome, u64, usize) {
             assert!(env.portfolio_state(peer).capital.get() >= ENDOWMENTS[0]);
         }
     }
-    assert_eq!(rollbacks, if interrupted { 28 } else { 8 });
+    assert_eq!(rollbacks, if interrupted { 32 } else { 12 });
     assert_cu_within("composite recipient liquidation history", peak, 500_000);
     println!("recipient becomes target: cpi={cpi}, interrupted={interrupted}, 4 worlds, {rollbacks} complete rollbacks; peak {peak} CU; economics={reference:?}");
     (reference.unwrap(), peak, rollbacks)
@@ -658,6 +679,6 @@ fn v16_program_composite_recipient_target_routes_restore_missing_evidence_prefix
             rollbacks += rejected;
         }
     }
-    assert_eq!(rollbacks, 72);
+    assert_eq!(rollbacks, 88);
     println!("Scope C observations: 16 worlds, {rollbacks} exact rollbacks, 8 restored SPL payout prefixes, peak {peak} CU");
 }
