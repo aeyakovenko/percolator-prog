@@ -54,6 +54,32 @@ benchmark evidence labels unchanged. Related nonqualifying rows are not promoted
 Full commands, results, row verdicts and remaining gaps are recorded in the
 [Lane 2 report](lane2_terminal_conformance_20260915.md). No production code changed.
 
+## Lane 3 pending funding and insurance attribution (2026-09-15)
+
+Owner: [cu/inv_039_mixed_role_funding_insurance.rs](cu/inv_039_mixed_role_funding_insurance.rs),
+mounted under INV-039's `mixed_role_resolution::funding_resolution`.
+`v16_program_mixed_funding_debt_charges_only_its_insurance_domain` adds twelve
+public LiteSVM histories: mirrored sides, insurance in the loss domain/opposite
+side/other asset, and two terminal orders. Each prefix checks an input-derived
+per-owner entitlement, source membership, pending weight, close-loss partition,
+typed insurance budgets, stock/reservation censuses, and terminal SPL payouts.
+
+This also qualifies the older "Row 435 mixed-role funding-order evidence" below:
+its creditor-close trade settles the debtor's K/F before resolution. The new
+history moves the debtor mark afterward and requires zero debtor K/F snapshots
+and intact capital at resolution. The original case remains an order control,
+now with exact funding-index assertions. No production correction was required.
+
+The existing [terminal scan regression](cu/inv_070_terminal_scan_recredit.rs)
+also now accounts for the authority epoch consumed by every insurance debit.
+Its sixteen histories distinguish stale-epoch rollback from the current-epoch
+unpaid-entitlement guard, then complete the original scanner/withdrawal orders.
+
+Rows **419/423/424/435 remain OPEN**, with no benchmark or invariant-status
+promotion. The [Lane 3 report](lane3_entitlement_stock_conformance_20260915.md)
+records the independent oracle, overlap review, existing capacity/expiry/reserve
+controls, commands, and bounded INV-024 through INV-039/041/086 coverage limits.
+
 ## Row 422 paid-origin Hybrid-recipient evidence (2026-09-14)
 
 Owner:

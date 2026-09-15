@@ -40,10 +40,11 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                     peak = peak.max(fixture_peak);
                     let recovered = CAPITAL[1].min(SPENT).min(backing);
                     let partial = recovered / 3;
-                    let close = wrap(
+                    let initial_epoch = env.control_sequences(0).authority_epoch;
+                    let mut close = wrap(
                         &env,
                         ProgInstruction::CloseSlab {
-                            authority_epoch: env.control_sequences(0).authority_epoch,
+                            authority_epoch: initial_epoch,
                         },
                         vec![
                             AccountMeta::new(admin.pubkey(), true),
@@ -55,13 +56,22 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                             AccountMeta::new(env.mint, false),
                         ],
                     );
-                    let withdraw = |amount: u64| {
+                    let close_after_debit = |debits| Instruction {
+                        data: ProgInstruction::CloseSlab {
+                            authority_epoch: initial_epoch + debits,
+                        }
+                        .encode(),
+                        ..close.clone()
+                    };
+                    let close_after_first = close_after_debit(1);
+                    let close_after_tail = close_after_debit(2);
+                    let withdraw = |amount: u64, debits| {
                         wrap(
                             &env,
                             ProgInstruction::WithdrawInsuranceAsset {
                                 asset_index: 0,
                                 market_id: env.asset_market_id(0),
-                                authority_epoch: env.control_sequences(0).authority_epoch,
+                                authority_epoch: initial_epoch + debits,
                                 amount: amount.into(),
                             },
                             vec![
@@ -74,8 +84,8 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                             ],
                         )
                     };
-                    let first = withdraw(partial);
-                    let tail = withdraw(recovered - partial);
+                    let first = withdraw(partial, 0);
+                    let tail = withdraw(recovered - partial, 1);
                     let mut tracked = vec![
                         env.market,
                         env.vault,
@@ -117,6 +127,11 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                         }
                         assert_eq!(env.market_state().1.resolved_payout_ledger, ledger);
                         assert_eq!(
+                            env.control_sequences(0).authority_epoch,
+                            initial_epoch + u64::from(paid > 0) + u64::from(paid == recovered),
+                            "only committed insurance debits consume the authority epoch"
+                        );
+                        assert_eq!(
                             env.token_amount(destination),
                             0,
                             "market authority has no insurance entitlement"
@@ -156,6 +171,20 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                     send(
                         &mut env,
                         &[close.clone(), first.clone(), close.clone()],
+                        &[&admin],
+                        &[],
+                        Some((
+                            4,
+                            InstructionError::Custom(PercolatorError::EngineStale as u32),
+                        )),
+                        (2, 1),
+                    );
+                    check(&env, false, 0, 0, 1);
+                    // The debit consumes an epoch even inside a bundle. A current
+                    // suffix must reach the unpaid-entitlement guard, not stale auth.
+                    send(
+                        &mut env,
+                        &[close.clone(), first.clone(), close_after_first.clone()],
                         &[&admin],
                         &[],
                         Some((4, lock.clone())),
@@ -205,7 +234,7 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                     }
                     send(
                         &mut env,
-                        &[first.clone(), close.clone()],
+                        &[first.clone(), close_after_first.clone()],
                         &[&admin],
                         &[],
                         Some((3, lock.clone())),
@@ -213,6 +242,7 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                     );
                     check(&env, true, if scanner_first { recovered } else { 0 }, 0, 0);
                     send(&mut env, &[first], &[], &payment, None, (1, 1));
+                    close = close_after_first;
                     check(&env, true, recovered, partial, 0);
                     send(
                         &mut env,
@@ -223,6 +253,7 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                         (0, 0),
                     );
                     send(&mut env, &[tail], &[], &payment, None, (1, 1));
+                    close = close_after_tail;
                     check(&env, true, recovered, recovered, 0);
 
                     let market = env.svm.get_account(&env.market).unwrap();
@@ -293,6 +324,6 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
         }
     }
     assert_eq!(outcomes.len(), 8);
-    assert_eq!((commits, rollbacks, rediscoveries), (88, 104, 8));
+    assert_eq!((commits, rollbacks, rediscoveries), (88, 120, 8));
     println!("INV-070 scan recredit: 16 public histories, 8 order comparisons, {commits} commits, {rollbacks} exact rollbacks, {rediscoveries} scanner rediscoveries, peak={peak} CU");
 }
