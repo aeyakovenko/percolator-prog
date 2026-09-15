@@ -54,6 +54,24 @@ machine dispositions are unchanged. No production change was required. The
 [Lane 11 report](lane11_funded_oracle_containment_20260915.md) records the
 non-duplication review, commands, results, and remaining gaps.
 
+## Lane 12 same-slot Hybrid reward provenance (2026-09-15)
+
+The existing [dual-Hybrid owner](cu/inv_045_hybrid_recipient_provenance.rs)
+now renews reports before recipient health refresh and checks exact rollback
+for the prior-slot report. Its original 32 worlds pass. A second selector adds
+32 worlds with independent newer source/recipient target replacements around
+a recipient reduction after a paid liquidation. Same-slot marks cannot move
+again; report provenance stays asset-local; the earned reward, exposed owner
+accounts and SPL custody remain unchanged by publication. An input-derived
+checkpoint trajectory determines subsequent PnL and exact keeper withdrawal.
+
+The two selectors execute 64 rewarded liquidations and 352 exact rollbacks,
+including 64 completed SPL payout prefixes. Peak measured transaction CU is
+370,185. This is bounded conformance with no production change: **row 422 remains
+OPEN** and INV-045 remains `REFUTED_CURRENT`. The
+[Lane 12 report](lane12_hybrid_reward_provenance_20260915.md) records the baseline
+fixture failure, overlap review, exact commands, validation and remaining gaps.
+
 ## Lane 6 recreated-counterparty cumulative limits (2026-09-15)
 
 The existing INV-058 selector

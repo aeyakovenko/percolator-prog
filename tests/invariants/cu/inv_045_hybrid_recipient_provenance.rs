@@ -217,10 +217,94 @@ impl World {
         assert_eq!(group.backing_provider_earnings_total, 0);
         expected
     }
+
+    fn replace_targets(&mut self, feeds: [[u8; 32]; 2], prices: [u64; 2], now: i64) {
+        let slot = self.env.svm.get_sysvar::<Clock>().slot;
+        set_test_clock(&mut self.env, slot, now);
+        let order = if self.reverse { [1, 0] } else { [0, 1] };
+        for i in order {
+            let before = self.env.market_state().1;
+            let market = self.env.svm.get_account(&self.env.market).unwrap();
+            let profiles = self.assets.map(|asset| {
+                state::read_asset_oracle_profile(&market.data, asset as usize).unwrap()
+            });
+            let mut framed = vec![self.env.mint, self.env.vault];
+            framed.extend(self.tokens);
+            framed.extend([0, 1, 2, 4].map(|actor| self.portfolios[actor]));
+            let accounts: Vec<_> = framed
+                .iter()
+                .map(|key| self.env.svm.get_account(key))
+                .collect();
+            let fresh = self
+                .env
+                .set_pyth_price_with_conf(&feeds[i], prices[i] as i64, -6, 0, now);
+            let equivocal =
+                self.env
+                    .set_pyth_price_with_conf(&feeds[i], prices[i] as i64 + 1, -6, 0, now);
+            self.tracked.extend([fresh, equivocal]);
+            self.reports[i] = fresh;
+            let publish = self.observe(3, false, self.reports);
+            let mut conflicting = self.reports;
+            conflicting[i] = equivocal;
+            self.send(
+                &[publish.clone(), self.observe(3, false, conflicting)],
+                Some((
+                    3,
+                    InstructionError::Custom(PercolatorError::OracleInvalid as u32),
+                )),
+            );
+            self.send(&[publish], None);
+            let after = self.env.market_state().1;
+            let market = self.env.svm.get_account(&self.env.market).unwrap();
+            for j in 0..2 {
+                let asset = self.assets[j] as usize;
+                let profile = state::read_asset_oracle_profile(&market.data, asset).unwrap();
+                assert_eq!(
+                    after.assets[asset].effective_price, before.assets[asset].effective_price,
+                    "new same-slot targets cannot purchase another price step"
+                );
+                assert_eq!(profile.mark_ewma_e6, profiles[j].mark_ewma_e6);
+                assert_eq!(
+                    profile.price_move_remainder_bps_num,
+                    profiles[j].price_move_remainder_bps_num
+                );
+                assert_eq!(
+                    after.assets[asset].oi_eff_long_q,
+                    before.assets[asset].oi_eff_long_q
+                );
+                assert_eq!(
+                    after.assets[asset].oi_eff_short_q,
+                    before.assets[asset].oi_eff_short_q
+                );
+                if i == j {
+                    assert_eq!(after.assets[asset].raw_oracle_target_price, prices[j]);
+                    assert_eq!(profile.oracle_target_price_e6, prices[j]);
+                    assert_eq!(profile.oracle_leg_prices_e6, [prices[j], 0, 0]);
+                    assert_eq!(profile.oracle_target_publish_time, now);
+                    assert_eq!(profile.oracle_leg_publish_times, [now, 0, 0]);
+                    assert_eq!(profile.last_good_oracle_slot, slot);
+                } else {
+                    assert_eq!(profile, profiles[j], "report provenance is asset-local");
+                }
+            }
+            assert_eq!(after.insurance, before.insurance);
+            assert_eq!(
+                after.insurance_domain_budget,
+                before.insurance_domain_budget
+            );
+            assert_eq!(
+                framed
+                    .iter()
+                    .map(|key| self.env.svm.get_account(key))
+                    .collect::<Vec<_>>(),
+                accounts,
+                "target replacement preserves the paid reward, every exposed owner and SPL custody"
+            );
+        }
+    }
 }
 
-#[test]
-fn v16_program_dual_hybrid_reward_lineage_survives_recipient_routes_and_payout() {
+fn run_dual_hybrid_reward_lineage(interleaved: bool) {
     let mut worlds = 0;
     let mut rollbacks = 0;
     let mut peak = 0;
@@ -327,12 +411,33 @@ fn v16_program_dual_hybrid_reward_lineage_survives_recipient_routes_and_payout()
                             peak: 0,
                             rollbacks: 0,
                         };
-                        let price_at = |i: usize, elapsed: u64| -> u64 {
+                        let original_price_at = |i: usize, elapsed: u64| -> u64 {
                             let sign = if i == 0 { direction } else { -direction };
                             let distance = entries[i] * 24 * elapsed.min([3, 4][i]) / 10_000;
                             (entries[i] as i128 + sign * distance as i128) as u64
                         };
-                        let raw = [price_at(0, 3), price_at(1, 4)];
+                        let raw = [original_price_at(0, 3), original_price_at(1, 4)];
+                        let price_at = |i: usize, elapsed: u64| -> u64 {
+                            if !interleaved || elapsed <= 1 {
+                                return original_price_at(i, elapsed);
+                            }
+                            // The replacements checkpoint the first committed price;
+                            // their slot itself contributes no additional movement.
+                            let anchor = original_price_at(i, 1);
+                            let capacity = anchor * 24 * (elapsed - 1) / 10_000;
+                            let distance = anchor.abs_diff(raw[i]).min(capacity);
+                            let sign = if i == 0 { direction } else { -direction };
+                            (anchor as i128 + sign * distance as i128) as u64
+                        };
+                        let recipient_loss = |elapsed: u64| -> i128 {
+                            let first = 2 * entries[1].abs_diff(price_at(1, 1));
+                            let second = if elapsed > 1 {
+                                price_at(1, 1).abs_diff(price_at(1, 2))
+                            } else {
+                                0
+                            };
+                            i128::from(first + second)
+                        };
                         let mut penalty = 0;
                         let mut reward = 0;
                         let mut closed = 0;
@@ -341,15 +446,27 @@ fn v16_program_dual_hybrid_reward_lineage_survives_recipient_routes_and_payout()
                         let mut target_after_reward = None;
                         for elapsed in 1..=4 {
                             let slot = 1 + elapsed;
-                            set_test_clock(&mut w.env, slot, 100 + elapsed as i64);
-                            if elapsed == 1 || publish_first {
+                            let now = 100 + 10 * elapsed as i64;
+                            set_test_clock(&mut w.env, slot, now);
+                            if elapsed == 2 && !publish_first {
+                                w.send(
+                                    &[w.observe(4, false, w.reports)],
+                                    Some((
+                                        2,
+                                        InstructionError::Custom(
+                                            PercolatorError::EngineNonProgress as u32,
+                                        ),
+                                    )),
+                                );
+                            }
+                            if elapsed <= 2 || publish_first {
                                 w.reports = [0, 1].map(|i| {
                                     w.env.set_pyth_price_with_conf(
                                         &feeds[i],
                                         raw[i] as i64,
                                         -6,
                                         0,
-                                        100 + elapsed as i64,
+                                        now,
                                     )
                                 });
                                 w.tracked.extend(w.reports);
@@ -473,20 +590,28 @@ fn v16_program_dual_hybrid_reward_lineage_survives_recipient_routes_and_payout()
                                 assert_eq!(
                                     profile.oracle_target_publish_time,
                                     if publish_first {
-                                        100 + elapsed as i64
+                                        now
                                     } else {
-                                        101
+                                        100 + 10 * elapsed.min(2) as i64
                                     }
                                 );
                                 assert_eq!(
                                     profile.last_good_oracle_slot,
-                                    if publish_first { slot } else { 2 }
+                                    if publish_first { slot } else { slot.min(3) }
                                 );
                                 assert_eq!(asset.slot_last, slot);
                             }
                             if elapsed <= 2 {
+                                if interleaved && elapsed == 1 {
+                                    let replacements = [
+                                        (raw[0] as i128 + direction * 2_400) as u64,
+                                        (raw[1] as i128 - direction * 4_800) as u64,
+                                    ];
+                                    w.replace_targets(feeds, replacements, now + 1);
+                                    w.treasury(penalty, reward);
+                                }
                                 w.current(4);
-                                let loss = if elapsed == 1 { 9_600 } else { 14_400 };
+                                let loss = recipient_loss(elapsed);
                                 assert_eq!(
                                     values(&w.env, portfolios)[4],
                                     ENDOWMENTS[4] as i128 + reward as i128 - loss
@@ -527,6 +652,10 @@ fn v16_program_dual_hybrid_reward_lineage_survives_recipient_routes_and_payout()
                                     ENDOWMENTS[2] as i128 + loss,
                                     "recipient loss belongs to its own counterparty"
                                 );
+                                if interleaved && elapsed == 1 {
+                                    w.replace_targets(feeds, raw, now + 2);
+                                    w.treasury(penalty, reward);
+                                }
                                 if elapsed == 2 {
                                     assert!(!has_active_leg_for_asset(
                                         &w.env.portfolio_state(portfolios[4]),
@@ -571,7 +700,7 @@ fn v16_program_dual_hybrid_reward_lineage_survives_recipient_routes_and_payout()
                                 );
                             }
                         }
-                        let remaining = ENDOWMENTS[4] as u128 - 14_400;
+                        let remaining = ENDOWMENTS[4] as u128 - recipient_loss(2) as u128;
                         let withdraw = w.payout(remaining);
                         w.send(&[withdraw], None);
                         payout += remaining;
@@ -584,13 +713,14 @@ fn v16_program_dual_hybrid_reward_lineage_survives_recipient_routes_and_payout()
                             group.vault + payout,
                             ENDOWMENTS.iter().map(|&v| v as u128).sum::<u128>()
                         );
-                        assert_eq!(payout, ENDOWMENTS[4] as u128 - 14_400 + reward);
+                        assert_eq!(payout, remaining + reward);
                         // Compare the settled liquidation episode and recipient payout;
                         // the still-exposed target's later price losses remain latent.
                         assert_eq!(
                             values(&w.env, portfolios)[0] + payout as i128,
                             ENDOWMENTS[0] as i128 + ENDOWMENTS[4] as i128
-                                - 254_400
+                                - 240_000
+                                - recipient_loss(2)
                                 - (penalty - reward) as i128
                         );
                         let outcome = (
@@ -619,6 +749,19 @@ fn v16_program_dual_hybrid_reward_lineage_survives_recipient_routes_and_payout()
         }
     }
     assert_eq!(worlds, 32);
-    assert!(rollbacks >= 3 * worlds);
-    println!("dual Hybrid lineage: worlds={worlds}, rewarded_liquidations={worlds}, payout_rollbacks={worlds}, exact_rollbacks={rollbacks}, peak_cu={peak}");
+    assert_eq!(
+        rollbacks,
+        (if interleaved { 7 } else { 3 }) * worlds + worlds / 2
+    );
+    println!("dual Hybrid lineage: interleaved={interleaved}, worlds={worlds}, rewarded_liquidations={worlds}, payout_rollbacks={worlds}, exact_rollbacks={rollbacks}, peak_cu={peak}");
+}
+
+#[test]
+fn v16_program_dual_hybrid_reward_lineage_survives_recipient_routes_and_payout() {
+    run_dual_hybrid_reward_lineage(false);
+}
+
+#[test]
+fn v16_program_same_slot_hybrid_target_replacements_preserve_earned_reward_and_exit() {
+    run_dual_hybrid_reward_lineage(true);
 }
