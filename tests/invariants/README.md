@@ -21,6 +21,25 @@ remain open. No production fix or new security finding is claimed. The
 [Lane 16 report](lane16_maxshape_progress_cu_20260915.md) records overlap,
 artifact provenance, exact CU, commands, fixture corrections and limitations.
 
+## Lane 17 pending receipts and funded insurance succession (2026-09-15)
+
+The existing [INV-067 late-fee owner](cu/inv_067_receipt_late_fee_reclassification.rs)
+adds 96 public LiteSVM histories with two funded insurance-beneficiary handoffs
+while unequal receipts remain pending. Both beneficiary directions and handoff
+before/after the final seven-atom fee cross exact/late backing expiry, both fee
+collection routes and six claimant orders. Retained user requests preserve exact
+receipt identity and payouts; only the successor receives the 294 insurance atoms
+after all five portfolios close. Locked reserve suffixes and obsolete-beneficiary
+suffixes roll back completed SPL payments, and unchanged valid requests finish.
+
+Lane 8 has zero maintenance fees and no beneficiary succession. Lane 10's
+succession worlds have no user portfolios or pending claims. This adds their
+previously untested interaction with late backing and fee reclassification using
+the existing receipt fixture and input-derived entitlement oracle. **Row 417
+remains OPEN/missing**; production and machine statuses are unchanged. This is
+bounded INV-024/063/067/068/073 evidence. See the [Lane 17 report](lane17_resolved_receipt_late_expiry_20260915.md)
+for exact validation, public-route constraints and the remaining products.
+
 ## Lane 9 mixed-role shutdown and pending debt (2026-09-15)
 
 The existing [INV-039 mixed-role owner](cu/inv_039_mixed_role_resolution.rs)

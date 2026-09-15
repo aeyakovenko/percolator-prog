@@ -3,6 +3,8 @@
 //! Six claimant orders cross exact/late expiry and explicit/close-collected fees.
 //! Insurance gains exactly the capital debit, never extra receipt face or residual;
 //! rejected paying prefixes restore the fee cursor, stock and original receipts.
+//! Funded beneficiary succession crosses the final fee credit while receipts remain
+//! live; only the successor can withdraw after all claimants complete their exits.
 //! Limits: one SPL rail, fixed fee rate, no rewards, insurance spend/recredit,
 //! live source conversion, arbitrary histories or maximum shapes. Row stays OPEN.
 
@@ -23,6 +25,8 @@ const INSURANCE: u128 = 3 * 12 * RATE + 2 * DEBTOR_FEES;
 const SUPPLY: u128 = 3_852;
 // The rollback transaction contains up to five wrapper calls and three SPL CPIs.
 const CU_LIMIT: u64 = 700_000;
+// Succession adds a sixth wrapper call: the locked insurance withdrawal suffix.
+const SUCCESSION_CU_LIMIT: u64 = 800_000;
 const ORDERS: [[usize; 3]; 6] = [
     [0, 2, 4],
     [0, 4, 2],
@@ -31,6 +35,68 @@ const ORDERS: [[usize; 3]; 6] = [
     [4, 0, 2],
     [4, 2, 0],
 ];
+
+#[derive(Clone, Copy, Debug)]
+struct Succession {
+    former: usize,
+    successor: usize,
+    before_fee: bool,
+}
+
+fn insurance_request(world: &World, recipient: Option<usize>, epoch: u64) -> Instruction {
+    let (owner, token) =
+        recipient.map_or((world.env.admin.pubkey(), world.provider_token), |actor| {
+            (
+                world.actors[actor].owner.pubkey(),
+                world.actors[actor].token,
+            )
+        });
+    Instruction {
+        program_id: world.env.program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(owner, false),
+            AccountMeta::new(world.env.market, false),
+            AccountMeta::new(token, false),
+            AccountMeta::new(world.env.vault, false),
+            AccountMeta::new_readonly(world.env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            market_id: world.env.asset_market_id(0),
+            authority_epoch: epoch,
+            amount: INSURANCE,
+        }
+        .encode(),
+    }
+}
+
+fn handoff(world: &mut World, former: Option<usize>, successor: usize) -> Instruction {
+    let before = world.frame();
+    let economic = world.env.market_state();
+    let epoch = world.env.control_sequences(0).authority_epoch;
+    let incumbent = former.map_or_else(
+        || world.env.admin.insecure_clone(),
+        |actor| world.actors[actor].owner.insecure_clone(),
+    );
+    let incoming = &world.actors[successor].owner;
+    let cu = world
+        .env
+        .try_update_per_asset_authority_with_cu(
+            &incumbent,
+            Some(incoming),
+            0,
+            processor::ASSET_AUTH_INSURANCE,
+            incoming.pubkey().to_bytes(),
+        )
+        .expect("funded insurance holder consents while user receipts are pending");
+    world.peak_cu = world.peak_cu.max(cu);
+    assert_eq!(world.env.control_sequences(0).authority_epoch, epoch + 1);
+    assert_eq!(world.env.market_state(), economic);
+    world.assert_frame_except(&before, &[world.env.market]);
+    world.custody();
+    insurance_request(world, Some(successor), epoch + 1)
+}
 
 fn junior(actor: usize, expired: bool) -> u128 {
     FACES[actor]
@@ -157,6 +223,23 @@ fn check(
 
 #[test]
 fn v16_program_late_fee_reclassification_preserves_receipt_faces_and_claimant_order() {
+    run_late_fee_reclassification(None);
+}
+
+#[test]
+fn v16_program_pending_receipts_preserve_late_fee_insurance_across_beneficiary_succession() {
+    for (former, successor) in [(1, 3), (3, 1)] {
+        for before_fee in [false, true] {
+            run_late_fee_reclassification(Some(Succession {
+                former,
+                successor,
+                before_fee,
+            }));
+        }
+    }
+}
+
+fn run_late_fee_reclassification(succession: Option<Succession>) {
     assert_eq!(
         (INITIAL_RESIDUAL, FINAL_RESIDUAL, INSURANCE),
         (480, 809, 294)
@@ -206,6 +289,11 @@ fn v16_program_late_fee_reclassification_preserves_receipt_faces_and_claimant_or
                     assert_eq!(receipt.paid_effective, junior(actor, false));
                 }
                 let original = [world.receipt(0), world.receipt(4)];
+                let former_request = succession.map(|schedule| {
+                    assert_eq!(world.env.market_state().1.insurance, INSURANCE - RATE);
+                    handoff(&mut world, None, schedule.former)
+                });
+                let mut successor_request = None;
                 let identities = [0, 2, 4].map(|actor| {
                     let p = world.actors[actor].portfolio;
                     (
@@ -245,11 +333,11 @@ fn v16_program_late_fee_reclassification_preserves_receipt_faces_and_claimant_or
                 }
                 prefix.extend([close.clone(), retained[0].clone(), retained[1].clone()]);
                 let mut rejected = prefix.clone();
-                rejected.push(Instruction {
+                rejected.push(former_request.clone().unwrap_or(Instruction {
                     program_id: solana_sdk::system_program::ID,
                     accounts: vec![],
                     data: vec![],
-                });
+                }));
                 let before = world.frame();
                 let mut payer = world
                     .env
@@ -264,7 +352,11 @@ fn v16_program_late_fee_reclassification_preserves_receipt_faces_and_claimant_or
                     failure.err,
                     TransactionError::InstructionError(
                         (2 + prefix.len()) as u8,
-                        InstructionError::InvalidInstructionData
+                        if succession.is_some() {
+                            InstructionError::Custom(PercolatorError::EngineLockActive as u32)
+                        } else {
+                            InstructionError::InvalidInstructionData
+                        }
                     )
                 );
                 assert_eq!(successes(&failure.meta, world.env.program_id), prefix.len());
@@ -283,6 +375,14 @@ fn v16_program_late_fee_reclassification_preserves_receipt_faces_and_claimant_or
 
                 pay(&mut world, &close, 2, 0, &mut paid);
                 check(&world, &original, &paid, true, false, false);
+                if let Some(schedule) = succession.filter(|s| s.before_fee) {
+                    successor_request = Some(handoff(
+                        &mut world,
+                        Some(schedule.former),
+                        schedule.successor,
+                    ));
+                    check(&world, &original, &paid, true, false, false);
+                }
                 let mut charged = false;
                 if explicit_fee {
                     let before = world.frame();
@@ -300,6 +400,14 @@ fn v16_program_late_fee_reclassification_preserves_receipt_faces_and_claimant_or
                     );
                     charged = true;
                     check(&world, &original, &paid, true, true, false);
+                    if let Some(schedule) = succession.filter(|s| !s.before_fee) {
+                        successor_request = Some(handoff(
+                            &mut world,
+                            Some(schedule.former),
+                            schedule.successor,
+                        ));
+                        check(&world, &original, &paid, true, true, false);
+                    }
                 }
                 let mut replaced = false;
                 for actor in order {
@@ -313,6 +421,15 @@ fn v16_program_late_fee_reclassification_preserves_receipt_faces_and_claimant_or
                         );
                         charged = true;
                         replaced = true;
+                        if let Some(schedule) =
+                            succession.filter(|s| !s.before_fee && !explicit_fee)
+                        {
+                            successor_request = Some(handoff(
+                                &mut world,
+                                Some(schedule.former),
+                                schedule.successor,
+                            ));
+                        }
                     } else {
                         let due = junior(actor, true) - junior(actor, false);
                         assert!(due > 0);
@@ -406,37 +523,71 @@ fn v16_program_late_fee_reclassification_preserves_receipt_faces_and_claimant_or
                     (0, 0, 0)
                 );
                 assert_eq!(group.vault, INSURANCE + 2);
-                let withdraw = Instruction {
-                    program_id: world.env.program_id,
-                    accounts: vec![
-                        AccountMeta::new_readonly(world.env.admin.pubkey(), false),
-                        AccountMeta::new(world.env.market, false),
-                        AccountMeta::new(world.provider_token, false),
-                        AccountMeta::new(world.env.vault, false),
-                        AccountMeta::new_readonly(world.env.vault_authority, false),
-                        AccountMeta::new_readonly(spl_token::ID, false),
-                    ],
-                    data: ProgInstruction::WithdrawInsuranceAsset {
-                        asset_index: 0,
-                        market_id: world.env.asset_market_id(0),
-                        authority_epoch: world.env.control_sequences(0).authority_epoch,
-                        amount: INSURANCE,
-                    }
-                    .encode(),
+                let epoch = world.env.control_sequences(0).authority_epoch;
+                let withdraw = insurance_request(&world, succession.map(|s| s.successor), epoch);
+                assert_eq!(successor_request.is_some(), succession.is_some());
+                let withdraw = if let Some(retained) = successor_request {
+                    assert_eq!(
+                        retained, withdraw,
+                        "receipt exits preserve the retained reserve request"
+                    );
+                    retained
+                } else {
+                    withdraw
                 };
+                let recipient =
+                    succession.map_or(world.provider_token, |s| world.actors[s.successor].token);
+                if let Some(schedule) = succession {
+                    // Even after claims finish, the old beneficiary cannot take the late fee.
+                    // Refreshing just the control epoch cannot repair the wrong recipient.
+                    for rejected in [
+                        former_request.clone().unwrap(),
+                        insurance_request(&world, Some(schedule.former), epoch),
+                    ] {
+                        let before = world.frame();
+                        let failure = world.land(&[rejected], false).unwrap_err();
+                        assert_eq!(
+                            failure.err,
+                            TransactionError::InstructionError(
+                                2,
+                                InstructionError::Custom(
+                                    PercolatorError::InvalidTokenAccount as u32
+                                )
+                            )
+                        );
+                        assert_eq!(successes(&failure.meta, spl_token::ID), 0);
+                        assert_eq!(world.frame(), before);
+                    }
+                    let before = world.frame();
+                    let failure = world
+                        .land(&[withdraw.clone(), former_request.clone().unwrap()], false)
+                        .unwrap_err();
+                    assert_eq!(
+                        failure.err,
+                        TransactionError::InstructionError(
+                            3,
+                            InstructionError::Custom(PercolatorError::InvalidTokenAccount as u32)
+                        )
+                    );
+                    assert_eq!(successes(&failure.meta, world.env.program_id), 1);
+                    assert_eq!(successes(&failure.meta, spl_token::ID), 1);
+                    assert_eq!(
+                        world.frame(),
+                        before,
+                        "successor payout and epoch roll back"
+                    );
+                    world.custody();
+                }
                 let before = world.frame();
-                let meta = world.land(&[withdraw], false).unwrap();
+                let meta = world.land(&[withdraw.clone()], false).unwrap();
                 assert_eq!(successes(&meta, spl_token::ID), 1);
-                world.assert_frame_except(
-                    &before,
-                    &[world.env.market, world.env.vault, world.provider_token],
-                );
+                world.assert_frame_except(&before, &[world.env.market, world.env.vault, recipient]);
                 let group = world.env.market_state().1;
                 assert_eq!(group.insurance, 0);
                 assert_eq!(group.vault, 2);
                 assert_eq!(
-                    world.env.token_amount(world.provider_token) as u128,
-                    1 + INSURANCE
+                    world.env.token_amount(recipient) as u128,
+                    INSURANCE + u128::from(succession.is_none())
                 );
                 assert_eq!(
                     group.resolved_payout_ledger, ledger,
@@ -444,10 +595,44 @@ fn v16_program_late_fee_reclassification_preserves_receipt_faces_and_claimant_or
                 );
                 assert_eq!(paid.iter().sum::<u128>() + INSURANCE + 1 + 2, SUPPLY);
                 world.custody();
-                assert_cu_within("INV-067 fee/expiry/order", world.peak_cu, CU_LIMIT);
+                if let Some(schedule) = succession {
+                    assert_eq!(world.env.token_amount(world.provider_token), 1);
+                    assert_eq!(
+                        world.env.token_amount(world.actors[schedule.former].token),
+                        0
+                    );
+                    assert_eq!(world.env.control_sequences(0).authority_epoch, epoch + 1);
+                    let before = world.frame();
+                    // The retained 294-atom request exceeds the two-atom vault. Custody
+                    // validation rejects before the consumed authority epoch is checked.
+                    let failure = world.land(&[withdraw], false).unwrap_err();
+                    assert_eq!(
+                        failure.err,
+                        TransactionError::InstructionError(
+                            2,
+                            InstructionError::Custom(PercolatorError::InvalidTokenAccount as u32)
+                        )
+                    );
+                    assert_eq!(world.frame(), before);
+                    for actor in [0, 2, 4] {
+                        assert_eq!(
+                            u128::from(world.env.token_amount(world.actors[actor].token)),
+                            paid[actor]
+                        );
+                    }
+                }
+                assert_cu_within(
+                    "INV-067 fee/expiry/order",
+                    world.peak_cu,
+                    if succession.is_some() {
+                        SUCCESSION_CU_LIMIT
+                    } else {
+                        CU_LIMIT
+                    },
+                );
                 peak_cu = peak_cu.max(world.peak_cu);
             }
         }
     }
-    eprintln!("INV-067 late fee reclassification: 24 worlds, 24 exact rollbacks, 72 rolled-back SPL payouts; peak_cu={peak_cu}, rollback_peak_cu={rollback_peak_cu}");
+    eprintln!("INV-067 late fee reclassification: succession={succession:?}, 24 worlds; peak_cu={peak_cu}, rollback_peak_cu={rollback_peak_cu}");
 }
