@@ -60,6 +60,27 @@ open evidence. No production or machine-status changes are made. The
 [Lane 5 report](lane5_current_observation_conformance_20260915.md) records all
 fourteen selector verdicts, changed files, commands, artifacts and coverage limits.
 
+## Lane 7 combined Hybrid source/backlog progress (2026-09-15)
+
+Owner: [cu/inv_077_hybrid_source_backlog.rs](cu/inv_077_hybrid_source_backlog.rs),
+mounted under INV-077. An all-Hybrid public construction now reaches fourteen legs
+and twenty-eight value-bearing, unliened source records. Fifteen permissionless
+cranks consume a 64-slot backlog (pending-slot sum 896 to zero); the last call
+supplies fourteen hints and forty-two references to three shared feeds. Two
+account refreshes, fourteen matched reductions, complete source conversion and
+both owners' withdrawals/closes finish in **36 successful required calls**.
+The exact SPL payouts are **1,902,000 / 2,098,000** atoms; peak required CU is
+**1,222,978**, below the 1,375,000 test bound and 1,400,000 transaction limit.
+
+**Row 423 remains OPEN; INV-077 remains OPEN_EVIDENCE.** The two older Hybrid
+liquidation/Recovery selectors still fail their shared setup with
+`EngineNonProgress` before measurement. Their historical CU claims are not current
+evidence. The new product has fourteen configured market slots, zero fees/funding,
+cooperative signed owner exits and no liens. It does not certify maximum market
+occupancy, distinct-feed maxima, all sixteen hints, Recovery, or liquidation.
+The [Lane 7 audit](lane7_combined_shape_progress_20260915.md) records the exact
+construction failure, successful continuation, bounds, artifact hashes and commands.
+
 ## Lane 1 retained close across funded oracle management (2026-09-15)
 
 Owner: [cu/inv_014_retained_oracle_role_close.rs](cu/inv_014_retained_oracle_role_close.rs),
@@ -29030,6 +29051,15 @@ executed product. Do not multiply separate maxima together: the 42-reference Hyb
 three shared feeds, the two-chunk backlog product passes at most two hints per call, flat
 withdrawals occur after active/source work is cleared, and host-shaped 10 MiB benchmarks are SBF
 boundary controls rather than public dense-market reachability.
+
+Current-pin qualification, 2026-09-15: the old
+`v16_attack_public_14_leg_28_source_42_feed_refresh_stays_bounded` and
+`v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_shape`
+selectors fail construction, so they provide no current combined-shape CU result.
+[Lane 7](lane7_combined_shape_progress_20260915.md) adds an executing all-Hybrid
+14-leg/28-source/64-slot-backlog product with a final 42-reference call and exact
+owner exit. Its 1,222,978-CU maximum applies only to that successful Live schedule;
+the original liquidation/Recovery products and wider occupancy frontier remain open.
 
 Additional maximum-hint/full-portfolio evidence, 2026-09-08:
 [`v16_bpf_full_14_leg_16_hint_three_feed_refresh_is_bounded`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)

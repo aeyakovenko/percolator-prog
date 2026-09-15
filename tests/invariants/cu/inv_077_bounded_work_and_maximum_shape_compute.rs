@@ -13,11 +13,10 @@
 //! ceiling, a bounded successful progress path, or atomic rejection before an attacker-controlled
 //! shape can strand a required exit route. A dedicated 14-leg/28-source Recovery test leaves one
 //! K/F cohort unsettled, freezes its asset, and proves the sole public crank settles committed
-//! state without accruing the frozen asset or exceeding the CU ceiling. The corresponding Hybrid
-//! product carries all 42 authenticated feed references into the frozen Recovery state: stale
-//! tails remain discovery-only, every accepted call mutates, and committed K/F progress occurs in
-//! 28 calls at no more than 1.147M CU while the frozen asset, oracle profile, custody, and feeds are
-//! framed exactly. A separate flat-account route fills all 28 historical source slots, requires
+//! state without accruing the frozen asset or exceeding the CU ceiling. Its older Hybrid
+//! counterpart fails construction on the current pin, before the Recovery measurement; the
+//! historical 28-call/1.147M-CU claim is not current evidence (see the Lane 7 audit).
+//! A separate flat-account route fills all 28 historical source slots, requires
 //! the automatic crank to release every
 //! obsolete source lien without an oracle tail, and then converts and withdraws the complete claim.
 //! The combined-shape owner-exit route reaches fourteen active legs and all twenty-eight source
@@ -31,10 +30,13 @@
 //! order. Selection follows persisted state only; every accepted crank mutates, eleven liquidation
 //! steps restore health below 1.156M CU, and the remaining owner reductions, reset cleanup,
 //! finalization, senior withdrawals, permissionless resolution, claims, and account closes reach
-//! exact terminal custody. A separate Hybrid composition builds the same fourteen legs and twenty-
-//! eight source domains before crossing all 42 authenticated feed references. Both a 13+1 split and
-//! the all-at-once schedule remain bounded; repeated complete-tail calls consume prior source work,
-//! reach a strict liquidation at no more than 1.201M CU, and then restore current health.
+//! exact terminal custody. The older Hybrid 13+1/all-at-once liquidation composition also fails
+//! construction on the current pin. Its historical 1.201M-CU claim is not current evidence.
+//! The separate hybrid_source_backlog owner constructs fourteen Hybrid legs and twenty-eight
+//! value-bearing sources using complete current reports, then measures two-chunk catch-up,
+//! full-report recertification, all reductions, conversion, exact SPL payouts and portfolio closes.
+//! Its final catch-up call supplies 42 references to three shared feeds. This is a Live, fourteen-
+//! market-slot, zero-fee/funding, unliened-source witness, not maximum market occupancy or Recovery.
 //! Finally, a fully public maximum-market construction appends all 5,782 configured assets after
 //! both funded portfolios already hold fourteen legs and twenty-eight source records. Thirty
 //! bounded automatic cranks refresh both accounts, unilateral reduction lands below 1.179M CU,
@@ -77,6 +79,9 @@ mod terminal_destination_variants;
 
 #[path = "inv_077_short_side_b_budget.rs"]
 mod short_side_b_budget;
+
+#[path = "inv_077_hybrid_source_backlog.rs"]
+mod hybrid_source_backlog;
 
 #[test]
 fn v16_program_active_leg_cap_pending_auth_marks_refresh_with_bounded_public_crank() {
