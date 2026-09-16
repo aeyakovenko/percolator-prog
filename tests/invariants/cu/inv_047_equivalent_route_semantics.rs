@@ -32,6 +32,31 @@ mod fee_leg_partition;
 #[path = "inv_047_inventory_cashflow_partitions.rs"]
 mod inventory_cashflow_partitions;
 
+fn inv047_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct OneLegRouteSnapshot {
     vault: u128,
@@ -1589,8 +1614,11 @@ fn v16_program_equivalent_route_family_composition_is_source_complete() {
 
     let confinement_source =
         include_str!("inv_023_caller_input_confinement_for_derived_safety_state.rs");
-    assert!(confinement_source
-        .contains("fn v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes"));
+    assert!(inv047_source_defines_test(
+        confinement_source,
+        "v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes"
+    ));
+    let local_source = include_str!("inv_047_equivalent_route_semantics.rs");
     for family_witness in [
         "v16_program_fee_charged_close_matches_single_and_one_leg_batch_routes",
         "v16_program_legacy_insurance_topup_matches_explicit_domain_split",
@@ -1599,31 +1627,37 @@ fn v16_program_equivalent_route_family_composition_is_source_complete() {
         "v16_program_unique_batch_position_plan_matches_sequential_route_and_slot_semantics",
     ] {
         assert!(
-            include_str!("inv_047_equivalent_route_semantics.rs")
-                .contains(&format!("fn {family_witness}")),
+            inv047_source_defines_test(local_source, family_witness),
             "missing INV-047 family witness {family_witness}",
         );
     }
 
     let stateful_route_source = include_str!("../stateful/inv_047_equivalent_route_semantics.rs");
-    assert!(stateful_route_source.contains(
-        "fn v16_program_nonzero_fee_trade_routes_are_byte_exact_after_transport_normalization"
+    assert!(inv047_source_defines_test(
+        stateful_route_source,
+        "v16_program_nonzero_fee_trade_routes_are_byte_exact_after_transport_normalization"
     ));
     let value_source = include_str!("../stateful/inv_024_attributed_quote_value_conservation.rs");
-    assert!(value_source
-        .contains("fn v16_program_all_trade_route_pairs_preserve_realized_pnl_owner_attribution"));
+    assert!(inv047_source_defines_test(
+        value_source,
+        "v16_program_all_trade_route_pairs_preserve_realized_pnl_owner_attribution"
+    ));
     let locality_source = include_str!("../stateful/inv_074_scope_locality.rs");
-    assert!(locality_source
-        .contains("fn v16_program_active_close_preserves_unrelated_same_asset_reduction"));
+    assert!(inv047_source_defines_test(
+        locality_source,
+        "v16_program_active_close_preserves_unrelated_same_asset_reduction"
+    ));
     let insurance_source = include_str!("inv_064_insurance_withdrawal_policy_equivalence.rs");
-    assert!(insurance_source.contains(
-        "fn v16_program_live_and_resolved_insurance_withdrawals_share_one_finite_budget"
+    assert!(inv047_source_defines_test(
+        insurance_source,
+        "v16_program_live_and_resolved_insurance_withdrawals_share_one_finite_budget"
     ));
 
     let transition_source =
         include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(transition_source.contains(
-        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    assert!(inv047_source_defines_test(
+        transition_source,
+        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
     ));
     let flow_proof = include_str!("../kani/inv_024_attributed_quote_value_conservation.rs");
     assert!(
