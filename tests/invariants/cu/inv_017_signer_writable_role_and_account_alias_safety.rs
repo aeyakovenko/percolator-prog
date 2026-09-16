@@ -42,6 +42,31 @@
 
 use super::*;
 
+fn inv017_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[test]
 fn v16_public_transaction_privilege_union_preserves_account_roles_and_retry() {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
@@ -328,14 +353,14 @@ fn v16_program_account_role_matrix_roster_is_source_complete() {
             "EXHAUSTIVE" => {
                 assert_eq!(gap, "-", "closed matrix {variant} must have no gap");
                 assert!(
-                    test_source.contains(&format!("fn {evidence}")),
+                    inv017_source_defines_test(test_source, evidence),
                     "closed matrix {variant} lacks executable evidence {evidence}"
                 );
             }
             "PARTIAL" => {
                 assert_ne!(evidence, "-");
                 assert_ne!(gap, "-");
-                assert!(test_source.contains(&format!("fn {evidence}")));
+                assert!(inv017_source_defines_test(test_source, evidence));
             }
             "OPEN" => {
                 assert_eq!(evidence, "-");
