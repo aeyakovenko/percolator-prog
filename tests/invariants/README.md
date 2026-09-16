@@ -1,5 +1,28 @@
 # Invariant-owned test coverage
 
+## INV-067 late-expiry evidence binding (2026-09-16)
+
+Owner:
+[public_sbf/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs](public_sbf/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs).
+`v16_row417_metadata_retains_late_expiry_receipt_evidence` binds benchmark row 417
+to its specific late-unrelated-backing-expiry discovery fingerprint, public-route
+selector, and receipt-preservation oracle. It also requires the stateful owner
+to remain mounted and preserves the generic receipt/late-expiry/claimant-order
+obligation as OPEN.
+
+The existing INV-079 benchmark guard checks that a mapped selector is executable
+and invariant-owned, but permits replacing this mapping with a different valid
+INV-067 payout selector and oracle. Its source check also survives removal of the
+stateful module mount. This guard covers those evidence-substitution gaps; it
+does not add a public execution trace or extend the bounded receipt witness to
+arbitrary histories. No production behavior or invariant classification changes.
+
+Validation at base `6f7a41c4`: replacing row 417's selector and oracle with the
+existing dust-payout pair leaves the INV-079 benchmark guard green and fails the
+new guard. Removing only the stateful module declaration gives the same result
+at the mount assertion. Both temporary mutations were restored. These are host
+metadata checks; no new SBF execution or whole-invariant proof is claimed.
+
 ## INV-039 resolution discovery metadata binding (2026-09-16)
 
 Owner:
