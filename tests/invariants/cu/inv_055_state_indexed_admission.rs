@@ -1803,6 +1803,17 @@ fn v16_program_every_public_instruction_has_a_state_admission_owner() {
         let evidence = inv055_public_route_admission(variant)
             .unwrap_or_else(|| panic!("{variant} has no state-admission owner"));
         *owners.entry(evidence.owner).or_default() += 1;
+        assert!(
+            evidence.path.starts_with("tests/invariants/") && evidence.path.ends_with(".rs"),
+            "{variant} admission witness must resolve to an invariant source file: {}",
+            evidence.path,
+        );
+        assert!(
+            evidence.test.starts_with("v16_"),
+            "{variant} admission witness must be a reviewed v16 regression: {}#{}",
+            evidence.path,
+            evidence.test,
+        );
         let source = witness_cache.entry(evidence.path).or_insert_with(|| {
             std::fs::read_to_string(root.join(evidence.path))
                 .unwrap_or_else(|error| panic!("read {}: {error}", evidence.path))
