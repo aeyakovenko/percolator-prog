@@ -20,6 +20,31 @@ OPEN/missing; INV-005 remains `REFUTED_CURRENT`.** See the
 [Lane 24 report](lane24_funded_oracle_containment_20260916.md) for non-overlap,
 exact commands/results, artifact hashes and remaining limits.
 
+## Lane 22 partial insurance recredit with unfinished liabilities (2026-09-16)
+
+The [partial-recredit child](cu/inv_073_partial_recredit_liability_progress.rs)
+reuses the public absent-insurer loss fixture in 32 worlds. Backing of 37/73 atoms
+expires before or after the debtor spends 100 insurance atoms, while the profitable
+peer still has an unfinished claim. Custody repair commits either during those
+liabilities or with the first insurance payment. A retained unsigned insurance
+request remains blocked until the last owner deletes its empty portfolio, then
+returns only the partial recovery plus the original zero/one-atom remainder.
+
+No operator, beneficiary, provider or administrator signs this continuation.
+Keeper-only active-leg expiry replaces the administrative expiry prerequisite
+in the older full-recredit worlds. Exact Account rollback, owner entitlements,
+stock/reservation censuses, role frames, custody rent and authority epochs cover
+128 ranked user calls, 448 rejected transactions, 96 owner deletions and 64
+insurance payments. Peak measured CU is 359,876 under a 600,000 bound. Historical
+spend remains 27/63 atoms after custody reaches zero; unsigned slab close rejects.
+
+This composes consumed insurance, partial recovery, unfinished liabilities and
+custody repair beyond Lane 13's unspent-insurance expiry product and Lane 10's
+portfolio-free succession worlds. **Row 421 remains OPEN/missing; INV-073 remains
+`REFUTED_CURRENT`.** No production bug was found. The
+[Lane 22 report](lane22_terminal_insurance_progress_20260916.md) records the full
+non-overlap review, exact commands, artifact hashes and remaining limits.
+
 ## Lane 19 latent Hybrid source realization across backlog (2026-09-16)
 
 The existing [INV-028 Hybrid carry owner](cu/inv_028_hybrid_capacity_carry.rs)

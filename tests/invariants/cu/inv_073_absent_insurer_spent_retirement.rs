@@ -24,6 +24,9 @@ mod recredited_insurance_quote_rails;
 #[path = "inv_073_native_recredit_custody.rs"]
 mod native_recredit_custody;
 
+#[path = "inv_073_partial_recredit_liability_progress.rs"]
+mod partial_recredit_liability_progress;
+
 #[test]
 fn v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion() {
     absent_reserve_progress(ProviderHistory::Empty, None);
@@ -59,7 +62,15 @@ enum ProviderHistory {
     Fresh,
     FreshMissingWallets,
     FreshDualQuote(bool),
-    FreshNativeCustody { native_first: bool, sync: bool },
+    FreshNativeCustody {
+        native_first: bool,
+        sync: bool,
+    },
+    PartialRecredit {
+        backing: u64,
+        before_loss: bool,
+        repair_early: bool,
+    },
     Withdrawn,
 }
 
@@ -74,15 +85,20 @@ fn absent_reserve_progress(
     const CALL_BOUND: usize = 8;
     const EXPIRY: u64 = 44;
     let native_custody = matches!(provider_history, ProviderHistory::FreshNativeCustody { .. });
-    let missing_wallets =
-        provider_history == ProviderHistory::FreshMissingWallets || native_custody;
+    let partial_recredit = matches!(provider_history, ProviderHistory::PartialRecredit { .. });
+    let missing_wallets = provider_history == ProviderHistory::FreshMissingWallets
+        || native_custody
+        || partial_recredit;
     let dual_quote = matches!(provider_history, ProviderHistory::FreshDualQuote(_));
     let with_backing = provider_history == ProviderHistory::Fresh || missing_wallets || dual_quote;
-    let provider_principal = if provider_history == ProviderHistory::Empty {
-        0u64
-    } else {
-        307
-    };
+    let provider_principal =
+        if let ProviderHistory::PartialRecredit { backing, .. } = provider_history {
+            backing
+        } else if provider_history == ProviderHistory::Empty {
+            0u64
+        } else {
+            307
+        };
     let backing = if with_backing { provider_principal } else { 0 };
     let withdrawn = provider_principal - backing;
 
@@ -410,6 +426,28 @@ fn absent_reserve_progress(
             let mint = Mint::unpack(&mint_frame.data).unwrap();
             assert_eq!(mint.supply, supply);
             assert_eq!(mint.mint_authority, COption::None);
+            if let ProviderHistory::PartialRecredit {
+                backing,
+                before_loss,
+                repair_early,
+            } = provider_history
+            {
+                drop(admin);
+                partial_recredit_liability_progress::finish(
+                    &mut env,
+                    &owners,
+                    portfolios,
+                    tokens,
+                    absent,
+                    [reserve_token, admin_token, provider_token.unwrap()],
+                    asset,
+                    remainder,
+                    backing,
+                    before_loss,
+                    repair_early,
+                );
+                continue;
+            }
             let mut tracked = vec![
                 env.market,
                 env.vault,
