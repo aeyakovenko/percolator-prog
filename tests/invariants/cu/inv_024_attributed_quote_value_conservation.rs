@@ -35,29 +35,54 @@ mod shutdown_operator_departure;
 #[path = "inv_024_pnl_reward_receipt_history.rs"]
 mod pnl_reward_receipt_history;
 
+fn inv024_unconditional_evidence(attrs: &[syn::Attribute]) -> bool {
+    !attrs.iter().any(|attr| {
+        ["cfg", "cfg_attr", "ignore"]
+            .iter()
+            .any(|name| attr.path().is_ident(name))
+    })
+}
+
 fn inv024_source_defines_test(source: &str, function: &str) -> bool {
-    let expected = format!("fn {function}");
-    let mut test_attribute = false;
-
-    for line in source.lines() {
-        let line = line.trim();
-        if line == "#[test]" {
-            test_attribute = true;
-        } else if line.starts_with("fn ") {
-            if test_attribute
-                && line
-                    .strip_prefix(&expected)
-                    .is_some_and(|tail| tail.trim_start().starts_with('('))
-            {
-                return true;
+    let file = syn::parse_file(source).expect("parse entitlement owner Rust source");
+    inv024_unconditional_evidence(&file.attrs)
+        && file.items.iter().any(|item| match item {
+            syn::Item::Fn(item) => {
+                item.sig.ident == function
+                    && inv024_unconditional_evidence(&item.attrs)
+                    && item.attrs.iter().any(|attr| attr.path().is_ident("test"))
             }
-            test_attribute = false;
-        } else if test_attribute && !line.is_empty() && !line.starts_with('#') {
-            test_attribute = false;
-        }
-    }
+            _ => false,
+        })
+}
 
-    false
+fn inv024_mounted_sources(source: &str) -> std::collections::BTreeSet<String> {
+    let file = syn::parse_file(source).expect("parse entitlement test target");
+    if !inv024_unconditional_evidence(&file.attrs) {
+        return Default::default();
+    }
+    // Current entitlement owners are direct #[path] modules. Fail closed if
+    // evidence moves behind conditional compilation or a different mount shape.
+    file.items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(item)
+                if item.content.is_none() && inv024_unconditional_evidence(&item.attrs) =>
+            {
+                item.attrs.iter().find_map(|attr| match &attr.meta {
+                    syn::Meta::NameValue(meta) if meta.path.is_ident("path") => match &meta.value {
+                        syn::Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Str(path),
+                            ..
+                        }) => Some(format!("tests/{}", path.value())),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -637,6 +662,18 @@ fn v16_program_shutdown_submitter_cannot_receive_foreign_reserve_cleanup() {
 #[test]
 fn v16_program_entitlement_effect_roster_is_source_complete() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mounted_sources = [
+        "tests/v16_cu.rs",
+        "tests/v16_program_stateful_fuzz.rs",
+        "tests/v16_program_fuzz_regressions.rs",
+    ]
+    .into_iter()
+    .flat_map(|target| {
+        let source = std::fs::read_to_string(root.join(target))
+            .unwrap_or_else(|error| panic!("read entitlement target {target}: {error}"));
+        inv024_mounted_sources(&source)
+    })
+    .collect::<std::collections::BTreeSet<_>>();
     let public_rows = include_str!("../public_instruction_coverage.tsv")
         .lines()
         .filter(|line| {
@@ -715,12 +752,6 @@ fn v16_program_entitlement_effect_roster_is_source_complete() {
             "entitlement owner must be a reviewed v16 regression: {owner_path}#{owner_test}"
         );
         entitlement_owners.insert((owner_path, owner_test));
-        let source = std::fs::read_to_string(root.join(owner_path))
-            .unwrap_or_else(|error| panic!("read entitlement owner {owner_path}: {error}"));
-        assert!(
-            inv024_source_defines_test(&source, owner_test),
-            "missing executable entitlement owner {owner_path}#{owner_test}"
-        );
         assert!(
             entitlement_rows.insert((columns[0].to_owned(), columns[1].to_owned())),
             "duplicate entitlement route: {}/{}",
@@ -741,12 +772,53 @@ fn v16_program_entitlement_effect_roster_is_source_complete() {
         entitlement_rows, public_rows,
         "every public instruction needs exactly one owner-level entitlement disposition"
     );
+    let production = syn::parse_file(include_str!("../../../src/v16_program.rs"))
+        .expect("parse public instruction source");
+    let instruction_enum = production
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            syn::Item::Mod(item) if item.ident == "ix" => item.content,
+            _ => None,
+        })
+        .expect("inline public instruction module")
+        .1
+        .into_iter()
+        .find_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == "Instruction" => Some(item),
+            _ => None,
+        })
+        .expect("public Instruction enum");
+    assert_eq!(
+        entitlement_rows
+            .iter()
+            .map(|(_, variant)| variant.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        instruction_enum
+            .variants
+            .iter()
+            .map(|variant| variant.ident.to_string())
+            .collect(),
+        "entitlement dispositions must cover the production enum, independently of the public TSV"
+    );
     assert_eq!(entitlement_rows.len(), 49);
     assert_eq!(
         entitlement_owners.len(),
         18,
         "INV-024 entitlement evidence owner roster drift"
     );
+    for (owner_path, owner_test) in entitlement_owners {
+        assert!(
+            mounted_sources.contains(owner_path),
+            "entitlement owner is not unconditionally mounted in a test target: {owner_path}"
+        );
+        let source = std::fs::read_to_string(root.join(owner_path))
+            .unwrap_or_else(|error| panic!("read entitlement owner {owner_path}: {error}"));
+        assert!(
+            inv024_source_defines_test(&source, owner_test),
+            "missing unconditional, non-ignored entitlement test {owner_path}#{owner_test}"
+        );
+    }
     assert_eq!(
         observed_effects, allowed_effects,
         "unused effect class drift"
