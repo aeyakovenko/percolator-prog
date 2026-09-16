@@ -19,16 +19,29 @@
 
 use super::*;
 
-fn inv080_source_defines_function(source: &str, function: &str) -> bool {
-    let needle = format!("fn {function}");
-    source.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with(&needle)
-            && line[needle.len()..]
-                .chars()
-                .next()
-                .is_some_and(|ch| ch == '(' || ch.is_whitespace())
-    })
+fn inv080_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
 }
 
 #[test]
@@ -125,12 +138,12 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
         assert!(
             witnesses
                 .iter()
-                .any(|source| inv080_source_defines_function(source, row.witness)),
+                .any(|source| inv080_source_defines_test(source, row.witness)),
             "engine-error disposition lacks public witness {}",
             row.witness
         );
     }
-    assert!(inv080_source_defines_function(
+    assert!(inv080_source_defines_test(
         witnesses[0],
         "v16_attack_hybrid_soft_stale_partial_oracle_error_does_not_poison_retry"
     ));
