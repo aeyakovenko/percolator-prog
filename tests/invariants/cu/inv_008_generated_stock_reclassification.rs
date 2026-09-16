@@ -998,6 +998,18 @@ fn v16_retained_stock_epoch_route_matrix_accounts_for_every_signed_outflow() {
         assert!(listed_handlers.insert(columns[1]));
         assert!(!columns[4].is_empty());
         let (path, function) = columns[3].split_once('#').unwrap();
+        assert!(
+            path.starts_with("cu/inv_") || path.starts_with("stateful/inv_"),
+            "stock-epoch owner points outside invariant tests: {path}"
+        );
+        assert!(
+            path.ends_with(".rs") && !path.contains(".."),
+            "stock-epoch owner path is not a direct Rust invariant file: {path}"
+        );
+        assert!(
+            function.starts_with("v16_"),
+            "stock-epoch owner uses an unreviewed witness name: {function}"
+        );
         let owner = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/invariants")
