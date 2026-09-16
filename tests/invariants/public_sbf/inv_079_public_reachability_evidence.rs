@@ -578,8 +578,9 @@ fn v16_program_fixed_blockers_remain_progressing() {
 fn v16_program_open_lof_manifest_snapshot_is_structurally_honest() {
     validate_manifest().expect("open LoF manifest structure");
     assert!(quarantined_prs().is_empty());
+    let certified = certified_prs();
     assert_eq!(
-        certified_prs(),
+        certified,
         [
             220, 223, 224, 225, 231, 251, 253, 254, 255, 256, 259, 260, 264, 265, 267, 271, 272,
             273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 290, 292, 293, 294,
@@ -590,11 +591,41 @@ fn v16_program_open_lof_manifest_snapshot_is_structurally_honest() {
         ],
         "fixed-pin adapters must not remain classified as vulnerable quarantines"
     );
+    let nonqualifying = nonqualifying_prs();
     assert_eq!(
-        nonqualifying_prs(),
+        nonqualifying,
         [237, 258, 286, 287, 370, 372, 373, 374],
         "nonqualifying rows must retain executable public-route disposition evidence"
     );
+    let benchmark_evidence = include_str!("../open_findings.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .map(|line| {
+            let fields = line.splitn(6, '\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 6, "malformed finding row: {line}");
+            (
+                fields[0].parse::<u16>().expect("numeric finding PR"),
+                fields[4],
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for pr in certified {
+        assert!(
+            matches!(
+                benchmark_evidence.get(&pr).copied(),
+                Some("certified") | Some("independent-discovery")
+            ),
+            "LoF manifest certified PR {pr} must have fixed-pin or invariant-owned benchmark \
+             evidence"
+        );
+    }
+    for pr in nonqualifying {
+        assert_eq!(
+            benchmark_evidence.get(&pr),
+            Some(&"nonqualifying"),
+            "LoF manifest nonqualifying PR {pr} must be nonqualifying in the benchmark ledger"
+        );
+    }
     let missing = missing_prs();
     assert!(
         missing.is_empty(),
