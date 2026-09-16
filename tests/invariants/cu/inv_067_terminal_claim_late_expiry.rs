@@ -98,7 +98,7 @@ impl World {
             [Keypair::new(), Keypair::new()],
             Some(setup),
             BACKING,
-            SourceShape::Staggered(14),
+            SourceShape::Staggered(14 * 50),
             0,
             decimals,
         )
@@ -113,11 +113,19 @@ impl World {
         first_claimant_lots: u16,
     ) -> Self {
         assert!((1..40).contains(&first_claimant_lots));
+        Self::before_receipts_with_staggered_face(owners, first_claimant_lots * 50)
+    }
+
+    pub(super) fn before_receipts_with_staggered_face(
+        owners: [Keypair; 2],
+        first_face: u16,
+    ) -> Self {
+        assert!((1..2_000).contains(&first_face));
         Self::build_before_receipts(
             owners,
             None,
             BACKING,
-            SourceShape::Staggered(first_claimant_lots),
+            SourceShape::Staggered(first_face),
             0,
             0,
         )
@@ -149,20 +157,20 @@ impl World {
         let asset_count = if staggered_sources { 3 } else { 2 };
         let mut deposits = DEPOSITS.to_vec();
         let mut faces = FACES.to_vec();
-        let trades = if let SourceShape::Staggered(first_lots) = source_shape {
+        let trades = if let SourceShape::Staggered(first_face) = source_shape {
             // Split the same 250 debtor capital, 100 backing and 1,000 claim face
             // across two independent source domains, without changing token supply.
             deposits[3] = 100;
             deposits.push(150);
             faces.push(0);
-            let first_lots = i128::from(first_lots);
-            faces[0] = first_lots as u128 * 50;
-            faces[4] = (40 - first_lots) as u128 * 50;
+            let first_face = i128::from(first_face);
+            faces[0] = first_face as u128;
+            faces[4] = (2_000 - first_face) as u128;
             vec![
-                (0, 1, 0, first_lots),
-                (4, 1, 0, 40 - first_lots),
-                (2, 3, 1, 8),
-                (2, 5, 2, 12),
+                (0, 1, 0, first_face),
+                (4, 1, 0, 2_000 - first_face),
+                (2, 3, 1, 400),
+                (2, 5, 2, 600),
             ]
         } else if split_claimants {
             // Preserve total capital and face, but share one source's fractional rate.
@@ -170,9 +178,14 @@ impl World {
             deposits.push(650);
             faces[2] = 7 * 50;
             faces.push(13 * 50);
-            vec![(0, 1, 0, 14), (4, 1, 0, 26), (2, 3, 1, 7), (5, 3, 1, 13)]
+            vec![
+                (0, 1, 0, 700),
+                (4, 1, 0, 1_300),
+                (2, 3, 1, 350),
+                (5, 3, 1, 650),
+            ]
         } else {
-            vec![(0, 1, 0, 14), (4, 1, 0, 26), (2, 3, 1, 20)]
+            vec![(0, 1, 0, 700), (4, 1, 0, 1_300), (2, 3, 1, 1_000)]
         };
         let params = V16CuMarketParams {
             maintenance_fee_per_slot,
@@ -381,6 +394,14 @@ impl World {
                 vec![1, 3, 0, 4, 2]
             };
             for actor in actors {
+                // Sub-lot claimants settle the complete mark move once; otherwise
+                // each intermediate settlement would truncate their fractional PnL.
+                if matches!(source_shape, SourceShape::Staggered(face) if face % 50 != 0)
+                    && (actor == 0 || actor == 4)
+                    && slot < 11
+                {
+                    continue;
+                }
                 world.env.crank(
                     world.actors[actor].portfolio,
                     ProgInstruction::PermissionlessCrank {
@@ -507,7 +528,7 @@ impl World {
         .unwrap();
     }
 
-    fn trade(&mut self, winner: usize, loser: usize, asset: u16, size: i128, price: u64) {
+    fn trade(&mut self, winner: usize, loser: usize, asset: u16, face: i128, price: u64) {
         let a = &self.actors[winner];
         let b = &self.actors[loser];
         self.env.svm.expire_blockhash();
@@ -517,7 +538,8 @@ impl World {
                     a.portfolio,
                     b.portfolio,
                     asset,
-                    size * POS_SCALE as i128,
+                    // Fixture marks move from 100 to 150; preserve fractional lots.
+                    face * POS_SCALE as i128 / 50,
                     price,
                     0,
                 ),

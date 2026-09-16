@@ -26,6 +26,37 @@ machine statuses are unchanged.** No current bug was found. The
 [focused report](row424_terminal_lien_classification_20260916.md) records the
 coverage audit, exact validation commands, measurements and limitations.
 
+## Row 417 first payable receipt atom (2026-09-16)
+
+The [first-atom child](cu/inv_067_receipt_first_atom.rs) adds exactly one public
+LiteSVM selector. A positive four-atom receipt keeps its identity while its
+junior payout floors are `0 / 0 / 1` across residuals `501 / 662 / 851`.
+An unequal, already-paid peer has floors `333 / 440 / 566`. The eight histories
+cross exact/late source expiry, source settlement before/after receipt top-ups,
+and both claimant orders.
+
+A retained claim containing only owner, market and portfolio accounts succeeds
+while no transfer is due. After public source normalization makes the first atom
+payable, the same request rejects with `NotEnoughAccountKeys`, including after a
+successful peer payout. Complete Account rollback checks preserve source stock,
+both receipts, SPL custody and rent; the separate payer loses only its signature
+fee. The original complete request pays one atom exactly once, and the shortened
+request becomes admissible again when paid. All six portfolios exit publicly.
+
+The selector passes eight histories, 32 exact rollbacks and 32 rolled-back SPL
+transfers; peak transaction CU is 722,050 under 900,000. Final payouts are
+`[1001, 0, 1283, 0, 1566, 0]`, with one booked rounding atom and the provider's
+untouched atom. Unlike the positive-payment threshold and repeated-stock products,
+this checks a receipt that has never received junior value across an intermediate
+stock release, then crosses the conditional transfer-account boundary. The
+shared public builder accepts atom-sized faces; its existing whole-lot histories
+retain their trades and settlement cadence. No program-owned state is injected.
+
+**Row 417 remains OPEN/missing; INV-067 remains `REFUTED_CURRENT`.** This is a
+fixed, single-SPL-rail product, not row closure. No current behavior violation
+was found. See the [report](row417_receipt_first_atom_20260916.md) for exact
+selectors, validation results, artifact provenance and the overlap audit.
+
 ## Row 411 retained route consent with existing open interest (2026-09-16)
 
 The [existing-OI mark-consent child](cu/inv_014_retained_oi_mark_consent.rs) adds
