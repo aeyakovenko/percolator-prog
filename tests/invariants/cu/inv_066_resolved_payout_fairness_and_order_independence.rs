@@ -1164,15 +1164,6 @@ struct Inv066PayoutClass {
     public_witnesses: &'static [(&'static str, &'static str)],
 }
 
-fn inv066_source_defines_function(source: &str, function: &str) -> bool {
-    let marker = format!("fn {function}");
-    source.lines().any(|line| {
-        line.trim()
-            .strip_prefix(&marker)
-            .is_some_and(|tail| tail.trim_start().starts_with('('))
-    })
-}
-
 fn inv066_source_defines_test(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
     let mut test_attribute = false;
@@ -1192,6 +1183,31 @@ fn inv066_source_defines_test(source: &str, function: &str) -> bool {
             test_attribute = false;
         } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
             test_attribute = false;
+        }
+    }
+
+    false
+}
+
+fn inv066_source_defines_kani_proof(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut proof_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[kani::proof]" {
+            proof_attribute = true;
+        } else if line.starts_with("fn ") {
+            if proof_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            proof_attribute = false;
+        } else if proof_attribute && !line.is_empty() && !line.starts_with("#") {
+            proof_attribute = false;
         }
     }
 
@@ -1406,7 +1422,7 @@ fn v16_program_resolved_payout_induction_composition_is_source_complete() {
 
     let induction = include_str!("../kani/inv_066_resolved_payout_fairness_and_exact_once.rs");
     assert!(induction.contains("RESOLVED_RATE_SUM_AXIOM"));
-    assert!(inv066_source_defines_function(
+    assert!(inv066_source_defines_kani_proof(
         induction,
         "kani_inv066_inv067_funded_receipt_induction_is_order_independent_and_exact_once",
     ));
