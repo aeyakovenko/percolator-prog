@@ -1,10 +1,12 @@
 //! INV-006 - Program, chain, message-type, and version binding.
 //!
 //! A retained request in the deployed wrapper is a signed Solana transaction, so the signature
-//! covers the invoked program, every account key (including the market), the exact instruction
-//! bytes, and the recent blockhash. This test mutates each signed domain after signing and requires
+//! covers the invoked program, static account keys, lookup-table addresses/indices/privileges,
+//! exact instruction bytes, and the recent blockhash. Tests mutate signed domains and require
 //! the transaction boundary to reject before any persistent effect. The instruction decoder's
 //! exhaustive schema/version obligations remain owned by INV-022.
+//! The lookup-table child publicly creates, extends and freezes tables, exercises loaded-role
+//! rollback and alternate-table replay, and composes retained bundles with portfolio ABA.
 //!
 //! Guarantee boundary: Solana has no explicit genesis hash in a legacy transaction message. This
 //! evidence establishes practical cluster binding through the signed recent blockhash and its
@@ -21,6 +23,9 @@ use solana_sdk::{
     signature::Signer,
     transaction::{TransactionError, VersionedTransaction},
 };
+
+#[path = "inv_006_lookup_table_retained_identity.rs"]
+mod lookup_table_retained_identity;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PersistentSnapshot {

@@ -1,5 +1,19 @@
 # Invariant-owned test coverage
 
+## INV-006 loaded lookup-table identity (2026-09-16)
+
+Owner: [public_sbf/inv_006_lookup_table_retained_identity.rs](public_sbf/inv_006_lookup_table_retained_identity.rs),
+mounted under public-SBF INV-006 with bounded INV-003/017 evidence. Real, publicly
+created lookup tables supply the market, portfolios and SPL custody accounts in
+signed v0 messages. Two tests cover table extension/freeze, signed lookup
+substitution, loaded alias/readonly rejection, alternate-table replay, and
+same-address A-A/A-B-A portfolio replacement. Three worlds include four signature
+rejections, seven exact prefix rollbacks, five committed deposits and five payouts.
+A separate SBF build with the portfolio-ID guard disabled accepts the obsolete-ID
+bundle and fails the new test. Production source is restored; no finding or
+invariant status changes. The prior v0 test used empty lookups.
+[Exact selectors, artifact hashes, negative control and limits](inv_006_lookup_table_audit_20260916.md).
+
 ## INV-020 current-observation evidence fidelity (2026-09-16)
 
 Owner: [public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs](public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs).
