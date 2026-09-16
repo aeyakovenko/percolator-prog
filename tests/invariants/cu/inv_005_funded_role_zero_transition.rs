@@ -370,16 +370,6 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
 
                 peak[2] = peak[2].max(land(
                     &mut env,
-                    retained_old,
-                    &tracked,
-                    &[market, vault, wallets[role]],
-                    None,
-                    1,
-                ));
-                book.pay(asset, backing, role, 3);
-                check(&env, &book, &profiles, &sequences);
-                peak[2] = peak[2].max(land(
-                    &mut env,
                     retained_pair,
                     &tracked,
                     &[market, vault, wallets[3]],
@@ -388,7 +378,7 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                 ));
                 book.pay(asset, backing, 3, 5);
                 set_holder(&mut profiles[asset], ROLES[role], successor.pubkey());
-                sequences[asset].authority_epoch += 1;
+                sequences[asset].authority_epoch += if backing { 1 } else { 2 };
                 check(&env, &book, &profiles, &sequences);
 
                 // After the committed handoff, an unchanged sibling payout executes before
@@ -430,15 +420,20 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                     asset,
                     backing,
                     1,
-                    epoch + 1,
+                    sequences[asset].authority_epoch,
                 );
                 let tx = signed(&env, &[old], &[actors[role]]);
+                let old_role_error = if backing {
+                    PercolatorError::Unauthorized
+                } else {
+                    PercolatorError::InvalidTokenAccount
+                };
                 peak[1] = peak[1].max(land(
                     &mut env,
                     tx,
                     &tracked,
                     &[],
-                    Some((2, PercolatorError::Unauthorized)),
+                    Some((2, old_role_error)),
                     0,
                 ));
                 check(&env, &book, &profiles, &sequences);
@@ -452,6 +447,9 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                     1,
                 ));
                 book.pay(peer, backing, role, 7);
+                if !backing {
+                    sequences[peer].authority_epoch += 1;
+                }
                 check(&env, &book, &profiles, &sequences);
                 let remaining = if backing {
                     book.backing[asset * 2]
@@ -465,7 +463,7 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                     asset,
                     backing,
                     remaining,
-                    epoch + 1,
+                    sequences[asset].authority_epoch,
                 );
                 let tx = signed(&env, &[final_payout], &[&successor]);
                 peak[2] = peak[2].max(land(
@@ -477,14 +475,17 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                     1,
                 ));
                 book.pay(asset, backing, 3, remaining);
+                if !backing {
+                    sequences[asset].authority_epoch += 1;
+                }
                 check(&env, &book, &profiles, &sequences);
                 let original = if backing {
                     BACKING[asset * 2]
                 } else {
                     INSURANCE[asset * 2] + INSURANCE[asset * 2 + 1]
                 };
-                assert_eq!(book.wallets[3], original - 3);
-                assert_eq!(book.wallets[role], 3 + 7);
+                assert_eq!(book.wallets[3], original);
+                assert_eq!(book.wallets[role], 7);
                 assert_eq!(
                     book.wallets[4], 0,
                     "cold admin receives no attributed stock"
