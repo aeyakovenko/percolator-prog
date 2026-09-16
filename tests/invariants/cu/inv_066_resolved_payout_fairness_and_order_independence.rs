@@ -1352,6 +1352,32 @@ fn v16_program_resolved_payout_induction_composition_is_source_complete() {
         );
     }
     assert_eq!(row417.len(), 12, "row417 receipt witness roster drift");
+    let inv067_parent = source_cache
+        .entry("tests/invariants/cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs")
+        .or_insert_with(|| {
+            std::fs::read_to_string(root.join(
+                "tests/invariants/cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs",
+            ))
+            .unwrap_or_else(|error| panic!("read INV-067 parent: {error}"))
+        });
+    for marker in [
+        "mod late_expiry;",
+        "mod receipt_expiry_interleavings;",
+        "mod receipt_source_realization;",
+        "mod receipt_rounding_threshold;",
+        "mod receipt_repeated_stock;",
+        "mod receipt_aborted_realization;",
+        "mod receipt_conversion_then_expiry;",
+        "mod receipt_coowned_conversion;",
+        "mod receipt_late_fee_reclassification;",
+        "mod receipt_destination_recreation;",
+        "mod claim_episode_materialization;",
+    ] {
+        assert!(
+            inv067_parent.contains(marker),
+            "row417 receipt witness module not mounted: {marker}",
+        );
+    }
 
     let induction = include_str!("../kani/inv_066_resolved_payout_fairness_and_exact_once.rs");
     assert!(induction.contains("RESOLVED_RATE_SUM_AXIOM"));
