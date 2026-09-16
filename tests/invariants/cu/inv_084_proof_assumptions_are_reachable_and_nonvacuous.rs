@@ -79,6 +79,39 @@ fn inv_084_mounted_kani_files() -> std::collections::BTreeSet<String> {
     files
 }
 
+fn inv_084_source_defines_attributed_function(
+    source: &str,
+    function: &str,
+    attribute: &str,
+) -> bool {
+    for (fn_index, _) in source.match_indices("fn ") {
+        let signature = &source[fn_index + "fn ".len()..];
+        let Some(rest) = signature.strip_prefix(function) else {
+            continue;
+        };
+        if !rest.trim_start().starts_with('(') {
+            continue;
+        }
+        let prefix = &source[..fn_index];
+        let previous_function = prefix.rfind("\nfn ");
+        let attribute_position = prefix.rfind(attribute);
+        if attribute_position
+            .is_some_and(|position| previous_function.is_none_or(|previous| position > previous))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn inv_084_source_defines_kani_proof(source: &str, function: &str) -> bool {
+    inv_084_source_defines_attributed_function(source, function, "#[kani::proof]")
+}
+
+fn inv_084_source_defines_test(source: &str, function: &str) -> bool {
+    inv_084_source_defines_attributed_function(source, function, "#[test]")
+}
+
 fn inv_084_source_assumptions(
     file: &str,
     source: &str,
@@ -378,8 +411,8 @@ fn v16_program_every_mounted_explicit_kani_assumption_is_exactly_inventoried() {
 
         let owner_source = source_cache.get(columns[0]).unwrap();
         assert!(
-            owner_source.contains(&format!("fn {}(", columns[3])),
-            "owning proof {} is absent from {}",
+            inv_084_source_defines_kani_proof(owner_source, columns[3]),
+            "owning proof {} is absent from {} or is not a #[kani::proof]",
             columns[3],
             columns[0]
         );
@@ -388,8 +421,8 @@ fn v16_program_every_mounted_explicit_kani_assumption_is_exactly_inventoried() {
             .get("tests/invariants/kani/inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs")
             .unwrap();
         assert!(
-            witness_source.contains(&format!("fn {}(", columns[5])),
-            "proof witness {} is absent",
+            inv_084_source_defines_kani_proof(witness_source, columns[5]),
+            "proof witness {} is absent or is not a #[kani::proof]",
             columns[5]
         );
 
@@ -403,8 +436,8 @@ fn v16_program_every_mounted_explicit_kani_assumption_is_exactly_inventoried() {
                     .unwrap_or_else(|error| panic!("read public evidence {evidence_file}: {error}"))
             });
         assert!(
-            evidence_source.contains(&format!("fn {evidence_function}(")),
-            "public evidence {} is absent",
+            inv_084_source_defines_test(evidence_source, evidence_function),
+            "public evidence {} is absent or is not a #[test]",
             columns[7]
         );
     }
@@ -522,8 +555,8 @@ fn v16_program_every_mounted_kani_harness_has_a_nonvacuity_disposition() {
                 let evidence_source = std::fs::read_to_string(manifest.join(evidence_file))
                     .unwrap_or_else(|error| panic!("read {evidence_file}: {error}"));
                 assert!(
-                    evidence_source.contains(&format!("fn {evidence_function}(")),
-                    "concrete fixture evidence {evidence} is absent"
+                    inv_084_source_defines_test(&evidence_source, evidence_function),
+                    "concrete fixture evidence {evidence} is absent or is not a #[test]"
                 );
                 "CONCRETE_EXACT"
             } else if facts.branch_limited_claim {
