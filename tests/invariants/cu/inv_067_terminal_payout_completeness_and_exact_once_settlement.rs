@@ -97,6 +97,9 @@ mod claim_episode_materialization;
 #[path = "inv_067_receipt_first_atom.rs"]
 mod receipt_first_atom;
 
+#[path = "inv_067_receipt_frozen_prefix.rs"]
+mod receipt_frozen_prefix;
+
 #[test]
 fn v16_program_receipt_payout_and_portfolio_close_retry_is_exact_once() {
     late_expiry::verify_receipt_payout_and_portfolio_close_retry();
