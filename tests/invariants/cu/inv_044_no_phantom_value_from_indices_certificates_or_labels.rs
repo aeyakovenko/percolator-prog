@@ -706,6 +706,14 @@ fn v16_program_derived_value_class_roster_is_source_complete() {
             assert!(proof.starts_with("proof_v16_"));
         }
         for (path, witness) in row.public_witnesses {
+            assert!(
+                path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                "derived-value witness path must stay under tests/invariants: {path}"
+            );
+            assert!(
+                witness.starts_with("v16_"),
+                "derived-value witness must name a v16 test: {witness}"
+            );
             let source = source_cache.entry(path).or_insert_with(|| {
                 std::fs::read_to_string(root.join(path))
                     .unwrap_or_else(|error| panic!("read {path}: {error}"))
