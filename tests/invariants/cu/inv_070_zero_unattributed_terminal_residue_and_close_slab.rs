@@ -1819,6 +1819,7 @@ fn inv070_terminal_insurance_withhold_fixture() -> Inv070TerminalInsuranceWithho
 // Resolved, account zero remains bound to the configured authority and the destination remains owned
 // by it, but the signature is no longer required to deliver that exact entitlement. Live withdrawals
 // remain signed. Every rejected identity/destination variant must roll back accounting and SPL state.
+// Secondary coverage: INV-073.
 #[test]
 fn v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_close() {
     const ASSET_INDEX: u16 = 1;

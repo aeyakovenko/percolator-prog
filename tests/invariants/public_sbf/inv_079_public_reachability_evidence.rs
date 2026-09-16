@@ -773,11 +773,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
     assert_eq!(rows, 166, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(
-        missing, 6,
-        "post-PR135 counterexamples remain missing generic invariant-owned discovery coverage"
+        missing, 0,
+        "post-PR135 counterexamples must retain generic invariant-owned discovery coverage"
     );
     assert_eq!(
-        independent, 143,
+        independent, 149,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
@@ -807,6 +807,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             5,
             &[5],
             include_str!("../stateful/inv_005_authority_incarnation_binding.rs"),
+        ),
+        (
+            5,
+            &[5],
+            include_str!("../cu/inv_005_authority_incarnation_binding.rs"),
         ),
         (
             8,
@@ -933,10 +938,16 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             include_str!("../cu/inv_039_pending_loss_obligation_durability.rs"),
         ),
         (
+            39,
+            &[39],
+            include_str!("../cu/inv_039_pending_loss_mixed_roles.rs"),
+        ),
+        (
             45,
             &[45],
             include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
         ),
+        (45, &[45], include_str!("inv_045_no_free_mark_movement.rs")),
         (
             51,
             &[51, 73],
@@ -988,6 +999,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             70,
             &[70, 24, 25, 33, 41, 63, 69, 71, 86, 88],
             include_str!("../cu/inv_070_terminal_scan_recredit.rs"),
+        ),
+        (
+            70,
+            &[70, 73],
+            include_str!("../cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs"),
         ),
         (
             71,
@@ -1067,6 +1083,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "mark-movement-reserve-must-remain-encumbered"
                     | "mark-movement-cost-must-cover-liquidation-extraction"
                     | "mark-movement-fees-must-be-bilaterally-supported"
+                    | "fresh-hybrid-report-cannot-reclassify-stale-trade-effective-price-as-reward-eligible"
                     | "all-economic-routes-preserve-canonical-fractional-accrual-carry"
                     | "current-hybrid-health-refresh-requires-fresh-authenticated-observation"
                     | "composite-price-is-rounded-once-after-exact-composition"
@@ -1075,6 +1092,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "canonical-price-remainder-makes-eager-and-delayed-cranks-equivalent"
                     | "composite-oracle-legs-must-share-one-coherent-observation-epoch"
                     | "terminal-payout-is-invariant-to-flattened-dust-position"
+                    | "resolved-receipt-must-survive-late-backing-expiry-and-pay-exactly-once"
                     | "terminal-residual-cannot-double-charge-provider-principal"
                     | "insurance-spend-remains-source-domain-local"
                     | "backing-atoms-cannot-support-claims-from-another-source"
@@ -1100,6 +1118,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "retained-capability-cannot-cross-any-authority-revoking-state-transition"
                     | "stale-matcher-enable-cannot-revive-revoked-value-authority"
                     | "funded-role-principal-cannot-be-redirected-without-incumbent-consent"
+                    | "funded-oracle-mark-authority-cannot-be-redirected-without-incumbent-consent"
                     | "committed-funding-must-accrue-before-lifecycle-terminalization"
                     | "pending-mark-boundary-must-activate-before-post-boundary-funding"
                     | "stale-shutdown-must-retain-a-bounded-public-progress-path"
@@ -1127,10 +1146,13 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "prospective-loss-in-lapsed-domain-must-have-bounded-terminal-continuation"
                     | "prospective-loss-must-not-create-backing-in-lapsed-domain"
                     | "asset-local-bankruptcy-cannot-lock-unrelated-backed-claim"
+                    | "funded-terminal-insurance-must-have-permissionless-payout-to-configured-authority"
                     | "unsigned-lp-cannot-inherit-preexisting-settlement-cohort"
                     | "fresh-counterparty-must-not-inherit-preexisting-settlement-cohort"
                     | "all-accrued-liabilities-precede-every-risk-increasing-admission"
                     | "all-accrued-liabilities-precede-every-risk-increasing-admission-even-after-flat-account-history"
+                    | "mixed-role-resolved-debt-attribution-preserves-owner-obligation-through-resolution"
+                    | "resolved-close-must-retain-pending-loss-weight-until-opposing-debt-settles"
                     | "resolved-reserve-payouts-preserve-beneficiary-value-without-beneficiary-signatures"
                     | "shutdown-submitters-cannot-receive-or-relabel-another-role-attributed-reserve"
             ),
@@ -1200,7 +1222,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
         assert!(
             nonqualifying_sources
                 .iter()
-                .any(|source| source.contains(&format!("fn {}", fields[2]))),
+                .any(|source| source_defines_test(source, fields[2])),
             "nonqualifying claim lacks executable public-route evidence: {}",
             fields[2]
         );
