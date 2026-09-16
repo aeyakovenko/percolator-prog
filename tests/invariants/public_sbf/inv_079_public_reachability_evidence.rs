@@ -1895,7 +1895,7 @@ fn validate_public_instruction_coverage_cell(cell: &str, column: &str, variant: 
             );
         }
         assert!(
-            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            path.starts_with("tests/invariants/") && path.ends_with(".rs") && !path.contains(".."),
             "{variant} {column} evidence must stay under tests/invariants: {path}"
         );
         assert!(
@@ -2156,8 +2156,15 @@ fn parse_special_method_registry(tsv: &str) -> Vec<SpecialMethodCoverageRow<'_>>
                     )
                 });
                 assert!(
-                    path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                    path.starts_with("tests/invariants/")
+                        && path.ends_with(".rs")
+                        && !path.contains(".."),
                     "row {} evidence is not invariant-owned: {path}",
+                    line_index + 1
+                );
+                assert!(
+                    function.starts_with("v16_"),
+                    "row {} evidence must name a reviewed v16 test: {path}#{function}",
                     line_index + 1
                 );
                 let full_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
@@ -2721,8 +2728,15 @@ fn v16_traceability_gap_ledger_points_to_executable_evidence() {
                 )
             });
             assert!(
-                path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                path.starts_with("tests/invariants/")
+                    && path.ends_with(".rs")
+                    && !path.contains(".."),
                 "traceability row {} evidence is not invariant-owned: {path}",
+                line_index + 1
+            );
+            assert!(
+                function.starts_with("v16_"),
+                "traceability row {} evidence must name a reviewed v16 test: {path}#{function}",
                 line_index + 1
             );
             let full_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
