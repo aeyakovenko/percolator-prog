@@ -24,6 +24,31 @@ use crate::support::invariant_discovery::{
 use crate::support::v16_svm::{MarketConfig, V16Svm};
 use percolator::BOUND_SCALE;
 
+fn inv014_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 fn inv014_braced_body<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
         .find(marker)
@@ -156,15 +181,19 @@ fn v16_program_delayed_control_matrix_is_source_complete() {
     assert!(restart.contains("restart_empty_asset_preserving_insurance_budget_not_atomic("));
 
     let authority_evidence = include_str!("../cu/inv_005_authority_incarnation_binding.rs");
-    assert!(authority_evidence
-        .contains("fn v16_program_configured_authority_route_dispositions_are_source_complete("));
-    assert!(
-        authority_evidence.contains("fn v16_program_authority_epoch_matrix_is_source_complete(")
-    );
+    assert!(inv014_source_defines_test(
+        authority_evidence,
+        "v16_program_configured_authority_route_dispositions_are_source_complete"
+    ));
+    assert!(inv014_source_defines_test(
+        authority_evidence,
+        "v16_program_authority_epoch_matrix_is_source_complete"
+    ));
     let market_evidence = include_str!("inv_007_no_aba_reuse.rs");
-    assert!(
-        market_evidence.contains("fn v16_wrapper_account_incarnation_census_is_source_complete(")
-    );
+    assert!(inv014_source_defines_test(
+        market_evidence,
+        "v16_wrapper_account_incarnation_census_is_source_complete"
+    ));
 }
 
 #[test]
