@@ -2863,12 +2863,28 @@ struct Inv070TerminalCompositionClass {
 }
 
 fn inv070_source_defines_test(source: &str, function: &str) -> bool {
-    let marker = format!("fn {function}");
-    source.lines().any(|line| {
-        line.trim()
-            .strip_prefix(&marker)
-            .is_some_and(|tail| tail.trim_start().starts_with('('))
-    })
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
 }
 
 fn inv070_braced_body_after<'a>(source: &'a str, marker: &str) -> &'a str {
@@ -2990,23 +3006,66 @@ fn v16_program_terminal_stock_and_close_slab_composition_is_source_complete() {
     );
 
     let witness_sources = [
-        include_str!("inv_005_authority_incarnation_binding.rs"),
-        include_str!("inv_017_signer_writable_role_and_account_alias_safety.rs"),
-        include_str!("inv_018_quote_mint_vault_token_program_and_authority_integrity.rs"),
-        include_str!("inv_034_domain_and_instance_isolation.rs"),
-        include_str!("inv_063_backing_expiry_normalization.rs"),
-        include_str!("inv_070_terminal_native_reclassification.rs"),
-        include_str!("inv_070_terminal_prefix_custody_actionability.rs"),
-        include_str!("inv_070_terminal_prefix_reuse.rs"),
-        include_str!("inv_070_terminal_scan_recredit.rs"),
-        include_str!("inv_070_zero_unattributed_terminal_residue_and_close_slab.rs"),
-        include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs"),
-        include_str!("../stateful/inv_063_backing_expiry_normalization.rs"),
-        include_str!("../stateful/inv_066_resolved_payout_fairness_and_order_independence.rs"),
-        include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs"),
+        (
+            "tests/invariants/cu/inv_005_authority_incarnation_binding.rs",
+            include_str!("inv_005_authority_incarnation_binding.rs"),
+        ),
+        (
+            "tests/invariants/cu/inv_017_signer_writable_role_and_account_alias_safety.rs",
+            include_str!("inv_017_signer_writable_role_and_account_alias_safety.rs"),
+        ),
+        (
+            "tests/invariants/cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs",
+            include_str!("inv_018_quote_mint_vault_token_program_and_authority_integrity.rs"),
+        ),
+        (
+            "tests/invariants/cu/inv_034_domain_and_instance_isolation.rs",
+            include_str!("inv_034_domain_and_instance_isolation.rs"),
+        ),
+        (
+            "tests/invariants/cu/inv_063_backing_expiry_normalization.rs",
+            include_str!("inv_063_backing_expiry_normalization.rs"),
+        ),
+        (
+            "tests/invariants/cu/inv_070_terminal_native_reclassification.rs",
+            include_str!("inv_070_terminal_native_reclassification.rs"),
+        ),
+        (
+            "tests/invariants/cu/inv_070_terminal_prefix_custody_actionability.rs",
+            include_str!("inv_070_terminal_prefix_custody_actionability.rs"),
+        ),
+        (
+            "tests/invariants/cu/inv_070_terminal_prefix_reuse.rs",
+            include_str!("inv_070_terminal_prefix_reuse.rs"),
+        ),
+        (
+            "tests/invariants/cu/inv_070_terminal_scan_recredit.rs",
+            include_str!("inv_070_terminal_scan_recredit.rs"),
+        ),
+        (
+            "tests/invariants/cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs",
+            include_str!("inv_070_zero_unattributed_terminal_residue_and_close_slab.rs"),
+        ),
+        (
+            "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+            include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs"),
+        ),
+        (
+            "tests/invariants/stateful/inv_063_backing_expiry_normalization.rs",
+            include_str!("../stateful/inv_063_backing_expiry_normalization.rs"),
+        ),
+        (
+            "tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs",
+            include_str!("../stateful/inv_066_resolved_payout_fairness_and_order_independence.rs"),
+        ),
+        (
+            "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+            include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs"),
+        ),
     ];
     let mut classes = std::collections::BTreeSet::new();
     let mut proofs = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
     for row in CLASSES {
         assert!(classes.insert(row.class), "duplicate terminal stock class");
         assert!(!row.public_witnesses.is_empty());
@@ -3015,10 +3074,34 @@ fn v16_program_terminal_stock_and_close_slab_composition_is_source_complete() {
             assert!(proof.starts_with("proof_v16_"));
         }
         for witness in row.public_witnesses {
+            let shared_terminal_cleanup = *witness
+                == "expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup";
             assert!(
-                witness_sources
-                    .iter()
-                    .any(|source| inv070_source_defines_test(source, witness)),
+                witnesses.insert(*witness) || shared_terminal_cleanup,
+                "duplicate terminal witness needs an explicit shared-witness review: {witness}",
+            );
+            assert!(
+                witness.starts_with("v16_")
+                    || matches!(
+                        *witness,
+                        "insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_payout"
+                            | "expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup"
+                    ),
+                "terminal class '{}' uses an unreviewed witness name: {witness}",
+                row.class,
+            );
+            let matches = witness_sources
+                .iter()
+                .filter(|(path, source)| {
+                    assert!(
+                        path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                        "terminal witness source path drift: {path}",
+                    );
+                    inv070_source_defines_test(source, witness)
+                })
+                .count();
+            assert!(
+                matches == 1,
                 "terminal class '{}' lacks executable public witness {witness}",
                 row.class,
             );
