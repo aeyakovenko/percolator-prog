@@ -161,6 +161,27 @@ No production bug was established. Rows **419/435 remain OPEN/missing** and
 INV-039 remains `REFUTED_CURRENT`. The [Lane 21 report](lane21_mixed_debt_attribution_20260916.md)
 records non-overlap, exact verification commands, artifacts and remaining gaps.
 
+## Receipt exit-window lane: signed and unsigned late-expiry routes (2026-09-16)
+
+The [INV-067 exit-window child](cu/inv_067_receipt_exit_window.rs) adds 72 public
+LiteSVM histories crossing partial receipts and late backing with a nonzero
+owner-exit delay. Delays of 1/2/5 slots, expiry landing at 13/17, both
+`CloseResolved` and resolved `PermissionlessCrank`, and six claim/normalization
+orders preserve the exact 700/1,300 receipt faces and 198/368 final junior payouts.
+Unsigned top-ups pay during the protected window; retained close requests reject
+at boundary minus one and pay at equality. Transaction-wide signer checks keep
+the source owner's signature from masking another owner's unsigned route.
+
+The existing interleaving oracle checks each prefix. There are 288 complete
+rollbacks (120 with actual SPL payments), 192 signature-gate checks and 360
+rent-exact portfolio deletions. This adds the exit-window/receipt interaction to
+the zero-delay interleavings; Lane 17 owns beneficiary succession, and Lane 20
+owns deferred receipts and fees. Neither product is duplicated here.
+
+**Row 417 remains OPEN/missing; INV-067 remains `REFUTED_CURRENT`.** The
+[lane report](lane_receipt_exit_window_20260916.md) records non-overlap, exact
+validation commands, public construction, measured bounds and residual limits.
+
 ## Lane 20 deferred receipt and fee across expiry (2026-09-16)
 
 The [INV-067 deferred-fee child](cu/inv_067_receipt_deferred_fee.rs) crosses a

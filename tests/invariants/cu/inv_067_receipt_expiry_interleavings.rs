@@ -4,6 +4,9 @@
 
 use super::{late_expiry::World, *};
 
+#[path = "inv_067_receipt_exit_window.rs"]
+mod exit_window;
+
 const CLAIMANTS: [usize; 2] = [0, 4];
 const FACES: [u128; 2] = [700, 1_300];
 const TOTAL_FACE: u128 = 3_000;

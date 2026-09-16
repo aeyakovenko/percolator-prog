@@ -408,7 +408,24 @@ impl World {
                 if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio) {
                     break;
                 }
-                world.land(&[world.payout(actor, false)], false).unwrap();
+                let mut ix = world.payout(actor, false);
+                if world.env.market_state().0.force_close_delay_slots != 0 {
+                    ix.accounts[0].is_signer = true;
+                    world.env.svm.expire_blockhash();
+                    let cu = world
+                        .env
+                        .send(
+                            ProgInstruction::CloseResolved {
+                                fee_rate_per_slot: 0,
+                            },
+                            ix.accounts,
+                            &[&world.actors[actor].owner],
+                        )
+                        .unwrap();
+                    world.peak_cu = world.peak_cu.max(cu);
+                } else {
+                    world.land(&[ix], false).unwrap();
+                }
             }
             assert!(resolved_portfolio_is_terminal(
                 &world.env,
