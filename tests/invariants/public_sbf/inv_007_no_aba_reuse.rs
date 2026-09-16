@@ -121,20 +121,48 @@ fn v16_wrapper_account_incarnation_census_is_source_complete() {
 
     let receipt_evidence =
         include_str!("../stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs");
-    assert!(inv007_source_defines_test(
-        receipt_evidence,
-        "v16_program_resolved_receipt_accepts_two_exact_topups_and_idempotent_retries"
-    ));
     let matcher_evidence = include_str!("../cu/inv_019_cpi_invocation_and_return_data_binding.rs");
-    assert!(inv007_source_defines_test(
-        matcher_evidence,
-        "v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi"
-    ));
     let ledger_evidence = include_str!("../cu/inv_034_domain_and_instance_isolation.rs");
-    assert!(inv007_source_defines_test(
-        ledger_evidence,
-        "v16_attack_insurance_ledger_authority_binding_enforced"
-    ));
+    let mut composition_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs",
+            receipt_evidence,
+            "v16_program_resolved_receipt_accepts_two_exact_topups_and_idempotent_retries",
+        ),
+        (
+            "tests/invariants/cu/inv_019_cpi_invocation_and_return_data_binding.rs",
+            matcher_evidence,
+            "v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi",
+        ),
+        (
+            "tests/invariants/cu/inv_034_domain_and_instance_isolation.rs",
+            ledger_evidence,
+            "v16_attack_insurance_ledger_authority_binding_enforced",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-007 ABA witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "INV-007 ABA witness must be a reviewed v16 regression: {path}#{witness}"
+        );
+        assert!(
+            composition_witnesses.insert((path, witness)),
+            "duplicate INV-007 ABA composition witness {path}#{witness}"
+        );
+        assert!(
+            inv007_source_defines_test(source, witness),
+            "INV-007 lost ABA composition witness {path}#{witness}",
+        );
+    }
+    assert_eq!(
+        composition_witnesses.len(),
+        3,
+        "INV-007 ABA composition witness roster drift"
+    );
 }
 
 #[test]
