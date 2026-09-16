@@ -1244,6 +1244,56 @@ fn v16_program_resolved_payout_induction_composition_is_source_complete() {
             ],
         },
     ];
+    const ROW417_WITNESSES: &[(&str, &str)] = &[
+        (
+            "tests/invariants/cu/inv_066_resolved_payout_fairness_and_order_independence.rs",
+            "v16_program_late_receipt_materialization_preserves_snapshot_entitlements",
+        ),
+        (
+            "tests/invariants/cu/inv_067_terminal_claim_late_expiry.rs",
+            "v16_program_retained_claim_identity_survives_late_expiry_recipient_rotation_and_atomic_retry",
+        ),
+        (
+            "tests/invariants/cu/inv_067_receipt_rounding_threshold.rs",
+            "v16_program_late_receipt_rounding_threshold_preserves_zero_vault_settlement",
+        ),
+        (
+            "tests/invariants/cu/inv_067_receipt_conversion_then_expiry.rs",
+            "v16_program_committed_conversion_then_late_expiry_preserves_receipt_attribution",
+        ),
+        (
+            "tests/invariants/cu/inv_067_receipt_late_fee_reclassification.rs",
+            "v16_program_late_fee_reclassification_preserves_receipt_faces_and_claimant_order",
+        ),
+        (
+            "tests/invariants/cu/inv_067_terminal_claim_episode_materialization.rs",
+            "v16_program_coowned_claim_episodes_survive_deferred_receipts_and_two_expiry_rollbacks",
+        ),
+        (
+            "tests/invariants/cu/inv_067_receipt_destination_recreation.rs",
+            "v16_program_recreated_destination_preserves_receipt_identity_across_second_expiry_retry",
+        ),
+        (
+            "tests/invariants/cu/inv_067_receipt_coowned_conversion.rs",
+            "v16_program_coowned_receipts_preserve_attribution_across_conversion_and_late_expiry",
+        ),
+        (
+            "tests/invariants/cu/inv_067_receipt_repeated_stock.rs",
+            "v16_program_receipts_preserve_identity_through_two_stock_releases_and_reversed_priority",
+        ),
+        (
+            "tests/invariants/cu/inv_067_receipt_source_realization.rs",
+            "v16_program_retained_receipts_preserve_identity_across_fresh_realization_or_expiry",
+        ),
+        (
+            "tests/invariants/cu/inv_067_receipt_expiry_interleavings.rs",
+            "v16_program_retained_claims_commute_with_late_expiry_normalization_after_catchup",
+        ),
+        (
+            "tests/invariants/cu/inv_067_receipt_aborted_realization.rs",
+            "v16_program_aborted_second_source_realization_preserves_receipts_across_expiry_and_order",
+        ),
+    ];
 
     let cargo = include_str!("../../../Cargo.toml");
     let lock = include_str!("../../../Cargo.lock");
@@ -1286,6 +1336,22 @@ fn v16_program_resolved_payout_induction_composition_is_source_complete() {
     }
     assert_eq!(classes.len(), 4, "payout class roster drift");
     assert_eq!(proofs.len(), 9, "payout engine-proof roster drift");
+    let mut row417 = std::collections::BTreeSet::new();
+    for (path, witness) in ROW417_WITNESSES {
+        assert!(
+            row417.insert(*witness),
+            "duplicate row417 witness {witness}"
+        );
+        let source = source_cache.entry(path).or_insert_with(|| {
+            std::fs::read_to_string(root.join(path))
+                .unwrap_or_else(|error| panic!("read {path}: {error}"))
+        });
+        assert!(
+            inv066_source_defines_function(source, witness),
+            "row417 late-expiry receipt witness missing {path}#{witness}",
+        );
+    }
+    assert_eq!(row417.len(), 12, "row417 receipt witness roster drift");
 
     let induction = include_str!("../kani/inv_066_resolved_payout_fairness_and_exact_once.rs");
     assert!(induction.contains("RESOLVED_RATE_SUM_AXIOM"));
