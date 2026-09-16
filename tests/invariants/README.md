@@ -8,6 +8,11 @@ malicious current-oracle economic effects. It identifies the next generic
 reference model and sequence coverage needed. **Row 416 remains OPEN/missing;
 INV-005 remains `REFUTED_CURRENT`.** No conformance test is duplicated.
 
+The INV-005 metadata guard rejects assigning row 416 to the reviewed epoch-only
+or direct funded-role discovery generators/oracles, including relabeling either
+column alone. It protects the audit's evidence boundary; it does not supply the
+missing succession/reference model or promote any benchmark status.
+
 ## Row 417 independent coverage audit (2026-09-16)
 
 **Row 417 remains OPEN/missing; INV-067 remains `REFUTED_CURRENT`.** The

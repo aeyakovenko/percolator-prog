@@ -72,3 +72,60 @@ host harness with a private target and copied dependency cache, using two jobs,
 incremental compilation disabled and dev/test debug info disabled. No SBF
 artifact, new conformance run, fuzz campaign or Kani result is claimed. The
 benchmark, discovery, reopening and invariant-status TSVs are unchanged.
+
+## Row 416 Metadata Guard Follow-up
+
+Based on `b95c8155` of `codex/astra-invariant-cycle-20260915`, the INV-005-owned
+`v16_row416_discovery_metadata_requires_more_than_epoch_or_direct_role_evidence`
+adds a host-only check of `independent_discoveries.tsv`. It rejects assigning
+row 416 to either reviewed epoch/direct-role generator or its bounded oracle.
+The existing INV-079 gates check executable ownership, allowed oracle names and
+agreement between metadata tables; they do not reject this semantic mismatch
+once a promotion has been reconciled across those tables.
+
+Negative controls cover row 416 alone and in each position of a PR list, plus
+renaming either the generator or oracle while retaining the other. Existing
+unrelated mappings and the distinct ID `1416` remain admissible. A different
+generator/oracle pair is not automatically blocked, but still needs the generic
+evidence gates and the independent scope/consent model described above. This
+exclusion is not a positive certification rule and cannot detect both columns
+being renamed to conceal the same implementation.
+
+No public sequence is repeated or newly claimed. The missing capability remains
+funded succession composed with correctly authorized economic actions, evaluated
+against an independent model that distinguishes legitimate price-dependent PnL
+from unauthorized principal/claim loss. **Row 416 remains `missing`/OPEN;
+INV-005 remains `REFUTED_CURRENT`.** Production and machine metadata are unchanged.
+
+Validation from `/tmp/percolator-row416-inv005-evidence-guard-20260916` on
+`codex/row416-inv005-evidence-guard-20260916`:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/row416-inv005-evidence-guard-20260916/target
+export TMPDIR=/dev/shm/row416-inv005-evidence-guard-20260916/tmp
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+
+# Dependency cache copied without hardlinks; rebuild this package in the private target.
+cargo clean --package percolator-prog
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --test-threads=1 \
+  inv_005_authority_incarnation_binding::v16_row416_discovery_metadata_requires_more_than_epoch_or_direct_role_evidence \
+  inv_079_public_reachability_evidence::v16_dated_open_security_finding_benchmark_is_non_overclaiming \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_post_pr135_counterexamples_reopen_every_affected_invariant \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row
+rustfmt --check --edition 2021 tests/invariants/public_sbf/inv_005_authority_incarnation_binding.rs
+git diff --check
+git diff --exit-code b95c8155 -- src Cargo.toml Cargo.lock tests/support \
+  tests/invariants/open_findings.tsv tests/invariants/coverage_reopenings.tsv \
+  tests/invariants/invariant_status.tsv tests/invariants/independent_discoveries.tsv
+```
+
+Result: **6 passed, 0 failed, 118 filtered out**, including 24 rejection controls
+and five non-rejection controls inside the new selector. Cargo rebuilt the host
+harness; the preliminary cached run omitted the new selector and is not counted.
+The build emitted existing shared-harness dead-code and Solana future-compatibility
+warnings. Formatting, whitespace and unchanged-scope checks passed. The rebuilt
+run's output is retained at `$TMPDIR/metadata.log`. No SBF run, new independent
+discovery, production change or other branch import is claimed.

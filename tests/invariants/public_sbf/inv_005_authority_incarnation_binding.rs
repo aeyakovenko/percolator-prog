@@ -8,6 +8,53 @@
 use crate::support::invariant_discovery::AuthorityIntentKind;
 
 #[test]
+fn v16_row416_discovery_metadata_requires_more_than_epoch_or_direct_role_evidence() {
+    // These reviewed generators/oracles lack funded oracle succession followed by
+    // current-authority economic effects. See inv_005_finding_blind_gap_20260916.md.
+    let generators = [
+        "v16_program_authority_incarnation_operation_matrix_rejects_aba_replays",
+        "v16_program_funded_role_matrix_preserves_incumbent_principal",
+    ];
+    let oracles = [
+        "stale-intent-must-reject-and-roll-back-exactly",
+        "funded-role-principal-cannot-be-redirected-without-incumbent-consent",
+    ];
+    let overclaims_row416 = |generator: &str, oracle: &str, benchmark_prs: &str| {
+        benchmark_prs
+            .split(',')
+            .any(|pr| pr.parse::<u16>().expect("numeric benchmark PR") == 416)
+            && (generators.contains(&generator) || oracles.contains(&oracle))
+    };
+
+    for line in include_str!("../independent_discoveries.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+    {
+        let fields = line.splitn(5, '\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 5, "malformed discovery row: {line}");
+        assert!(
+            !overclaims_row416(fields[2], fields[3], fields[4]),
+            "row 416 requires funded succession and an independent current-authority \
+             economic oracle; existing epoch/direct-role evidence is insufficient: {line}"
+        );
+    }
+
+    // Exercise the guard even while row 416 has no discovery mapping. Relabeling
+    // either column alone must not conceal reuse of the other bounded witness.
+    for (generator, oracle) in generators.into_iter().zip(oracles) {
+        for prs in ["416", "375,416", "416,375", "375,416,353"] {
+            assert!(overclaims_row416(generator, oracle, prs));
+            assert!(overclaims_row416("new-generator", oracle, prs));
+            assert!(overclaims_row416(generator, "new-oracle", prs));
+        }
+        assert!(!overclaims_row416(generator, oracle, "251,345,346,353,375"));
+        assert!(!overclaims_row416(generator, oracle, "1416"));
+    }
+    // Passing this exclusion is not certification; generic evidence gates still apply.
+    assert!(!overclaims_row416("new-generator", "new-oracle", "416"));
+}
+
+#[test]
 fn v16_program_authority_incarnation_matrix_rejects_stale_consent() {
     let discoveries =
         crate::support::invariant_discovery::discover_authority_incarnation_replays([0x51; 32])
