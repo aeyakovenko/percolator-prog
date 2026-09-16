@@ -99,6 +99,18 @@ fn inv063_production_processor_function_bodies() -> std::collections::BTreeMap<S
     functions
 }
 
+fn inv063_source_defines_function(source: &str, function: &str) -> bool {
+    let needle = format!("fn {function}");
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with(&needle)
+            && line[needle.len()..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '(' || ch.is_whitespace())
+    })
+}
+
 #[test]
 fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
     const CLASSES: &[Inv063BackingSurfaceClass] = &[
@@ -154,6 +166,17 @@ fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
                 "handle_close_slab",
                 "handle_update_asset_lifecycle",
             ],
+        },
+        Inv063BackingSurfaceClass {
+            disposition:
+                "resolved payout consumption; authenticated expiry normalized before close",
+            witness: "v16_program_resolved_close_normalizes_backing_at_expiry",
+            functions: &["handle_close_resolved"],
+        },
+        Inv063BackingSurfaceClass {
+            disposition: "permissionless lapsed-backing expiry and bounded account progress",
+            witness: "v16_attack_lapsed_live_source_backing_expires_bounded_and_owner_can_reduce",
+            functions: &["handle_permissionless_crank"],
         },
         Inv063BackingSurfaceClass {
             disposition: "initialization/reactivation structural preservation",
@@ -231,7 +254,7 @@ fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
         assert!(
             witness_sources
                 .iter()
-                .any(|source| source.contains(&format!("fn {}", class.witness))),
+                .any(|source| inv063_source_defines_function(source, class.witness)),
             "INV-063 backing class '{}' lost executable witness {}",
             class.disposition,
             class.witness,
@@ -249,8 +272,9 @@ fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
     );
 
     let transitions = include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(transitions.contains(
-        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    assert!(inv063_source_defines_function(
+        transitions,
+        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
     ));
     crate::assert_certified_engine_pin("INV-063 engine expiry-transition composition");
 }
