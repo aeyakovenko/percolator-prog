@@ -1,5 +1,25 @@
 # Invariant-owned test coverage
 
+## INV-036 multi-source fee partition (2026-09-16)
+
+Owner: [stateful/inv_036_multi_source_fee_partition.rs](stateful/inv_036_multi_source_fee_partition.rs).
+One public fill grows two source liens with different fee rates, insurance shares,
+and provider identities. An independent position/deposit ledger derives both lien
+amounts, both rounded fees, all domain credits, provider SPL withdrawals, and all
+four traders' final SPL payouts. CPI/no-CPI and both participant orders cover four
+worlds, 160 public transactions, 40 exact-rollback rejections, and 12 balanced
+negative controls. The controls pass the existing stock census while failing the
+new payer/provider/insurance partition. Per-domain ceiling charges 1,611 atoms;
+aggregating before rounding would charge only 1,610.
+
+The three exact public fee selectors pass **3/3**; five host integration guards
+pass **5/5**. The trace inventory is reconciled from its stale 110 expectation to
+112 existing validated consumers plus this new consumer. This is executable
+INV-036/024/034/038 evidence, with no production, dependency, or invariant-status
+change. It does not close arbitrary multi-source histories or the separately
+observed two-payer stale-certificate route. Exact selectors, artifact provenance,
+negative controls, and limits are in the [audit](inv_036_multi_source_fee_audit_20260916.md).
+
 ## INV-045 fractional-carry evidence fidelity (2026-09-16)
 
 Owner: [public_sbf/inv_045_no_free_mark_movement.rs](public_sbf/inv_045_no_free_mark_movement.rs).
