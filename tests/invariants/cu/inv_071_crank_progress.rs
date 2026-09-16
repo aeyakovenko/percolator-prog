@@ -3226,15 +3226,6 @@ struct Inv071ProgressClass {
     public_witnesses: &'static [(&'static str, &'static str)],
 }
 
-fn inv071_source_defines_function(source: &str, function: &str) -> bool {
-    let marker = format!("fn {function}");
-    source.lines().any(|line| {
-        line.trim()
-            .strip_prefix(&marker)
-            .is_some_and(|tail| tail.trim_start().starts_with('('))
-    })
-}
-
 fn inv071_source_defines_test(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
     let mut test_attribute = false;
@@ -3254,6 +3245,31 @@ fn inv071_source_defines_test(source: &str, function: &str) -> bool {
             test_attribute = false;
         } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
             test_attribute = false;
+        }
+    }
+
+    false
+}
+
+fn inv071_source_defines_kani_proof(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut proof_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[kani::proof]" {
+            proof_attribute = true;
+        } else if line.starts_with("fn ") {
+            if proof_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            proof_attribute = false;
+        } else if proof_attribute && !line.is_empty() && !line.starts_with("#") {
+            proof_attribute = false;
         }
     }
 
@@ -3567,7 +3583,7 @@ fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
         "kani_inv082_terminal_administration_is_finite_and_not_permissionless",
     ] {
         assert!(
-            inv071_source_defines_function(&rank_composition, theorem),
+            inv071_source_defines_kani_proof(&rank_composition, theorem),
             "INV-071 lost state-indexed liveness composition {theorem}",
         );
     }
