@@ -1749,7 +1749,7 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
     }
     for removed in REMOVED_PROCESSOR_COPIES {
         assert!(
-            !production.contains(&format!("fn {removed}")),
+            !inv085_source_defines_function(production, removed),
             "processor arithmetic copy {removed} must stay removed"
         );
     }
