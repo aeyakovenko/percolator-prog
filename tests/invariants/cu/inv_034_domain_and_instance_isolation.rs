@@ -102,9 +102,15 @@ fn v16_program_cross_instance_role_roster_is_source_complete() {
         if evidence != "-" {
             for test in evidence.split(',') {
                 assert!(
-                    test_sources
-                        .iter()
-                        .any(|source| inv034_source_defines_test(source, test)),
+                    test.starts_with("v16_"),
+                    "{variant} cites unreviewed INV-034 evidence name {test}",
+                );
+                let matches = test_sources
+                    .iter()
+                    .filter(|source| inv034_source_defines_test(source, test))
+                    .count();
+                assert!(
+                    matches == 1,
                     "{variant} cites missing INV-034 evidence {test}"
                 );
             }
