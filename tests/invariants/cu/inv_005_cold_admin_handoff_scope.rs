@@ -17,6 +17,9 @@ mod disabled_role_restoration;
 #[path = "inv_005_funded_insurance_restart.rs"]
 mod funded_insurance_restart;
 
+#[path = "inv_005_unrelated_shutdown_exit_scope.rs"]
+mod unrelated_shutdown_exit_scope;
+
 const ROLES: [u8; 3] = [
     processor::ASSET_AUTH_INSURANCE,
     processor::ASSET_AUTH_INSURANCE_OPERATOR,
