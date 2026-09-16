@@ -45,6 +45,136 @@ mod retained_partial_fee_routes;
 #[path = "inv_014_reserve_debit_epoch.rs"]
 mod reserve_debit_epoch;
 
+#[derive(Clone, Copy)]
+struct Inv014RetainedFeeWitness {
+    path: &'static str,
+    function: &'static str,
+}
+
+fn inv014_source_defines_function(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+#[test]
+fn v16_program_retained_fee_consent_witness_roster_is_source_complete() {
+    const ENGINE_PIN: &str = "94979ede7db934545e53a8f210dd063a9ea3ea63";
+    const WITNESSES: &[Inv014RetainedFeeWitness] = &[
+        Inv014RetainedFeeWitness {
+            path: "tests/invariants/cu/inv_014_delayed_policy_and_policy_epoch_safety.rs",
+            function:
+                "v16_retained_fee_terms_bound_partial_and_exact_fill_routes_after_policy_change",
+        },
+        Inv014RetainedFeeWitness {
+            path: "tests/invariants/cu/inv_014_retained_partial_fee_routes.rs",
+            function:
+                "v16_retained_partial_fill_fee_rate_matches_exact_routes_after_funded_rejection",
+        },
+        Inv014RetainedFeeWitness {
+            path: "tests/invariants/cu/inv_014_generated_partial_policy_words.rs",
+            function: "v16_generated_partial_policy_words_preserve_retained_fee_and_retry_budgets",
+        },
+        Inv014RetainedFeeWitness {
+            path: "tests/invariants/cu/inv_014_retained_single_cpi_policy_history.rs",
+            function:
+                "v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollback",
+        },
+        Inv014RetainedFeeWitness {
+            path: "tests/invariants/cu/inv_014_retained_single_cpi_policy_history.rs",
+            function:
+                "v16_retained_cpi_and_direct_policy_histories_differ_only_by_explicit_route_fees",
+        },
+        Inv014RetainedFeeWitness {
+            path: "tests/invariants/cu/inv_014_retained_policy_route_budgets.rs",
+            function: "v16_retained_policy_route_budgets_bound_each_committed_prefix",
+        },
+        Inv014RetainedFeeWitness {
+            path: "tests/invariants/cu/inv_014_retained_mixed_route_fees.rs",
+            function:
+                "v16_retained_mixed_route_fee_budgets_survive_bilateral_revocation_and_renewal",
+        },
+        Inv014RetainedFeeWitness {
+            path: "tests/invariants/cu/inv_014_retained_maintenance_reward.rs",
+            function:
+                "v16_retained_trade_fees_exclude_counterparty_maintenance_rewards_across_routes",
+        },
+        Inv014RetainedFeeWitness {
+            path: "tests/invariants/cu/inv_014_retained_redirect_entitlement.rs",
+            function:
+                "v16_retained_fee_routes_preserve_recipient_entitlement_after_paid_redirect_history",
+        },
+        Inv014RetainedFeeWitness {
+            path: "tests/invariants/cu/inv_014_retained_recipient_succession.rs",
+            function:
+                "v16_retained_trade_and_payout_consent_diverge_across_live_recipient_succession",
+        },
+        Inv014RetainedFeeWitness {
+            path: "tests/invariants/stateful/inv_014_retained_backing_fee_cap.rs",
+            function: "v16_program_retained_backing_fee_caps_follow_participant_and_route_consent",
+        },
+        Inv014RetainedFeeWitness {
+            path: "tests/invariants/stateful/inv_010_out_of_order_safety.rs",
+            function:
+                "v16_program_retained_bilateral_fee_terms_survive_both_policy_relaxation_orders",
+        },
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-014 retained-fee composition must be reviewed on every engine pin change",
+    );
+    assert!(lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")));
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let parent = include_str!("inv_014_delayed_policy_and_policy_epoch_safety.rs");
+    for mounted_child in [
+        "mod retained_partial_fee_routes;",
+        "mod retained_single_cpi_policy_history;",
+        "mod retained_redirect_entitlement;",
+    ] {
+        assert!(
+            parent.contains(mounted_child),
+            "INV-014 retained-fee child module is no longer mounted: {mounted_child}",
+        );
+    }
+
+    let partial_parent = include_str!("inv_014_retained_partial_fee_routes.rs");
+    assert!(partial_parent.contains("mod generated_partial_policy_words;"));
+    assert!(partial_parent.contains("mod retained_maintenance_reward;"));
+    let cpi_parent = include_str!("inv_014_retained_single_cpi_policy_history.rs");
+    for mounted_child in [
+        "mod retained_policy_route_budgets;",
+        "mod retained_mixed_route_fees;",
+        "mod retained_round_trip_fee_consent;",
+    ] {
+        assert!(
+            cpi_parent.contains(mounted_child),
+            "retained single-CPI child module is no longer mounted: {mounted_child}",
+        );
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    for witness in WITNESSES {
+        assert!(seen.insert(witness.function), "duplicate INV-014 witness");
+        let source = std::fs::read_to_string(root.join(witness.path))
+            .unwrap_or_else(|error| panic!("read {}: {error}", witness.path));
+        assert!(
+            inv014_source_defines_function(&source, witness.function),
+            "INV-014 retained-fee witness missing {}#{}",
+            witness.path,
+            witness.function,
+        );
+    }
+    assert_eq!(seen.len(), 12, "retained-fee witness roster drift");
+}
+
 #[test]
 fn v16_retained_fee_terms_bound_partial_and_exact_fill_routes_after_policy_change() {
     use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
