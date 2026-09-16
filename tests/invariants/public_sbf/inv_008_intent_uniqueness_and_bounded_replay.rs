@@ -31,6 +31,51 @@ use percolator::POS_SCALE;
 use solana_sdk::{pubkey::Pubkey, transaction::Transaction};
 use std::collections::BTreeSet;
 
+#[test]
+fn v16_retained_insurance_discovery_metadata_preserves_stock_and_resolved_debit_evidence() {
+    let discoveries = include_str!("../independent_discoveries.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 5, "malformed discovery row: {line}");
+            fields
+        })
+        .collect::<Vec<_>>();
+
+    // An isolated debit does not exercise retained retries on replacement stock;
+    // a Live debit does not exercise permissionless Resolved epoch consumption.
+    for (pr, fingerprint, generator, oracle) in [
+        (
+            "415",
+            "retained-insurance-stock/replenishment",
+            "v16_generated_live_insurance_stock_epochs_preserve_retained_rail_entitlement",
+            "same-economic-intent-executes-at-most-once-and-rejection-rolls-back",
+        ),
+        (
+            "428",
+            "reserve-debit/live-resolved-authority-epoch",
+            "v16_resolved_insurance_debit_consumes_reserve_authority_epoch",
+            "successful-insurance-debit-consumes-authorizing-reserve-authority-epoch",
+        ),
+    ] {
+        let evidence = discoveries
+            .iter()
+            .filter(|fields| fields[4].split(',').any(|mapped| mapped == pr))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            evidence.len(),
+            1,
+            "row {pr} must retain exactly one reviewed INV-008 discovery mapping"
+        );
+        assert_eq!(
+            &evidence[0][..4],
+            &["INV-008", fingerprint, generator, oracle],
+            "row {pr} must retain its own stock-history or Resolved-debit evidence"
+        );
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct RetainedTradeSnapshot {
     market: Vec<u8>,

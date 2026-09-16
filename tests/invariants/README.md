@@ -1,5 +1,65 @@
 # Invariant-owned test coverage
 
+## INV-008 retained insurance evidence fidelity (2026-09-16)
+
+Owner:
+[public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs](public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs).
+`v16_retained_insurance_discovery_metadata_preserves_stock_and_resolved_debit_evidence`
+binds benchmark rows 415 and 428 to their respective reviewed discovery
+fingerprints, selectors, and oracles, requiring exactly one mapping per row.
+The generic benchmark gate verifies invariant ownership and recognized oracles
+but permits replacing either selector with another accepted INV-008 witness.
+
+The distinction follows from the witness bodies. Row 415's generated stock
+history retains withdrawal envelopes across partial/full depletion, replenishment,
+and quote-rail changes. Row 428's Resolved witness requires successful
+permissionless insurance payouts to consume their authorizing epoch. The Live
+debit control in `cu/inv_014_reserve_debit_epoch.rs` performs four isolated payouts;
+it has no retained retry/replenishment history and never enters Resolved mode.
+The generic retry-operation matrix does include one refill, so it is not used
+as the decisive negative control for the stock-history distinction.
+
+On base `e649508587d4cb49307c73a9660ce598314f0882`, temporarily replace only
+the selectors for both rows in `independent_discoveries.tsv` with
+`v16_live_insurance_debit_consumes_reserve_authority_epoch`. Keep both rows'
+fingerprints, oracles, and benchmark IDs unchanged. The existing benchmark and
+reopening selectors below still pass **1/1 each**, while the new selector fails
+**0 passed / 1 failed** at row 415. Restore only row 415's selector and the new
+guard fails **0 passed / 1 failed** at row 428. Restore row 428 and all six final
+selectors below pass **1/1 each**. Both temporary ledger mutations are restored;
+listing-only and zero-test runs are not evidence.
+
+This is a metadata guard, not a new economic rediscovery. Benchmark comparison
+used existing titles and evidence metadata; no open-PR implementation was read
+or imported. There are no production, dependency, benchmark-classification, or
+invariant-status changes. The separate INV-014 runnable-witness parser and
+INV-079 lifecycle mounts are unchanged. This guard does not validate test bodies
+or mounts, execute SBF, or prove arbitrary retained stock/authority histories.
+Whole-invariant INV-008 coverage remains bounded; these behavioral and source
+reachability gaps remain open for later work.
+
+Validation ran in the isolated checkout
+`/dev/shm/percolator-astra-ultra-identity-20260916`, using its private `target`
+directory seeded from the existing host dependency cache. No SBF artifact is
+needed for these host metadata checks. Exact commands:
+
+```bash
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+for selector in \
+  inv_008_intent_uniqueness_and_bounded_replay::v16_retained_insurance_discovery_metadata_preserves_stock_and_resolved_debit_evidence \
+  inv_079_public_reachability_evidence::v16_dated_open_security_finding_benchmark_is_non_overclaiming \
+  inv_079_public_reachability_evidence::v16_post_pr135_counterexamples_reopen_every_affected_invariant \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row
+do
+  cargo test --locked --offline --test v16_program_fuzz_regressions "$selector" -- --exact --nocapture || exit "$?"
+done
+rustfmt --edition 2021 --check tests/invariants/public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs
+git diff --check
+```
+
 ## INV-014 runnable retained-fee witnesses (2026-09-16)
 
 Owner:
