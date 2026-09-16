@@ -1864,6 +1864,30 @@ fn validate_public_instruction_coverage_cell(cell: &str, column: &str, variant: 
         let (path, function) = rest
             .split_once('#')
             .unwrap_or_else(|| panic!("{variant} {column} evidence lacks function: {evidence}"));
+        if kind == "SHARED" {
+            let fixed_route_oracle = path
+                == "tests/invariants/cu/inv_081_success_state_validity_over_complete_public_routes.rs"
+                && function
+                    == "v16_program_public_route_oracle_checks_success_and_reject_frames_fixed_case"
+                && matches!(
+                    variant,
+                    "Deposit"
+                        | "Withdraw"
+                        | "PermissionlessCrank"
+                        | "TradeNoCpi"
+                        | "TradeCpi"
+                        | "BatchTradeNoCpi"
+                        | "BatchTradeCpi"
+                );
+            let stateful_route_oracle = variant == "SetMatcherConfig"
+                && path
+                    == "tests/invariants/stateful/inv_081_success_state_validity_over_complete_public_routes.rs"
+                && function == "v16_program_stateful_public_interface_fuzz";
+            assert!(
+                column == "public_route_coverage" && (fixed_route_oracle || stateful_route_oracle),
+                "{variant} {column} cannot claim broad SHARED coverage from {path}#{function}"
+            );
+        }
         assert!(
             path.starts_with("tests/invariants/") && path.ends_with(".rs"),
             "{variant} {column} evidence must stay under tests/invariants: {path}"
