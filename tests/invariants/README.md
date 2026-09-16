@@ -31,6 +31,27 @@ observed CU** (32,816 in the final run).
 No production change or invariant-status promotion. Commands, controls, and limits:
 [audit](inv_089_activation_fee_cpi_audit_20260916.md).
 
+## INV-051 nonunit-ADL reduction partitions (2026-09-16)
+
+Owner: [cu/inv_051_canonical_adl_effective_quantity.rs](cu/inv_051_canonical_adl_effective_quantity.rs).
+`v16_program_nonunit_adl_reduction_partitions_preserve_raw_basis_and_funded_exit`
+compares aggregate, split and reversed owner reductions after the reducing
+owner's ADL index has fallen below its retained basis index. Two quantities and
+both signs give **12 public LiteSVM worlds**, **20 partition reductions**,
+**32 exact rollback rejections**, **12 one-atom final closes**, **12 passive
+cleanups**, **24 side finalizations**, and **24 exact principal withdrawals**.
+Every admitted reduction checks independently converted raw basis and matched
+OI; the passive counterparty stays byte-identical. Maximum exit/cleanup CU is
+**110,377**, below the existing **300,000** custody bound.
+
+The final exact INV-051 selection passes **6 tests, 0 failed, 0 ignored**.
+Two temporary wrong-oracle substitutions each fail the new test. The existing
+INV-052 generator reduces the unit-index owner; existing ADL clamp cases check
+one request followed by a full close. This adds repeated inverse conversion and
+order equivalence on the nonunit-index owner, with ordinary Live withdrawals.
+No production, pin, status, row425 or INV-047 composition change. Commands,
+negative controls and limits: [audit](inv_051_nonunit_partition_audit_20260916.md).
+
 ## INV-045 fractional-carry evidence fidelity (2026-09-16)
 
 Owner: [public_sbf/inv_045_no_free_mark_movement.rs](public_sbf/inv_045_no_free_mark_movement.rs).
