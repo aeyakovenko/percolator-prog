@@ -157,10 +157,21 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
         3,
         "engine-error disposition witness roster drift"
     );
-    assert!(inv080_source_defines_test(
-        witnesses[0],
-        "v16_attack_hybrid_soft_stale_partial_oracle_error_does_not_poison_retry"
-    ));
+    let soft_stale_path = "tests/invariants/cu/inv_080_error_propagation_and_exact_rollback.rs";
+    let soft_stale_witness =
+        "v16_attack_hybrid_soft_stale_partial_oracle_error_does_not_poison_retry";
+    assert!(
+        soft_stale_path.starts_with("tests/invariants/") && soft_stale_path.ends_with(".rs"),
+        "INV-080 soft-stale witness must resolve to an invariant source file: {soft_stale_path}"
+    );
+    assert!(
+        soft_stale_witness.starts_with("v16_"),
+        "INV-080 soft-stale witness must be a reviewed v16 regression"
+    );
+    assert!(
+        inv080_source_defines_test(witnesses[0], soft_stale_witness),
+        "INV-080 lost soft-stale rollback witness {soft_stale_path}#{soft_stale_witness}"
+    );
 }
 
 #[test]
