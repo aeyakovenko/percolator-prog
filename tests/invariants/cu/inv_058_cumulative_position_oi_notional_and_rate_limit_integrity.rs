@@ -26,6 +26,8 @@
 //! account-local position caps by filling the side cap across two pairs, then
 //! rejecting one additional public trade with exact rollback. These fixed-price
 //! witnesses assert unit ADL indices and do not exercise rate limits.
+//! The row 427 metadata guard preserves the distinct-owner shared-side obligation
+//! and its conformance-only classification; it is not public-route evidence.
 //!
 //! Guarantee boundary: `MAX_TRADE_SIZE_Q`, `MAX_POSITION_ABS_Q`, and
 //! `MAX_OI_SIDE_Q` are currently one shared bound, while the exact maximum
@@ -1634,6 +1636,60 @@ fn v16_program_batch_tradecpi_configured_leg_cap_rejects_before_hostile_matcher_
     assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
     assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
     assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+}
+
+#[test]
+fn v16_row427_metadata_retains_distinct_owner_side_oi_conformance() {
+    let rows = include_str!("../coverage_reopenings.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .filter(|fields| fields[0] == "427")
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1, "row 427 must have one conformance entry");
+    let row = &rows[0];
+    assert_eq!(row.len(), 8, "row 427 metadata schema changed");
+    assert_eq!(
+        (row[1], row[2]),
+        ("Conformance", "LIMIT"),
+        "a side-OI limit witness alone does not establish LoF or persistent DoS"
+    );
+    assert_eq!(row[3], "INV-058");
+    assert!(row[4].split(',').any(|id| id == row[3]));
+    assert_eq!(
+        row[5], "disjoint-portfolios+x-side-oi-cap+x-public-trades",
+        "same-pair position caps cannot replace distinct-owner shared-side coverage"
+    );
+    assert_eq!(
+        row[6], "side-oi-cap-enforcement-must-compose-across-distinct-owner-pairs",
+        "row 427 must retain aggregate side-OI enforcement across independent pairs"
+    );
+    for (name, tsv, width, id_column) in [
+        (
+            "open_findings.tsv",
+            include_str!("../open_findings.tsv"),
+            6,
+            0,
+        ),
+        (
+            "independent_discoveries.tsv",
+            include_str!("../independent_discoveries.tsv"),
+            5,
+            4,
+        ),
+    ] {
+        for line in tsv
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+        {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), width, "{name} metadata schema changed");
+            assert!(
+                !fields[id_column].split(',').any(|id| id == "427"),
+                "row 427 conformance evidence must not become a security benchmark in {name}"
+            );
+        }
+    }
 }
 
 fn inv058_source_defines_test(source: &str, function: &str) -> bool {
