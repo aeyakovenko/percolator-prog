@@ -394,43 +394,45 @@ fn v16_program_leg_writer_surface_is_engine_owned_and_source_complete() {
         "a new wrapper-to-engine transition reopens the structural-leg classification"
     );
     let mut witnesses = std::collections::BTreeSet::new();
-    let transition_witness =
-        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness";
-    assert!(
-        witnesses.insert(transition_witness),
-        "duplicate canonical-leg witness {transition_witness}",
-    );
-    assert!(transition_witness.starts_with("v16_"));
-    assert!(inv049_source_defines_test(
-        ENGINE_TRANSITION_ROSTER,
-        transition_witness,
-    ));
-    for (source, witness) in [
+    for (path, source, witness) in [
         (
+            "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+            ENGINE_TRANSITION_ROSTER,
+            "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness",
+        ),
+        (
+            "tests/invariants/stateful/inv_081_success_state_validity_over_complete_public_routes.rs",
             STATEFUL_VALIDITY,
             "v16_program_extended_public_action_alphabet_runs_through_shared_oracles",
         ),
         (
+            "tests/invariants/stateful/inv_081_success_state_validity_over_complete_public_routes.rs",
             STATEFUL_VALIDITY,
             "v16_program_recovery_exit_restart_and_fresh_generation_trade_compose",
         ),
         (
+            "tests/invariants/cu/inv_051_canonical_adl_effective_quantity.rs",
             ADL_EVIDENCE,
             "v16_program_liquidation_adl_effective_exit_matrix_preserves_bounded_cleanup",
         ),
         (
+            "tests/invariants/cu/inv_065_reset_recovery_and_retired_state_isolation.rs",
             RESET_EVIDENCE,
             "v16_program_reset_pending_rejects_fresh_counterparty_and_completes_recovery",
         ),
     ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-049 canonical-leg witness must resolve to an invariant source file: {path}"
+        );
         assert!(witness.starts_with("v16_"));
         assert!(
-            witnesses.insert(witness),
-            "duplicate canonical-leg witness {witness}",
+            witnesses.insert((path, witness)),
+            "duplicate canonical-leg witness {path}#{witness}",
         );
         assert!(
             inv049_source_defines_test(source, witness),
-            "canonical-leg composition witness {witness} is missing"
+            "canonical-leg composition witness {path}#{witness} is missing"
         );
     }
     assert_eq!(witnesses.len(), 5, "canonical-leg witness roster drift");
