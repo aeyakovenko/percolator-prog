@@ -388,10 +388,21 @@ fn v16_program_recovery_fallback_pricing_is_absent_and_force_close_uses_frozen_m
 
     let public_recovery_evidence =
         include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs");
-    assert!(inv042_source_defines_test(
-        public_recovery_evidence,
-        "v16_program_dual_adl_force_close_clamps_stale_and_raw_work"
-    ));
+    let recovery_path =
+        "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs";
+    let recovery_witness = "v16_program_dual_adl_force_close_clamps_stale_and_raw_work";
+    assert!(
+        recovery_witness.starts_with("v16_"),
+        "INV-042 recovery witness must be a reviewed v16 regression"
+    );
+    assert!(
+        recovery_path.starts_with("tests/invariants/") && recovery_path.ends_with(".rs"),
+        "INV-042 recovery witness must resolve to an invariant source file: {recovery_path}"
+    );
+    assert!(
+        inv042_source_defines_test(public_recovery_evidence, recovery_witness),
+        "INV-042 lost recovery fallback witness {recovery_witness}"
+    );
 
     crate::assert_certified_engine_pin("INV-042 disabled recovery-fallback profile evidence");
 }
