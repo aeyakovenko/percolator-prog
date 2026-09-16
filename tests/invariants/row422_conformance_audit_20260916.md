@@ -214,5 +214,59 @@ execution of INV-045 coverage and does not change row 422 to dependency-blocked.
 
 Whitespace, protected-source and ledger-data identity checks pass. Existing host
 dead-code and Solana future-compatibility warnings remain. No broad suite was
-run. Changes are limited to this report, a README entry and commentary beside
-row 422 in the two ledgers; no Rust or production code changes are included.
+run. Original audit changes were limited to this report, a README entry and
+commentary beside row 422 in the two ledgers; no Rust or production code changes
+were included.
+
+## Follow-up Metadata Contract (2026-09-16)
+
+Base: `codex/astra-invariant-cycle-20260915` at
+`b95c8155c3230c383b966628c8a622c47a367cca`; isolated worktree:
+`/tmp/percolator-row422-metadata-20260916`, branch
+`codex/row422-provenance-metadata-20260916`. No other branch was imported.
+
+The INV-045-owned selector
+`v16_row422_metadata_retains_effective_price_lineage_obligation` in
+[the public-SBF owner](public_sbf/inv_045_no_free_mark_movement.rs) checks agreement
+on row 422's invariant owner and preserves its exact omitted composition and
+effective-price-until-catchup requirement. The general reopening guard checks
+property uniqueness and cross-product syntax, not this semantic obligation.
+
+Negative control: temporarily replacing only row 422's required property with
+`liquidation-reward-eligibility-follows-current-report-freshness` leaves the four
+existing metadata selectors below passing; the new selector alone fails at the
+property assertion (4 passed, 1 expected failure, Cargo exit 101). Restoring the
+ledger makes all five pass (119 filtered out). Both ledger data and machine
+statuses remain identical to the base. This guards against weakening the recorded
+obligation without changing OPEN/missing, rather than pinning aggregate counts.
+
+The missing behavioral capability remains an input-history reference model that
+derives reward eligibility from effective-price origin across paid discovery,
+fresh-target arrival, partial catchup and replacement. Neither this metadata
+check nor the source predicate guard supplies that model. **Row 422 remains
+OPEN/missing; INV-045 remains `REFUTED_CURRENT`.** No new public sequence, SBF
+execution, artifact rebuild or production change is claimed.
+
+Validation used a private copy (no hardlinks) of the base worktree's host cache:
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/percolator-row422-metadata-20260916-target
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \
+  inv_045_no_free_mark_movement::v16_row422_metadata_retains_effective_price_lineage_obligation \
+  inv_079_public_reachability_evidence::v16_dated_open_security_finding_benchmark_is_non_overclaiming \
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming \
+  inv_079_public_reachability_evidence::v16_post_pr135_counterexamples_reopen_every_affected_invariant \
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete
+git diff --check
+git diff --exit-code b95c8155 -- src Cargo.toml Cargo.lock tests/fixtures \
+  tests/invariants/open_findings.tsv tests/invariants/coverage_reopenings.tsv \
+  tests/invariants/invariant_status.tsv tests/invariants/independent_discoveries.tsv
+```
+
+The same five-selector command was used before, during and after the negative
+control. Final result: **5 passed, 0 failed**. Logs:
+`/tmp/row422-metadata-negative-20260916.log` and
+`/tmp/row422-metadata-final-20260916.log`. Existing host dead-code and Solana
+future-compatibility warnings remain; no broad suite was run.
