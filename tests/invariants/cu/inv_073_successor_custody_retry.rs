@@ -18,6 +18,9 @@ const BUDGETS: [u64; 2] = [19, 28];
 const FUNDED: u64 = BUDGETS[0] + BUDGETS[1];
 const PREFIX: u64 = 17;
 
+#[path = "inv_073_successor_expiry_residue.rs"]
+mod successor_expiry_residue;
+
 fn ata(wallet: Pubkey, mint: Pubkey) -> Pubkey {
     Pubkey::find_program_address(
         &[wallet.as_ref(), spl_token::ID.as_ref(), mint.as_ref()],

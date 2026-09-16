@@ -46,6 +46,34 @@ histories. No production bug was found. **Row 422 remains OPEN/missing; INV-045
 remains `REFUTED_CURRENT`.** The [reward-destination report](lane25_reward_destination_retry_20260916.md)
 records non-overlap, exact validation commands and the remaining limits.
 
+## Lane 27 insurance succession across provider expiry (2026-09-16)
+
+The [successor-expiry child](cu/inv_073_successor_expiry_residue.rs) adds eight
+public LiteSVM histories crossing classic/native quote, exact/late provider
+expiry, and beneficiary handoff before/after expiry normalization. A former
+beneficiary keeps a 17-atom insurance payment; keeper-created successor custody
+receives only the remaining 30-atom insurance claim. The separate 31-atom expired
+backing residue cannot be withdrawn as insurance. Final signed closure burns it
+on classic SPL or pays it to the current native beneficiary without changing
+either insurance ledger.
+
+The selector checks 84 complete Account rollbacks, including last-portfolio
+deletion/payment, expiry followed by premature closure, stale authority epochs,
+stale native residue custody, and successful custody/payment/closure prefixes
+followed by a rejected System suffix. All eight histories finish with exact
+token images, ledger attribution and rent. Peak measured continuation/rollback
+CU is 108,617 under 300,000. Seven adjacent controls and sixteen INV-079 guards
+pass; no production property violation was found.
+
+This joins Lane 10's paid beneficiary succession with expired provider residue
+and its rail-specific final disposition. It does not repeat Lane 22's partial
+recredit with unfinished liabilities or Lane 13's pending-user expiry product.
+Setup and handoff use role consent, portfolio deletion uses its owner, and
+expiry normalization/final closure use the market authority. **Row 421 remains
+OPEN/missing; INV-073 remains `REFUTED_CURRENT`.** See the
+[terminal-insurance succession report](lane25_terminal_insurance_succession_expiry_20260916.md) for the
+non-overlap analysis, exact commands/results, artifact hashes and limitations.
+
 ## Lane 24 funded oracle containment across resolution (2026-09-16)
 
 The [resolved containment owner](cu/inv_005_cold_oracle_resolved_containment.rs)
