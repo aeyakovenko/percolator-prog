@@ -16,6 +16,31 @@
 
 use super::*;
 
+fn inv016_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 fn inv016_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let start = source
         .find(start)
@@ -1265,20 +1290,28 @@ fn v16_program_stateless_pda_incarnation_composition_is_source_complete() {
     let binding = inv016_source_between(
         source,
         "fn expect_portfolio_position_binding(",
-        "fn reject_missing_pending_liquidation_observations_view(",
+        "fn reject_incomplete_account_health_observations_view(",
     );
     assert!(binding.contains("expect_portfolio_id(data, expected_portfolio_id)?"));
     assert!(binding.contains("state::read_portfolio_position_epoch(data)?"));
 
     let market_aba = include_str!("../public_sbf/inv_007_no_aba_reuse.rs");
-    assert!(market_aba
-        .contains("v16_program_whole_market_recreate_aba_matrix_is_public_and_nonvacuous"));
+    assert!(inv016_source_defines_test(
+        market_aba,
+        "v16_program_whole_market_recreate_aba_matrix_is_public_and_nonvacuous"
+    ));
     let portfolio_aba = include_str!("../public_sbf/inv_003_portfolio_incarnation_binding.rs");
-    assert!(portfolio_aba
-        .contains("v16_program_all_retained_portfolio_intents_reject_after_same_pubkey_recreate"));
+    assert!(inv016_source_defines_test(
+        portfolio_aba,
+        "v16_program_all_retained_portfolio_intents_reject_after_same_pubkey_recreate"
+    ));
     let matcher_transport = include_str!("inv_019_cpi_invocation_and_return_data_binding.rs");
-    assert!(matcher_transport
-        .contains("v16_program_matcher_cpi_identity_incarnation_census_is_source_complete"));
-    assert!(matcher_transport
-        .contains("v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi"));
+    assert!(inv016_source_defines_test(
+        matcher_transport,
+        "v16_program_matcher_cpi_identity_incarnation_census_is_source_complete"
+    ));
+    assert!(inv016_source_defines_test(
+        matcher_transport,
+        "v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi"
+    ));
 }

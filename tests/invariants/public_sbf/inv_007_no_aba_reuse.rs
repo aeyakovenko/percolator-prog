@@ -14,6 +14,31 @@
 
 use crate::support::invariant_discovery::{discover_market_incarnation_replays, MarketIntentKind};
 
+fn inv007_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[test]
 fn v16_wrapper_account_incarnation_census_is_source_complete() {
     let source = include_str!("../../../src/v16_program.rs");
@@ -80,13 +105,20 @@ fn v16_wrapper_account_incarnation_census_is_source_complete() {
 
     let receipt_evidence =
         include_str!("../stateful/inv_068_receipt_uniqueness_and_monotonic_topups.rs");
-    assert!(receipt_evidence
-        .contains("v16_program_resolved_receipt_accepts_two_exact_topups_and_idempotent_retries"));
+    assert!(inv007_source_defines_test(
+        receipt_evidence,
+        "v16_program_resolved_receipt_accepts_two_exact_topups_and_idempotent_retries"
+    ));
     let matcher_evidence = include_str!("../cu/inv_019_cpi_invocation_and_return_data_binding.rs");
-    assert!(matcher_evidence
-        .contains("v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi"));
+    assert!(inv007_source_defines_test(
+        matcher_evidence,
+        "v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi"
+    ));
     let ledger_evidence = include_str!("../cu/inv_034_domain_and_instance_isolation.rs");
-    assert!(ledger_evidence.contains("v16_attack_insurance_ledger_authority_binding_enforced"));
+    assert!(inv007_source_defines_test(
+        ledger_evidence,
+        "v16_attack_insurance_ledger_authority_binding_enforced"
+    ));
 }
 
 #[test]
