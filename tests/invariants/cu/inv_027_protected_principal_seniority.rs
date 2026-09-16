@@ -46,6 +46,31 @@ mod maintenance_terminal_seniority;
 #[path = "inv_027_joint_admission_liabilities.rs"]
 mod joint_admission_liabilities;
 
+fn inv027_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 const ISSUE408_FEE_PER_SLOT: u128 = 1_000;
 const ISSUE408_AGED_SLOT: u64 = 500;
 const ISSUE408_MOVE_SLOT: u64 = 542;
@@ -2339,7 +2364,7 @@ fn v16_program_loss_stale_economic_routes_have_a_complete_seniority_disposition(
             assert!(
                 witness_sources
                     .iter()
-                    .any(|source| source.contains(&format!("fn {witness}"))),
+                    .any(|source| inv027_source_defines_test(source, witness)),
                 "{}.{} lacks executable seniority witness {witness}",
                 row.owner,
                 row.marker,
