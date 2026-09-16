@@ -2755,7 +2755,9 @@ fn v16_traceability_gap_ledger_points_to_executable_evidence() {
         );
         for owner in fields[6].split("; ") {
             assert!(
-                owner.starts_with("tests/invariants/") && owner.ends_with(".rs"),
+                owner.starts_with("tests/invariants/")
+                    && owner.ends_with(".rs")
+                    && !owner.contains(".."),
                 "traceability row {} owner is not invariant-owned: {owner}",
                 line_index + 1
             );
