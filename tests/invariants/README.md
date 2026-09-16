@@ -29839,8 +29839,8 @@ Current public-shape evidence includes maximum-N owner-exit construction, 14-leg
 exit, unilateral `RebalanceReduce`, max-source conversion and lien release, resolved
 `PermissionlessCrank` order matrices, Hybrid refresh/liquidation, Recovery K/F progress, and
 delegated paid-mark movement/B-settlement witnesses under INV-045/056. Each witness owns only its
-executed product. Do not multiply separate maxima together: the 42-reference Hybrid products use
-three shared feeds, the two-chunk backlog product passes at most two hints per call, flat
+executed product. Do not multiply separate maxima together: the older 42-reference Hybrid products
+use three shared feeds, the original backlog product passes at most two hints per call, flat
 withdrawals occur after active/source work is cleared, and host-shaped 10 MiB benchmarks are SBF
 boundary controls rather than public dense-market reachability.
 
@@ -29859,6 +29859,28 @@ strict-progress cranks peak at 1,241,192 CU, followed by complete owner payouts
 and closures. The final 48-reference transaction is 486 bytes, with three
 distinct feeds. This covers that Live full-market continuation only; it does
 not close distinct-feed maxima, Recovery, liquidation, or row 423 as a whole.
+
+Distinct-feed extension, 2026-09-16:
+[`v16_program_42_distinct_feeds_max_source_backlog_has_bounded_public_exit`](cu/inv_077_distinct_feed_progress.rs)
+reuses Lane 7's economic assertions with **42 distinct Pyth feed identities and
+accounts**, fourteen active legs, twenty-eight value-bearing sources and a
+64-slot backlog. A publicly created and extended address lookup table makes the
+full v0 crank 456 bytes; its uncompressed legacy encoding exceeds the 1,232-byte
+packet ceiling. Fifteen strict-progress catch-up calls peak at **1,230,272 CU**.
+A late wrong-feed tail rejects with `InvalidOracleKey` at **226,934 CU**, restoring
+174 complete accounts and charging only the payer fee; the valid retry consumes
+the remaining backlog. All 36 successful required continuations finish, including
+exact 1,902,000/2,098,000-atom owner payouts and both portfolio closures.
+
+The new child shares construction, progress and exit assertions with Lane 7/16;
+its added boundary is distinct external-account loading, public lookup-table
+realizability, packet size and late feed-binding rollback at maximum active/source
+shape. The new variant creates the market/portfolios through System instructions,
+uses SPL minting and ATA creation for deposits and withdrawals, and injects no
+protocol economic state. It does not combine sixteen hints, 48 distinct feeds, maximum market
+occupancy, liens, latent capacity, Recovery or liquidation. **Row 423 stays OPEN;
+INV-028 stays REFUTED_CURRENT and INV-077 stays OPEN_EVIDENCE.** See the
+[focused audit and exact commands](row423_distinct_feed_progress_20260916.md).
 
 Additional maximum-hint/full-portfolio evidence, 2026-09-08:
 [`v16_bpf_full_14_leg_16_hint_three_feed_refresh_is_bounded`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)
