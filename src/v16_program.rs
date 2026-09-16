@@ -12009,7 +12009,12 @@ pub mod processor {
                 backing_has_value(&slot.engine.backing_long)
                     || backing_has_value(&slot.engine.backing_short)
             }
-            ASSET_AUTH_ADMIN | ASSET_AUTH_ORACLE => false,
+            // The oracle owns no token stock directly, but once this asset has exposure it controls
+            // the mark used to settle that stock. Treat that indirect entitlement as funded so a
+            // cold asset admin cannot replace the incumbent oracle without its consent. Do not
+            // count mode-only state here; active-but-empty assets must remain administrable.
+            ASSET_AUTH_ORACLE => asset_local_has_exposure_or_loss_state_view(group, asset_index),
+            ASSET_AUTH_ADMIN => false,
             _ => return Err(PercolatorError::InvalidInstruction.into()),
         })
     }
@@ -15068,6 +15073,46 @@ pub mod processor {
             || asset.explicit_unallocated_loss_short.get() != 0
             || asset.mode_long != 0
             || asset.mode_short != 0
+            || group.markets[asset_index]
+                .engine
+                .pending_domain_loss_barrier_long
+                .get()
+                != 0
+            || group.markets[asset_index]
+                .engine
+                .pending_domain_loss_barrier_short
+                .get()
+                != 0
+    }
+
+    fn asset_local_has_exposure_or_loss_state_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> bool {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return true;
+        }
+        let asset = &group.markets[asset_index].engine.asset;
+        asset.oi_eff_long_q.get() != 0
+            || asset.oi_eff_short_q.get() != 0
+            || asset.stored_pos_count_long.get() != 0
+            || asset.stored_pos_count_short.get() != 0
+            || asset.stale_account_count_long.get() != 0
+            || asset.stale_account_count_short.get() != 0
+            || asset.b_long_num.get() != 0
+            || asset.b_short_num.get() != 0
+            || asset.b_epoch_start_long_num.get() != 0
+            || asset.b_epoch_start_short_num.get() != 0
+            || asset.loss_weight_sum_long.get() != 0
+            || asset.loss_weight_sum_short.get() != 0
+            || asset.social_loss_remainder_long_num.get() != 0
+            || asset.social_loss_remainder_short_num.get() != 0
+            || asset.social_loss_dust_long_num.get() != 0
+            || asset.social_loss_dust_short_num.get() != 0
+            || asset.explicit_unallocated_loss_long.get() != 0
+            || asset.explicit_unallocated_loss_short.get() != 0
             || group.markets[asset_index]
                 .engine
                 .pending_domain_loss_barrier_long
