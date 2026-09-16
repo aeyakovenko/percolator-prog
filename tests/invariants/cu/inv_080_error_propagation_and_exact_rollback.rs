@@ -1681,6 +1681,262 @@ fn v16_bpf_failed_deposit_spl_transfer_rolls_back_engine_credit() {
 }
 
 #[test]
+fn v16_program_engine_error_rolls_back_withdraw_burn_and_token_close_prefix() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const CAPITAL: u64 = 7;
+    const PEER_CAPITAL: u64 = 11;
+    let mut env = inv018_public_spl_market(0);
+    let owner = Keypair::new();
+    env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    let portfolio_keys = [Keypair::new(), Keypair::new()];
+    let [portfolio, peer] = portfolio_keys.each_ref().map(Signer::pubkey);
+    for key in &portfolio_keys {
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            key,
+            env.portfolio_account_len,
+            env.program_id,
+        );
+        env.send(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(key.pubkey(), false),
+            ],
+            &[&owner],
+        )
+        .expect("initialize the System-created portfolio");
+    }
+    let source = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+    let destination_key = Keypair::new();
+    let destination = destination_key.pubkey();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &destination_key,
+        TokenAccount::LEN,
+        spl_token::ID,
+    );
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![
+            spl_token::instruction::initialize_account3(
+                &spl_token::ID,
+                &destination,
+                &env.mint,
+                &owner.pubkey(),
+            )
+            .unwrap(),
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &source,
+                &env.admin.pubkey(),
+                &[],
+                CAPITAL + PEER_CAPITAL,
+            )
+            .unwrap(),
+        ],
+        &[&env.admin],
+    )
+    .unwrap();
+    for (key, amount) in [(portfolio, CAPITAL), (peer, PEER_CAPITAL)] {
+        env.send(
+            env.deposit_ix(key, amount.into()),
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(key, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .unwrap();
+    }
+    let withdraw_accounts = |key, token| {
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(key, false),
+            AccountMeta::new(token, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ]
+    };
+    let sequence = env.portfolio_matcher_sequence(portfolio);
+    let prefix = vec![
+        heap_ix(),
+        cu_ix(),
+        Instruction {
+            program_id: env.program_id,
+            accounts: withdraw_accounts(portfolio, source),
+            data: env.withdraw_ix(portfolio, CAPITAL.into()).encode(),
+        },
+        spl_token::instruction::burn(
+            &spl_token::ID,
+            &source,
+            &env.mint,
+            &owner.pubkey(),
+            &[],
+            CAPITAL,
+        )
+        .unwrap(),
+        spl_token::instruction::close_account(
+            &spl_token::ID,
+            &source,
+            &owner.pubkey(),
+            &owner.pubkey(),
+            &[],
+        )
+        .unwrap(),
+    ];
+    // Unlike portfolio-close/deposit prefixes, this burns supply and refunds SPL rent.
+    // The fresh sequence and live destination let the suffix reach the engine after exit.
+    let mut instructions = prefix.clone();
+    instructions.push(Instruction {
+        program_id: env.program_id,
+        accounts: withdraw_accounts(portfolio, destination),
+        data: ProgInstruction::Withdraw {
+            portfolio_id: env.portfolio_id(portfolio),
+            expected_sequence: sequence + 1,
+            amount: 1,
+        }
+        .encode(),
+    });
+    let peer_withdraw = Instruction {
+        program_id: env.program_id,
+        accounts: withdraw_accounts(peer, destination),
+        data: env.withdraw_ix(peer, PEER_CAPITAL.into()).encode(),
+    };
+    env.svm.expire_blockhash();
+    let rejected_tx = Transaction::new_signed_with_payer(
+        &instructions,
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &owner],
+        env.svm.latest_blockhash(),
+    );
+    let mut keys = rejected_tx.message.account_keys.clone();
+    keys.extend([peer, env.admin.pubkey(), solana_sdk::sysvar::clock::id()]);
+    keys.sort_unstable();
+    keys.dedup();
+    let before = keys
+        .iter()
+        .map(|key| (*key, env.svm.get_account(key)))
+        .collect::<Vec<_>>();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let owner_before = env.svm.get_account(&owner.pubkey()).unwrap();
+    let peer_before = env.svm.get_account(&peer).unwrap();
+    let mint_before = env.svm.get_account(&env.mint).unwrap();
+    assert!(source_before.lamports > 0);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(destination), 0);
+    assert_eq!(env.token_amount(env.vault), CAPITAL + PEER_CAPITAL);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), CAPITAL.into());
+    assert_eq!(
+        Mint::unpack(&mint_before.data).unwrap().supply,
+        CAPITAL + PEER_CAPITAL
+    );
+    let fee = FeeStructure::default().lamports_per_signature
+        * u64::from(rejected_tx.message.header.num_required_signatures);
+    let failure = env.svm.send_transaction(rejected_tx).unwrap_err();
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(
+            5,
+            InstructionError::Custom(PercolatorError::EngineLockActive as u32),
+        ),
+        "the empty portfolio must reject even though peer capital still funds the vault"
+    );
+    for (program, successes) in [(env.program_id, 1), (spl_token::ID, 3)] {
+        assert_eq!(
+            failure
+                .meta
+                .logs
+                .iter()
+                .filter(|line| **line == format!("Program {program} success"))
+                .count(),
+            successes,
+            "withdrawal, burn and token close must finish before the wrapper error"
+        );
+    }
+    for (key, account) in &before {
+        let mut expected = account.clone();
+        if *key == env.payer.pubkey() {
+            expected.as_mut().unwrap().lamports -= fee;
+        }
+        assert_eq!(
+            env.svm.get_account(key),
+            expected,
+            "exact rollback of bytes, tokens, lamports and metadata: {key}"
+        );
+    }
+
+    let retry = Transaction::new_signed_with_payer(
+        &prefix,
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &owner],
+        env.svm.latest_blockhash(),
+    );
+    let mut payer_after = env.svm.get_account(&env.payer.pubkey()).unwrap();
+    payer_after.lamports -= fee;
+    let accepted = env
+        .svm
+        .send_transaction(retry)
+        .expect("the identical withdrawal/burn/close prefix remains executable after rollback");
+    assert_eq!(env.svm.get_account(&env.payer.pubkey()), Some(payer_after));
+    let mut owner_after = owner_before;
+    owner_after.lamports += source_before.lamports;
+    assert_eq!(env.svm.get_account(&owner.pubkey()), Some(owner_after));
+    assert!(env
+        .svm
+        .get_account(&source)
+        .is_none_or(|account| account.lamports == 0 && account.data.is_empty()));
+    let mut expected_mint = mint_before;
+    let mut mint = Mint::unpack(&expected_mint.data).unwrap();
+    mint.supply -= CAPITAL;
+    Mint::pack(mint, &mut expected_mint.data).unwrap();
+    assert_eq!(env.svm.get_account(&env.mint), Some(expected_mint));
+    assert_eq!(env.svm.get_account(&peer), Some(peer_before));
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+    assert_eq!(env.portfolio_matcher_sequence(portfolio), sequence + 1);
+    assert_eq!(env.token_amount(destination), 0);
+    assert_eq!(env.token_amount(env.vault), PEER_CAPITAL);
+    let group = env.market_state().1;
+    assert_eq!(
+        (group.c_tot, group.vault),
+        (PEER_CAPITAL.into(), PEER_CAPITAL.into())
+    );
+    assert_cu_within(
+        "withdraw/burn/close rollback and retry",
+        failure
+            .meta
+            .compute_units_consumed
+            .max(accepted.compute_units_consumed),
+        CUSTODY_CU_LIMIT,
+    );
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), peer_withdraw],
+        &[&owner],
+    )
+    .expect("the untouched peer's original withdrawal remains executable");
+    assert_eq!(env.token_amount(destination), PEER_CAPITAL);
+    assert_eq!(env.token_amount(env.vault), 0);
+    assert_eq!(env.portfolio_state(peer).capital.get(), 0);
+}
+
+#[test]
 fn v16_program_insurance_funding_prefix_rolls_back_created_ledger_on_engine_error() {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
     use solana_sdk::{
