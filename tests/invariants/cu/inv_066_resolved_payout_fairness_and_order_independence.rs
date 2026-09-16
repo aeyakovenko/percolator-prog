@@ -1173,6 +1173,31 @@ fn inv066_source_defines_function(source: &str, function: &str) -> bool {
     })
 }
 
+fn inv066_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 fn inv066_handler_body<'a>(production: &'a str, function: &str) -> &'a str {
     let start = production
         .find(&format!("fn {function}"))
@@ -1328,7 +1353,7 @@ fn v16_program_resolved_payout_induction_composition_is_source_complete() {
                     .unwrap_or_else(|error| panic!("read {path}: {error}"))
             });
             assert!(
-                inv066_source_defines_function(source, witness),
+                inv066_source_defines_test(source, witness),
                 "payout class '{}' lacks executable witness {path}#{witness}",
                 row.class,
             );
@@ -1347,7 +1372,7 @@ fn v16_program_resolved_payout_induction_composition_is_source_complete() {
                 .unwrap_or_else(|error| panic!("read {path}: {error}"))
         });
         assert!(
-            inv066_source_defines_function(source, witness),
+            inv066_source_defines_test(source, witness),
             "row417 late-expiry receipt witness missing {path}#{witness}",
         );
     }
