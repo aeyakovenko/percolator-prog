@@ -429,6 +429,14 @@ fn v16_program_every_mounted_explicit_kani_assumption_is_exactly_inventoried() {
         let (evidence_file, evidence_function) = columns[7]
             .split_once('#')
             .expect("public evidence must be path#function");
+        assert!(
+            evidence_file.starts_with("tests/invariants/") && evidence_file.ends_with(".rs"),
+            "public evidence must stay under tests/invariants: {evidence_file}"
+        );
+        assert!(
+            !evidence_function.is_empty(),
+            "public evidence function is empty for {evidence_file}"
+        );
         let evidence_source = source_cache
             .entry(evidence_file.to_owned())
             .or_insert_with(|| {
@@ -552,6 +560,15 @@ fn v16_program_every_mounted_kani_harness_has_a_nonvacuity_disposition() {
                 let (evidence_file, evidence_function) = evidence
                     .split_once('#')
                     .expect("concrete evidence must be path#function");
+                assert!(
+                    evidence_file.starts_with("tests/invariants/")
+                        && evidence_file.ends_with(".rs"),
+                    "concrete fixture evidence must stay under tests/invariants: {evidence_file}"
+                );
+                assert!(
+                    !evidence_function.is_empty(),
+                    "concrete fixture evidence function is empty for {evidence_file}"
+                );
                 let evidence_source = std::fs::read_to_string(manifest.join(evidence_file))
                     .unwrap_or_else(|error| panic!("read {evidence_file}: {error}"));
                 assert!(
