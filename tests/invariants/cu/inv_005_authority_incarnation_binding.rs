@@ -268,9 +268,18 @@ fn inv005_source_defines_test(source: &str, function: &str) -> bool {
 }
 
 fn inv005_evidence_parts(evidence: &str) -> (&str, &str) {
-    evidence
+    let (path, function) = evidence
         .split_once('#')
-        .unwrap_or_else(|| panic!("role evidence must be path#test: {evidence}"))
+        .unwrap_or_else(|| panic!("role evidence must be path#test: {evidence}"));
+    assert!(
+        path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+        "role evidence path must stay under tests/invariants: {path}"
+    );
+    assert!(
+        function.starts_with("v16_"),
+        "role evidence must use a v16 test function: {function}"
+    );
+    (path, function)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -576,7 +585,12 @@ fn v16_program_adversarial_role_containment_matrix_is_source_complete() {
             economic_evidence.len() >= 2,
             "{role} needs independent correctly-authorized economic witnesses"
         );
+        let mut unique_economic_evidence = std::collections::BTreeSet::new();
         for evidence in economic_evidence {
+            assert!(
+                unique_economic_evidence.insert(evidence),
+                "{role} repeats economic-containment evidence {evidence}"
+            );
             let (path, function) = inv005_evidence_parts(evidence);
             let source = source_cache.entry(path.to_owned()).or_insert_with(|| {
                 std::fs::read_to_string(root.join(path))
