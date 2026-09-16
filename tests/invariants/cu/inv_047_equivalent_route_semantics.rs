@@ -1639,54 +1639,98 @@ fn v16_program_equivalent_route_family_composition_is_source_complete() {
 
     let confinement_source =
         include_str!("inv_023_caller_input_confinement_for_derived_safety_state.rs");
-    assert!(inv047_source_defines_test(
-        confinement_source,
-        "v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes"
-    ));
     let local_source = include_str!("inv_047_equivalent_route_semantics.rs");
-    for family_witness in [
-        "v16_program_fee_charged_close_matches_single_and_one_leg_batch_routes",
-        "v16_program_legacy_insurance_topup_matches_explicit_domain_split",
-        "v16_program_authority_and_permissionless_resolution_match_at_maturity",
-        "v16_program_optional_topup_ledgers_are_economically_transparent",
-        "v16_program_unique_batch_position_plan_matches_sequential_route_and_slot_semantics",
-    ] {
-        assert!(
-            inv047_source_defines_test(local_source, family_witness),
-            "missing INV-047 family witness {family_witness}",
-        );
-    }
-
     let stateful_route_source = include_str!("../stateful/inv_047_equivalent_route_semantics.rs");
-    assert!(inv047_source_defines_test(
-        stateful_route_source,
-        "v16_program_nonzero_fee_trade_routes_are_byte_exact_after_transport_normalization"
-    ));
     let value_source = include_str!("../stateful/inv_024_attributed_quote_value_conservation.rs");
-    assert!(inv047_source_defines_test(
-        value_source,
-        "v16_program_all_trade_route_pairs_preserve_realized_pnl_owner_attribution"
-    ));
     let locality_source = include_str!("../stateful/inv_074_scope_locality.rs");
-    assert!(inv047_source_defines_test(
-        locality_source,
-        "v16_program_active_close_preserves_unrelated_same_asset_reduction"
-    ));
     let insurance_source = include_str!("inv_064_insurance_withdrawal_policy_equivalence.rs");
-    assert!(inv047_source_defines_test(
-        insurance_source,
-        "v16_program_live_and_resolved_insurance_withdrawals_share_one_finite_budget"
-    ));
-
     let transition_source =
         include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(inv047_source_defines_test(
-        transition_source,
-        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
-    ));
+    let mut public_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/cu/inv_023_caller_input_confinement_for_derived_safety_state.rs",
+            confinement_source,
+            "v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes",
+        ),
+        (
+            "tests/invariants/cu/inv_047_equivalent_route_semantics.rs",
+            local_source,
+            "v16_program_fee_charged_close_matches_single_and_one_leg_batch_routes",
+        ),
+        (
+            "tests/invariants/cu/inv_047_equivalent_route_semantics.rs",
+            local_source,
+            "v16_program_legacy_insurance_topup_matches_explicit_domain_split",
+        ),
+        (
+            "tests/invariants/cu/inv_047_equivalent_route_semantics.rs",
+            local_source,
+            "v16_program_authority_and_permissionless_resolution_match_at_maturity",
+        ),
+        (
+            "tests/invariants/cu/inv_047_equivalent_route_semantics.rs",
+            local_source,
+            "v16_program_optional_topup_ledgers_are_economically_transparent",
+        ),
+        (
+            "tests/invariants/cu/inv_047_equivalent_route_semantics.rs",
+            local_source,
+            "v16_program_unique_batch_position_plan_matches_sequential_route_and_slot_semantics",
+        ),
+        (
+            "tests/invariants/stateful/inv_047_equivalent_route_semantics.rs",
+            stateful_route_source,
+            "v16_program_nonzero_fee_trade_routes_are_byte_exact_after_transport_normalization",
+        ),
+        (
+            "tests/invariants/stateful/inv_024_attributed_quote_value_conservation.rs",
+            value_source,
+            "v16_program_all_trade_route_pairs_preserve_realized_pnl_owner_attribution",
+        ),
+        (
+            "tests/invariants/stateful/inv_074_scope_locality.rs",
+            locality_source,
+            "v16_program_active_close_preserves_unrelated_same_asset_reduction",
+        ),
+        (
+            "tests/invariants/cu/inv_064_insurance_withdrawal_policy_equivalence.rs",
+            insurance_source,
+            "v16_program_live_and_resolved_insurance_withdrawals_share_one_finite_budget",
+        ),
+        (
+            "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+            transition_source,
+            "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-047 equivalent-route witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "INV-047 equivalent-route witness must be a reviewed v16 regression: {path}#{witness}"
+        );
+        assert!(
+            public_witnesses.insert((path, witness)),
+            "duplicate INV-047 equivalent-route witness {path}#{witness}"
+        );
+        assert!(
+            inv047_source_defines_test(source, witness),
+            "INV-047 lost equivalent-route public witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        public_witnesses.len(),
+        11,
+        "INV-047 equivalent-route public witness roster drift"
+    );
     let flow_proof = include_str!("../kani/inv_024_attributed_quote_value_conservation.rs");
-    assert!(inv047_source_defines_kani_proof(
-        flow_proof,
-        "kani_inv024_engine_flow_validator_equals_wrapper_value_equation"
-    ));
+    let proof_witness = "kani_inv024_engine_flow_validator_equals_wrapper_value_equation";
+    assert!(proof_witness.starts_with("kani_inv"));
+    assert!(
+        inv047_source_defines_kani_proof(flow_proof, proof_witness),
+        "INV-047 lost equivalent-route proof witness {proof_witness}"
+    );
 }
