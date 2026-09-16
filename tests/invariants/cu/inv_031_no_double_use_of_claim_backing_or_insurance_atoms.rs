@@ -818,7 +818,7 @@ fn v16_program_single_use_lifecycle_composition_is_source_complete() {
         ),
     ] {
         assert!(
-            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            path.starts_with("tests/invariants/") && path.ends_with(".rs") && !path.contains(".."),
             "INV-031 single-use public witness must resolve to an invariant source file: {path}"
         );
         assert!(
@@ -856,7 +856,9 @@ fn v16_program_single_use_lifecycle_composition_is_source_complete() {
         ),
     ] {
         assert!(
-            path.starts_with("tests/invariants/kani/") && path.ends_with(".rs"),
+            path.starts_with("tests/invariants/kani/")
+                && path.ends_with(".rs")
+                && !path.contains(".."),
             "INV-031 single-use proof witness must resolve to a Kani invariant source file: {path}"
         );
         assert!(
