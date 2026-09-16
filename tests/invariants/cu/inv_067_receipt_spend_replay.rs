@@ -5,6 +5,9 @@
 use super::{late_expiry::World, *};
 use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_067_receipt_vault_reentry.rs"]
+mod receipt_vault_reentry;
+
 const FACES: [u128; 5] = [700, 0, 1_000, 0, 1_300];
 const CAPITAL: [u128; 5] = [1_000, 0, 1_000, 0, 1_000];
 const INITIAL: u128 = 501;
