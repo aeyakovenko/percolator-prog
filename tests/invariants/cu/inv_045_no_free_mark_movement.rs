@@ -3241,7 +3241,7 @@ fn inv045_function_body<'a>(production: &'a str, function: &str) -> &'a str {
 
 #[test]
 fn v16_program_mark_writer_and_trade_exit_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "394fd0bf2cb7d73df425eb3754dc3be1a0c44336";
+    const ENGINE_PIN: &str = "94979ede7db934545e53a8f210dd063a9ea3ea63";
     const CLASSES: &[Inv045MarkClass] = &[
         Inv045MarkClass {
             class: "full-width mark and fee arithmetic",
@@ -3455,7 +3455,7 @@ fn v16_program_mark_writer_and_trade_exit_composition_is_source_complete() {
         "let selected_liquidation = matches!(",
         "let liquidation_penalty_reclaimable = if selected_liquidation",
         ".find(|(asset_index, _)| *asset_index == selected_fee_asset)",
-        "!profile_updates_mark_from_trade_view(&profile, authenticated_now_slot)",
+        "liquidation_penalty_reclaimable_from_profile_view(",
         "let retained_fee = group\n                .header\n                .insurance\n                .get()\n                .saturating_sub(insurance_before);",
         "if completed_liquidation && liquidation_penalty_reclaimable",
         "expect_portfolio_view_owner(&cranker, owner.key)?;",
@@ -3471,6 +3471,14 @@ fn v16_program_mark_writer_and_trade_exit_composition_is_source_complete() {
             "PermissionlessCrank reward/fee provenance lost {required}",
         );
     }
+    let reclaimability_helper = inv045_function_body(
+        production,
+        "liquidation_penalty_reclaimable_from_profile_view",
+    );
+    assert!(
+        reclaimability_helper.contains("!profile_updates_mark_from_trade_view(profile, now_slot)"),
+        "liquidation penalty reclaimability must exclude trade-origin mark movement",
+    );
     let health_gate = crank
         .find("reject_incomplete_account_health_observations_view(")
         .expect("health observation gate");
