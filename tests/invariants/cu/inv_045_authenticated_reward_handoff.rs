@@ -112,12 +112,23 @@ fn submit_with_cu_limit(
     env.svm.expire_blockhash();
     let mut ixs = vec![heap_ix(), cu_ix()];
     ixs.extend_from_slice(instructions);
-    let tx = Transaction::new_signed_with_payer(
-        &ixs,
-        Some(&env.payer.pubkey()),
-        &[&env.payer, signer],
-        env.svm.latest_blockhash(),
-    );
+    let transaction = |ixs: &[Instruction]| {
+        let mut signers = vec![&env.payer];
+        if ixs.iter().any(|ix| {
+            ix.accounts
+                .iter()
+                .any(|meta| meta.is_signer && meta.pubkey == signer.pubkey())
+        }) {
+            signers.push(signer);
+        }
+        Transaction::new_signed_with_payer(
+            ixs,
+            Some(&env.payer.pubkey()),
+            &signers,
+            env.svm.latest_blockhash(),
+        )
+    };
+    let tx = transaction(&ixs);
     tx.verify().unwrap();
     assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
     let mut keys = tracked.to_vec();
@@ -130,12 +141,7 @@ fn submit_with_cu_limit(
     let cu = match rejection {
         Some((index, expected)) => {
             if instructions.len() == 2 {
-                let valid = Transaction::new_signed_with_payer(
-                    &[heap_ix(), cu_ix(), instructions[0].clone()],
-                    Some(&env.payer.pubkey()),
-                    &[&env.payer, signer],
-                    env.svm.latest_blockhash(),
-                );
+                let valid = transaction(&[heap_ix(), cu_ix(), instructions[0].clone()]);
                 env.svm
                     .simulate_transaction(valid.into())
                     .expect("the same fresh prefix must succeed independently");

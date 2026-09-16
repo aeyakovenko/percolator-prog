@@ -5,6 +5,9 @@
 
 use super::*;
 
+#[path = "inv_045_clipped_reward_maintenance.rs"]
+mod clipped_reward_maintenance;
+
 const RATE: u128 = 160;
 const SHARE: u128 = 3_333;
 

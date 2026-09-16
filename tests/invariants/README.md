@@ -45,6 +45,29 @@ portfolio-free succession worlds. **Row 421 remains OPEN/missing; INV-073 remain
 [Lane 22 report](lane22_terminal_insurance_progress_20260916.md) records the full
 non-overlap review, exact commands, artifact hashes and remaining limits.
 
+## Lane 23 clipped maintenance and Hybrid reward sources (2026-09-16)
+
+The [INV-045 clipped-maintenance child](cu/inv_045_clipped_reward_maintenance.rs)
+adds eight public LiteSVM histories crossing self-rewarded fee collection
+before/after the first Hybrid liquidation receipt, independent/shared
+target-and-keeper ownership, and two maintenance reward shares. A 101-atom
+keeper clips an 800-atom fee before receipt; 699 forgiven atoms cannot return
+as debt when two liquidations subsequently credit 4,759 atoms. The independent
+keeper book accounts for maintenance rebates, per-event domain rounding,
+source-effective-price penalties and exact shared/distinct-ATA payouts.
+
+There are 16 rewarded liquidations, 24 post-reward same-slot fee retries,
+72 complete Account rollbacks and eight exact SPL payouts. Peak measured
+transaction CU is 322,491 under 500,000. Collection order changes payout only
+by the change in retained canonical maintenance insurance; both source-asset
+liquidation budgets remain exact. This composes the existing unclipped
+maintenance and flat-refill controls with actual Hybrid reward ingress.
+It does not repeat Lane 12's target replacements or Lane 15's competing
+recipients/CPI route switching. **Row 422 remains OPEN/missing; INV-045 remains
+`REFUTED_CURRENT`.** No production bug or generic closure is claimed. See the
+[Lane 23 report](lane23_hybrid_reward_provenance_20260916.md) for non-overlap
+with lanes 1-21, exact commands/results, artifact hashes and finite limits.
+
 ## Lane 19 latent Hybrid source realization across backlog (2026-09-16)
 
 The existing [INV-028 Hybrid carry owner](cu/inv_028_hybrid_capacity_carry.rs)
