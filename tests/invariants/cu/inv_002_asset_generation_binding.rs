@@ -17,13 +17,29 @@
 
 use super::*;
 
-fn inv002_source_defines_function(source: &str, function: &str) -> bool {
+fn inv002_source_defines_kani_proof(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
-    source.lines().any(|line| {
-        line.trim_start()
-            .strip_prefix(&expected)
-            .is_some_and(|tail| tail.trim_start().starts_with('('))
-    })
+    let mut proof_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[kani::proof]" {
+            proof_attribute = true;
+        } else if line.starts_with("fn ") {
+            if proof_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            proof_attribute = false;
+        } else if proof_attribute && !line.is_empty() && !line.starts_with("#") {
+            proof_attribute = false;
+        }
+    }
+
+    false
 }
 
 fn inv002_source_defines_test(source: &str, function: &str) -> bool {
@@ -139,11 +155,11 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
         public_generation_evidence,
         "v16_program_retained_activation_binds_exact_next_generation_frontier"
     ));
-    assert!(inv002_source_defines_function(
+    assert!(inv002_source_defines_kani_proof(
         predicate_proofs,
         "kani_v16_asset_generation_binding_is_exact"
     ));
-    assert!(inv002_source_defines_function(
+    assert!(inv002_source_defines_kani_proof(
         predicate_proofs,
         "kani_v16_asset_lifecycle_binding_selects_current_or_frontier_exactly"
     ));
