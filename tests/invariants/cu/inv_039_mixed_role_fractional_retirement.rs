@@ -13,6 +13,9 @@ mod close_preemption;
 #[path = "inv_039_mixed_role_unsettled_expiry.rs"]
 mod unsettled_expiry;
 
+#[path = "inv_039_mixed_role_settled_expiry.rs"]
+mod settled_expiry;
+
 #[path = "inv_039_mixed_underfunded_receipt.rs"]
 mod underfunded_receipt;
 
