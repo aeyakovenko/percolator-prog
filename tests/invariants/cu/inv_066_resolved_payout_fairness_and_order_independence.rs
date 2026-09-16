@@ -1351,6 +1351,7 @@ fn v16_program_resolved_payout_induction_composition_is_source_complete() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut classes = std::collections::BTreeSet::new();
     let mut proofs = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
     let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
     for row in CLASSES {
         assert!(classes.insert(row.class), "duplicate payout class");
@@ -1364,6 +1365,17 @@ fn v16_program_resolved_payout_induction_composition_is_source_complete() {
             );
         }
         for (path, witness) in row.public_witnesses {
+            assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            assert!(
+                path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                "payout class '{}' points outside invariant test sources: {path}",
+                row.class,
+            );
+            assert!(
+                witness.starts_with("v16_"),
+                "payout class '{}' uses an unreviewed witness name: {witness}",
+                row.class,
+            );
             let source = source_cache.entry(path).or_insert_with(|| {
                 std::fs::read_to_string(root.join(path))
                     .unwrap_or_else(|error| panic!("read {path}: {error}"))
@@ -1377,11 +1389,20 @@ fn v16_program_resolved_payout_induction_composition_is_source_complete() {
     }
     assert_eq!(classes.len(), 4, "payout class roster drift");
     assert_eq!(proofs.len(), 9, "payout engine-proof roster drift");
+    assert_eq!(witnesses.len(), 6, "payout public-witness roster drift");
     let mut row417 = std::collections::BTreeSet::new();
     for (path, witness) in ROW417_WITNESSES {
         assert!(
             row417.insert(*witness),
             "duplicate row417 witness {witness}"
+        );
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "row417 witness points outside invariant test sources: {path}",
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "row417 witness uses an unreviewed test name: {witness}",
         );
         let source = source_cache.entry(path).or_insert_with(|| {
             std::fs::read_to_string(root.join(path))
