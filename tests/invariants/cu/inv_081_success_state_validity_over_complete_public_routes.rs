@@ -100,6 +100,11 @@ fn v16_program_success_state_validity_composition_is_source_complete() {
             test: "v16_public_instruction_coverage_registry_matches_production_roster",
         },
         Inv081CompositionOwner {
+            layer: "production instruction evidence links",
+            path: "tests/invariants/public_sbf/inv_079_public_reachability_evidence.rs",
+            test: "v16_public_instruction_coverage_registry_points_to_executable_evidence",
+        },
+        Inv081CompositionOwner {
             layer: "production instruction dispatch handler roster",
             path: "tests/invariants/public_sbf/inv_079_public_reachability_evidence.rs",
             test: "v16_public_instruction_dispatch_registry_matches_reviewed_handlers",
@@ -247,7 +252,7 @@ fn v16_program_success_state_validity_composition_is_source_complete() {
             owner.test,
         );
     }
-    assert_eq!(layers.len(), 23, "INV-081 composition layer drift");
+    assert_eq!(layers.len(), 24, "INV-081 composition layer drift");
 
     for (path, theorem) in KANI_OWNERS {
         let source = std::fs::read_to_string(root.join(path))
