@@ -6973,6 +6973,33 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
             "row421 source gate lost public SVM witness {witness}",
         );
     }
+    let inv073_public_witnesses = include_str!("inv_073_no_permanent_user_lock.rs");
+    for witness in [
+        "v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings",
+        "v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature",
+        "v16_program_distinct_absent_providers_preserve_each_others_terminal_fee_claims",
+        "v16_program_absent_native_provider_redeemed_prefix_preserves_public_remainder_and_close",
+        "v16_program_absent_provider_dual_quote_earnings_share_one_ledger_and_close",
+    ] {
+        assert!(
+            inv073_public_witnesses.contains(witness),
+            "row420 source gate lost public SVM witness {witness}",
+        );
+    }
+    for witness in [
+        "v16_program_generated_reserve_wallet_absence_preserves_fee_claims_across_expiry",
+        "v16_program_recovery_reserve_repair_crosses_last_portfolio_cleanup_without_beneficiary_signatures",
+        "v16_program_frozen_reserve_destinations_allow_public_replacement_without_thaw_or_beneficiary_signatures",
+        "v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry",
+        "v16_program_recreated_reserve_custody_preserves_spent_prefix_through_close_retry",
+        "v16_program_terminal_public_reserve_disposition_preserves_value_across_orders",
+        "v16_program_public_reserve_payments_wait_for_resolved_senior_disposition",
+    ] {
+        assert!(
+            inv073_public_witnesses.contains(witness),
+            "row433 source gate lost public SVM witness {witness}",
+        );
+    }
 
     let resolved = inv073_braced_body_after(production, "fn handle_close_resolved<'a>(");
     assert!(resolved.contains("expect_portfolio_view_owner(&portfolio, owner.key)?"));
