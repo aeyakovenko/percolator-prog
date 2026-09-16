@@ -1,5 +1,30 @@
 # Invariant-owned test coverage
 
+## Row 417 late backing expiry receipt evidence (2026-09-16)
+
+Owner:
+[stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs](stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs),
+mounted under INV-067's terminal-payout owner. The selector
+`v16_program_late_unrelated_backing_cannot_outlive_and_erase_resolved_receipt`
+builds a public LiteSVM trace with underfunded matched exposure, resolves the
+market, creates a positive receipt before backing expiry, then advances to the
+expiry boundary. Missing and wrong backing hints are checked for exact rollback;
+the correct discovery hint drives the resolved continuation, preserves the
+receipt, drains the resolved actor, closes the slab, and verifies the winner SPL
+payout plus unchanged mint supply.
+
+The companion CU selector
+`v16_program_resolved_crank_topup_batch_order_retries_pay_exactly_once` now
+checks that same-transaction duplicate payout continuations reject as
+`NonProgress` and roll back before the live route pays exactly once.
+
+This is bounded INV-063/067/070/080 public-route evidence for the specific
+late-backing-expiry receipt erasure class behind row 417. Row **417 remains
+OPEN** as a generic terminal-payout proof target: generated claim faces,
+additional source and claimant counts, insurance and Recovery rails, CPI rails,
+maximum shape, and unbounded whole-route entitlement remain outside this
+increment.
+
 ## Row 422 paid-origin Hybrid-recipient evidence (2026-09-14)
 
 Owner:
