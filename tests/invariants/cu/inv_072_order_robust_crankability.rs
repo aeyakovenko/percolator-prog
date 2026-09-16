@@ -1206,6 +1206,18 @@ struct Inv072PlanEvidence {
     witness: &'static str,
 }
 
+fn inv072_source_defines_function(source: &str, function: &str) -> bool {
+    let needle = format!("fn {function}");
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with(&needle)
+            && line[needle.len()..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '(' || ch.is_whitespace())
+    })
+}
+
 fn inv072_plan_evidence(plan: AutoCrankPlanV16) -> Inv072PlanEvidence {
     match plan {
         AutoCrankPlanV16::NoAction => Inv072PlanEvidence {
@@ -1292,7 +1304,7 @@ fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence
         assert!(
             witness_sources
                 .iter()
-                .any(|source| source.contains(&format!("fn {}", evidence.witness))),
+                .any(|source| inv072_source_defines_function(source, evidence.witness)),
             "auto-crank plan {} lost public witness {}",
             evidence.plan,
             evidence.witness,
@@ -1309,6 +1321,7 @@ fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence
         "v16_program_external_oracle_hint_and_account_order_is_normalized_or_atomic",
         "v16_program_drain_only_three_feed_hint_order_is_economically_normalized",
         "v16_program_crank_authenticated_oracle_account_roles_are_exhaustive",
+        "v16_attack_liquidation_cannot_omit_fresh_external_rescue_observation",
         "v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded",
         "v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_shape",
         "v16_program_recovery_reset_crank_tail_matrix_is_order_robust",
@@ -1324,7 +1337,7 @@ fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence
         assert!(
             parser_sources
                 .iter()
-                .any(|source| source.contains(&format!("fn {witness}"))),
+                .any(|source| inv072_source_defines_function(source, witness)),
             "hint-parser stratum lost public witness {witness}",
         );
     }
@@ -1366,7 +1379,8 @@ fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence
         "oracle_tail.len() < oracle_account_count",
         "oracle_account_count != oracle_profile.oracle_leg_count as usize",
         "if !oracle_tail.is_empty()",
-        "reject_missing_pending_liquidation_observations_view",
+        "(summary.stale || summary.liquidatable) && !summary.b_stale",
+        "reject_incomplete_account_health_observations_view",
     ] {
         assert!(
             zero_copy.contains(guard),
