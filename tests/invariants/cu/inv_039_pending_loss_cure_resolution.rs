@@ -9,6 +9,9 @@ use solana_sdk::fee::FeeStructure;
 
 const CURE: u128 = 100_000;
 
+#[path = "inv_076_cure_token_cpi_retry.rs"]
+mod token_cpi_retry;
+
 fn land(
     world: &mut AttributionWorld,
     instructions: &[Instruction],
