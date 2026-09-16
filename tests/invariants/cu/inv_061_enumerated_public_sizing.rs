@@ -14,6 +14,9 @@ use crate::support::fuzz_model::{
 #[path = "inv_061_caught_up_portfolio_sizing.rs"]
 mod caught_up_portfolio_sizing;
 
+#[path = "inv_061_nonunit_fee_boundary_sizing.rs"]
+mod nonunit_fee_boundary_sizing;
+
 const ASSET: usize = 1;
 const PRICE: u64 = POS_SCALE as u64;
 const MM_BPS: u128 = 6_000;
