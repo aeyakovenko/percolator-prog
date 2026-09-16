@@ -19,6 +19,9 @@
 
 use super::*;
 
+#[path = "inv_080_native_deposit_sync_retry.rs"]
+mod native_deposit_sync_retry;
+
 fn inv080_source_defines_test(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
     let mut test_attribute = false;
