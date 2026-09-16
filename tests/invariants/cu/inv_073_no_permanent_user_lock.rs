@@ -6958,19 +6958,54 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
         !resolved_insurance.contains("insurance_operator"),
         "resolved insurance payout must not consult the live operator role",
     );
+    let row421_sources = [
+        include_str!("inv_073_no_permanent_user_lock.rs"),
+        include_str!("inv_073_absent_insurer_spent_retirement.rs"),
+        include_str!("inv_073_frozen_insurance_remainder.rs"),
+        include_str!("inv_073_missing_insurance_wallet_recredit.rs"),
+        include_str!("inv_073_native_insurance_ledger_progress.rs"),
+        include_str!("inv_073_recredited_insurance_quote_rails.rs"),
+        include_str!("inv_073_native_recredit_custody.rs"),
+    ];
     for witness in [
         "v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledger",
+        "v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion",
+        "v16_program_absent_reserve_roles_preserve_recredited_insurance_after_backing_expiry",
+        "v16_program_absent_depleted_reserves_preserve_exhaustion_and_retirement_across_retries",
+        "v16_program_frozen_paid_insurance_preserves_unsigned_remainder_and_retirement",
         "v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close",
         "v16_program_native_insurance_paid_prefix_survives_operator_free_redemption_retry",
+        "v16_program_recredited_insurance_reaches_terminal_exit_without_wallets_or_signatures",
         "v16_program_recredited_insurance_switches_quote_rails_without_operator_signatures",
         "v16_program_recredited_insurance_recreates_native_custody_without_role_signatures",
     ] {
         assert!(
-            include_str!("inv_073_no_permanent_user_lock.rs").contains(witness)
-                || include_str!("inv_073_native_insurance_ledger_progress.rs").contains(witness)
-                || include_str!("inv_073_recredited_insurance_quote_rails.rs").contains(witness)
-                || include_str!("inv_073_native_recredit_custody.rs").contains(witness),
+            row421_sources
+                .iter()
+                .any(|source| inv073_source_defines_test(source, witness)),
             "row421 source gate lost public SVM witness {witness}",
+        );
+    }
+    let row421_parent = include_str!("inv_073_no_permanent_user_lock.rs");
+    for marker in [
+        "mod absent_insurer_spent_retirement;",
+        "mod frozen_insurance_remainder;",
+        "mod native_insurance_ledger_progress;",
+    ] {
+        assert!(
+            row421_parent.contains(marker),
+            "row421 witness module not mounted: {marker}",
+        );
+    }
+    let row421_absent = include_str!("inv_073_absent_insurer_spent_retirement.rs");
+    for marker in [
+        "mod missing_insurance_wallet_recredit;",
+        "mod recredited_insurance_quote_rails;",
+        "mod native_recredit_custody;",
+    ] {
+        assert!(
+            row421_absent.contains(marker),
+            "row421 nested witness module not mounted: {marker}",
         );
     }
     let inv073_public_witnesses = include_str!("inv_073_no_permanent_user_lock.rs");

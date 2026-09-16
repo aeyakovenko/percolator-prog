@@ -227,10 +227,12 @@ now also locks the current production `WithdrawInsuranceAsset` terminal branch:
 resolved payout uses the configured insurance beneficiary rather than the live
 operator, requires zero materialized portfolios and zero `c_tot`, consumes the
 current authority epoch, recredits claim-free residual before debit, and requires
-unencumbered unsigned beneficiary custody. The same gate points to the existing
-classic, native, recredited, quote-rail and custody-recreation SVM witnesses, so
-a future wrapper drift that reintroduces an operator signature dependency or
-changes the terminal payout guards fails before metadata can stay green.
+unencumbered unsigned beneficiary custody. The same gate now requires the
+expanded row421 witness roster and nested module graph: classic, absent-role,
+depleted-reserve, frozen-remainder, native-ledger, missing-wallet, quote-rail,
+and custody-recreation SVM witnesses. A future wrapper drift that reintroduces an
+operator signature dependency, drops a row421 witness module, or changes the
+terminal payout guards fails before metadata can stay green.
 
 `v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_close`
 now covers the withheld row421 blocker directly. It builds the terminal state
