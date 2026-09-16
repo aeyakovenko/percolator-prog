@@ -100,6 +100,10 @@ fn inv087_source_defines_test(source: &str, function: &str) -> bool {
 
 fn assert_named_witness(source: &str, label: &str, witness: &str) {
     assert!(
+        witness.starts_with("v16_"),
+        "{label} uses an unreviewed public mutation witness name {witness}",
+    );
+    assert!(
         inv087_source_defines_test(source, witness),
         "{label} missing executable public mutation witness {witness}",
     );
