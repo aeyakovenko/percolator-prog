@@ -81,12 +81,12 @@ fn inv010_evidence_parts(evidence: &str) -> (&str, &str) {
         .split_once('#')
         .unwrap_or_else(|| panic!("history evidence must be path#test: {evidence}"));
     assert!(
-        path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+        path.starts_with("tests/invariants/") && path.ends_with(".rs") && !path.contains(".."),
         "history evidence path must stay under tests/invariants: {path}"
     );
     assert!(
-        !function.is_empty(),
-        "history evidence test function is empty for {path}"
+        function.starts_with("v16_"),
+        "history evidence must use a reviewed v16 test function: {path}#{function}"
     );
     (path, function)
 }
