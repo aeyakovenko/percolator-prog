@@ -250,6 +250,11 @@ fn v16_program_out_of_order_induction_composition_is_source_complete() {
             test: "v16_program_every_public_route_has_an_explicit_history_relation",
         },
         Inv010CompositionOwner {
+            obligation: "every public route binds its reviewed dispatch handler",
+            path: "tests/invariants/public_sbf/inv_079_public_reachability_evidence.rs",
+            test: "v16_public_instruction_dispatch_registry_matches_reviewed_handlers",
+        },
+        Inv010CompositionOwner {
             obligation: "all delayed policy and observation controls",
             path: "tests/invariants/public_sbf/inv_014_delayed_policy_and_policy_epoch_safety.rs",
             test: "v16_program_delayed_control_matrix_is_source_complete",
@@ -333,7 +338,7 @@ fn v16_program_out_of_order_induction_composition_is_source_complete() {
             owner.test,
         );
     }
-    assert_eq!(obligations.len(), 15, "ordering composition drift");
+    assert_eq!(obligations.len(), 16, "ordering composition drift");
 
     let kani =
         std::fs::read_to_string(root.join("tests/invariants/kani/inv_010_out_of_order_safety.rs"))
