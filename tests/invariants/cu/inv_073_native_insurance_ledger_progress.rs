@@ -29,6 +29,9 @@ use crate::support::fuzz_model::{
 };
 use solana_sdk::fee::FeeStructure;
 
+#[path = "inv_073_paid_insurance_custody_recreation.rs"]
+mod paid_insurance_custody_recreation;
+
 const BUDGETS: [u64; 2] = [37, 61];
 const FUNDED: u64 = BUDGETS[0] + BUDGETS[1];
 const FIRST: u64 = 41;
