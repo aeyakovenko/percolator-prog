@@ -240,6 +240,31 @@ struct Inv049LegWriterCallsite<'a> {
     count: usize,
 }
 
+fn inv049_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[test]
 fn v16_program_leg_writer_surface_is_engine_owned_and_source_complete() {
     use std::collections::BTreeMap;
@@ -368,8 +393,9 @@ fn v16_program_leg_writer_surface_is_engine_owned_and_source_complete() {
         50,
         "a new wrapper-to-engine transition reopens the structural-leg classification"
     );
-    assert!(ENGINE_TRANSITION_ROSTER.contains(
-        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness("
+    assert!(inv049_source_defines_test(
+        ENGINE_TRANSITION_ROSTER,
+        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
     ));
     for (source, witness) in [
         (
@@ -390,7 +416,7 @@ fn v16_program_leg_writer_surface_is_engine_owned_and_source_complete() {
         ),
     ] {
         assert!(
-            source.contains(&format!("fn {witness}(")),
+            inv049_source_defines_test(source, witness),
             "canonical-leg composition witness {witness} is missing"
         );
     }
