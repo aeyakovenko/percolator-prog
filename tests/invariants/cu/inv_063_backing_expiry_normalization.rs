@@ -296,10 +296,22 @@ fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
     );
 
     let transitions = include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(inv063_source_defines_test(
-        transitions,
-        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
-    ));
+    let transition_witness =
+        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness";
+    let transition_path =
+        "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs";
+    assert!(
+        transition_path.starts_with("tests/invariants/") && transition_path.ends_with(".rs"),
+        "INV-063 transition witness must resolve to an invariant source file: {transition_path}"
+    );
+    assert!(
+        transition_witness.starts_with("v16_"),
+        "INV-063 transition witness must be a reviewed v16 regression"
+    );
+    assert!(
+        inv063_source_defines_test(transitions, transition_witness),
+        "INV-063 lost transition-census witness {transition_path}#{transition_witness}"
+    );
     crate::assert_certified_engine_pin("INV-063 engine expiry-transition composition");
 }
 
