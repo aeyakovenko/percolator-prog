@@ -351,6 +351,23 @@ fn inv_085_clamp_toward_oracle(anchor: u64, target: u64, cap_bps: u64, dt: u64) 
     }
 }
 
+fn inv_085_adverse_trade_price_delta_oracle(
+    size_q: i128,
+    exec_price: u64,
+    authenticated_price: u64,
+) -> Option<u64> {
+    if size_q == i128::MIN {
+        return None;
+    }
+    Some(if size_q > 0 {
+        exec_price.saturating_sub(authenticated_price)
+    } else if size_q < 0 {
+        authenticated_price.saturating_sub(exec_price)
+    } else {
+        0
+    })
+}
+
 fn inv_085_premium_funding_rate_oracle(
     mark: u64,
     index: u64,
@@ -769,6 +786,19 @@ fn v16_program_policy_arithmetic_matches_independent_full_width_corpus() {
             oracle_v16::clamp_toward_engine_dt(old, new, cap, dt),
             inv_085_clamp_toward_oracle(old, new, cap, dt),
             "dt clamp diverged at corpus word {index}"
+        );
+        let raw_size = inv_085_boundary_u128(&mut state, index + 19).min(i128::MAX as u128);
+        let signed_size_q = match index % 5 {
+            0 => 0,
+            1 => i128::MIN,
+            2 => i128::MAX,
+            3 => raw_size as i128,
+            _ => -(raw_size as i128),
+        };
+        assert_eq!(
+            percolator_prog::policy_v16::adverse_trade_price_delta(signed_size_q, old, new),
+            inv_085_adverse_trade_price_delta_oracle(signed_size_q, old, new),
+            "adverse trade price delta diverged at corpus word {index}"
         );
         assert_eq!(
             percolator_prog::policy_v16::premium_funding_rate_e9(old, new, cap),
@@ -1605,6 +1635,7 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         ArithmeticOwner { function: "scale_decimal_exponent_to_e6", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
         ArithmeticOwner { function: "compose_price_e6", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
         ArithmeticOwner { function: "clamp_toward_engine_dt", class: "ORACLE", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
+        ArithmeticOwner { function: "adverse_trade_price_delta", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
         ArithmeticOwner { function: "mul_div_u128_by_u64", class: "POLICY", evidence: "v16_program_canonical_arithmetic_matches_bigint_on_full_width_boundaries" },
         ArithmeticOwner { function: "permissionless_market_init_fee_for_asset", class: "POLICY", evidence: "v16_program_market_init_fee_matches_repeated_doubling_at_supported_and_overflow_edges" },
         ArithmeticOwner { function: "ceil_div_u128", class: "POLICY", evidence: "v16_program_canonical_arithmetic_matches_bigint_on_full_width_boundaries" },
@@ -1620,16 +1651,30 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         ArithmeticOwner { function: "handle_batch_execute_zero_copy", class: "STRUCTURAL", evidence: "INV-077" },
         ArithmeticOwner { function: "handle_batch_trade_cpi", class: "STRUCTURAL", evidence: "INV-077" },
         ArithmeticOwner { function: "handle_top_up_insurance", class: "STRUCTURAL", evidence: "INV-034" },
+        ArithmeticOwner { function: "market_insurance_withdraw_capacity_view", class: "STRUCTURAL", evidence: "INV-064" },
         ArithmeticOwner { function: "backing_domain_parts_view", class: "STRUCTURAL", evidence: "INV-034" },
         ArithmeticOwner { function: "verify_domain_withdrawal_preflight", class: "STRUCTURAL", evidence: "INV-034" },
         ArithmeticOwner { function: "handle_top_up_backing_bucket", class: "STRUCTURAL", evidence: "INV-034" },
         ArithmeticOwner { function: "handle_withdraw_insurance_asset", class: "STRUCTURAL", evidence: "INV-064" },
         ArithmeticOwner { function: "hybrid_trade_fee_quote_view", class: "COMPOSITE", evidence: "v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered" },
+        ArithmeticOwner { function: "trade_fee_budgeted_amounts_with_mark_externality_view", class: "COMPOSITE", evidence: "v16_program_pr225_mark_movement_fee_is_nonwithdrawable_and_terminally_burned" },
+        ArithmeticOwner { function: "hybrid_soft_stale_matured", class: "STRUCTURAL", evidence: "INV-088" },
+        ArithmeticOwner { function: "profile_hybrid_soft_stale_matured", class: "STRUCTURAL", evidence: "INV-088" },
+        ArithmeticOwner { function: "permissionless_stale_matured", class: "STRUCTURAL", evidence: "INV-088" },
+        ArithmeticOwner { function: "permissionless_resolve_matured_for_profile_at_slot", class: "STRUCTURAL", evidence: "INV-088" },
+        ArithmeticOwner { function: "shutdown_asset_matured_at_slot_view", class: "STRUCTURAL", evidence: "INV-088" },
+        ArithmeticOwner { function: "hybrid_target_for_crank_view", class: "STRUCTURAL", evidence: "INV-088" },
+        ArithmeticOwner { function: "zero_move_funding_path_for_profile_view", class: "STRUCTURAL", evidence: "INV-088" },
+        ArithmeticOwner { function: "handle_close_resolved", class: "STRUCTURAL", evidence: "INV-073" },
+        ArithmeticOwner { function: "handle_force_close_abandoned_asset", class: "STRUCTURAL", evidence: "INV-088" },
+        ArithmeticOwner { function: "handle_permissionless_crank_zero_copy", class: "STRUCTURAL", evidence: "INV-088" },
     ];
 
     const RISK_MARKERS: &[&str] = &[
         ".checked_mul(",
         ".checked_div(",
+        ".saturating_add(",
+        ".saturating_sub(",
         ".saturating_mul(",
         ".wrapping_mul(",
         ".abs_diff(",
@@ -1705,6 +1750,7 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         include_str!("inv_085_proven_arithmetic_equals_deployed_arithmetic.rs"),
         include_str!("inv_020_authenticated_clock_slot_and_oracle_provenance.rs"),
         include_str!("inv_045_no_free_mark_movement.rs"),
+        include_str!("../public_sbf/inv_045_no_free_mark_movement.rs"),
     ];
     let mut expected = std::collections::BTreeSet::new();
     for row in ROWS {
