@@ -19,6 +19,31 @@
 
 use super::*;
 
+fn inv036_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DirectionalFeeTerminalOutcome {
     winner_payout: u128,
@@ -2295,7 +2320,7 @@ fn v16_program_fee_policy_and_destination_census_is_source_complete() {
         assert!(
             witness_sources
                 .iter()
-                .any(|source| source.contains(&format!("fn {}", class.public_witness))),
+                .any(|source| inv036_source_defines_test(source, class.public_witness)),
             "{} lacks executable public destination witness {}",
             class.name,
             class.public_witness,
@@ -2304,22 +2329,30 @@ fn v16_program_fee_policy_and_destination_census_is_source_complete() {
 
     let supersession_evidence =
         include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs");
-    assert!(supersession_evidence
-        .contains("fn v16_program_superseded_control_matrix_rejects_stale_overwrites"));
+    assert!(inv036_source_defines_test(
+        supersession_evidence,
+        "v16_program_superseded_control_matrix_rejects_stale_overwrites"
+    ));
     let custody_evidence =
         include_str!("inv_018_quote_mint_vault_token_program_and_authority_integrity.rs");
-    assert!(custody_evidence
-        .contains("fn v16_primary_quote_routes_match_actual_spl_and_internal_accounting_deltas"));
+    assert!(inv036_source_defines_test(
+        custody_evidence,
+        "v16_primary_quote_routes_match_actual_spl_and_internal_accounting_deltas"
+    ));
     let stock_evidence = include_str!("inv_025_exact_stock_reconciliation.rs");
-    assert!(stock_evidence.contains(
-        "fn v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks"
+    assert!(inv036_source_defines_test(
+        stock_evidence,
+        "v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks"
     ));
     let seniority_evidence = include_str!("inv_040_no_fee_seniority.rs");
-    assert!(seniority_evidence
-        .contains("fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed"));
+    assert!(inv036_source_defines_test(
+        seniority_evidence,
+        "v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed"
+    ));
     let transition_evidence =
         include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(transition_evidence.contains(
-        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    assert!(inv036_source_defines_test(
+        transition_evidence,
+        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
     ));
 }
