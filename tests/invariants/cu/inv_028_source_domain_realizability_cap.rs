@@ -1710,7 +1710,7 @@ fn v16_program_source_realizability_cap_composition_is_source_complete() {
             "duplicate row423 witness {witness}"
         );
         assert!(
-            path.starts_with("inv_028_") && path.ends_with(".rs"),
+            path.starts_with("inv_028_") && path.ends_with(".rs") && !path.contains(".."),
             "row423 witness points outside the INV-028 CU invariant family: {path}",
         );
         assert!(
@@ -1728,6 +1728,10 @@ fn v16_program_source_realizability_cap_composition_is_source_complete() {
     }
     assert_eq!(witnesses.len(), 23, "row423 witness roster drift");
     for (path, marker) in ROW423_MODULE_LINKS {
+        assert!(
+            path.starts_with("inv_028_") && path.ends_with(".rs") && !path.contains(".."),
+            "row423 witness module points outside the INV-028 CU invariant family: {path}",
+        );
         let source = source_cache.entry(path).or_insert_with(|| {
             std::fs::read_to_string(root.join(path))
                 .unwrap_or_else(|error| panic!("read {path}: {error}"))
@@ -1791,7 +1795,7 @@ fn v16_program_source_realizability_cap_composition_is_source_complete() {
         ),
     ] {
         assert!(
-            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            path.starts_with("tests/invariants/") && path.ends_with(".rs") && !path.contains(".."),
             "INV-028 source-realizability witness must resolve to an invariant source file: {path}"
         );
         assert!(
