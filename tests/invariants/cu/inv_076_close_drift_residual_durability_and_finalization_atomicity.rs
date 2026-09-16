@@ -22,8 +22,163 @@
 //! composition gate at the end of this file closes the remaining fallible-phase
 //! question by combining the exact-pin engine success contracts with INV-080's
 //! complete wrapper error propagation and the SVM rollback boundary.
+//!
+//! `v16_program_resolved_close_order_preserves_pending_obligation_attribution`
+//! owns one normal-operation INV-039/076 join that the earlier matrices did not:
+//! resolution while one zero-basis loss obligation and its opposing active debt
+//! coexist. It preserves the obligation census across `ResolveMarket`, drains
+//! both public close orders, normalizes payouts by owner, and requires identical
+//! owner attribution and terminal custody.
 
 use super::*;
+
+#[test]
+fn v16_program_resolved_close_order_preserves_pending_obligation_attribution() {
+    let run = |pending_first: bool| {
+        let PublicActiveCloseFixture {
+            mut env,
+            loss_owner,
+            loss,
+            asset1_counterparty_owner,
+            asset1_counterparty,
+            live_counterparty_owner,
+            live_counterparty,
+            live_peer_owner,
+            live_peer,
+        } = public_asset1_bankrupt_close_fixture_before_close_with_b_chunk_atoms(1);
+
+        let forfeit_cu = env.forfeit_recovery_leg_with_cu(
+            &asset1_counterparty_owner,
+            asset1_counterparty,
+            1,
+            u128::MAX,
+        );
+        assert_cu_within(
+            "INV-039/076 winning-side Recovery forfeit",
+            forfeit_cu,
+            CRANK_CU_LIMIT,
+        );
+
+        let portfolios = [loss, asset1_counterparty, live_counterparty, live_peer];
+        let states = portfolios.map(|portfolio| env.portfolio_state(portfolio));
+        let pending_flags = states.map(|account| {
+            account.legs.iter().any(|encoded| {
+                let leg = encoded.try_to_runtime().expect("decode pending leg");
+                leg.active && leg.basis_pos_q == 0 && leg.loss_weight != 0
+            })
+        });
+        assert_eq!(
+            pending_flags.into_iter().filter(|pending| *pending).count(),
+            1,
+            "the public close prefix must retain exactly one economically live obligation"
+        );
+        let pending_index = pending_flags
+            .into_iter()
+            .position(|pending| pending)
+            .expect("pending obligation owner");
+        assert!(
+            pending_index < 2,
+            "the pending obligation must belong to the asset-1 close pair"
+        );
+        assert_eq!(
+            pending_index, 1,
+            "the winning counterparty must own the retained obligation"
+        );
+        let opposing_index = 1 - pending_index;
+        let before = env.market_state().1;
+        let asset = before.assets[1];
+        assert_eq!(
+            asset
+                .pending_obligation_count_long
+                .checked_add(asset.pending_obligation_count_short),
+            Some(1),
+            "the account-local obligation must agree with the market summary"
+        );
+        let opposing = env.portfolio_state(loss);
+        assert!(
+            opposing.pnl.get() < 0 && has_active_leg_for_asset(&opposing, 1),
+            "the opposing economic debt must still need terminal processing"
+        );
+
+        let vault_at_resolution = env.token_amount(env.vault) as u128;
+        let resolve_cu = env.resolve();
+        assert_cu_within(
+            "INV-039/076 resolve with pending obligation",
+            resolve_cu,
+            CRANK_CU_LIMIT,
+        );
+        let resolved = env.market_state().1;
+        assert_eq!(resolved.mode, MarketModeV16::Resolved);
+        let resolved_asset = resolved.assets[1];
+        assert_eq!(
+            (
+                resolved_asset.pending_obligation_count_long,
+                resolved_asset.pending_obligation_count_short,
+                resolved_asset.loss_weight_sum_long,
+                resolved_asset.loss_weight_sum_short,
+            ),
+            (
+                asset.pending_obligation_count_long,
+                asset.pending_obligation_count_short,
+                asset.loss_weight_sum_long,
+                asset.loss_weight_sum_short,
+            ),
+            "resolution must retain the pending obligation and its attribution weights",
+        );
+        env.svm.warp_to_slot(resolved.resolved_slot + 5);
+
+        let actors = [
+            (&loss_owner, loss),
+            (&asset1_counterparty_owner, asset1_counterparty),
+            (&live_counterparty_owner, live_counterparty),
+            (&live_peer_owner, live_peer),
+        ];
+        let order = if pending_first {
+            [pending_index, opposing_index, 2, 3]
+        } else {
+            [opposing_index, pending_index, 2, 3]
+        };
+        let ordered = order.map(|index| actors[index]);
+        let ordered_payouts = drain_resolved_cohort(
+            &mut env,
+            &ordered,
+            if pending_first {
+                "INV-039/076 pending-obligation-first resolved close"
+            } else {
+                "INV-039/076 opposing-residual-first resolved close"
+            },
+        );
+        let mut payouts = [0u128; 4];
+        for (ordered_index, actor_index) in order.into_iter().enumerate() {
+            payouts[actor_index] = ordered_payouts[ordered_index];
+        }
+
+        let terminal = env.market_state().1;
+        let terminal_asset = terminal.assets[1];
+        assert_eq!(terminal_asset.pending_obligation_count_long, 0);
+        assert_eq!(terminal_asset.pending_obligation_count_short, 0);
+        assert_eq!(terminal_asset.loss_weight_sum_long, 0);
+        assert_eq!(terminal_asset.loss_weight_sum_short, 0);
+        assert_eq!(terminal_asset.stored_pos_count_long, 0);
+        assert_eq!(terminal_asset.stored_pos_count_short, 0);
+        assert_eq!(terminal_asset.oi_eff_long_q, 0);
+        assert_eq!(terminal_asset.oi_eff_short_q, 0);
+        assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
+        assert_eq!(
+            payouts.iter().sum::<u128>() + terminal.vault,
+            vault_at_resolution,
+            "resolved payouts and retained protocol value must reconcile exactly"
+        );
+        (payouts, terminal.vault, terminal.insurance)
+    };
+
+    let opposing_first = run(false);
+    let pending_first = run(true);
+    assert_eq!(
+        pending_first, opposing_first,
+        "resolved close order changed owner attribution or terminal custody"
+    );
+}
 
 #[test]
 fn v16_program_cure_and_cancel_close_rejects_when_resolve_matured_atomically() {
