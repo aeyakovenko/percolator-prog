@@ -13,6 +13,9 @@ use solana_sdk::account::Account;
 #[path = "inv_070_native_booked_residue_cleanup.rs"]
 mod native_booked_residue_cleanup;
 
+#[path = "inv_073_booked_residue_beneficiary_epochs.rs"]
+mod booked_residue_beneficiary_epochs;
+
 const LIMIT: u64 = 300_000;
 const INITIAL_STOCK: u64 = SOURCE_PRINCIPAL + BACKING + PROVIDER_FEE + AVAILABLE;
 

@@ -81,6 +81,39 @@ bounded coverage, not arbitrary-history closure or a status promotion. See the
 [report](row417_receipt_close_slab_rail_20260916.md) for commands, CU, provenance,
 results and limits.
 
+## Row 421 booked recovery and beneficiary epochs (2026-09-16)
+
+The [booked-residue child](cu/inv_073_booked_residue_beneficiary_epochs.rs)
+adds four public LiteSVM histories crossing classic/native quote and 1/28 atoms
+of final booked residue. A real loss consumes 73 insurance atoms while 657
+provider-fee atoms remain attributed. After available insurance pays A,
+consented `A -> B -> A` succession spans lazy recredit and B's partial recovery
+payment. Restoring A cannot revive its retained payout epoch. Missing provider
+and beneficiary ATAs are recreated by the independent payer; the provider key
+is dropped before its payouts, and both beneficiary keys are dropped before
+the final insurance payout and booked-residue cleanup.
+
+The input-owned book separates user payouts, source/provider principal, earned
+fees, A/B insurance payments and residue. Forty-two exact Account rollback checks
+include ATA creation, lazy recredit, epoch consumption, SPL/native transfers,
+provider-ledger initialization, burn/escheat, vault closure and tombstone rent.
+Unpaid provider fees block closure even after insurance is exhausted. Final
+classic closure burns only the claim-free 1/28 atoms; native closure pays them
+only to restored A, rejecting former B's destination. There is no external surplus.
+
+This is bounded single-asset, full-recredit coverage using the existing public
+fee/loss/user-settlement fixture. Succession requires both holders, earlier
+portfolio deletion requires owners, and normalization/final slab closure requires
+the admin; reserve economic payments require only the payer. Unfinished user
+claims, unavailable succession consent, partial recovery, disabled existing
+custody, secondary quotes and arbitrary histories remain outside this increment.
+It extends Scope O's fixed-beneficiary cleanup and the depleted-succession test
+with missing custody, epoch restoration and both quote rails. It does not repeat
+the external-surplus or unspent-insurance/provider-expiry matrices.
+**Row 421 remains OPEN/missing; INV-073 remains `REFUTED_CURRENT`.** See the
+[worker report](row421_booked_residue_terminal_20260916.md) for exact selectors,
+results, CU measurements and authority assumptions. No TSV status is changed.
+
 ## Row 417 alternating receipt rails across two expiries (2026-09-16)
 
 The [receipt rail history child](cu/inv_067_receipt_rail_history.rs) adds bounded
