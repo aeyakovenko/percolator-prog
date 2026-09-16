@@ -1379,6 +1379,15 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # trade-driven/nonreclaimable liquidation penalties before domain credit, and orders
 # reward credit before the remaining domain split. This is current-route source
 # hardening only; arbitrary paid-origin/fresh-report reward histories remain OPEN.
+# Row 422 INV-045 conformance audit (2026-09-16): row422_conformance_audit_20260916.md.
+# Lane12/23/25, CPI switching, native terminal and slab-closure products already
+# exercise public reward accounting; cross-asset and frozen-payout owners add
+# distinct bounded controls. Prior per-family limits are not suite-wide gaps.
+# Missing: independent effective-price-lineage reward eligibility composed with
+# paid discovery, fresh target arrival during lag, replacements and catchup.
+# The row280 discovery adapter keeps Hybrid stale; the source guard pins the
+# implementation predicate. Neither supplies this oracle/history composition.
+# Reuse existing tests; no new Rust, independent-discovery or verdict promotion.
 422	LoF	BLOCKER	INV-045	INV-020,INV-024,INV-036,INV-041,INV-045,INV-061,INV-062	mark-provenance+x-fresh-report+x-liquidation-reward	liquidation-reward-provenance-follows-the-effective-price-until-catchup	OPEN
 # 423 partial conformance (2026-09-10): cu/inv_028_single_slot_admission.rs::v16_program_batch_admission_cannot_share_last_future_domain_slot.
 # Two individually fitting old-asset legs jointly need 29 domains: both batch orders reject atomically;

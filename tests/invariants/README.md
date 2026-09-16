@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## Row 422 INV-045 reward-provenance audit (2026-09-16)
+
+The existing public-route products cover reward accounting through same-slot
+target replacement, clipped maintenance, optional destinations, CPI switching,
+native redemption and classic SPL slab closure. Their independent fee and
+custody checks do not independently derive reward eligibility from effective-
+price lineage during paid-origin/fresh-report handoff. The closest finding-blind
+INV-045 liquidation adapter deliberately keeps the Hybrid feed stale; the
+source-composition guard checks the production predicate rather than modeling
+that transition independently.
+
+**Row 422 remains OPEN/missing; INV-045 remains `REFUTED_CURRENT`.** The
+[focused audit](row422_conformance_audit_20260916.md) records the public-account
+construction, exact existing selectors, validation and remaining oracle/sequence
+boundary. This is reward-provenance and public-route conformance coverage only.
+No new Rust, production change or discovery/status promotion is included. Nine
+scoped INV-045 checks passed in the isolated audit, and PR135's current metadata
+guards pass after the separate row421 reconciliation.
+
 ## Row 416 conformance evidence audit (2026-09-16)
 
 Existing INV-005 public LiteSVM coverage already exercises the bounded
