@@ -373,8 +373,18 @@ fn v16_program_terminal_fee_share_succession_preserves_operator_paid_history() {
     peak = peak.max(land(
         &mut world,
         &ledgers,
+        &[fees.clone(), wrong_ledger.clone()],
+        Some((3, PercolatorError::Unauthorized, 1)),
+    ));
+    book.check(&world);
+    assert_eq!(world.env.svm.get_account(&ledgers[0]), provider_baseline);
+    assert_eq!(world.env.svm.get_account(&ledgers[1]), old_insurance);
+    assert_eq!(world.env.svm.get_account(&ledgers[2]), successor_baseline);
+    peak = peak.max(land(
+        &mut world,
+        &ledgers,
         &[fees.clone(), insurance.clone(), wrong_ledger],
-        Some((4, PercolatorError::Unauthorized, 2)),
+        Some((4, PercolatorError::EngineStale, 2)),
     ));
     book.check(&world);
     assert_eq!(world.env.svm.get_account(&ledgers[0]), provider_baseline);
@@ -384,6 +394,7 @@ fn v16_program_terminal_fee_share_succession_preserves_operator_paid_history() {
     book.paid[2] += book.provider_fees;
     book.provider_fees = 0;
     book.pay_insurance(2, TERMINAL_PREFIX);
+    book.epoch += 1;
     book.check(&world);
     assert_eq!(
         state::read_backing_domain_ledger(&world.env.svm.get_account(&ledgers[0]).unwrap().data)
@@ -409,6 +420,7 @@ fn v16_program_terminal_fee_share_succession_preserves_operator_paid_history() {
     let ix = insurance_payout(&world, 2, insurance_tail - TERMINAL_PREFIX, ledgers[2]);
     peak = peak.max(land(&mut world, &ledgers, &[ix], None));
     book.pay_insurance(2, insurance_tail - TERMINAL_PREFIX);
+    book.epoch += 1;
     book.check(&world);
     insurance_record(
         &world,
