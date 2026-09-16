@@ -1,5 +1,22 @@
 # Invariant-owned test coverage
 
+## Row 422 fresh Hybrid reward-provenance evidence (2026-09-16)
+
+Owner:
+[public_sbf/inv_045_no_free_mark_movement.rs](public_sbf/inv_045_no_free_mark_movement.rs).
+The selector
+`v16_program_fresh_hybrid_report_does_not_reenable_stale_trade_liquidation_reward`
+builds the public SBF sequence where a stale Hybrid self-trade moves the effective
+price, then a fresh authenticated report arrives before the effective price has
+fully caught up. The regression proves the liquidation penalty remains retained
+by the protocol instead of becoming a cranker reward, while a companion positive
+selector keeps ordinary fresh-Hybrid liquidation rewards enabled.
+
+This is bounded INV-020/024/041/045/061/080 evidence for the concrete row 422
+fresh-report provenance laundering class. It does not claim a generic proof over
+every Hybrid reward history, CPI route, maximum shape, or arbitrary liquidation
+ordering.
+
 ## Row 417 late backing expiry receipt evidence (2026-09-16)
 
 Owner:

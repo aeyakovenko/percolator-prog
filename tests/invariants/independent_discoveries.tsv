@@ -75,6 +75,7 @@ INV-045	pending-target-override/all-trade-routes	v16_program_trade_route_matrix_
 INV-045	pending-mark/fee-sync-order	v16_program_pending_mark_fee_ordering_rejects_and_preserves_terminal_value	fee-reward-cannot-outrank-uncommitted-adverse-value	356
 INV-045	mark-movement/reserve-withdrawal	v16_program_trade_route_matrix_keeps_mark_reserve_nonwithdrawable	mark-movement-reserve-must-remain-encumbered	225
 INV-045	trade-driven-mark/liquidation-economics	v16_program_mark_mode_route_matrix_keeps_liquidation_penalties_nonreclaimable	mark-movement-cost-must-cover-liquidation-extraction	280
+INV-045	hybrid-provenance/fresh-report-after-trade	v16_program_fresh_hybrid_report_does_not_reenable_stale_trade_liquidation_reward	fresh-hybrid-report-cannot-reclassify-stale-trade-effective-price-as-reward-eligible	422
 INV-045	mark-movement/bilateral-fee-support	v16_program_matcher_route_matrix_rejects_one_sided_mark_subsidy	mark-movement-fees-must-be-bilaterally-supported	369
 INV-045	canonical-accrual/trade-crank-interleaving	v16_attack_risk_reducing_trade_cannot_erase_canonical_price_movement_remainder	all-economic-routes-preserve-canonical-fractional-accrual-carry	425
 INV-038	composite-rounding/large-factorization	v16_program_composite_scale_matrix_preserves_exact_composition	composite-price-is-rounded-once-after-exact-composition	329

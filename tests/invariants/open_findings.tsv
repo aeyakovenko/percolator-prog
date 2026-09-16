@@ -159,7 +159,7 @@
 419	LoF	BLOCKER	INV-039	missing	[BLOCKER LoF] Retain pending loss weight through resolution
 420	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Make terminal provider claims permissionlessly payable
 421	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Make terminal insurance payout permissionless
-422	LoF	BLOCKER	INV-045	missing	[BLOCKER LoF] Preserve Hybrid liquidation reward provenance
+422	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Preserve Hybrid liquidation reward provenance
 423	DoS	BLOCKER	INV-028	independent-discovery	[BLOCKER DoS] Prevent latent source-domain exhaustion
 424	LoF	PRIVILEGED	INV-070	independent-discovery	[PRIVILEGED LoF] Restart terminal scan after backing expiry
 425	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Preserve oracle cap carry across interleaved trades
