@@ -36,6 +36,9 @@ mod frozen_reward_payout;
 #[path = "inv_045_cpi_reward_provenance.rs"]
 mod cpi_reward_provenance;
 
+#[path = "inv_045_cross_asset_reward_isolation.rs"]
+mod cross_asset_reward_isolation;
+
 fn values(env: &V16CuEnv, portfolios: [Pubkey; 5]) -> [i128; 5] {
     portfolios.map(|key| {
         let account = env.portfolio_state(key);
