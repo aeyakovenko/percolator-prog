@@ -54,6 +54,33 @@ See the [local report](row422_native_terminal_reward_20260916.md) for the public
 trace, exact commands, results and remaining limits. No current behavior violation
 was found in this product.
 
+## Row 417 receipt clear through dual-rail CloseSlab (2026-09-16)
+
+The [receipt CloseSlab child](cu/inv_067_receipt_close_slab_rail.rs) extends the
+existing staggered-expiry public prefix through owner deletion and final market
+retirement. Eight LiteSVM histories cross classic/native secondary custody,
+which unequal receipt gets the first partial top-up, and the final payment rail.
+One receipt clears and its owner deletes the portfolio while the peer still has
+unpaid entitlement. Retained pre-expiry claims and closes must not repay cleared
+receipts or erase the deferred peer's claim.
+
+Premature `CloseSlab` and deleted-owner requests roll back real peer payments;
+replayed claims after final `CloseSlab` roll back both SPL vault closes, the
+two-atom rounding burn, surplus transfers, rent refunds and market tombstone.
+After committing closure, both handlers on both rails and `CloseSlab` itself
+reject again at slots 17 and 100 with exact account preservation. Native closure
+also distinguishes seven unsynchronized lamports from token surplus, including
+an exactly depleted secondary token balance. All 312 failed suffixes preserve
+complete economic Account images and charge only the exact separate payer fee.
+
+This is net-new composition of partial/deferred receipt clearing, owner deletion
+and dual-rail slab retirement; the older alternating-rail history ends with
+portfolios allocated, and the older receipt/slab product uses one classic rail.
+**Row 417 remains OPEN/missing; INV-067 remains `REFUTED_CURRENT`.** This is
+bounded coverage, not arbitrary-history closure or a status promotion. See the
+[report](row417_receipt_close_slab_rail_20260916.md) for commands, CU, provenance,
+results and limits.
+
 ## Row 417 alternating receipt rails across two expiries (2026-09-16)
 
 The [receipt rail history child](cu/inv_067_receipt_rail_history.rs) adds bounded

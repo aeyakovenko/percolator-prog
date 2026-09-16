@@ -5,6 +5,9 @@
 use super::*;
 use solana_sdk::fee::FeeStructure;
 
+#[path = "inv_067_receipt_close_slab_rail.rs"]
+mod close_slab;
+
 const RESIDUALS: [u128; 3] = [501, 662, 851];
 
 #[derive(Debug, PartialEq)]
