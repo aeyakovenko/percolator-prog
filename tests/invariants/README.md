@@ -125,6 +125,20 @@ rustfmt --edition 2021 --check tests/invariants/public_sbf/inv_008_intent_unique
 git diff --check
 ```
 
+## INV-028 latent-admission evidence fidelity (2026-09-16)
+
+Owner: [cu/inv_028_source_domain_realizability_cap.rs](cu/inv_028_source_domain_realizability_cap.rs).
+`v16_row423_metadata_preserves_latent_admission_evidence_and_exit_resource_obligation`
+binds row 423 to its used-generation latent-reservation discovery and retains the
+broader obligation to reserve every future settlement resource needed for exit.
+Substituting the older admission-order selector/oracle or narrowing the property
+to vacant source slots passes six existing checks but fails this guard.
+Both temporary mutations are restored; the final seven selected host tests pass.
+This is metadata fidelity coverage only, with no SBF execution, production change,
+benchmark reclassification, or invariant-status promotion. Row 423 remains OPEN.
+Exact commands, negative controls, and remaining gaps are in the
+[audit](inv_028_latent_admission_metadata_audit_20260916.md).
+
 ## INV-014 runnable retained-fee witnesses (2026-09-16)
 
 Owner:
