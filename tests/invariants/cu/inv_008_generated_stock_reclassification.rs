@@ -17,6 +17,31 @@ const PEER: u128 = 103;
 const EXTERNAL: u128 = 211;
 const TOTAL: u128 = PRINCIPAL + RESERVE[0] + RESERVE[1] + PEER + EXTERNAL;
 
+fn inv008_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with('#') {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Class {
     Capital,
@@ -979,7 +1004,10 @@ fn v16_retained_stock_epoch_route_matrix_accounts_for_every_signed_outflow() {
                 .join(path),
         )
         .unwrap();
-        assert!(owner.contains(&format!("fn {function}(")));
+        assert!(
+            inv008_source_defines_test(&owner, function),
+            "stock-epoch owner {path}#{function} is missing or is not a #[test]"
+        );
         match columns[2] {
             "generated-live" => {
                 generated.insert(columns[0]);
