@@ -64,6 +64,9 @@ mod receipt_expiry_interleavings;
 #[path = "inv_067_receipt_source_realization.rs"]
 mod receipt_source_realization;
 
+#[path = "inv_067_receipt_fresh_conversion_custody.rs"]
+mod receipt_fresh_conversion_custody;
+
 #[path = "inv_067_receipt_rounding_threshold.rs"]
 mod receipt_rounding_threshold;
 
