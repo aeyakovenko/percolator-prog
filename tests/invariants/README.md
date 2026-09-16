@@ -50,6 +50,28 @@ provider-expiry succession. **Row 421 remains OPEN/missing; INV-073 remains
 `REFUTED_CURRENT`.** See the [worker report](row421_disabled_beneficiary_restoration_20260916.md)
 for exact selectors, validation, authority assumptions and limitations.
 
+## Row 416 retained terminal oracle and role envelopes (2026-09-16)
+
+The [terminal-envelope child](cu/inv_005_terminal_oracle_role.rs) adds four public
+LiteSVM histories crossing both assets with oracle or insurance-beneficiary
+A-to-B-to-A succession. The old oracle also owns 41 backing and 59 insurance
+atoms. Retained signed payout and handoff bundles reject after restoration;
+current consent and the independent asset's retained consent remain admissible.
+A separate market-authority round trip invalidates retained slab-close consent.
+
+Thirty exact Account rollbacks include completed SPL payouts, ledger changes,
+vault closure, donated-surplus transfer and market rent reclamation. All four
+histories finish with the original funded holder receiving 100 atoms, the peer
+receiving 23, and the current market authority receiving only 7 donated atoms
+plus exact rent. The final selector's peak is 122,276 CU under 300,000.
+
+This bounded terminal product adds retained signed envelopes and final closure
+to Lane 24's resolution/cold-burn coverage; it has no Lane 14 Hybrid positions or
+Lane 28 open-lien impairment. No current behavior violation was found. **Row 416
+remains OPEN/missing; INV-005 remains `REFUTED_CURRENT`.** See the
+[terminal-envelope report](row416_terminal_oracle_role_20260916.md) for exact
+commands, non-overlap, artifact provenance and remaining limits.
+
 ## Lane 25 source expiry before mixed-role settlement (2026-09-16)
 
 The [unsettled-expiry owner](cu/inv_039_mixed_role_unsettled_expiry.rs) adds 48

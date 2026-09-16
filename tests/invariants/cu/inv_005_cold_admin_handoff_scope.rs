@@ -8,6 +8,9 @@ use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::
 #[path = "inv_005_funded_role_zero_transition.rs"]
 mod funded_role_zero_transition;
 
+#[path = "inv_005_terminal_oracle_role.rs"]
+mod terminal_oracle_role;
+
 const ROLES: [u8; 3] = [
     processor::ASSET_AUTH_INSURANCE,
     processor::ASSET_AUTH_INSURANCE_OPERATOR,
