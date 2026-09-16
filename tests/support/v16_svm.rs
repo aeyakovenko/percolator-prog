@@ -543,6 +543,7 @@ struct TraceTokenAccount {
 
 struct PublicTraceCapture {
     expected_state: TraceStateSnapshot,
+    program_account_keys: BTreeSet<Pubkey>,
     steps: Vec<PublicTraceStep>,
     out_of_band_economic_mutations: usize,
 }
@@ -553,6 +554,7 @@ struct PendingPublicTraceStep {
     fee_payer: Pubkey,
     transaction_signers: Vec<Pubkey>,
     accounts: Vec<PublicTraceAccountMeta>,
+    transaction_account_keys: Vec<Pubkey>,
     writable_before: Vec<(Pubkey, Option<TraceAccountState>)>,
     token_accounts_before: Vec<TraceTokenAccount>,
     mint_supplies_before: Vec<(Pubkey, u64)>,
@@ -5073,6 +5075,7 @@ impl V16Svm {
         assert!(self.public_trace.is_none(), "public trace already active");
         self.public_trace = Some(PublicTraceCapture {
             expected_state: self.trace_state_snapshot(),
+            program_account_keys: BTreeSet::new(),
             steps: Vec::new(),
             out_of_band_economic_mutations: 0,
         });
@@ -5209,6 +5212,9 @@ impl V16Svm {
             self.foreign_actor.destination_token,
         ];
         keys.extend(self.token_accounts.iter().copied());
+        if let Some(capture) = &self.public_trace {
+            keys.extend(capture.program_account_keys.iter().copied());
+        }
         for actor in &self.actors {
             keys.extend([
                 actor.signer.pubkey(),
@@ -5231,6 +5237,17 @@ impl V16Svm {
                 .map(|key| (key, self.trace_account_state(key)))
                 .collect(),
         )
+    }
+
+    fn trace_program_account_keys(&self, keys: &[Pubkey]) -> BTreeSet<Pubkey> {
+        keys.iter()
+            .copied()
+            .filter(|key| {
+                self.svm.get_account(key).is_some_and(|account| {
+                    account.owner == self.program_id || account.owner == self.matcher_program
+                })
+            })
+            .collect()
     }
 
     fn crank_state_snapshot(&self) -> TraceStateSnapshot {
@@ -5337,11 +5354,13 @@ impl V16Svm {
             .map(|key| (key, self.account_lamports(key)))
             .collect();
 
+        let program_account_keys = self.trace_program_account_keys(&message.account_keys);
         let capture = self.public_trace.as_mut().expect("trace checked above");
         if current_state != capture.expected_state {
             capture.out_of_band_economic_mutations += 1;
         }
         capture.expected_state = current_state;
+        capture.program_account_keys.extend(program_account_keys);
 
         Some(PendingPublicTraceStep {
             program_id: message.account_keys[instruction.program_id_index as usize],
@@ -5349,6 +5368,7 @@ impl V16Svm {
             fee_payer: message.account_keys[0],
             transaction_signers,
             accounts,
+            transaction_account_keys: message.account_keys.clone(),
             writable_before,
             token_accounts_before: self.trace_token_accounts(),
             mint_supplies_before,
@@ -5364,6 +5384,15 @@ impl V16Svm {
         let Some(pending) = pending else {
             return;
         };
+        // Enroll accounts created by this transaction too, and retain their keys
+        // after closure/owner changes so they cannot disappear from the evidence.
+        let program_account_keys =
+            self.trace_program_account_keys(&pending.transaction_account_keys);
+        self.public_trace
+            .as_mut()
+            .expect("public trace remained active")
+            .program_account_keys
+            .extend(program_account_keys);
         let current_state = self.trace_state_snapshot();
         let rejected_exact_writable_rollback = compute_units.is_none().then(|| {
             pending.writable_before.iter().all(|(key, before)| {

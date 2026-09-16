@@ -28,6 +28,9 @@ use solana_sdk::signature::Signer;
 #[path = "inv_079_lifecycle_evidence_mounts.rs"]
 mod lifecycle_evidence_mounts;
 
+#[path = "inv_079_dynamic_account_trace.rs"]
+mod dynamic_account_trace;
+
 #[test]
 fn v16_public_trace_schema_detects_out_of_band_economic_mutation() {
     let mut env = V16Svm::new([0x79; 32], MarketConfig::default());
@@ -354,7 +357,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 114,
+        consumers, 115,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
 }
