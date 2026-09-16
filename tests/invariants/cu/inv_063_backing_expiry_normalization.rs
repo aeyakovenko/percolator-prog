@@ -99,16 +99,29 @@ fn inv063_production_processor_function_bodies() -> std::collections::BTreeMap<S
     functions
 }
 
-fn inv063_source_defines_function(source: &str, function: &str) -> bool {
-    let needle = format!("fn {function}");
-    source.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with(&needle)
-            && line[needle.len()..]
-                .chars()
-                .next()
-                .is_some_and(|ch| ch == '(' || ch.is_whitespace())
-    })
+fn inv063_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
 }
 
 #[test]
@@ -254,7 +267,7 @@ fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
         assert!(
             witness_sources
                 .iter()
-                .any(|source| inv063_source_defines_function(source, class.witness)),
+                .any(|source| inv063_source_defines_test(source, class.witness)),
             "INV-063 backing class '{}' lost executable witness {}",
             class.disposition,
             class.witness,
@@ -272,7 +285,7 @@ fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
     );
 
     let transitions = include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(inv063_source_defines_function(
+    assert!(inv063_source_defines_test(
         transitions,
         "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
     ));
