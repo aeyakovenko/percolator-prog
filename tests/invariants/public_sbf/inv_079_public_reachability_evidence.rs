@@ -25,6 +25,9 @@ use crate::support::v16_svm::{
 };
 use solana_sdk::signature::Signer;
 
+#[path = "inv_079_lifecycle_evidence_mounts.rs"]
+mod lifecycle_evidence_mounts;
+
 #[test]
 fn v16_public_trace_schema_detects_out_of_band_economic_mutation() {
     let mut env = V16Svm::new([0x79; 32], MarketConfig::default());
