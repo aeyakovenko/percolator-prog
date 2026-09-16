@@ -133,16 +133,30 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
         include_str!("inv_021_account_creation_reallocation_close_rent_and_lamport_safety.rs"),
         include_str!("inv_071_crank_progress.rs"),
     ];
+    let mut disposition_witnesses = std::collections::BTreeSet::new();
     for row in ROWS {
         assert!(!row.disposition.is_empty());
+        assert!(row.witness.starts_with("v16_"));
         assert!(
-            witnesses
-                .iter()
-                .any(|source| inv080_source_defines_test(source, row.witness)),
+            disposition_witnesses.insert(row.witness),
+            "duplicate engine-error disposition witness {}",
+            row.witness,
+        );
+        let matches = witnesses
+            .iter()
+            .filter(|source| inv080_source_defines_test(source, row.witness))
+            .count();
+        assert!(
+            matches == 1,
             "engine-error disposition lacks public witness {}",
             row.witness
         );
     }
+    assert_eq!(
+        disposition_witnesses.len(),
+        3,
+        "engine-error disposition witness roster drift"
+    );
     assert!(inv080_source_defines_test(
         witnesses[0],
         "v16_attack_hybrid_soft_stale_partial_oracle_error_does_not_poison_retry"
