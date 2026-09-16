@@ -1,5 +1,14 @@
 # Invariant-owned test coverage
 
+## Row 417 independent coverage audit (2026-09-16)
+
+**Row 417 remains OPEN/missing; INV-067 remains `REFUTED_CURRENT`.** The
+[focused audit](row417_independent_coverage_audit_20260916.md) distinguishes the
+existing receipt/expiry conformance from independent discovery. The remaining
+generic coverage must retain claim entitlement across receipt removal and later
+stock reclassification, with public generated histories and an independent
+economic oracle. No replacement-PR code or benchmark promotion is included.
+
 ## Rows 419/435 held-out coverage audit (2026-09-16)
 
 The [focused INV-039 audit](row419_435_heldout_gap_20260916.md) does not establish
