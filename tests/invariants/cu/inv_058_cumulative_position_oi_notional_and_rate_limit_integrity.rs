@@ -329,6 +329,217 @@ fn v16_program_distinct_owner_pairs_cannot_cross_shared_side_oi_cap() {
 }
 
 #[test]
+fn v16_program_funding_accrual_does_not_open_shared_side_oi_headroom() {
+    const ASSET: u16 = 0;
+    const PRICE: u64 = 2;
+    const FUNDING_TARGET: u64 = 1;
+    const CAPITAL: u128 = 20_000_000_000;
+    const EXTRA_TAKER: usize = 4;
+
+    fn funding_observation(env: &V16Svm) -> Vec<CrankObservationHint> {
+        vec![CrankObservationHint {
+            asset_index: ASSET,
+            oracle_accounts: env.primary_profile(ASSET as usize).oracle_leg_count,
+        }]
+    }
+
+    fn assert_funding_current(env: &V16Svm) {
+        let (_, group) = env.primary_market_state();
+        let asset = group.assets[ASSET as usize];
+        assert_eq!(asset.effective_price, PRICE);
+        assert_ne!(asset.f_long_num, 0, "funding index must move");
+        assert_eq!(asset.f_short_num, -asset.f_long_num);
+        let pnls = [
+            env.primary_portfolio(0).pnl.get(),
+            env.primary_portfolio(1).pnl.get(),
+            env.primary_portfolio(2).pnl.get(),
+            env.primary_portfolio(3).pnl.get(),
+        ];
+        let capitals = [
+            env.primary_portfolio(0).capital.get(),
+            env.primary_portfolio(1).capital.get(),
+            env.primary_portfolio(2).capital.get(),
+            env.primary_portfolio(3).capital.get(),
+        ];
+        assert_eq!(pnls.iter().filter(|pnl| **pnl > 0).count(), 2);
+        assert_eq!(
+            capitals
+                .iter()
+                .filter(|capital| **capital < CAPITAL)
+                .count(),
+            2
+        );
+        assert!(pnls.iter().all(|pnl| *pnl >= 0));
+        let pnl_total: u128 = pnls
+            .into_iter()
+            .map(|pnl| u128::try_from(pnl).unwrap())
+            .sum();
+        assert_eq!(capitals.into_iter().sum::<u128>() + pnl_total, 4 * CAPITAL);
+        for actor in 0..4 {
+            let leg = active_leg_for_asset(&env.primary_portfolio(actor), ASSET as usize);
+            assert_eq!(leg.basis_pos_q.signum().abs(), 1);
+        }
+    }
+
+    fn assert_side_cap(env: &V16Svm, expected: [i128; PRIMARY_ACTOR_COUNT]) {
+        let (_, group) = env.primary_market_state();
+        let asset = group.assets[ASSET as usize];
+        let mut recomputed = [0u128; 2];
+        for (actor, q) in expected.into_iter().enumerate() {
+            let portfolio = env.primary_portfolio(actor);
+            if q == 0 {
+                assert!(!has_active_leg_for_asset(&portfolio, ASSET as usize));
+                continue;
+            }
+            let leg = active_leg_for_asset(&portfolio, ASSET as usize);
+            assert_eq!(leg.market_id, asset.market_id);
+            assert_eq!(leg.basis_pos_q, q, "actor {actor} basis");
+            assert_eq!(
+                leg.a_basis, ADL_ONE,
+                "this witness isolates funding, not ADL"
+            );
+            let side = usize::from(q < 0);
+            recomputed[side] = recomputed[side].checked_add(q.unsigned_abs()).unwrap();
+            assert!(q.unsigned_abs() < percolator::MAX_POSITION_ABS_Q);
+            let cert = health_cert(&portfolio);
+            assert!(cert.valid, "actor {actor} must be refreshed after funding");
+        }
+        assert_eq!([asset.oi_eff_long_q, asset.oi_eff_short_q], recomputed);
+        assert_eq!(recomputed, [percolator::MAX_OI_SIDE_Q; 2]);
+    }
+
+    let max = i128::try_from(percolator::MAX_OI_SIDE_Q).unwrap();
+    let first = max / 2;
+    let second = max - first;
+    let config = MarketConfig {
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: 24,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        actor_deposits: [CAPITAL; PRIMARY_ACTOR_COUNT],
+        actor_token_balances: [CAPITAL as u64; PRIMARY_ACTOR_COUNT],
+        ..MarketConfig::default()
+    };
+    for direction in [-1i128, 1] {
+        for fill_route in INV_058_TRADE_ROUTES {
+            let mut env = V16Svm::new([0x58; 32], config);
+            env.begin_public_trace();
+            execute_trade_route(
+                &mut env,
+                fill_route,
+                0,
+                1,
+                ASSET,
+                direction * first,
+                PRICE,
+                0,
+            )
+            .unwrap_or_else(|error| panic!("funding side-OI {fill_route:?} first fill: {error}"));
+            execute_trade_route(
+                &mut env,
+                fill_route,
+                2,
+                3,
+                ASSET,
+                direction * second,
+                PRICE,
+                0,
+            )
+            .unwrap_or_else(|error| panic!("funding side-OI {fill_route:?} second fill: {error}"));
+            let expected = [
+                direction * first,
+                -direction * first,
+                direction * second,
+                -direction * second,
+                0,
+            ];
+            assert_side_cap(&env, expected);
+
+            env.warp_to_slot(2);
+            env.push_auth_mark(ASSET, 2, FUNDING_TARGET)
+                .expect("publish authenticated funding target");
+            for actor in 0..4 {
+                env.crank(actor, 2, funding_observation(&env))
+                    .unwrap_or_else(|error| panic!("prime funding clock actor {actor}: {error}"));
+            }
+            env.warp_to_slot(3);
+            for actor in 0..4 {
+                env.crank_if_actionable(actor, 3, funding_observation(&env))
+                    .unwrap_or_else(|error| panic!("settle funding actor {actor}: {error}"));
+            }
+            assert_funding_current(&env);
+            assert_side_cap(&env, expected);
+
+            for reject_route in INV_058_TRADE_ROUTES {
+                if matches!(reject_route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+                    env.ensure_primary_matcher_enabled(1)
+                        .expect("prepare funded CPI maker capability");
+                }
+                let before = inv_058_economic_snapshot(&env);
+                let error = execute_trade_route(
+                    &mut env,
+                    reject_route,
+                    EXTRA_TAKER,
+                    1,
+                    ASSET,
+                    direction,
+                    PRICE,
+                    0,
+                )
+                .expect_err("funded side-OI cap must reject one more atom");
+                let invalid_leg = PercolatorError::EngineInvalidLeg as u32;
+                let lock_active = PercolatorError::EngineLockActive as u32;
+                assert!(
+                    error.contains(&format!("Custom({invalid_leg})"))
+                        || error.contains(&format!("Custom({lock_active})")),
+                    "funded {fill_route:?}->{reject_route:?} returned {error}"
+                );
+                assert_eq!(
+                    inv_058_economic_snapshot(&env),
+                    before,
+                    "funded {fill_route:?}->{reject_route:?} rollback"
+                );
+            }
+            for (taker, maker, close_q) in [(0, 1, -direction * first), (2, 3, -direction * second)]
+            {
+                let close = execute_trade_route(
+                    &mut env,
+                    TradeRoute::NoCpi,
+                    taker,
+                    maker,
+                    ASSET,
+                    close_q,
+                    PRICE,
+                    0,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("funded side-OI close taker={taker} maker={maker}: {error}")
+                });
+                assert!(close.compute_units < TX_CU_LIMIT);
+            }
+            let (_, terminal_group) = env.primary_market_state();
+            let terminal_asset = terminal_group.assets[ASSET as usize];
+            assert_eq!(terminal_asset.oi_eff_long_q, 0);
+            assert_eq!(terminal_asset.oi_eff_short_q, 0);
+            for actor in 0..4 {
+                assert!(!has_active_leg_for_asset(
+                    &env.primary_portfolio(actor),
+                    ASSET as usize
+                ));
+            }
+            assert_public_stock_census("INV-058 funded side-cap terminal", &env)
+                .expect("funded side-cap close preserves stock");
+            assert_public_encumbrance_census("INV-058 funded side-cap terminal", &env)
+                .expect("funded side-cap close preserves encumbrances");
+            env.finish_public_trace()
+                .validate_public_execution()
+                .expect("funding side-OI cap witness uses public instructions only");
+        }
+    }
+}
+
+#[test]
 fn v16_program_post_transition_caps_match_across_reduction_and_cross_zero_histories() {
     const PRICE: u64 = 100;
 

@@ -1908,6 +1908,17 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # zero fees/funding, unit ADL and no expiry/scan or generic capacity closure.
 # Rows 417/423/424/427 and machine verdicts are unchanged. Exact commands/limits:
 # astra_scope_f_capped_pnl_terminal_20260913.md.
+# Row 427 funding/liability side-cap conformance (2026-09-16):
+# cu/inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs,
+# v16_program_funding_accrual_does_not_open_shared_side_oi_headroom.
+# Eight public worlds fill aggregate side OI across two disjoint pairs, publish
+# an authenticated funding target, crank all four active accounts to nonzero
+# funding effects, then retry one more locally admissible atom through every
+# route. Each retry rejects with exact rollback at the cap/lock boundary, and the
+# two pairs retain bounded public closes with zero terminal OI plus stock and
+# encumbrance reconciliation. No production/status change: this is a bounded
+# funding-liability witness, not generic nonunit-ADL, arbitrary-history or
+# maximum-shape row closure.
 427	Conformance	LIMIT	INV-058	INV-058	disjoint-portfolios+x-side-oi-cap+x-public-trades	side-oi-cap-enforcement-must-compose-across-distinct-owner-pairs	OPEN
 # 428 bounded public conformance (2026-09-12): stateful/inv_008_retained_reserve_replenishment.rs,
 # v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_succession.

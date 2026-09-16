@@ -3206,6 +3206,27 @@ states and maximum shapes remain outside this increment. Production code,
 dependency pins and invariant status rows are unchanged; no current
 public-interface property violation was observed.
 
+## INV-058 funding side-OI cap conformance (row 427, 2026-09-16)
+
+Owner:
+[`cu/inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs`](cu/inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs),
+selector
+`v16_program_funding_accrual_does_not_open_shared_side_oi_headroom`.
+
+This witness fills the aggregate side-OI cap across two disjoint public owner
+pairs, then moves authenticated funding through public mark publication and
+permissionless cranks. The post-funding state has two positive funding claimants,
+two capital-paying accounts, and exact conservation of capital plus claim value.
+One more locally admissible atom is retried through all four trade transports;
+each retry rejects with complete market, portfolio, matcher, SPL, lamport, and
+mint-supply rollback at the cap/lock boundary. Both funded pairs then close
+through bounded public no-CPI trades, leaving zero terminal OI with independent
+stock and encumbrance reconciliation.
+
+**Row 427 remains OPEN.** This is bounded funding/liability conformance. It does
+not cover nonunit ADL, arbitrary histories, larger pair graphs, mixed lifecycle
+states, partial matcher fills, or maximum-shape side-cap products.
+
 Base: `origin/codex/astra-open-holdout-ledger-20260912` at exactly
 `4886d7bdae8a48ebb2f0e9bcd7702e7980f0a289`. Branch:
 `codex/row427-existing-leg-cap-20260913`; isolated worktree:
