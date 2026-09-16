@@ -23,6 +23,8 @@
 //! complete engine-transition ownership, and the exact engine pin. A new public
 //! variant, shared handler, semantic alternate, transition call, normalization, or
 //! engine pin reopens this current-surface closure.
+//! The roster also retains the fee-partition, inventory-cashflow, retained-grant,
+//! generated-fee, and stale-liability comparisons, with their INV-047 module mounts.
 
 use super::*;
 
@@ -1641,6 +1643,9 @@ fn v16_program_equivalent_route_family_composition_is_source_complete() {
         include_str!("inv_023_caller_input_confinement_for_derived_safety_state.rs");
     let local_source = include_str!("inv_047_equivalent_route_semantics.rs");
     let stateful_route_source = include_str!("../stateful/inv_047_equivalent_route_semantics.rs");
+    let fee_partition_source = include_str!("inv_047_fee_leg_partition.rs");
+    let inventory_source = include_str!("inv_047_inventory_cashflow_partitions.rs");
+    let retained_source = include_str!("../stateful/inv_047_retained_mixed_transport.rs");
     let value_source = include_str!("../stateful/inv_024_attributed_quote_value_conservation.rs");
     let locality_source = include_str!("../stateful/inv_074_scope_locality.rs");
     let insurance_source = include_str!("inv_064_insurance_withdrawal_policy_equivalence.rs");
@@ -1684,6 +1689,41 @@ fn v16_program_equivalent_route_family_composition_is_source_complete() {
             "v16_program_nonzero_fee_trade_routes_are_byte_exact_after_transport_normalization",
         ),
         (
+            "tests/invariants/stateful/inv_047_equivalent_route_semantics.rs",
+            stateful_route_source,
+            "v16_program_generated_nonzero_fee_trade_routes_are_economically_equivalent",
+        ),
+        (
+            "tests/invariants/stateful/inv_047_equivalent_route_semantics.rs",
+            stateful_route_source,
+            "v16_program_stale_liability_hint_histories_preserve_trade_route_admission",
+        ),
+        (
+            "tests/invariants/stateful/inv_047_retained_mixed_transport.rs",
+            retained_source,
+            "v16_program_retained_grants_bind_context_across_mixed_transport_reductions",
+        ),
+        (
+            "tests/invariants/cu/inv_047_fee_leg_partition.rs",
+            fee_partition_source,
+            "v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles",
+        ),
+        (
+            "tests/invariants/cu/inv_047_fee_leg_partition.rs",
+            fee_partition_source,
+            "v16_program_off_mark_quotes_preserve_fractional_fee_route_equivalence",
+        ),
+        (
+            "tests/invariants/cu/inv_047_inventory_cashflow_partitions.rs",
+            inventory_source,
+            "v16_program_inventory_cashflows_match_direct_composite_and_partition_routes",
+        ),
+        (
+            "tests/invariants/cu/inv_047_inventory_cashflow_partitions.rs",
+            inventory_source,
+            "v16_program_inventory_cashflow_suffix_rollback_retries_preserve_route_equivalence",
+        ),
+        (
             "tests/invariants/stateful/inv_024_attributed_quote_value_conservation.rs",
             value_source,
             "v16_program_all_trade_route_pairs_preserve_realized_pnl_owner_attribution",
@@ -1723,9 +1763,36 @@ fn v16_program_equivalent_route_family_composition_is_source_complete() {
     }
     assert_eq!(
         public_witnesses.len(),
-        11,
+        18,
         "INV-047 equivalent-route public witness roster drift"
     );
+    for (parent, mount) in [
+        (
+            include_str!("../../v16_cu.rs"),
+            "#[path = \"invariants/cu/inv_047_equivalent_route_semantics.rs\"]\nmod inv_047_equivalent_route_semantics;",
+        ),
+        (
+            include_str!("../../v16_program_stateful_fuzz.rs"),
+            "#[path = \"invariants/stateful/inv_047_equivalent_route_semantics.rs\"]\nmod inv_047_equivalent_route_semantics;",
+        ),
+        (
+            local_source,
+            "#[path = \"inv_047_fee_leg_partition.rs\"]\nmod fee_leg_partition;",
+        ),
+        (
+            local_source,
+            "#[path = \"inv_047_inventory_cashflow_partitions.rs\"]\nmod inventory_cashflow_partitions;",
+        ),
+        (
+            stateful_route_source,
+            "#[path = \"inv_047_retained_mixed_transport.rs\"]\nmod retained_mixed_transport;",
+        ),
+    ] {
+        assert!(
+            parent.contains(mount),
+            "INV-047 equivalent-route witness module is not mounted: {mount}"
+        );
+    }
     let flow_proof = include_str!("../kani/inv_024_attributed_quote_value_conservation.rs");
     let proof_witness = "kani_inv024_engine_flow_validator_equals_wrapper_value_equation";
     assert!(proof_witness.starts_with("kani_inv"));

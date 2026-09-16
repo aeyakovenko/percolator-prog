@@ -1,5 +1,53 @@
 # Invariant-owned test coverage
 
+## INV-047 route witness composition guard (2026-09-16)
+
+Owner: [cu/inv_047_equivalent_route_semantics.rs](cu/inv_047_equivalent_route_semantics.rs).
+`v16_program_equivalent_route_family_composition_is_source_complete` now retains
+seven previously unguarded comparisons: generated nonzero fees, stale-liability
+admission, retained mixed-transport grants, both fractional fee-leg partitions,
+and both inventory-cashflow/rollback histories. Its roster grows from 11 to 18
+witnesses and requires both INV-047 harness mounts plus all three child mounts.
+The existing exact engine pin, external composition witnesses and Kani anchor
+remain part of the same guard.
+
+The gap was derived from the INV-047 route contract and source graph at remote
+main `cc3b1a502583253a84bdead6a19717680b3e76fd`. Withheld-benchmark comparison
+used titles and existing metadata only: row 411's fee-bearing route obligation
+and row 426's incomplete-observation history explain why a fresh, one-leg fee
+witness cannot stand in for the omitted comparisons. No PR implementation or
+fix was imported, and this guard is not a new rediscovery of either finding.
+In particular, the AuthMark stale-liability witness does not prove arbitrary
+Hybrid report histories or close row 411's broader fee-consent obligation.
+
+Negative control: remove the `#[test]` attribute from the stale-liability witness
+and the stateful `retained_mixed_transport` module declaration. The original
+composition guard still passes (**1 passed**), while the compiled stateful
+INV-047 inventory drops from four tests to two. The strengthened guard fails
+at the missing executable witness (**1 failed**). Restoring only the attribute
+makes it fail at the disconnected module (**1 failed**). Both mutations are
+restored in the final tree. Each execution uses the exact selector below;
+test listings are inventory checks, not executed-test evidence.
+Final verification passes all six exact composition selectors for INV-045,
+047, 048, 052, 058 and 061 (**6 passed, 0 failed**). Exact listings confirm
+four CU comparisons and all four stateful INV-047 comparisons are registered.
+Formatting and whitespace checks pass.
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/astra-ultra-inv045-062-20260916-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu inv_047_equivalent_route_semantics::v16_program_equivalent_route_family_composition_is_source_complete -- --exact --nocapture
+```
+
+This is host metadata coverage. No SBF execution, CU measurement, production
+change, benchmark reclassification, or invariant-status promotion is claimed.
+Arbitrary retained-policy/oracle/lifecycle histories, maximum-shape route
+products, and wrapper/engine equivalence remain open. The mount checks enforce
+the current source declarations; they do not parse arbitrary Rust `cfg` or
+prove witness assertions. Exact compiled selectors must still be listed and
+the public-route suites run when making behavioral claims.
+
 ## INV-058 distinct-owner side-OI metadata guard (2026-09-16)
 
 Owner:
