@@ -17,6 +17,40 @@
 
 use super::*;
 
+fn inv002_source_defines_function(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix(&expected)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+fn inv002_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let start = source
         .find(start)
@@ -89,29 +123,45 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
         assert!(body.contains("market_id: u64"), "{leg} lost market_id");
     }
 
-    assert!(public_generation_evidence.contains(
-        "fn v16_program_stale_backing_earnings_withdrawal_rejects_across_asset_generation("
+    assert!(inv002_source_defines_test(
+        public_generation_evidence,
+        "v16_program_stale_backing_earnings_withdrawal_rejects_across_asset_generation"
     ));
-    assert!(transaction_domain_evidence
-        .contains("fn retained_transaction_binds_program_market_kind_schema_and_blockhash("));
-    assert!(generated_generation_evidence
-        .contains("fn v16_program_asset_generation_operation_matrix_discovers_stale_intents("));
-    assert!(public_generation_evidence
-        .contains("fn v16_program_retained_activation_binds_exact_next_generation_frontier("));
-    assert!(predicate_proofs.contains("fn kani_v16_asset_generation_binding_is_exact("));
-    assert!(predicate_proofs
-        .contains("fn kani_v16_asset_lifecycle_binding_selects_current_or_frontier_exactly("));
+    assert!(inv002_source_defines_test(
+        transaction_domain_evidence,
+        "retained_transaction_binds_program_market_kind_schema_and_blockhash"
+    ));
+    assert!(inv002_source_defines_test(
+        generated_generation_evidence,
+        "v16_program_asset_generation_operation_matrix_discovers_stale_intents"
+    ));
+    assert!(inv002_source_defines_test(
+        public_generation_evidence,
+        "v16_program_retained_activation_binds_exact_next_generation_frontier"
+    ));
+    assert!(inv002_source_defines_function(
+        predicate_proofs,
+        "kani_v16_asset_generation_binding_is_exact"
+    ));
+    assert!(inv002_source_defines_function(
+        predicate_proofs,
+        "kani_v16_asset_lifecycle_binding_selects_current_or_frontier_exactly"
+    ));
     assert!(lifecycle_composition
         .contains("proof_v16_restart_empty_asset_core_preserves_budgets_and_assigns_fresh_market"));
     assert!(lifecycle_composition.contains("contract_check_asset_restart_next_counters"));
-    assert!(ordering_composition
-        .contains("fn v16_program_out_of_order_induction_composition_is_source_complete("));
+    assert!(inv002_source_defines_test(
+        ordering_composition,
+        "v16_program_out_of_order_induction_composition_is_source_complete"
+    ));
 
     let matcher_config = variant_body(instruction_enum, "SetMatcherConfig");
     assert!(!matcher_config.contains("asset_index"));
     assert!(!matcher_config.contains("market_id"));
-    assert!(matcher_scope_evidence
-        .contains("fn v16_program_matcher_capability_route_roster_binds_every_current_scope("));
+    assert!(inv002_source_defines_test(
+        matcher_scope_evidence,
+        "v16_program_matcher_capability_route_roster_binds_every_current_scope"
+    ));
     assert!(
         instruction_enum.contains("ClaimResolvedPayoutTopup,"),
         "resolved claims remain permissionless current-state transitions without retained asset consent"
