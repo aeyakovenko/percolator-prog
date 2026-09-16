@@ -708,14 +708,16 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
             .split_once('#')
             .expect("boundary profile evidence is path#test");
         assert!(
-            owner_file.starts_with("tests/invariants/") && owner_file.ends_with(".rs"),
+            owner_file.starts_with("tests/invariants/")
+                && owner_file.ends_with(".rs")
+                && !owner_file.contains(".."),
             "boundary profile {} evidence must stay under tests/invariants: {owner_file}",
             profile.name
         );
         assert!(
-            !test_function.is_empty(),
-            "boundary profile {} evidence test is empty",
-            profile.name
+            test_function.starts_with("v16_") || test_function.starts_with("host_"),
+            "boundary profile {} evidence must be a reviewed v16/host witness: {owner_file}#{test_function}",
+            profile.name,
         );
         let source = std::fs::read_to_string(manifest.join(owner_file))
             .unwrap_or_else(|error| panic!("read {owner_file}: {error}"));
