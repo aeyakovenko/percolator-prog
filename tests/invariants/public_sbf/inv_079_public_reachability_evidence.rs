@@ -2443,6 +2443,111 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
 }
 
 #[test]
+fn v16_traceability_gap_ledger_points_to_executable_evidence() {
+    const HEADER: &str = "invariant\troute_family\tclaim_source\texisting_generic_entrypoints\tmissing_generator_link\tmissing_oracle_link\trecommended_next_test_owner\tnext_action";
+
+    let statuses = parse_invariant_status(include_str!("../invariant_status.tsv"))
+        .into_iter()
+        .map(|row| (row.id, row.disposition))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let mut saw_header = false;
+    let mut rows = 0usize;
+    let mut row_keys = std::collections::BTreeSet::new();
+    for (line_index, line) in include_str!("../traceability_gaps.tsv").lines().enumerate() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if !saw_header {
+            assert_eq!(line, HEADER, "traceability gap header changed");
+            saw_header = true;
+            continue;
+        }
+
+        let fields = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(
+            fields.len(),
+            8,
+            "malformed traceability gap row {}: {line}",
+            line_index + 1
+        );
+        let invariant = fields[0];
+        let id = invariant
+            .strip_prefix("INV-")
+            .expect("traceability invariant prefix")
+            .parse::<u16>()
+            .expect("numeric traceability invariant id");
+        assert!((1..=89).contains(&id));
+        assert_ne!(fields[1], "-", "{invariant} route family must be named");
+        assert!(
+            fields[2].contains("README.md") || fields[2].contains("INVARIANTS.md"),
+            "{invariant} claim source must point at the charter or README"
+        );
+        assert_ne!(
+            statuses.get(&id).copied(),
+            Some("PROVEN"),
+            "{invariant} has an explicit traceability gap and cannot be marked PROVEN"
+        );
+
+        for evidence in fields[3].split("; ") {
+            let (path, function) = evidence.split_once('#').unwrap_or_else(|| {
+                panic!(
+                    "traceability row {} evidence lacks path#function: {evidence}",
+                    line_index + 1
+                )
+            });
+            assert!(
+                path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                "traceability row {} evidence is not invariant-owned: {path}",
+                line_index + 1
+            );
+            let full_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+            let source = std::fs::read_to_string(&full_path)
+                .unwrap_or_else(|error| panic!("read traceability evidence {path}: {error}"));
+            assert!(
+                source_defines_test(&source, function),
+                "traceability row {} evidence {path} does not define #[test] fn {function}",
+                line_index + 1
+            );
+        }
+
+        assert!(
+            fields[4].len() > 32 && fields[5].len() > 32,
+            "{invariant} must spell out generator and oracle gaps"
+        );
+        for owner in fields[6].split("; ") {
+            assert!(
+                owner.starts_with("tests/invariants/") && owner.ends_with(".rs"),
+                "traceability row {} owner is not invariant-owned: {owner}",
+                line_index + 1
+            );
+            let full_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(owner);
+            assert!(
+                full_path.is_file(),
+                "traceability row {} owner file is missing: {owner}",
+                line_index + 1
+            );
+        }
+        assert!(
+            fields[7].len() > 32,
+            "{invariant} must retain a concrete next action"
+        );
+        assert!(
+            row_keys.insert((id, fields[1])),
+            "duplicate traceability gap row for {invariant} {}",
+            fields[1]
+        );
+        rows += 1;
+    }
+
+    assert!(saw_header, "traceability gap header is missing");
+    assert_eq!(
+        rows, 25,
+        "traceability gap ledger size changed; update this guard deliberately"
+    );
+}
+
+#[test]
 fn v16_program_invariant_harnesses_are_test_free_roots() {
     for (name, source) in [
         (
