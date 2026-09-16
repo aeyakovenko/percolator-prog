@@ -6744,6 +6744,31 @@ fn inv073_source_defines_test(source: &str, function: &str) -> bool {
     false
 }
 
+fn inv073_source_defines_kani_proof(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut proof_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[kani::proof]" {
+            proof_attribute = true;
+        } else if line.starts_with("fn ") {
+            if proof_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            proof_attribute = false;
+        } else if proof_attribute && !line.is_empty() && !line.starts_with("#") {
+            proof_attribute = false;
+        }
+    }
+
+    false
+}
+
 fn inv073_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let start_offset = source
         .find(start)
@@ -7119,8 +7144,10 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
     }
 
     let rank_proof = include_str!("../kani/inv_082_state_indexed_liveness_theorem.rs");
-    assert!(rank_proof
-        .contains("fn kani_inv082_terminal_administration_is_finite_and_not_permissionless()"));
+    assert!(inv073_source_defines_kani_proof(
+        rank_proof,
+        "kani_inv082_terminal_administration_is_finite_and_not_permissionless"
+    ));
     assert!(rank_proof.contains("struct TerminalAdministrationRank"));
     assert!(rank_proof.contains("fn inv082_terminal_step_requires_signer"));
 }
