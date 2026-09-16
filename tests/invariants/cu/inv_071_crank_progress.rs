@@ -3397,6 +3397,26 @@ fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
                     "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
                     "v16_program_receipt_conflict_seeded_frontier_is_exact_and_terminal",
                 ),
+                (
+                    "tests/invariants/cu/inv_071_terminal_cursor_time.rs",
+                    "v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings",
+                ),
+                (
+                    "tests/invariants/cu/inv_071_terminal_reserve_backfill.rs",
+                    "v16_program_terminal_prefix_blocks_reserve_backfill_across_expiry_and_retries_cleanup",
+                ),
+                (
+                    "tests/invariants/cu/inv_071_terminal_prefix_insurance.rs",
+                    "v16_program_scanned_insurance_withdrawals_preserve_peer_entitlements_across_late_expiry",
+                ),
+                (
+                    "tests/invariants/cu/inv_071_terminal_prefix_recredit.rs",
+                    "v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement",
+                ),
+                (
+                    "tests/invariants/cu/inv_071_generated_terminal_actionability.rs",
+                    "v16_program_generated_receipts_and_reserves_have_constructible_terminal_progress",
+                ),
             ],
         },
         Inv071ProgressClass {
@@ -3462,7 +3482,25 @@ fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
     }
     assert_eq!(classes.len(), 9, "liveness class roster drift");
     assert_eq!(proofs.len(), 29, "liveness proof roster drift");
-    assert_eq!(witnesses.len(), 22, "liveness witness roster drift");
+    assert_eq!(witnesses.len(), 27, "liveness witness roster drift");
+    let parent = source_cache
+        .entry("tests/invariants/cu/inv_071_crank_progress.rs")
+        .or_insert_with(|| {
+            std::fs::read_to_string(root.join("tests/invariants/cu/inv_071_crank_progress.rs"))
+                .unwrap_or_else(|error| panic!("read INV-071 parent: {error}"))
+        });
+    for marker in [
+        "mod terminal_cursor_time;",
+        "mod terminal_reserve_backfill;",
+        "mod terminal_prefix_insurance;",
+        "pub(crate) mod terminal_prefix_recredit;",
+        "mod generated_terminal_actionability;",
+    ] {
+        assert!(
+            parent.contains(marker),
+            "row424 terminal progress witness module not mounted: {marker}",
+        );
+    }
 
     // The complete plan/parser gate is itself source-complete over all ten current
     // AutoCrankPlanV16 shapes and the sole wrapper ingress. Requiring it here keeps

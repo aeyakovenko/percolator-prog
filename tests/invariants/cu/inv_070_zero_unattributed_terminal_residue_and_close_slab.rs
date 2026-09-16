@@ -2957,6 +2957,10 @@ fn v16_program_terminal_stock_and_close_slab_composition_is_source_complete() {
             public_witnesses: &[
                 "v16_bpf_terminal_claim_free_surplus_close_stays_bounded_on_10m_market",
                 "v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market",
+                "v16_program_terminal_prefix_rejects_retired_slot_reuse_with_exact_rollback",
+                "v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry",
+                "v16_program_cached_prefix_custody_surplus_cannot_capitalize_spent_insurance",
+                "v16_program_native_sync_after_terminal_prefix_reclassifies_only_external_surplus",
             ],
         },
         Inv070TerminalCompositionClass {
@@ -2990,6 +2994,10 @@ fn v16_program_terminal_stock_and_close_slab_composition_is_source_complete() {
         include_str!("inv_018_quote_mint_vault_token_program_and_authority_integrity.rs"),
         include_str!("inv_034_domain_and_instance_isolation.rs"),
         include_str!("inv_063_backing_expiry_normalization.rs"),
+        include_str!("inv_070_terminal_native_reclassification.rs"),
+        include_str!("inv_070_terminal_prefix_custody_actionability.rs"),
+        include_str!("inv_070_terminal_prefix_reuse.rs"),
+        include_str!("inv_070_terminal_scan_recredit.rs"),
         include_str!("inv_070_zero_unattributed_terminal_residue_and_close_slab.rs"),
         include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs"),
         include_str!("../stateful/inv_063_backing_expiry_normalization.rs"),

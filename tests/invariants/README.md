@@ -29909,6 +29909,15 @@ git show --format= --check HEAD
 
 ### INV-070/071/088 prefix custody actionability, row 424 (2026-09-14)
 
+Current source guards now bind row424's terminal cursor family in both owning
+composition tests. `v16_program_terminal_stock_and_close_slab_composition_is_source_complete`
+requires the terminal-prefix reuse, scan recredit, prefix-custody, and native
+reclassification witnesses to remain executable. `v16_program_crank_progress_and_recovery_composition_is_source_complete`
+requires the persisted cursor-time, reserve-backfill, prefix-insurance,
+prefix-recredit, and generated terminal-actionability witnesses to stay mounted
+in the compiled INV-071 graph. This is current-surface roster enforcement, not a
+generic proof over all environmental reclassification histories.
+
 Scope Q adds one bounded public LiteSVM selector:
 `inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_prefix_custody_actionability::v16_program_cached_prefix_custody_surplus_cannot_capitalize_spent_insurance`.
 Eight worlds cross both source sides, 61/307 atoms of later backing, and a control
