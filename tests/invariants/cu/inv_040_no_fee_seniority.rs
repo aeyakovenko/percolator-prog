@@ -762,16 +762,43 @@ fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed() {
 
     let activation_evidence =
         include_str!("../public_sbf/inv_036_fee_destination_and_policy_version_integrity.rs");
-    assert!(inv040_source_defines_test(
-        activation_evidence,
-        "v16_program_pr314_permissionless_activation_fee_requires_creator_consent"
-    ));
-    assert!(processor.contains("permissionless_market_init_fee_for_asset("));
-    assert!(processor.contains("fee > max_init_fee"));
-
     let transition_census =
         include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(transition_census.contains(
-        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
-    ));
+    let mut composition_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/public_sbf/inv_036_fee_destination_and_policy_version_integrity.rs",
+            activation_evidence,
+            "v16_program_pr314_permissionless_activation_fee_requires_creator_consent",
+        ),
+        (
+            "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+            transition_census,
+            "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-040 fee-seniority witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "INV-040 fee-seniority witness must be a reviewed v16 regression: {path}#{witness}"
+        );
+        assert!(
+            composition_witnesses.insert((path, witness)),
+            "duplicate INV-040 fee-seniority witness {path}#{witness}"
+        );
+        assert!(
+            inv040_source_defines_test(source, witness),
+            "INV-040 lost fee-seniority composition witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        composition_witnesses.len(),
+        2,
+        "INV-040 fee-seniority composition witness roster drift"
+    );
+    assert!(processor.contains("permissionless_market_init_fee_for_asset("));
+    assert!(processor.contains("fee > max_init_fee"));
 }
