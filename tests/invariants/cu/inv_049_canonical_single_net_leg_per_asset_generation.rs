@@ -393,9 +393,17 @@ fn v16_program_leg_writer_surface_is_engine_owned_and_source_complete() {
         50,
         "a new wrapper-to-engine transition reopens the structural-leg classification"
     );
+    let mut witnesses = std::collections::BTreeSet::new();
+    let transition_witness =
+        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness";
+    assert!(
+        witnesses.insert(transition_witness),
+        "duplicate canonical-leg witness {transition_witness}",
+    );
+    assert!(transition_witness.starts_with("v16_"));
     assert!(inv049_source_defines_test(
         ENGINE_TRANSITION_ROSTER,
-        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+        transition_witness,
     ));
     for (source, witness) in [
         (
@@ -415,11 +423,17 @@ fn v16_program_leg_writer_surface_is_engine_owned_and_source_complete() {
             "v16_program_reset_pending_rejects_fresh_counterparty_and_completes_recovery",
         ),
     ] {
+        assert!(witness.starts_with("v16_"));
+        assert!(
+            witnesses.insert(witness),
+            "duplicate canonical-leg witness {witness}",
+        );
         assert!(
             inv049_source_defines_test(source, witness),
             "canonical-leg composition witness {witness} is missing"
         );
     }
+    assert_eq!(witnesses.len(), 5, "canonical-leg witness roster drift");
 
     crate::assert_certified_engine_pin("INV-049 engine validator and leg-kernel contracts");
 }
