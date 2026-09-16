@@ -2316,16 +2316,35 @@ fn v16_program_fee_policy_and_destination_census_is_source_complete() {
         include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs"),
         include_str!("../public_sbf/inv_045_no_free_mark_movement.rs"),
     ];
+    let mut fee_witnesses = std::collections::BTreeSet::new();
     for class in FEE_CLASSES {
         assert!(
-            witness_sources
-                .iter()
-                .any(|source| inv036_source_defines_test(source, class.public_witness)),
+            class.public_witness.starts_with("v16_"),
+            "{} uses an unreviewed public witness name {}",
+            class.name,
+            class.public_witness,
+        );
+        assert!(
+            fee_witnesses.insert(class.public_witness),
+            "duplicate fee destination witness {}",
+            class.public_witness,
+        );
+        let matches = witness_sources
+            .iter()
+            .filter(|source| inv036_source_defines_test(source, class.public_witness))
+            .count();
+        assert!(
+            matches == 1,
             "{} lacks executable public destination witness {}",
             class.name,
             class.public_witness,
         );
     }
+    assert_eq!(
+        fee_witnesses.len(),
+        7,
+        "fee destination witness roster drift"
+    );
 
     let supersession_evidence =
         include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs");
