@@ -2497,16 +2497,21 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
         })
         .collect::<std::collections::BTreeMap<_, _>>();
 
-    let benchmark_evidence = include_str!("../open_findings.tsv")
+    let benchmark_rows = include_str!("../open_findings.tsv")
         .lines()
         .filter(|line| !line.starts_with('#') && !line.is_empty())
         .map(|line| {
             let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 6, "malformed open finding row: {line}");
             (
                 fields[0].parse::<u16>().expect("numeric finding PR"),
-                fields[4],
+                (fields[1], fields[2], fields[3], fields[4]),
             )
         })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let benchmark_evidence = benchmark_rows
+        .iter()
+        .map(|(pr, row)| (*pr, row.3))
         .collect::<std::collections::BTreeMap<_, _>>();
     let missing_findings = benchmark_evidence
         .iter()
@@ -2550,6 +2555,39 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
             matches!(fields[7], "OPEN" | "COVERED"),
             "coverage-reopening status must be OPEN or COVERED"
         );
+        if fields[1] == "Conformance" {
+            assert!(
+                !benchmark_rows.contains_key(&pr),
+                "conformance-only reopening {pr} must not masquerade as an open LoF/DoS benchmark row"
+            );
+        } else {
+            let benchmark = benchmark_rows.get(&pr).unwrap_or_else(|| {
+                panic!("LoF/DoS reopening row {pr} is missing from the holdout benchmark")
+            });
+            assert_eq!(benchmark.0, fields[1], "benchmark kind drift for row {pr}");
+            assert_eq!(
+                benchmark.1, fields[2],
+                "benchmark severity drift for row {pr}"
+            );
+            assert_eq!(
+                benchmark.2, fields[3],
+                "benchmark primary invariant drift for row {pr}"
+            );
+            assert!(
+                matches!(
+                    benchmark.3,
+                    "independent-discovery" | "missing" | "nonqualifying"
+                ),
+                "unknown benchmark evidence classification for row {pr}: {}",
+                benchmark.3
+            );
+            if fields[7] == "COVERED" {
+                assert_eq!(
+                    benchmark.3, "independent-discovery",
+                    "covered reopening row {pr} must have invariant-owned independent discovery evidence"
+                );
+            }
+        }
         assert!(
             fields[5].split("+x-").count() >= 3,
             "omitted dimension must name a cross-product, not one example: {line}"
@@ -2594,7 +2632,9 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         independently_discovered_open_findings,
-        [411, 420, 423, 424, 433].into_iter().collect(),
+        [411, 416, 417, 420, 421, 422, 423, 424, 433]
+            .into_iter()
+            .collect(),
         "only explicitly qualified discoveries retain broader OPEN obligations"
     );
     let expected_reopenings = missing_findings
