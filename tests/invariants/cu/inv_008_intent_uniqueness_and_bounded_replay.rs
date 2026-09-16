@@ -174,10 +174,30 @@ fn v16_public_replay_disposition_roster_is_source_complete() {
 
         if let Some(kinds) = disposition.strip_prefix("retry:") {
             retry_variants.insert(variant);
-            retry_kinds.extend(kinds.split(',').map(str::to_owned));
+            let row_kinds = kinds.split(',').map(str::to_owned).collect::<Vec<_>>();
+            assert!(
+                row_kinds.iter().all(|kind| !kind.is_empty()),
+                "empty retry kind in disposition for {variant}"
+            );
+            assert_eq!(
+                row_kinds.iter().collect::<BTreeSet<_>>().len(),
+                row_kinds.len(),
+                "duplicate retry kind in disposition for {variant}"
+            );
+            retry_kinds.extend(row_kinds);
         } else if let Some(kinds) = disposition.strip_prefix("supersession:") {
             supersession_variants.insert(variant);
-            supersession_kinds.extend(kinds.split(',').map(str::to_owned));
+            let row_kinds = kinds.split(',').map(str::to_owned).collect::<Vec<_>>();
+            assert!(
+                row_kinds.iter().all(|kind| !kind.is_empty()),
+                "empty supersession kind in disposition for {variant}"
+            );
+            assert_eq!(
+                row_kinds.iter().collect::<BTreeSet<_>>().len(),
+                row_kinds.len(),
+                "duplicate supersession kind in disposition for {variant}"
+            );
+            supersession_kinds.extend(row_kinds);
         } else {
             assert!(
                 matches!(
