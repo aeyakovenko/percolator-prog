@@ -26,6 +26,26 @@ production bug was found. **Rows 419/435 remain OPEN/missing; INV-039 remains
 `REFUTED_CURRENT`.** See the [Lane 25 report](lane25_mixed_role_unsettled_expiry_20260916.md)
 for the public trace, non-overlap, validation commands and finite limits.
 
+## Lane 26 optional Hybrid reward destinations (2026-09-16)
+
+The [INV-045 destination retry child](cu/inv_045_reward_destination_retry.rs)
+crosses optional destination presence across two fresh-report liquidations after
+paid Hybrid discovery. Four public LiteSVM histories distinguish earned receipts
+from skipped shares: omitting a destination commits the entire penalty to its
+source domains, and supplying a destination later cannot recover that share.
+Independent effective-price fee rounding, per-episode domain accounting and actual
+SPL payouts reconcile all four histories through full catchup.
+
+Uninitialized, wrong-owner, aliased and read-only destinations are probed at the
+actionable boundaries. Successful observation, liquidation and SPL payout prefixes
+roll back completely when a malformed destination suffix rejects. The selector
+checks eight liquidations, 72 exact Account rollbacks and four payouts; the maximum
+measured transaction uses 345,500 CU. This adds destination omission/retry accounting
+to the existing single malformed-tail rejection and always-present-recipient
+histories. No production bug was found. **Row 422 remains OPEN/missing; INV-045
+remains `REFUTED_CURRENT`.** The [reward-destination report](lane25_reward_destination_retry_20260916.md)
+records non-overlap, exact validation commands and the remaining limits.
+
 ## Lane 24 funded oracle containment across resolution (2026-09-16)
 
 The [resolved containment owner](cu/inv_005_cold_oracle_resolved_containment.rs)
