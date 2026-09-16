@@ -283,6 +283,14 @@ fn v16_program_no_hint_favorable_route_roster_is_source_complete() {
 
         match (evidence.witness_path, evidence.witness_test) {
             (Some(path), Some(test)) => {
+                assert!(
+                    path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                    "{variant} INV-056 witness must resolve to an invariant source file: {path}"
+                );
+                assert!(
+                    test.starts_with("v16_") || test.starts_with("inv037_"),
+                    "{variant} INV-056 witness must be a reviewed v16 regression: {path}#{test}"
+                );
                 let source = std::fs::read_to_string(
                     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path),
                 )
