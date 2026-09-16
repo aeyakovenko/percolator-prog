@@ -13,7 +13,7 @@
 //! current consent to land and change exposure or released PnL so the guard is not a blanket
 //! risk-reduction DoS.
 //!
-//! The source roster requires all five single-account and four paired-trade episode-bound
+//! The source roster requires all six single-account and four paired-trade episode-bound
 //! instruction families to encode and dispatch their position epochs, consume the shared exact
 //! binding predicate before mutation, and advance the epoch after success. It also owns every
 //! wrapper callsite that can change a portfolio's position vector: single/batch trades,
@@ -21,6 +21,31 @@
 //! this invariant until classified.
 
 use std::fs;
+
+fn inv004_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
 
 #[test]
 fn v16_program_position_episode_matrix_rejects_stale_consent_fixed_case() {
@@ -66,10 +91,11 @@ fn v16_program_retained_position_binding_and_writer_rosters_are_source_complete(
     let instruction_enum = &source[enum_start..enum_end];
     assert_eq!(
         instruction_enum.matches("position_epoch: u64").count(),
-        13,
+        14,
         "retained position-episode field roster changed without INV-004 review"
     );
     for variant in [
+        "SetMatcherConfig",
         "ClosePortfolio",
         "ConvertReleasedPnl",
         "CureAndCancelClose",
@@ -122,6 +148,14 @@ fn v16_program_retained_position_binding_and_writer_rosters_are_source_complete(
         );
     }
 
+    let set_matcher = function_source(
+        &source,
+        "handle_set_matcher_config",
+        "MATCHER_BATCH_MAX_LEGS",
+    );
+    assert!(set_matcher.contains("position_epoch != current_position_epoch"));
+    assert!(set_matcher.contains("cfg.set_position_epoch(current_position_epoch)?;"));
+
     let convert = function_source(
         &source,
         "handle_convert_released_pnl",
@@ -172,9 +206,13 @@ fn v16_program_retained_position_binding_and_writer_rosters_are_source_complete(
 
     let recovery_evidence =
         include_str!("../stateful/inv_081_success_state_validity_over_complete_public_routes.rs");
-    assert!(recovery_evidence
-        .contains("fn v16_program_owner_recovery_forfeit_strictly_reduces_each_position_episode("));
+    assert!(inv004_source_defines_test(
+        recovery_evidence,
+        "v16_program_owner_recovery_forfeit_strictly_reduces_each_position_episode"
+    ));
     let resolved_evidence = include_str!("inv_068_receipt_uniqueness_and_monotonic_topups.rs");
-    assert!(resolved_evidence
-        .contains("fn v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail("));
+    assert!(inv004_source_defines_test(
+        resolved_evidence,
+        "v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail"
+    ));
 }
