@@ -1779,6 +1779,14 @@ fn v16_program_side_oi_cap_witness_roster_is_source_complete() {
     let mut witness_set = std::collections::BTreeSet::new();
     for (path, witness) in WITNESSES {
         assert!(witness_set.insert(*witness), "duplicate witness {witness}");
+        assert!(
+            path.starts_with("inv_058_") && path.ends_with(".rs"),
+            "INV-058 witness points outside the side-OI invariant family: {path}",
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "INV-058 witness uses an unreviewed test name: {witness}",
+        );
         let source = source_cache.entry(path).or_insert_with(|| {
             std::fs::read_to_string(root.join(path))
                 .unwrap_or_else(|error| panic!("read {path}: {error}"))
