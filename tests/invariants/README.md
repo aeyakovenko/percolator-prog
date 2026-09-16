@@ -270,6 +270,10 @@ the role match to write exactly one scoped authority field, including
 This is paired with the existing public `cold_admin_handoff_scope`,
 `funded_role_zero_transition`, `cold_oracle_funded_containment`,
 `funded_oracle_succession`, and `funded_backing_succession` witnesses.
+The source-composition selector now requires all fourteen mounted row416
+funded-role witnesses and their nested module graph, including refunding,
+retained management, stale-resolution, consumed/impaired backing, shutdown ABA,
+cold-oracle coholder, zero-role, and generated round-trip products.
 `cold_oracle_insurance_containment` adds the complementary insurance-funded
 oracle-coholder lane: a cold admin can rotate observation power and land an
 authenticated mark while the incumbent's live insurance-domain budgets remain

@@ -100,6 +100,15 @@ fn inv005_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     panic!("unterminated source block after {marker}");
 }
 
+fn inv005_source_defines_function(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
 fn inv005_epoch_bearing_instruction_variants(source: &str) -> std::collections::BTreeSet<String> {
     inv005_instruction_variant_bodies(source)
         .into_iter()
@@ -735,6 +744,152 @@ fn v16_program_authority_handoffs_share_one_incoming_key_validator() {
 
 #[test]
 fn v16_program_funded_role_guard_and_oracle_handoff_are_source_complete() {
+    crate::assert_certified_engine_pin("INV-005 funded-role containment");
+    const ROW416_WITNESSES: &[(&str, &str)] = &[
+        (
+            "inv_005_backing_role_refunding.rs",
+            "v16_program_backing_role_containment_tracks_both_domains_through_refunding",
+        ),
+        (
+            "inv_005_retained_insurance_management.rs",
+            "v16_program_retained_empty_insurance_management_rechecks_stock_before_ordered_succession",
+        ),
+        (
+            "inv_005_funded_backing_succession.rs",
+            "v16_program_funded_backing_succession_preserves_paid_prefix_and_terminal_role_partition",
+        ),
+        (
+            "inv_005_funded_oracle_succession.rs",
+            "v16_program_funded_oracle_succession_after_admin_burn_preserves_backing_exit",
+        ),
+        (
+            "inv_005_funded_insurer_stale_resolution.rs",
+            "v16_program_funded_insurer_handoff_preserves_stale_deadline_and_permissionless_user_exit",
+        ),
+        (
+            "inv_005_cold_admin_earned_reserve.rs",
+            "v16_program_cold_admin_rotation_preserves_earned_reserve_after_partial_principal_repayment",
+        ),
+        (
+            "inv_005_consumed_backing_containment.rs",
+            "v16_program_consumed_backing_role_survives_expiry_stale_clock_and_drain_only",
+        ),
+        (
+            "inv_005_impaired_backing_containment.rs",
+            "v16_program_cold_admin_cannot_seize_impaired_backing_only_role",
+        ),
+        (
+            "inv_005_cold_admin_handoff_scope.rs",
+            "v16_program_cold_admin_aba_and_burn_preserve_funded_handoff_scope_and_value",
+        ),
+        (
+            "inv_005_shutdown_reserve_aba.rs",
+            "v16_program_shutdown_and_funded_oracle_aba_preserve_separate_reserve_owners",
+        ),
+        (
+            "inv_005_cold_oracle_funded_containment.rs",
+            "v16_program_cold_oracle_replacement_preserves_funded_coholder_and_atomic_prefix",
+        ),
+        (
+            "inv_005_cold_oracle_insurance_containment.rs",
+            "v16_program_cold_oracle_replacement_preserves_insurance_funded_coholder",
+        ),
+        (
+            "inv_005_funded_role_zero_transition.rs",
+            "v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_consent",
+        ),
+        (
+            "inv_005_generated_funded_role_epochs.rs",
+            "v16_program_generated_funded_role_round_trips_preserve_entitlements_and_observation_scope",
+        ),
+    ];
+    const ROW416_MODULE_LINKS: &[(&str, &str)] = &[
+        (
+            "inv_005_authority_incarnation_binding.rs",
+            "mod backing_role_refunding;",
+        ),
+        (
+            "inv_005_authority_incarnation_binding.rs",
+            "mod retained_insurance_management;",
+        ),
+        (
+            "inv_005_authority_incarnation_binding.rs",
+            "mod funded_backing_succession;",
+        ),
+        (
+            "inv_005_authority_incarnation_binding.rs",
+            "mod funded_oracle_succession;",
+        ),
+        (
+            "inv_005_authority_incarnation_binding.rs",
+            "mod funded_insurer_stale_resolution;",
+        ),
+        (
+            "inv_005_authority_incarnation_binding.rs",
+            "mod cold_admin_earned_reserve;",
+        ),
+        (
+            "inv_005_authority_incarnation_binding.rs",
+            "mod consumed_backing_containment;",
+        ),
+        (
+            "inv_005_authority_incarnation_binding.rs",
+            "mod impaired_backing_containment;",
+        ),
+        (
+            "inv_005_authority_incarnation_binding.rs",
+            "mod cold_admin_handoff_scope;",
+        ),
+        (
+            "inv_005_funded_oracle_succession.rs",
+            "mod shutdown_reserve_aba;",
+        ),
+        (
+            "inv_005_funded_oracle_succession.rs",
+            "mod cold_oracle_funded_containment;",
+        ),
+        (
+            "inv_005_funded_oracle_succession.rs",
+            "mod cold_oracle_insurance_containment;",
+        ),
+        (
+            "inv_005_cold_admin_handoff_scope.rs",
+            "mod funded_role_zero_transition;",
+        ),
+        (
+            "inv_005_funded_role_zero_transition.rs",
+            "mod generated_funded_role_epochs;",
+        ),
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/invariants/cu");
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    let mut witnesses = std::collections::BTreeSet::new();
+    for (path, witness) in ROW416_WITNESSES {
+        assert!(
+            witnesses.insert(*witness),
+            "duplicate row416 witness {witness}"
+        );
+        let source = source_cache.entry(path).or_insert_with(|| {
+            std::fs::read_to_string(root.join(path))
+                .unwrap_or_else(|error| panic!("read {path}: {error}"))
+        });
+        assert!(
+            inv005_source_defines_function(source, witness),
+            "row416 funded-role witness missing {path}#{witness}",
+        );
+    }
+    assert_eq!(witnesses.len(), 14, "row416 witness roster drift");
+    for (path, marker) in ROW416_MODULE_LINKS {
+        let source = source_cache.entry(path).or_insert_with(|| {
+            std::fs::read_to_string(root.join(path))
+                .unwrap_or_else(|error| panic!("read {path}: {error}"))
+        });
+        assert!(
+            source.contains(marker),
+            "row416 witness module not mounted: {path} missing {marker}",
+        );
+    }
+
     let production = include_str!("../../../src/v16_program.rs");
     let funded =
         inv005_braced_block_after(production, "fn asset_authority_role_has_funded_value_view");
