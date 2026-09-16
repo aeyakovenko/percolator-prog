@@ -16,6 +16,74 @@
 use super::*;
 
 #[test]
+fn v16_row425_metadata_retains_fractional_carry_evidence_and_entitlement() {
+    const PROPERTY: &str = "all-economic-routes-preserve-canonical-fractional-accrual-carry";
+
+    fn row425(tsv: &str, width: usize) -> Vec<&str> {
+        let rows = tsv
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .map(|line| line.split('\t').collect::<Vec<_>>())
+            .filter(|fields| fields[0] == "425")
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1, "row 425 must have one metadata entry");
+        assert_eq!(rows[0].len(), width, "row 425 metadata schema changed");
+        rows.into_iter().next().unwrap()
+    }
+
+    let finding = row425(include_str!("../open_findings.tsv"), 6);
+    let reopening = row425(include_str!("../coverage_reopenings.tsv"), 8);
+    assert_eq!(
+        &finding[1..5],
+        &["LoF", "BLOCKER", "INV-045", "independent-discovery"],
+        "row 425 must retain its invariant-owned carry discovery"
+    );
+    assert_eq!(&reopening[1..4], &finding[1..4]);
+    for owner in ["INV-045", "INV-052"] {
+        assert!(
+            reopening[4].split(',').any(|id| id == owner),
+            "row 425 must retain {owner}'s mark/partition obligation"
+        );
+    }
+    assert_eq!(
+        reopening[5], "fractional-carry+x-trade-crank-interleaving+x-entitlement",
+        "row 425 needs fractional carry and owner entitlement across economic route interleavings"
+    );
+    assert_eq!(
+        reopening[6], PROPERTY,
+        "an isolated mark envelope or crank cadence cannot replace cross-route carry preservation"
+    );
+
+    // Executable ownership is checked by INV-079. Another valid INV-045 test
+    // cannot substitute for the canonical/interleaved carry and payout comparison.
+    let discoveries = include_str!("../independent_discoveries.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 5, "malformed discovery row: {line}");
+            fields
+        })
+        .filter(|fields| fields[4].split(',').any(|pr| pr == "425"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        discoveries.len(),
+        1,
+        "row 425 must retain exactly one reviewed carry discovery mapping"
+    );
+    assert_eq!(
+        &discoveries[0][..4],
+        &[
+            "INV-045",
+            "canonical-accrual/trade-crank-interleaving",
+            "v16_attack_risk_reducing_trade_cannot_erase_canonical_price_movement_remainder",
+            PROPERTY,
+        ],
+        "row 425 must retain its carry-specific fingerprint, executable witness, and oracle"
+    );
+}
+
+#[test]
 fn v16_row422_metadata_retains_effective_price_lineage_obligation() {
     fn row422(tsv: &str, width: usize) -> Vec<&str> {
         let rows = tsv
@@ -42,8 +110,7 @@ fn v16_row422_metadata_retains_effective_price_lineage_obligation() {
         "row 422 must retain the paid-origin/fresh-report reward composition"
     );
     assert_eq!(
-        reopening[6],
-        "liquidation-reward-provenance-follows-the-effective-price-until-catchup",
+        reopening[6], "liquidation-reward-provenance-follows-the-effective-price-until-catchup",
         "report freshness alone cannot replace the effective-price-lineage obligation"
     );
 }
