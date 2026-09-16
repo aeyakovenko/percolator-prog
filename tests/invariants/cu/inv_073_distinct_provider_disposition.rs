@@ -1,5 +1,5 @@
-//! INV-073 / row420: independent absent providers share terminal custody without
-//! coupling their signatures or erasing the other domain's unpaid earnings.
+//! INV-034/073: terminal earnings remain domain-local with distinct absent
+//! providers or one absent provider sharing custody across both domains.
 //! Two public asset cohorts earn unequal fees; both payout orders include exact
 //! rollback of a successful payment prefix followed by premature slab closure.
 //! One SPL rail, fresh backing, two domains and available cleanup owners only.
@@ -12,6 +12,17 @@ use crate::support::fuzz_model::{
 use terminal_reserve_destination_recovery::land;
 
 pub(crate) fn verify_distinct_provider_disposition() {
+    verify_provider_disposition(false);
+}
+
+// INV-034/073: a shared provider and destination do not pool domain earnings or
+// make their ledgers interchangeable; rejected continuations preserve both claims.
+#[test]
+fn v16_program_shared_provider_terminal_earnings_remain_domain_local() {
+    verify_provider_disposition(true);
+}
+
+fn verify_provider_disposition(shared_provider: bool) {
     const RATES: [u16; 2] = [3_333, 6_666];
     const FEES: [u64; 2] = [875, 1_749];
     const TOTAL_SUPPLY: u64 = 2 * (CAPITAL[0] + CAPITAL[1] + BACKING);
@@ -30,11 +41,21 @@ pub(crate) fn verify_distinct_provider_disposition() {
             },
         );
         let admin = env.admin.insecure_clone();
-        let providers = [Keypair::new(), Keypair::new()];
+        let first_provider = Keypair::new();
+        let second_provider = if shared_provider {
+            first_provider.insecure_clone()
+        } else {
+            Keypair::new()
+        };
+        let providers = [first_provider, second_provider];
         let users = std::array::from_fn::<_, 4, _>(|_| Keypair::new());
         let provider_keys = providers.each_ref().map(Signer::pubkey);
         let user_keys = users.each_ref().map(Signer::pubkey);
-        for key in provider_keys.into_iter().chain(user_keys) {
+        for key in provider_keys
+            .into_iter()
+            .chain(user_keys)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
             env.svm.airdrop(&key, 1_000_000_000).unwrap();
         }
         env.svm.warp_to_slot(1);
@@ -57,8 +78,15 @@ pub(crate) fn verify_distinct_provider_disposition() {
         env.configure_permissionless_resolve_with_cu(100, 5);
         let user_tokens =
             user_keys.map(|key| create_ata_for_test(&mut env.svm, &env.payer, key, env.mint));
-        let provider_tokens =
-            provider_keys.map(|key| create_ata_for_test(&mut env.svm, &env.payer, key, env.mint));
+        let first_token = create_ata_for_test(&mut env.svm, &env.payer, provider_keys[0], env.mint);
+        let provider_tokens = [
+            first_token,
+            if shared_provider {
+                first_token
+            } else {
+                create_ata_for_test(&mut env.svm, &env.payer, provider_keys[1], env.mint)
+            },
+        ];
         let admin_token = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
         for (token, amount) in user_tokens
             .into_iter()
@@ -66,6 +94,7 @@ pub(crate) fn verify_distinct_provider_disposition() {
             .map(|(i, key)| (key, CAPITAL[i % 2]))
             .chain(provider_tokens.map(|key| (key, BACKING)))
         {
+            env.svm.expire_blockhash();
             send_raw_tx(
                 &mut env.svm,
                 &env.payer,
@@ -162,7 +191,8 @@ pub(crate) fn verify_distinct_provider_disposition() {
         // No provider key survives funding, including during fee generation and user exit.
         assert!(!provider_keys.contains(&admin.pubkey()));
         assert!(!provider_keys.contains(&env.payer.pubkey()));
-        assert_ne!(provider_keys[0], provider_keys[1]);
+        assert_eq!(provider_keys[0] == provider_keys[1], shared_provider);
+        assert_eq!(provider_tokens[0] == provider_tokens[1], shared_provider);
         drop(providers);
         for asset in 0..2 {
             let a = 2 * asset;
@@ -277,6 +307,8 @@ pub(crate) fn verify_distinct_provider_disposition() {
                         .into_iter()
                         .chain(provider_tokens)
                         .chain([env.vault])
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
                         .map(|key| env.token_amount(key))
                         .sum::<u64>(),
                     TOTAL_SUPPLY
@@ -390,6 +422,11 @@ pub(crate) fn verify_distinct_provider_disposition() {
             ];
             assert_eq!(amounts.iter().sum::<u64>(), TOTAL_SUPPLY);
             for ((key, frame), amount) in custody_keys.iter().zip(&custody_frames).zip(amounts) {
+                let amount = if shared_provider && *key == provider_tokens[0] {
+                    principal_paid.iter().sum::<u64>() + fees_paid.iter().sum::<u64>()
+                } else {
+                    amount
+                };
                 let mut expected = frame.clone();
                 let mut token = TokenAccount::unpack(&expected.data).unwrap();
                 token.amount = amount;
@@ -507,7 +544,54 @@ pub(crate) fn verify_distinct_provider_disposition() {
         }
         let first = order[0];
         let second = order[1];
-        let pay_first = payout(&env, first, true, FEES[first]);
+        if shared_provider {
+            for asset in order {
+                let prefix = [17, 29][asset];
+                let ix = payout(&env, asset, true, prefix);
+                let allowed = [
+                    env.market,
+                    env.vault,
+                    provider_tokens[asset],
+                    ledgers[asset],
+                ];
+                peak = peak.max(land(
+                    &mut env,
+                    &[ix],
+                    &[],
+                    &tracked,
+                    &allowed,
+                    0,
+                    None,
+                    None,
+                ));
+                fees_paid[asset] = prefix;
+                check(&env, principal_paid, fees_paid);
+            }
+            for asset in order {
+                let peer = 1 - asset;
+                let peer_payment = payout(&env, peer, true, 1);
+                let mut wrong_ledger = payout(&env, asset, true, 1);
+                wrong_ledger.accounts[2].pubkey = ledgers[peer];
+                let excessive = payout(&env, asset, true, FEES[asset] - fees_paid[asset] + 1);
+                for (rejected, error) in [
+                    (wrong_ledger, PercolatorError::Unauthorized),
+                    (excessive, PercolatorError::EngineLockActive),
+                ] {
+                    peak = peak.max(land(
+                        &mut env,
+                        &[peer_payment.clone(), rejected],
+                        &[],
+                        &tracked,
+                        &[],
+                        0,
+                        None,
+                        Some((3, error)),
+                    ));
+                    check(&env, principal_paid, fees_paid);
+                }
+            }
+        }
+        let pay_first = payout(&env, first, true, FEES[first] - fees_paid[first]);
         let allowed = [
             env.market,
             env.vault,
@@ -526,8 +610,8 @@ pub(crate) fn verify_distinct_provider_disposition() {
         ));
         fees_paid[first] = FEES[first];
         check(&env, principal_paid, fees_paid);
-        // One fully paid domain cannot release the other provider's last fee atom.
-        let partial = payout(&env, second, true, FEES[second] - 1);
+        // One fully paid domain cannot release the other domain's last fee atom.
+        let partial = payout(&env, second, true, FEES[second] - fees_paid[second] - 1);
         peak = peak.max(land(
             &mut env,
             &[partial.clone(), close.clone()],
@@ -599,9 +683,13 @@ pub(crate) fn verify_distinct_provider_disposition() {
         assert_eq!(env.svm.get_account(&env.mint), Some(mint_frame));
         assert_eq!(
             provider_tokens.map(|key| env.token_amount(key)),
-            FEES.map(|fees| BACKING + fees)
+            if shared_provider {
+                [2 * BACKING + FEES.iter().sum::<u64>(); 2]
+            } else {
+                FEES.map(|fees| BACKING + fees)
+            }
         );
     }
-    assert_cu_within("distinct absent providers", peak, LIMIT);
-    println!("row420 distinct absent providers: worlds=2, user_calls={user_calls}, reserve_payments=10, exact_rollbacks=2, slab_closes=2, peak_CU={peak}, limit={LIMIT}");
+    assert_cu_within("terminal provider attribution", peak, LIMIT);
+    println!("terminal providers: shared={shared_provider}, worlds=2, user_calls={user_calls}, slab_closes=2, peak_CU={peak}, limit={LIMIT}");
 }
