@@ -1,5 +1,70 @@
 # Invariant-owned test coverage
 
+## INV-045 fractional-carry evidence fidelity (2026-09-16)
+
+Owner: [public_sbf/inv_045_no_free_mark_movement.rs](public_sbf/inv_045_no_free_mark_movement.rs).
+`v16_row425_metadata_retains_fractional_carry_evidence_and_entitlement` binds
+row 425 to its canonical-accrual/trade-crank-interleaving fingerprint, carry
+regression, and carry-preservation oracle. It also preserves the reopening's
+fractional-carry, trade/crank-interleaving, and entitlement dimensions, with
+INV-045/052 ownership. INV-079 continues to check executable witness ownership.
+This guard checks the relationship between the finding and its evidence; it does
+not add another witness parser or module-mount check.
+
+The gap was found at remote main `e6495085` by comparing the generic benchmark
+validator with the INV-045 carry contract. The withheld comparison used the local
+benchmark title and existing evidence mapping only; no open PR implementation or
+fix was imported. A valid INV-045 reserve witness cannot replace row 425's
+canonical/interleaved remainder and owner-payout comparison.
+
+Two temporary negative controls demonstrate the gap:
+
+1. In `independent_discoveries.tsv`, replace only row 425's selector with
+   `v16_program_trade_route_matrix_keeps_mark_reserve_nonwithdrawable` and its
+   oracle with `mark-movement-reserve-must-remain-encumbered`. All five generic
+   metadata selectors below pass on the original guard set (**5 passed**).
+   The new exact row425 selector rejects the substituted evidence (**1 failed**).
+2. Restore the discovery mapping, then replace only row 425's required property
+   in `coverage_reopenings.tsv` with
+   `isolated-cranks-preserve-the-elapsed-time-mark-envelope`. Running the new
+   guard with the same five generic selectors gives **5 passed, 1 failed**;
+   only the new guard rejects the weakened obligation.
+
+Both mutations are restored. No metadata classification or production source
+changes. Row 425 remains `COVERED`; INV-045 remains `REFUTED_CURRENT` due to
+row 422. This is host metadata evidence, with no new SBF execution, CU result,
+economic counterexample, or whole-invariant closure. Arbitrary oracle/funding/
+retained-policy histories, maximum-shape route products, witness assertion
+semantics, and the broader row 422 obligation remain outside this increment.
+
+Exact execution commands (no listing-only or zero-test runs):
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/astra-ultra-inv045-062-next-gap-20260916-target
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR=/dev/shm
+guard=inv_045_no_free_mark_movement::v16_row425_metadata_retains_fractional_carry_evidence_and_entitlement
+metadata=(
+  inv_079_public_reachability_evidence::v16_dated_open_security_finding_benchmark_is_non_overclaiming
+  inv_079_public_reachability_evidence::v16_post_pr135_counterexamples_reopen_every_affected_invariant
+  inv_079_public_reachability_evidence::v16_invariant_charter_and_index_are_complete
+  inv_079_public_reachability_evidence::v16_machine_invariant_status_is_authoritative_and_nonoverclaiming
+  inv_079_public_reachability_evidence::v16_invariant_audit_summary_matches_every_verdict_row
+)
+# Control 1: substituted discovery, before adding the new guard (5 passed).
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture "${metadata[@]}"
+# Control 1: substituted discovery, after adding the guard (1 expected failure).
+cargo test --locked --offline --test v16_program_fuzz_regressions "$guard" -- --exact --nocapture
+# Control 2: original discovery, weakened reopening property (5 passed, 1 expected failure).
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture "$guard" "${metadata[@]}"
+# Restored final tree, including the existing row422 guard (7 passed).
+cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture "$guard" \
+  inv_045_no_free_mark_movement::v16_row422_metadata_retains_effective_price_lineage_obligation "${metadata[@]}"
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/public_sbf/inv_045_no_free_mark_movement.rs
+git diff --check
+git diff --exit-code e6495085 -- src Cargo.toml Cargo.lock tests/invariants/open_findings.tsv tests/invariants/independent_discoveries.tsv tests/invariants/coverage_reopenings.tsv tests/invariants/invariant_status.tsv
+```
+
 ## INV-014 runnable retained-fee witnesses (2026-09-16)
 
 Owner:
