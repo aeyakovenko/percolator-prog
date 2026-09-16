@@ -67,6 +67,231 @@ fn withdraw_backing_with_authority(
 }
 
 #[test]
+fn v16_program_activation_fee_cpi_failure_preserves_append_and_reuse_frontiers() {
+    use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const FEE: u64 = 40;
+    const SLOT: u64 = 4;
+    let creator = Keypair::new();
+    let mut normalized = Vec::new();
+    let mut peak_cu = 0;
+    for reuse in [false, true] {
+        let mut env = inv018_public_spl_market(6);
+        env.svm.airdrop(&creator.pubkey(), 1_000_000_000).unwrap();
+        if reuse {
+            env.activate_asset(1, 1, 100);
+            env.svm.warp_to_slot(3);
+            env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_RETIRE, 1, 3, 0);
+        }
+        env.update_market_init_fee_policy_with_cu(FEE.into());
+        let source = create_ata_for_test(&mut env.svm, &env.payer, creator.pubkey(), env.mint);
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &source,
+                &env.admin.pubkey(),
+                &[],
+                FEE + 7,
+            )
+            .unwrap(),
+            &[&env.admin],
+        )
+        .unwrap();
+        // Balance preflight succeeds, but SPL selects the self-delegate branch and rejects
+        // its insufficient allowance after the wrapper has installed the new incarnation.
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::approve(
+                &spl_token::ID,
+                &source,
+                &creator.pubkey(),
+                &creator.pubkey(),
+                &[],
+                FEE - 1,
+            )
+            .unwrap(),
+            &[&creator],
+        )
+        .unwrap();
+        env.svm.warp_to_slot(SLOT);
+        let (config_before, group_before) = env.market_state();
+        assert_eq!(config_before.free_market_slot_count, u16::from(reuse));
+        assert_eq!(
+            group_before.config.max_market_slots,
+            if reuse { 2 } else { 1 }
+        );
+        if reuse {
+            assert_eq!(group_before.assets[1].lifecycle, AssetLifecycleV16::Retired);
+        }
+        let frontier = group_before.next_market_id;
+        let activation = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: ProgInstruction::UpdateAssetLifecycle {
+                action: processor::ASSET_ACTION_ACTIVATE,
+                asset_index: 1,
+                market_id: frontier,
+                authority_epoch: 0,
+                now_slot: SLOT,
+                initial_price: 250,
+                max_init_fee: FEE.into(),
+                insurance_authority: creator.pubkey().to_bytes(),
+                insurance_operator: creator.pubkey().to_bytes(),
+                backing_bucket_authority: creator.pubkey().to_bytes(),
+                oracle_authority: creator.pubkey().to_bytes(),
+            }
+            .encode(),
+        };
+        let instructions = [heap_ix(), cu_ix(), activation];
+        let transaction = |env: &V16CuEnv| {
+            Transaction::new_signed_with_payer(
+                &instructions,
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &creator],
+                env.svm.latest_blockhash(),
+            )
+        };
+        let rejected_tx = transaction(&env);
+        let fee = FeeStructure::default().lamports_per_signature
+            * u64::from(rejected_tx.message.header.num_required_signatures);
+        let mut keys = rejected_tx.message.account_keys.clone();
+        keys.extend([env.mint, env.admin.pubkey(), env.vault_authority]);
+        keys.sort_unstable();
+        keys.dedup();
+        keys.retain(|key| *key != env.payer.pubkey());
+        let snapshot = |env: &V16CuEnv| {
+            keys.iter()
+                .map(|key| env.svm.get_account(key))
+                .collect::<Vec<_>>()
+        };
+        let before = snapshot(&env);
+        let mut expected_payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        let market_len_before = env.svm.get_account(&env.market).unwrap().data.len();
+        let rejected = env
+            .svm
+            .send_transaction(rejected_tx)
+            .expect_err("fee CPI must fail");
+        assert_eq!(
+            rejected.err,
+            TransactionError::InstructionError(
+                2,
+                InstructionError::Custom(spl_token::error::TokenError::InsufficientFunds as u32),
+            ),
+            "reuse={reuse}: must reach the late fee CPI, not a wrapper preflight rejection"
+        );
+        assert!(rejected
+            .meta
+            .logs
+            .iter()
+            .any(|line| { line == &format!("Program {} invoke [2]", spl_token::ID) }));
+        assert!(rejected
+            .meta
+            .logs
+            .iter()
+            .any(|line| line == "Program log: Instruction: Transfer"));
+        assert_eq!(
+            snapshot(&env),
+            before,
+            "reuse={reuse}: exact account and rent rollback"
+        );
+        expected_payer.lamports -= fee;
+        assert_eq!(
+            env.svm.get_account(&env.payer.pubkey()).unwrap(),
+            expected_payer
+        );
+        peak_cu = peak_cu.max(rejected.meta.compute_units_consumed);
+
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::revoke(&spl_token::ID, &source, &creator.pubkey(), &[])
+                .unwrap(),
+            &[&creator],
+        )
+        .expect("public allowance revocation repairs the source");
+        env.svm.expire_blockhash();
+        let retry = transaction(&env);
+        let accepted = env
+            .svm
+            .send_transaction(retry)
+            .expect("captured activation remains retryable");
+        peak_cu = peak_cu.max(accepted.compute_units_consumed);
+        let (config_after, group_after) = env.market_state();
+        assert_eq!(group_after.next_market_id, frontier + 1);
+        assert_eq!(group_after.assets[1].market_id, frontier);
+        assert_eq!(group_after.assets[1].lifecycle, AssetLifecycleV16::Active);
+        assert_eq!(group_after.config.max_market_slots, 2);
+        assert_eq!(config_after.free_market_slot_count, 0);
+        assert_eq!(group_after.vault - group_before.vault, u128::from(FEE));
+        assert_eq!(
+            group_after.insurance - group_before.insurance,
+            u128::from(FEE)
+        );
+        assert_eq!(env.token_amount(source), 7);
+        assert_eq!(env.token_amount(env.vault), FEE);
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap().data.len(),
+            if reuse {
+                market_len_before
+            } else {
+                state::market_account_len_for_capacity(2).unwrap()
+            }
+        );
+        assert_domain_budget_remaining_total_consistent(&group_after, "retried activation fee");
+        normalized.push(normalized_persisted_asset_slot(&env, 1));
+
+        // A committed retry consumes the captured generation exactly once.
+        env.svm.expire_blockhash();
+        let before_replay = snapshot(&env);
+        let mut payer_before_replay = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        let replay = transaction(&env);
+        let rejected = env
+            .svm
+            .send_transaction(replay)
+            .expect_err("stale generation replay");
+        assert_eq!(
+            rejected.err,
+            TransactionError::InstructionError(
+                2,
+                InstructionError::Custom(PercolatorError::AssetGenerationMismatch as u32),
+            )
+        );
+        assert_eq!(snapshot(&env), before_replay);
+        payer_before_replay.lamports -= fee;
+        assert_eq!(
+            env.svm.get_account(&env.payer.pubkey()).unwrap(),
+            payer_before_replay
+        );
+        peak_cu = peak_cu.max(rejected.meta.compute_units_consumed);
+    }
+    assert_eq!(
+        normalized[0], normalized[1],
+        "append and reuse converge after CPI failure"
+    );
+    assert_cu_within(
+        "INV-089 activation fee failure/retry/replay",
+        peak_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    println!(
+        "INV-089 fee CPI: worlds=2 late_rollbacks=2 retries=2 stale_replays=2 peak_cu={peak_cu}"
+    );
+}
+
+#[test]
 fn v16_program_reuse_rejects_every_zero_authority_before_mutation() {
     let creator = Keypair::new();
     let valid = creator.pubkey().to_bytes();

@@ -1,5 +1,20 @@
 # Invariant-owned test coverage
 
+## INV-089 activation fee CPI rollback and retry (2026-09-16)
+
+Owner: [cu/inv_089_activation_reactivation_and_initialization_equivalence.rs](cu/inv_089_activation_reactivation_and_initialization_equivalence.rs).
+`v16_program_activation_fee_cpi_failure_preserves_append_and_reuse_frontiers`
+compares fresh append with retired-slot reuse after a public SPL self-delegate
+allowance forces the fee CPI to fail beyond wrapper preflight. It requires exact
+account/rent rollback, successful retry of the captured generation after SPL
+revocation, single fee credit, stale-generation rejection, and equivalent persisted
+replacement slots. Two test-only negative controls fail as intended. Final exact
+selectors: **4 CU-harness tests and 2 host metadata tests passed**; the new test
+executes two late rollbacks, two retries, and two stale replays, at **33,541 maximum
+observed CU** (32,816 in the final run).
+No production change or invariant-status promotion. Commands, controls, and limits:
+[audit](inv_089_activation_fee_cpi_audit_20260916.md).
+
 ## INV-045 fractional-carry evidence fidelity (2026-09-16)
 
 Owner: [public_sbf/inv_045_no_free_mark_movement.rs](public_sbf/inv_045_no_free_mark_movement.rs).
