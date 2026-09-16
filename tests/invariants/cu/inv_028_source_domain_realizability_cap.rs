@@ -1508,9 +1508,211 @@ fn v16_bpf_trade_paths_respect_source_credit_watermark_permutations() {
     }
 }
 
+fn inv028_source_defines_function(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
 #[test]
 fn v16_program_source_realizability_cap_composition_is_source_complete() {
     crate::assert_certified_engine_pin("INV-028 realizability-cap composition");
+
+    const ROW423_WITNESSES: &[(&str, &str)] = &[
+        (
+            "inv_028_source_domain_realizability_cap.rs",
+            "v16_program_shared_expiry_progress_matrix_preserves_terminal_progress",
+        ),
+        (
+            "inv_028_source_domain_realizability_cap.rs",
+            "v16_program_source_capacity_admission_order_matrix_rejects_unreserved_risk",
+        ),
+        (
+            "inv_028_source_domain_realizability_cap.rs",
+            "v16_program_expired_source_lien_route_matrix_preserves_bounded_owner_exit",
+        ),
+        (
+            "inv_028_source_domain_realizability_cap.rs",
+            "v16_bpf_trade_paths_respect_source_credit_watermark_permutations",
+        ),
+        (
+            "inv_028_historical_latent_capacity.rs",
+            "v16_program_historical_and_latent_domains_share_bounded_settlement_capacity",
+        ),
+        (
+            "inv_028_historical_latent_capacity.rs",
+            "v16_program_latent_capacity_at_resolution_preserves_attribution_and_exit",
+        ),
+        (
+            "inv_028_deferred_claim_backing.rs",
+            "v16_program_deferred_claim_after_provider_withdrawal_preserves_cap",
+        ),
+        (
+            "inv_028_single_slot_admission.rs",
+            "v16_program_single_vacant_domain_admission_preserves_historical_claims_and_exit",
+        ),
+        (
+            "inv_028_single_slot_admission.rs",
+            "v16_program_batch_admission_cannot_share_last_future_domain_slot",
+        ),
+        (
+            "inv_028_generation_capacity_admission.rs",
+            "v16_program_used_generation_admission_reserves_latent_capacity_through_exact_exit",
+        ),
+        (
+            "inv_028_shared_source_late_exit.rs",
+            "v16_program_shared_history_preserves_late_claimant_capacity_and_exact_exit",
+        ),
+        (
+            "inv_028_recovery_latent_capacity.rs",
+            "v16_program_last_latent_domain_survives_split_recovery_and_terminal_payout",
+        ),
+        (
+            "inv_028_exit_resource_reservation.rs",
+            "v16_program_historical_liens_preserve_future_domains_and_owner_exit",
+        ),
+        (
+            "inv_028_reserved_domain_renewal.rs",
+            "v16_program_reserved_domains_survive_revocation_and_renewed_cpi_rollback",
+        ),
+        (
+            "inv_028_active_leg_admission.rs",
+            "v16_program_active_leg_increases_preserve_latent_and_full_domain_owner_exit",
+        ),
+        (
+            "inv_028_latent_reset_exit.rs",
+            "v16_program_latent_source_survives_owner_reduction_and_prior_epoch_exit",
+        ),
+        (
+            "inv_028_sibling_generation_liveness.rs",
+            "v16_program_sibling_generation_changes_preserve_reserved_settlement_and_owner_exit",
+        ),
+        (
+            "inv_028_hybrid_capacity_carry.rs",
+            "v16_program_historical_capacity_preserves_hybrid_carry_health_and_owner_entitlement",
+        ),
+        (
+            "inv_028_retained_domain_episodes.rs",
+            "v16_program_full_history_reused_episodes_preserve_claims_and_drain_exit",
+        ),
+        (
+            "inv_028_concurrent_latent_capacity.rs",
+            "v16_program_concurrent_latent_cohorts_preserve_full_shape_settlement_and_exit",
+        ),
+        (
+            "inv_028_terminal_latent_capacity.rs",
+            "v16_program_full_latent_settlement_survives_terminal_owner_window_expiry",
+        ),
+        (
+            "inv_028_latent_capacity_reuse.rs",
+            "v16_program_latent_pair_reuse_preserves_historical_claims_and_replacement_exit",
+        ),
+        (
+            "inv_028_reserved_loss_exit.rs",
+            "v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit",
+        ),
+    ];
+    const ROW423_MODULE_LINKS: &[(&str, &str)] = &[
+        (
+            "inv_028_source_domain_realizability_cap.rs",
+            "mod historical_latent_capacity;",
+        ),
+        (
+            "inv_028_source_domain_realizability_cap.rs",
+            "mod deferred_claim_backing;",
+        ),
+        (
+            "inv_028_source_domain_realizability_cap.rs",
+            "mod single_slot_admission;",
+        ),
+        (
+            "inv_028_historical_latent_capacity.rs",
+            "mod concurrent_latent_capacity;",
+        ),
+        (
+            "inv_028_historical_latent_capacity.rs",
+            "mod retained_domain_episodes;",
+        ),
+        (
+            "inv_028_historical_latent_capacity.rs",
+            "mod hybrid_capacity_carry;",
+        ),
+        (
+            "inv_028_historical_latent_capacity.rs",
+            "mod sibling_generation_liveness;",
+        ),
+        (
+            "inv_028_historical_latent_capacity.rs",
+            "mod latent_reset_exit;",
+        ),
+        (
+            "inv_028_historical_latent_capacity.rs",
+            "mod active_leg_admission;",
+        ),
+        (
+            "inv_028_historical_latent_capacity.rs",
+            "mod reserved_domain_renewal;",
+        ),
+        (
+            "inv_028_historical_latent_capacity.rs",
+            "mod exit_resource_reservation;",
+        ),
+        (
+            "inv_028_historical_latent_capacity.rs",
+            "mod recovery_latent_capacity;",
+        ),
+        (
+            "inv_028_historical_latent_capacity.rs",
+            "mod shared_source_late_exit;",
+        ),
+        (
+            "inv_028_historical_latent_capacity.rs",
+            "mod generation_capacity_admission;",
+        ),
+        (
+            "inv_028_concurrent_latent_capacity.rs",
+            "mod terminal_latent_capacity;",
+        ),
+        (
+            "inv_028_single_slot_admission.rs",
+            "mod latent_capacity_reuse;",
+        ),
+        (
+            "inv_028_exit_resource_reservation.rs",
+            "mod reserved_loss_exit;",
+        ),
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/invariants/cu");
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    let mut witnesses = std::collections::BTreeSet::new();
+    for (path, witness) in ROW423_WITNESSES {
+        assert!(
+            witnesses.insert(*witness),
+            "duplicate row423 witness {witness}"
+        );
+        let source = source_cache.entry(path).or_insert_with(|| {
+            std::fs::read_to_string(root.join(path))
+                .unwrap_or_else(|error| panic!("read {path}: {error}"))
+        });
+        assert!(
+            inv028_source_defines_function(source, witness),
+            "row423 admission/resource witness missing {path}#{witness}",
+        );
+    }
+    assert_eq!(witnesses.len(), 23, "row423 witness roster drift");
+    for (path, marker) in ROW423_MODULE_LINKS {
+        let source = source_cache.entry(path).or_insert_with(|| {
+            std::fs::read_to_string(root.join(path))
+                .unwrap_or_else(|error| panic!("read {path}: {error}"))
+        });
+        assert!(
+            source.contains(marker),
+            "row423 witness module not mounted: {path} missing {marker}",
+        );
+    }
 
     let model = include_str!("../../support/fuzz_model.rs");
     for required in [
