@@ -161,6 +161,34 @@ impl Book {
             .unwrap();
     }
 
+    fn sync_actor_from_chain(&mut self, world: &AttributionWorld, actor: usize) {
+        if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio) {
+            self.basis[actor] = 0;
+            self.pending[actor] = false;
+            return;
+        }
+        let account = world.env.portfolio_state(world.actors[actor].portfolio);
+        let legs: Vec<_> = account
+            .legs
+            .iter()
+            .map(|l| l.try_to_runtime().unwrap())
+            .filter(|l| l.active)
+            .collect();
+        if legs.is_empty() {
+            self.basis[actor] = 0;
+            self.pending[actor] = false;
+            return;
+        }
+        assert_eq!(
+            legs.len(),
+            1,
+            "portfolio {actor}: owner partition expects one canonical attribution leg"
+        );
+        let leg = legs[0];
+        self.basis[actor] = leg.basis_pos_q;
+        self.pending[actor] = leg.basis_pos_q == 0 && leg.loss_weight != 0;
+    }
+
     fn close(&mut self, world: &mut AttributionWorld, actor: usize, peak: &mut u64) {
         let before = world.frame();
         let token = world.actors[actor].token;
@@ -179,8 +207,7 @@ impl Book {
         };
         assert_cu_within("INV-039 partition close", cu, CUSTODY_CU_LIMIT);
         *peak = (*peak).max(cu);
-        self.basis[actor] = 0;
-        self.pending[actor] = false;
+        self.sync_actor_from_chain(world, actor);
         self.paid[actor] += u128::from(world.env.token_amount(token) - paid_before);
         for (key, account) in before {
             if ![

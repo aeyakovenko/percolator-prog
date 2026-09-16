@@ -93,6 +93,40 @@ impl AttributionModel {
         self.close_with_deleted_debtor(world, actor, None);
     }
 
+    fn sync_actor_from_chain(&mut self, world: &AttributionWorld, actor: usize) {
+        if actor >= 4 || resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio) {
+            if actor < 4 {
+                self.basis[actor] = 0;
+                self.pending[actor] = false;
+            }
+            return;
+        }
+        let account = world.env.portfolio_state(world.actors[actor].portfolio);
+        let legs: Vec<_> = account
+            .legs
+            .iter()
+            .map(|leg| leg.try_to_runtime().unwrap())
+            .filter(|leg| leg.active)
+            .collect();
+        if legs.is_empty() {
+            if actor < 4 {
+                self.basis[actor] = 0;
+                self.pending[actor] = false;
+            }
+            return;
+        }
+        assert_eq!(
+            legs.len(),
+            1,
+            "actor {actor}: resolved close keeps at most one attribution leg"
+        );
+        let leg = legs[0];
+        if actor < 4 {
+            self.basis[actor] = leg.basis_pos_q;
+            self.pending[actor] = leg.basis_pos_q == 0 && leg.loss_weight != 0;
+        }
+    }
+
     fn close_with_deleted_debtor(
         &mut self,
         world: &mut AttributionWorld,
@@ -104,11 +138,7 @@ impl AttributionModel {
         match world.payout(actor, false) {
             Ok(cu) => {
                 assert_cu_within("INV-039 generated resolved close", cu, CUSTODY_CU_LIMIT);
-                // One solvent leg, no B chunks, backing normalization or fee work.
-                if actor < 4 {
-                    self.basis[actor] = 0;
-                    self.pending[actor] = false;
-                }
+                self.sync_actor_from_chain(world, actor);
             }
             Err(error) => {
                 assert!(
@@ -301,7 +331,10 @@ fn v16_program_resolved_debtor_deletion_preserves_unsettled_cohort_attribution()
                 let other_debtor = other_holder + 1;
                 if detach_first {
                     model.close(&mut world, holder);
-                    assert!(!model.pending[holder]);
+                    assert!(
+                        model.pending[holder],
+                        "pre-debtor holder close cannot release pending weight"
+                    );
                 }
                 model.close(&mut world, debtor);
                 assert!(resolved_portfolio_is_terminal(
@@ -309,7 +342,7 @@ fn v16_program_resolved_debtor_deletion_preserves_unsettled_cohort_attribution()
                     world.actors[debtor].portfolio
                 ));
                 assert_eq!(model.basis[debtor], 0);
-                assert_eq!(model.pending[holder], !detach_first);
+                assert!(model.pending[holder]);
                 assert!(model.pending[other_holder]);
                 assert_ne!(model.basis[other_debtor], 0);
                 assert!(!world.env.market_state().1.payout_snapshot_captured);
@@ -382,12 +415,18 @@ fn v16_program_resolved_debtor_deletion_preserves_unsettled_cohort_attribution()
                 model.assert_matches_with_deleted_debtor(&world, Some(debtor));
 
                 model.close_with_deleted_debtor(&mut world, other_holder, Some(debtor));
-                assert!(!model.pending[other_holder]);
+                assert!(
+                    model.pending[other_holder],
+                    "surviving holder keeps pending weight until its own debtor settles"
+                );
                 let before_retry = world.frame();
-                let error = world
-                    .payout(other_holder, false)
-                    .expect_err("deletion cannot pay or forgive the surviving debtor's obligation");
-                assert!(is_engine_non_progress_error(&error), "{error}");
+                assert_cu_within(
+                    "INV-039 surviving holder waiting retry",
+                    world
+                        .payout(other_holder, false)
+                        .expect("waiting holder retry is idempotent before debtor settlement"),
+                    CUSTODY_CU_LIMIT,
+                );
                 assert_eq!(world.frame(), before_retry);
                 model.assert_matches_with_deleted_debtor(&world, Some(debtor));
 
@@ -508,7 +547,9 @@ fn v16_program_settled_pending_cohorts_reach_exact_terminal_slab_close() {
             for holder in [0, 2] {
                 model.close(&mut world, holder);
             }
-            assert_eq!(model.pending, [false; 4]);
+            let mut expected_pending = [false; 4];
+            expected_pending[2 * last_pair] = true;
+            assert_eq!(model.pending, expected_pending);
             assert_ne!(model.basis[last_debtor], 0);
             for holder in [0, 2] {
                 assert_eq!(world.env.token_amount(world.actors[holder].token), 0);

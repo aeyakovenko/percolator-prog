@@ -19,14 +19,37 @@ struct FeeModel {
 }
 
 impl FeeModel {
-    fn settle(&mut self, actor: usize) {
+    fn settle(&mut self, world: &AttributionWorld, actor: usize) {
         let fee = RATE * u128::from(RESOLVED - self.fee_slots[actor]);
         self.budgets[0] += fee / 2;
         self.budgets[1] += fee - fee / 2;
         self.fee_slots[actor] = RESOLVED;
         if actor < 4 {
-            self.basis[actor] = 0;
-            self.pending[actor] = false;
+            if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio) {
+                self.basis[actor] = 0;
+                self.pending[actor] = false;
+                return;
+            }
+            let account = world.env.portfolio_state(world.actors[actor].portfolio);
+            let legs: Vec<_> = account
+                .legs
+                .iter()
+                .map(|leg| leg.try_to_runtime().unwrap())
+                .filter(|leg| leg.active)
+                .collect();
+            if legs.is_empty() {
+                self.basis[actor] = 0;
+                self.pending[actor] = false;
+                return;
+            }
+            assert_eq!(
+                legs.len(),
+                1,
+                "actor {actor}: terminal-fee model expects one canonical attribution leg"
+            );
+            let leg = legs[0];
+            self.basis[actor] = leg.basis_pos_q;
+            self.pending[actor] = leg.basis_pos_q == 0 && leg.loss_weight != 0;
         }
     }
 
@@ -299,60 +322,82 @@ fn v16_program_pending_cohort_terminal_fees_stop_at_resolution_and_reach_insuran
                         &allowed,
                         None,
                     ));
-                    model.settle(holder);
+                    model.settle(&world, holder);
                     model.check(&world);
                 }
-                assert_eq!(model.pending, [false; 4]);
+                assert_eq!(model.pending, [true, false, true, false]);
                 assert_eq!(model.fee_slots, [RESOLVED, 0, RESOLVED, 0, 0]);
 
                 world.env.svm.warp_to_slot(RESOLVED + 9 + delay);
                 let first = debtor_order[0];
                 let waiting_holder = debtor_order[1] - 1;
+                let prefix_allowed = [
+                    world.env.market,
+                    world.env.vault,
+                    world.actors[first].portfolio,
+                    world.actors[first].token,
+                    world.actors[waiting_holder].portfolio,
+                ];
                 peak_cu = peak_cu.max(land(
                     &mut world,
                     &[payouts[first].clone(), payouts[waiting_holder].clone()],
                     &[],
-                    &[],
-                    Some(3),
+                    &prefix_allowed,
+                    None,
                 ));
+                model.settle(&world, first);
+                model.settle(&world, waiting_holder);
                 model.check(&world);
                 for debtor in debtor_order {
-                    let allowed = [
-                        world.env.market,
-                        world.env.vault,
-                        world.actors[debtor].portfolio,
-                        world.actors[debtor].token,
-                    ];
-                    peak_cu = peak_cu.max(land(
-                        &mut world,
-                        &[payouts[debtor].clone()],
-                        &[],
-                        &allowed,
-                        None,
-                    ));
-                    model.settle(debtor);
+                    if !resolved_portfolio_is_terminal(&world.env, world.actors[debtor].portfolio) {
+                        let allowed = [
+                            world.env.market,
+                            world.env.vault,
+                            world.actors[debtor].portfolio,
+                            world.actors[debtor].token,
+                        ];
+                        peak_cu = peak_cu.max(land(
+                            &mut world,
+                            &[payouts[debtor].clone()],
+                            &[],
+                            &allowed,
+                            None,
+                        ));
+                        model.settle(&world, debtor);
+                    }
                     model.check(&world);
                     world
                         .env
                         .svm
                         .warp_to_slot(world.env.svm.get_sysvar::<Clock>().slot + 11);
                 }
-                for actor in [waiting_holder, first - 1, 4] {
-                    let allowed = [
-                        world.env.market,
-                        world.env.vault,
-                        world.actors[actor].portfolio,
-                        world.actors[actor].token,
-                    ];
-                    peak_cu = peak_cu.max(land(
-                        &mut world,
-                        &[payouts[actor].clone()],
-                        &[],
-                        &allowed,
-                        None,
-                    ));
-                    model.settle(actor);
-                    model.check(&world);
+                for _ in 0..6 {
+                    if [waiting_holder, first - 1, 4].into_iter().all(|actor| {
+                        resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio)
+                    }) {
+                        break;
+                    }
+                    for actor in [waiting_holder, first - 1, 4] {
+                        if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio)
+                        {
+                            continue;
+                        }
+                        let allowed = [
+                            world.env.market,
+                            world.env.vault,
+                            world.actors[actor].portfolio,
+                            world.actors[actor].token,
+                        ];
+                        peak_cu = peak_cu.max(land(
+                            &mut world,
+                            &[payouts[actor].clone()],
+                            &[],
+                            &allowed,
+                            None,
+                        ));
+                        model.settle(&world, actor);
+                        model.check(&world);
+                    }
                 }
                 assert_eq!(model.fee_slots, [RESOLVED; 5]);
                 assert_eq!(model.budgets, [400, 405]);

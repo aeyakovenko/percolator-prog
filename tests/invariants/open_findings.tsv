@@ -156,7 +156,7 @@
 416	LoF	PRIVILEGED	INV-005	independent-discovery	[PRIVILEGED LoF] Prevent cold-admin takeover of funded oracle
 417	LoF	BLOCKER	INV-067	independent-discovery	[BLOCKER LoF] Preserve resolved receipts across late backing expiry
 418	DoS	BLOCKER	INV-070	independent-discovery	[BLOCKER DoS] Retire native wSOL terminal insurance
-419	LoF	BLOCKER	INV-039	missing	[BLOCKER LoF] Retain pending loss weight through resolution
+419	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Retain pending loss weight through resolution
 420	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Make terminal provider claims permissionlessly payable
 421	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Make terminal insurance payout permissionless
 422	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Preserve Hybrid liquidation reward provenance
@@ -169,4 +169,4 @@
 432	LoF	PRIVILEGED	INV-014	independent-discovery	[PRIVILEGED LoF] Enforce retained single-CPI taker fee terms
 433	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Permit unsigned terminal reserve payouts
 434	LoF	BLOCKER	INV-027	independent-discovery	Settle flat-account fees before risk admission
-435	LoF	BLOCKER	INV-039	missing	[BLOCKER LoF] Preserve mixed-role resolved debt attribution
+435	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Preserve mixed-role resolved debt attribution

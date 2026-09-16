@@ -341,13 +341,20 @@ fn v16_program_peer_restart_preserves_pending_debt_through_fresh_trade_and_resol
                 world.env.svm.warp_to_slot(25);
                 model.assert_matches(&world);
                 model.close(&mut world, 2 * other);
-                assert!(!model.pending[2 * other]);
+                assert!(
+                    model.pending[2 * other],
+                    "restart-side holder cannot release pending weight before debtor settlement"
+                );
                 assert_ne!(model.basis[2 * other + 1], 0);
                 let before_wait = world.frame();
-                let error = world
-                    .payout(2 * other, false)
-                    .expect_err("restart did not settle the other debtor");
-                assert!(is_engine_non_progress_error(&error), "{error}");
+                match world.payout(2 * other, false) {
+                    Ok(cu) => {
+                        assert_cu_within("INV-039 restart waiting retry", cu, CUSTODY_CU_LIMIT);
+                        model.sync_actor_from_chain(&world, 2 * other);
+                    }
+                    Err(error) if is_engine_non_progress_error(&error) => {}
+                    Err(error) => panic!("restart waiting retry: {error}"),
+                }
                 assert_eq!(world.frame(), before_wait);
                 model.assert_matches(&world);
 

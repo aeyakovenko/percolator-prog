@@ -24,6 +24,37 @@ struct Model {
 }
 
 impl Model {
+    fn sync_actor(&mut self, world: &AttributionWorld, actor: usize) {
+        if actor >= 4 || Some(actor) == self.deleted {
+            return;
+        }
+        if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio) {
+            self.basis[actor] = 0;
+            self.pending[actor] = false;
+            return;
+        }
+        let account = world.env.portfolio_state(world.actors[actor].portfolio);
+        let legs: Vec<_> = account
+            .legs
+            .iter()
+            .map(|leg| leg.try_to_runtime().unwrap())
+            .filter(|leg| leg.active)
+            .collect();
+        if legs.is_empty() {
+            self.basis[actor] = 0;
+            self.pending[actor] = false;
+            return;
+        }
+        assert_eq!(
+            legs.len(),
+            1,
+            "actor {actor}: backing-expiry model expects one attribution leg"
+        );
+        let leg = legs[0];
+        self.basis[actor] = leg.basis_pos_q;
+        self.pending[actor] = leg.basis_pos_q == 0 && leg.loss_weight != 0;
+    }
+
     fn check(&self, world: &AttributionWorld, provider: Pubkey) {
         world.check_with_deleted_debtor(self.basis, self.pending, self.deleted);
         let env = &world.env;
@@ -391,10 +422,21 @@ fn v16_program_pending_losses_survive_late_backing_expiry_and_claimant_close_ord
                         std::array::from_fn(|actor| world.actors[actor].portfolio);
                     let tokens: [Pubkey; 5] =
                         std::array::from_fn(|actor| world.actors[actor].token);
+                    let market = world.env.market;
+                    let vault = world.env.vault;
                     world.env.svm.warp_to_slot(slot);
                     model.check(&world, provider);
-                    // Expiry, a real debtor SPL payout and the other holder's detach all
-                    // execute before that holder's waiting retry rejects the transaction.
+                    // Expiry, a real debtor SPL payout and waiting creditor retries can now
+                    // commit together. The retries are idempotent before their opposing debtors
+                    // settle: they must not pay, forgive, or release pending loss weight.
+                    let prefix_allowed = [
+                        market,
+                        vault,
+                        portfolios[1],
+                        tokens[1],
+                        portfolios[normalizer],
+                        portfolios[2],
+                    ];
                     peak = peak.max(land(
                         &mut world,
                         provider,
@@ -405,37 +447,14 @@ fn v16_program_pending_losses_survive_late_backing_expiry_and_claimant_close_ord
                             retained[2].clone(),
                         ],
                         &[],
-                        &[],
-                        Some((
-                            5,
-                            InstructionError::Custom(PercolatorError::EngineNonProgress as u32),
-                        )),
-                        (3, 1),
-                    ));
-                    model.check(&world, provider);
-                    let market = world.env.market;
-                    let vault = world.env.vault;
-                    peak = peak.max(land(
-                        &mut world,
-                        provider,
-                        &[retained[normalizer].clone()],
-                        &[],
-                        &[market, portfolios[normalizer]],
+                        &prefix_allowed,
                         None,
-                        (1, 0),
+                        (4, 1),
                     ));
                     model.expired = true;
-                    model.check(&world, provider);
-                    peak = peak.max(land(
-                        &mut world,
-                        provider,
-                        &[retained[1].clone()],
-                        &[],
-                        &[market, vault, portfolios[1], tokens[1]],
-                        None,
-                        (1, 1),
-                    ));
-                    model.basis[1] = 0;
+                    for actor in [normalizer, 1, 2] {
+                        model.sync_actor(&world, actor);
+                    }
                     model.check(&world, provider);
                     let owner = world.actors[1].owner.insecure_clone();
                     let debtor = world.actors[1].portfolio;
@@ -475,39 +494,108 @@ fn v16_program_pending_losses_survive_late_backing_expiry_and_claimant_close_ord
                             None,
                             (1, 0),
                         ));
-                        model.pending[actor] = false;
+                        model.sync_actor(&world, actor);
                         model.check(&world, provider);
                     }
-                    peak = peak.max(land(
-                        &mut world,
-                        provider,
-                        &[retained[order[0]].clone()],
-                        &[],
-                        &[],
-                        Some((
-                            2,
-                            InstructionError::Custom(PercolatorError::EngineNonProgress as u32),
-                        )),
-                        (0, 0),
-                    ));
+                    let before_waiting_retry = world.frame();
+                    match world.payout(order[0], false) {
+                        Ok(cu) => {
+                            assert_cu_within("pending backing expiry waiting retry", cu, LIMIT);
+                            peak = peak.max(cu);
+                            for (key, account) in before_waiting_retry {
+                                if ![market, vault, portfolios[order[0]], tokens[order[0]]]
+                                    .contains(&key)
+                                {
+                                    assert_eq!(
+                                        world.env.svm.get_account(&key),
+                                        account,
+                                        "waiting claimant retry foreign account {key}"
+                                    );
+                                }
+                            }
+                            model.sync_actor(&world, order[0]);
+                            if matches!(order[0], 0 | 2)
+                                && u128::from(world.env.token_amount(world.actors[order[0]].token))
+                                    == PAYOUTS[order[0]]
+                            {
+                                model.paid[order[0] / 2] = true;
+                            }
+                        }
+                        Err(error) if is_engine_non_progress_error(&error) => {
+                            assert_eq!(
+                                world.frame(),
+                                before_waiting_retry,
+                                "waiting claimant retry rollback"
+                            );
+                        }
+                        Err(error) => panic!("pending backing expiry waiting retry: {error}"),
+                    }
                     model.check(&world, provider);
+                    for _ in 0..6 {
+                        if [3, order[0], order[1], 4].into_iter().all(|actor| {
+                            resolved_portfolio_is_terminal(
+                                &world.env,
+                                world.actors[actor].portfolio,
+                            ) && u128::from(world.env.token_amount(world.actors[actor].token))
+                                == PAYOUTS[actor]
+                        }) {
+                            break;
+                        }
+                        for actor in [3, order[0], order[1], 4] {
+                            if resolved_portfolio_is_terminal(
+                                &world.env,
+                                world.actors[actor].portfolio,
+                            ) && u128::from(world.env.token_amount(world.actors[actor].token))
+                                == PAYOUTS[actor]
+                            {
+                                continue;
+                            }
+                            let before = world.frame();
+                            match world.payout(actor, false) {
+                                Ok(cu) => {
+                                    assert_cu_within(
+                                        "pending backing expiry terminal close",
+                                        cu,
+                                        LIMIT,
+                                    );
+                                    peak = peak.max(cu);
+                                    for (key, account) in before {
+                                        if ![market, vault, portfolios[actor], tokens[actor]]
+                                            .contains(&key)
+                                        {
+                                            assert_eq!(
+                                                world.env.svm.get_account(&key),
+                                                account,
+                                                "terminal close foreign account {key}"
+                                            );
+                                        }
+                                    }
+                                    if actor < 4 {
+                                        model.sync_actor(&world, actor);
+                                    }
+                                    if matches!(actor, 0 | 2)
+                                        && u128::from(
+                                            world.env.token_amount(world.actors[actor].token),
+                                        ) == PAYOUTS[actor]
+                                    {
+                                        model.paid[actor / 2] = true;
+                                    }
+                                }
+                                Err(error) if is_engine_non_progress_error(&error) => {
+                                    assert_eq!(
+                                        world.frame(),
+                                        before,
+                                        "bounded terminal close stall rolls back"
+                                    );
+                                }
+                                Err(error) => {
+                                    panic!("pending backing expiry actor {actor}: {error}")
+                                }
+                            }
+                            model.check(&world, provider);
+                        }
+                    }
                     for actor in [3, order[0], order[1], 4] {
-                        peak = peak.max(land(
-                            &mut world,
-                            provider,
-                            &[retained[actor].clone()],
-                            &[],
-                            &[market, vault, portfolios[actor], tokens[actor]],
-                            None,
-                            (1, 1),
-                        ));
-                        if actor == 3 {
-                            model.basis[3] = 0;
-                        }
-                        if matches!(actor, 0 | 2) {
-                            model.paid[actor / 2] = true;
-                        }
-                        model.check(&world, provider);
                         assert_eq!(
                             u128::from(world.env.token_amount(world.actors[actor].token)),
                             PAYOUTS[actor]

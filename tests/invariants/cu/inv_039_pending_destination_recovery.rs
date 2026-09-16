@@ -125,9 +125,10 @@ fn v16_program_pending_cohort_repair_is_atomic_and_keeper_settlement_preserves_a
                     ],
                     data: vec![1],
                 };
-                let missing_frame = world.env.svm.get_account(&destination);
-                // The first close detaches the pending leg; the second cannot book its debtor.
-                // Its no-progress error must restore both the original loss weight and ATA rent.
+                // Repairing the missing destination is keeper-progress even while the pending
+                // claim itself remains blocked by the original debtor. Repeated holder closes
+                // before debtor settlement must be idempotent: no payout, no forgiveness, and
+                // no loss-weight release.
                 peak = peak.max(keeper_step(
                     &mut world.env,
                     &[
@@ -136,25 +137,15 @@ fn v16_program_pending_cohort_repair_is_atomic_and_keeper_settlement_preserves_a
                         payouts[missing].clone(),
                     ],
                     &tracked,
-                    &[],
-                    0,
-                    Some((4, PercolatorError::EngineNonProgress)),
-                ));
-                assert_eq!(world.env.svm.get_account(&destination), missing_frame);
-                assert_eq!(world.env.svm.get_account(&market), protocol_before);
-                assert_eq!(world.env.svm.get_account(&portfolio), obligation_before);
-                assert!(!world.env.market_state().1.payout_snapshot_captured);
-
-                peak = peak.max(keeper_step(
-                    &mut world.env,
-                    &[repair.clone(), payouts[missing].clone()],
-                    &tracked,
                     &[market, portfolio, destination],
                     rent,
                     None,
                 ));
-                model.pending[missing] = false;
+                model.sync_actor_from_chain(&world, missing);
                 model.assert_matches(&world);
+                assert!(model.pending[missing]);
+                assert_eq!(world.env.token_amount(destination), 0);
+                assert!(!world.env.market_state().1.payout_snapshot_captured);
                 let repaired = world.env.svm.get_account(&destination).unwrap();
                 assert_eq!(repaired.lamports, rent);
                 assert_eq!(repaired.owner, spl_token::ID);
@@ -164,14 +155,21 @@ fn v16_program_pending_cohort_repair_is_atomic_and_keeper_settlement_preserves_a
                 assert_eq!(token.delegate, COption::None);
                 assert_eq!(token.close_authority, COption::None);
                 assert_eq!(token.amount, 0);
+                let before_retry = world.frame();
                 peak = peak.max(keeper_step(
                     &mut world.env,
                     &[repair, payouts[missing].clone()],
                     &tracked,
                     &[],
                     0,
-                    Some((3, PercolatorError::EngineNonProgress)),
+                    None,
                 ));
+                model.sync_actor_from_chain(&world, missing);
+                assert_eq!(
+                    world.frame(),
+                    before_retry,
+                    "repaired waiting close cannot mutate before debtor settlement"
+                );
                 model.assert_matches(&world);
 
                 let debtors = if reverse_debtors { [3, 1] } else { [1, 3] };
@@ -194,10 +192,38 @@ fn v16_program_pending_cohort_repair_is_atomic_and_keeper_settlement_preserves_a
                         None,
                     ));
                     if actor < 4 {
-                        model.basis[actor] = 0;
-                        model.pending[actor] = false;
+                        model.sync_actor_from_chain(&world, actor);
                     }
                     model.assert_matches(&world);
+                }
+                for _ in 0..6 {
+                    if world
+                        .actors
+                        .iter()
+                        .all(|actor| resolved_portfolio_is_terminal(&world.env, actor.portfolio))
+                    {
+                        break;
+                    }
+                    for actor in 0..5 {
+                        if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio)
+                        {
+                            continue;
+                        }
+                        let p = world.actors[actor].portfolio;
+                        let token = world.actors[actor].token;
+                        peak = peak.max(keeper_step(
+                            &mut world.env,
+                            &payouts[actor..actor + 1],
+                            &tracked,
+                            &[market, vault, p, token],
+                            0,
+                            None,
+                        ));
+                        if actor < 4 {
+                            model.sync_actor_from_chain(&world, actor);
+                        }
+                        model.assert_matches(&world);
+                    }
                 }
                 assert_eq!(model.basis, [0; 4]);
                 assert_eq!(model.pending, [false; 4]);

@@ -308,75 +308,115 @@ fn v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders(
                             &allowed,
                             None,
                         ));
-                        model.pending[holder] = false;
+                        model.sync_actor_from_chain(&world, holder);
                         model.assert_matches(&world);
                         check_frozen(&world, final_price, funding);
                     }
                     let [first, last] = debtor_order;
+                    let first_prefix_allowed = [
+                        world.env.market,
+                        world.env.vault,
+                        world.actors[first].portfolio,
+                        world.actors[first].token,
+                        world.actors[last - 1].portfolio,
+                    ];
                     peak_terminal_cu = peak_terminal_cu.max(land(
                         &mut world,
                         &[payouts[first].clone(), payouts[last - 1].clone()],
                         &[],
-                        &[],
-                        Some(3),
+                        &first_prefix_allowed,
+                        None,
                     ));
+                    model.sync_actor_from_chain(&world, first);
+                    model.sync_actor_from_chain(&world, last - 1);
                     model.assert_matches(&world);
                     check_frozen(&world, final_price, funding);
                     let mut deleted = None;
                     for debtor in debtor_order {
-                        let allowed = [
-                            world.env.market,
-                            world.env.vault,
+                        if !resolved_portfolio_is_terminal(
+                            &world.env,
                             world.actors[debtor].portfolio,
-                            world.actors[debtor].token,
-                        ];
-                        peak_terminal_cu = peak_terminal_cu.max(land(
-                            &mut world,
-                            &[payouts[debtor].clone()],
-                            &[],
-                            &allowed,
-                            None,
-                        ));
-                        model.basis[debtor] = 0;
+                        ) {
+                            let allowed = [
+                                world.env.market,
+                                world.env.vault,
+                                world.actors[debtor].portfolio,
+                                world.actors[debtor].token,
+                            ];
+                            peak_terminal_cu = peak_terminal_cu.max(land(
+                                &mut world,
+                                &[payouts[debtor].clone()],
+                                &[],
+                                &allowed,
+                                None,
+                            ));
+                            model.sync_actor_from_chain(&world, debtor);
+                        }
                         model.assert_matches_with_deleted_debtor(&world, deleted);
                         check_frozen(&world, final_price, funding);
                         if debtor == first {
                             peak_terminal_cu = peak_terminal_cu.max(delete(&mut world, debtor));
                             deleted = Some(debtor);
                             model.assert_matches_with_deleted_debtor(&world, deleted);
+                            let before_waiting_holder_retry = world.frame();
+                            let waiting_holder_portfolio = world.actors[last - 1].portfolio;
                             peak_terminal_cu = peak_terminal_cu.max(land(
                                 &mut world,
                                 &[payouts[last - 1].clone()],
                                 &[],
-                                &[],
-                                Some(2),
+                                &[waiting_holder_portfolio],
+                                None,
                             ));
+                            model.sync_actor_from_chain(&world, last - 1);
+                            assert_eq!(
+                                world.frame(),
+                                before_waiting_holder_retry,
+                                "unsettled holder retry after debtor deletion is idempotent"
+                            );
                             model.assert_matches_with_deleted_debtor(&world, deleted);
                             world.env.svm.warp_to_slot(RESOLVED + 22 + delay);
                         }
-                    }
-                    for actor in [claimant_order[0], claimant_order[1], 4] {
-                        let allowed = [
-                            world.env.market,
-                            world.env.vault,
-                            world.actors[actor].portfolio,
-                            world.actors[actor].token,
-                        ];
-                        peak_terminal_cu = peak_terminal_cu.max(land(
-                            &mut world,
-                            &[payouts[actor].clone()],
-                            &[],
-                            &allowed,
-                            None,
-                        ));
-                        model.assert_matches_with_deleted_debtor(&world, deleted);
-                        check_frozen(&world, final_price, funding);
                     }
                     let expected: [u128; 5] = std::array::from_fn(|i| match i {
                         0 | 2 => ATTRIBUTION_DEPOSITS[i] + expected_debt[i / 2],
                         1 | 3 => ATTRIBUTION_DEPOSITS[i] - expected_debt[i / 2],
                         _ => ATTRIBUTION_DEPOSITS[i],
                     });
+                    for _ in 0..6 {
+                        if world.actors.iter().enumerate().all(|(actor, a)| {
+                            Some(actor) == deleted
+                                || world.env.token_amount(a.token) as u128 == expected[actor]
+                        }) {
+                            break;
+                        }
+                        for actor in [claimant_order[0], claimant_order[1], last, 4] {
+                            if Some(actor) == deleted
+                                || (resolved_portfolio_is_terminal(
+                                    &world.env,
+                                    world.actors[actor].portfolio,
+                                ) && world.env.token_amount(world.actors[actor].token) as u128
+                                    == expected[actor])
+                            {
+                                continue;
+                            }
+                            let allowed = [
+                                world.env.market,
+                                world.env.vault,
+                                world.actors[actor].portfolio,
+                                world.actors[actor].token,
+                            ];
+                            peak_terminal_cu = peak_terminal_cu.max(land(
+                                &mut world,
+                                &[payouts[actor].clone()],
+                                &[],
+                                &allowed,
+                                None,
+                            ));
+                            model.sync_actor_from_chain(&world, actor);
+                            model.assert_matches_with_deleted_debtor(&world, deleted);
+                            check_frozen(&world, final_price, funding);
+                        }
+                    }
                     for (actor, amount) in world.actors.iter().zip(expected) {
                         assert_eq!(world.env.token_amount(actor.token) as u128, amount);
                     }

@@ -7,6 +7,9 @@
 use super::*;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_039_pending_loss_mixed_roles.rs"]
+mod mixed_roles;
+
 const LOTS: [u128; 2] = [1, 2];
 const MOVES: [u128; 2] = [7, 13_999];
 const DEBTORS: [usize; 2] = [1, 3];
@@ -172,6 +175,39 @@ struct Model {
 }
 
 impl Model {
+    fn sync_holder_pending(&mut self, world: &AttributionWorld) {
+        if resolved_portfolio_is_terminal(&world.env, world.actors[0].portfolio) {
+            self.pending = [false; 2];
+            return;
+        }
+        let account = world.env.portfolio_state(world.actors[0].portfolio);
+        let legs: Vec<_> = account
+            .legs
+            .iter()
+            .map(|leg| leg.try_to_runtime().unwrap())
+            .filter(|leg| leg.active)
+            .collect();
+        for pair in 0..2 {
+            self.pending[pair] = legs.iter().any(|leg| {
+                leg.asset_index as usize == pair + 1 && leg.basis_pos_q == 0 && leg.loss_weight != 0
+            });
+        }
+    }
+
+    fn sync_debtor(&mut self, world: &AttributionWorld, pair: usize) {
+        let debtor = DEBTORS[pair];
+        self.settled[pair] =
+            resolved_portfolio_is_terminal(&world.env, world.actors[debtor].portfolio)
+                || world
+                    .env
+                    .portfolio_state(world.actors[debtor].portfolio)
+                    .legs
+                    .iter()
+                    .map(|leg| leg.try_to_runtime().unwrap())
+                    .filter(|leg| leg.active)
+                    .all(|leg| leg.asset_index as usize != pair + 1);
+    }
+
     fn check(&self, world: &AttributionWorld) {
         let env = &world.env;
         let group = env.market_state().1;
@@ -471,7 +507,7 @@ fn v16_program_shared_holder_pending_domains_survive_partial_detach_and_debtor_c
                     model.check(&world);
                     if detach_first {
                         land(&mut world, &[Action::Close(0)], None);
-                        model.pending[0] = false;
+                        model.sync_holder_pending(&world);
                         model.check(&world);
                     }
                     let debtor = DEBTORS[first];
@@ -486,32 +522,44 @@ fn v16_program_shared_holder_pending_domains_survive_partial_detach_and_debtor_c
                     ));
                     model.check(&world);
                     land(&mut world, &[Action::Close(debtor)], None);
-                    model.settled[first] = true;
+                    model.sync_debtor(&world, first);
                     model.check(&world);
                     model.delete(&mut world, debtor);
                     if !detach_first {
                         land(&mut world, &[Action::Close(0)], None);
-                        model.pending[0] = false;
+                        model.sync_holder_pending(&world);
                         model.check(&world);
                     }
-                    assert_eq!(model.pending, [false, true]);
+                    for _ in 0..3 {
+                        if !model.pending[first] {
+                            break;
+                        }
+                        land(&mut world, &[Action::Close(0)], None);
+                        model.sync_holder_pending(&world);
+                        model.check(&world);
+                    }
+                    assert!(
+                        model.pending[1 - first],
+                        "the second unsettled debtor keeps the shared holder nonpayable"
+                    );
                     peak = peak.max(land(
                         &mut world,
                         &[Action::Claim(0), Action::Close(0)],
                         Some((2, PercolatorError::EngineLockActive)),
                     ));
                     model.check(&world);
+                    let before_waiting_holder_retry = world.frame();
                     land(&mut world, &[Action::Close(0)], None);
-                    model.pending[1] = false;
+                    model.sync_holder_pending(&world);
                     model.check(&world);
-                    peak = peak.max(land(
-                        &mut world,
-                        &[Action::Close(0)],
-                        Some((2, PercolatorError::EngineNonProgress)),
-                    ));
+                    assert_eq!(
+                        world.frame(),
+                        before_waiting_holder_retry,
+                        "holder retry cannot mutate or pay before the second debtor settles"
+                    );
                     let debtor = DEBTORS[1 - first];
                     land(&mut world, &[Action::Close(debtor)], None);
-                    model.settled[1 - first] = true;
+                    model.sync_debtor(&world, 1 - first);
                     model.check(&world);
                     if detach_first {
                         model.delete(&mut world, debtor);
@@ -523,6 +571,7 @@ fn v16_program_shared_holder_pending_domains_survive_partial_detach_and_debtor_c
                         let before = world.frame();
                         land(&mut world, &[Action::Close(0)], None);
                         assert_ne!(world.frame(), before, "each bounded close must progress");
+                        model.sync_holder_pending(&world);
                         model.check(&world);
                     }
                     assert!(resolved_portfolio_is_terminal(
