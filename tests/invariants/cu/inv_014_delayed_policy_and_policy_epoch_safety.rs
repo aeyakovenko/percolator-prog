@@ -179,6 +179,19 @@ fn v16_program_retained_fee_consent_witness_roster_is_source_complete() {
     let mut seen = std::collections::BTreeSet::new();
     for witness in WITNESSES {
         assert!(seen.insert(witness.function), "duplicate INV-014 witness");
+        assert!(
+            witness.path.starts_with("tests/invariants/")
+                && witness.path.ends_with(".rs")
+                && !witness.path.contains(".."),
+            "INV-014 retained-fee witness points outside invariant tests: {}",
+            witness.path
+        );
+        assert!(
+            witness.function.starts_with("v16_"),
+            "INV-014 retained-fee witness uses an unreviewed test name: {}#{}",
+            witness.path,
+            witness.function
+        );
         let source = std::fs::read_to_string(root.join(witness.path))
             .unwrap_or_else(|error| panic!("read {}: {error}", witness.path));
         assert!(
