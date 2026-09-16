@@ -23,6 +23,19 @@
 
 use super::*;
 
+fn inv018_source_defines_function(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.strip_prefix(&expected)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+            || line
+                .strip_prefix("pub ")
+                .and_then(|tail| tail.strip_prefix(&expected))
+                .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
 fn inv018_initialize_token_account(env: &mut V16CuEnv, account: &Keypair, owner: Pubkey) {
     system_create_account_for_test(
         &mut env.svm,
@@ -423,7 +436,7 @@ fn v16_program_spl_account_parser_is_single_gateway_and_reuses_validated_state()
         "handlers must consume validated SPL state instead of unpacking account bytes directly",
     );
     assert!(
-        source.contains("fn require_token_balance(balance: u64"),
+        inv018_source_defines_function(source, "require_token_balance"),
         "balance checks must consume the already validated SPL state",
     );
     assert!(

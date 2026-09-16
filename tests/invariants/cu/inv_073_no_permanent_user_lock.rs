@@ -6769,6 +6769,19 @@ fn inv073_source_defines_kani_proof(source: &str, function: &str) -> bool {
     false
 }
 
+fn inv073_source_defines_function(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.strip_prefix(&expected)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+            || line
+                .strip_prefix("pub ")
+                .and_then(|tail| tail.strip_prefix(&expected))
+                .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
 fn inv073_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let start_offset = source
         .find(start)
@@ -7149,5 +7162,8 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
         "kani_inv082_terminal_administration_is_finite_and_not_permissionless"
     ));
     assert!(rank_proof.contains("struct TerminalAdministrationRank"));
-    assert!(rank_proof.contains("fn inv082_terminal_step_requires_signer"));
+    assert!(inv073_source_defines_function(
+        rank_proof,
+        "inv082_terminal_step_requires_signer"
+    ));
 }

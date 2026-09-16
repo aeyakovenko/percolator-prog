@@ -21,6 +21,19 @@
 
 use super::*;
 
+fn inv048_source_defines_function(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.strip_prefix(&expected)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+            || line
+                .strip_prefix("pub ")
+                .and_then(|tail| tail.strip_prefix(&expected))
+                .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 enum MatchedTradeRoute {
     TradeNoCpi,
@@ -320,7 +333,10 @@ fn v16_program_typed_matched_book_obligation_oracle_is_source_complete() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let model = include_str!("../../support/fuzz_model.rs");
     assert!(model.contains("struct MatchedBookObligationCensus"));
-    assert!(model.contains("fn matched_book_obligation_census("));
+    assert!(inv048_source_defines_function(
+        model,
+        "matched_book_obligation_census"
+    ));
     assert!(model.contains("matched_book_obligations: [MatchedBookObligationCensus; ASSET_COUNT]"));
     assert!(
         !model.contains("protocol_positions"),

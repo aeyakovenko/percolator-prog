@@ -39,6 +39,19 @@ fn inv007_source_defines_test(source: &str, function: &str) -> bool {
     false
 }
 
+fn inv007_source_defines_function(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.strip_prefix(&expected)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+            || line
+                .strip_prefix("pub ")
+                .and_then(|tail| tail.strip_prefix(&expected))
+                .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
 #[test]
 fn v16_wrapper_account_incarnation_census_is_source_complete() {
     let source = include_str!("../../../src/v16_program.rs");
@@ -99,7 +112,10 @@ fn v16_wrapper_account_incarnation_census_is_source_complete() {
     // matcher context is owned by the configured external program and is separately exercised
     // through public same-address context recreation under INV-019.
     assert!(source.contains("PortfolioAccountV16Account"));
-    assert!(source.contains("fn matcher_config_bytes(data: &[u8])"));
+    assert!(inv007_source_defines_function(
+        source,
+        "matcher_config_bytes"
+    ));
     assert!(source
         .contains("Pubkey::find_program_address(\n            &[\n                b\"matcher\""));
 
