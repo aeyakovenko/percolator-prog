@@ -1,5 +1,19 @@
 # Invariant-owned test coverage
 
+## INV-017 valid resolved owner/destination alias (2026-09-16)
+
+Owner: [cu/inv_017_resolved_owner_destination_alias.rs](cu/inv_017_resolved_owner_destination_alias.rs).
+One public LiteSVM test compares self-owned SPL owner/destination aliases with
+distinct destinations across both resolved-close entrypoints and claimant orders.
+Eight worlds produce 16 positive receipt top-ups, 16 exact post-engine rollbacks,
+16 no-op retries, 16 portfolio rent sweeps and 16 SPL rent recoveries. Payouts remain
+spendable; the final run peaks at 242,210 CU against the 300,000 bound.
+Two temporary test-only negative controls fail as intended. Existing pairwise
+substitution matrices reject malformed aliases; they do not construct this valid
+shape. Final exact checks: 4 INV-017 tests and 2 metadata guards passed, none failed
+or ignored. No production or invariant-status change.
+[Exact selectors, non-duplication review, controls and limits](inv_017_resolved_owner_alias_audit_20260916.md).
+
 ## INV-067 receipt custody account boundaries (2026-09-16)
 
 Owner: [cu/inv_067_receipt_custody_boundary.rs](cu/inv_067_receipt_custody_boundary.rs),

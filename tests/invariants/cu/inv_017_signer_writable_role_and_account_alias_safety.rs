@@ -35,12 +35,18 @@
 //! downgrades; permissionless stale resolution adds its sole writable-role downgrade. Accepted
 //! self-cranker, unsigned no-reward-crank, and readonly reward-cranker cases have explicit economic
 //! controls.
+//! The resolved-owner/destination child also constructs a valid self-owned SPL alias and compares
+//! its unsigned partial receipts, top-ups, spendable payout and rent disposition with distinct
+//! destinations. Pairwise substitution fixtures alone do not cover this accepted account shape.
 //!
 //! Guarantee boundary: this exhausts pairwise aliases and required privilege downgrades for every
 //! current successful public account shape. It does not prove higher-arity alias combinations or
 //! the instructions' non-account-role economic invariants.
 
 use super::*;
+
+#[path = "inv_017_resolved_owner_destination_alias.rs"]
+mod resolved_owner_destination_alias;
 
 fn inv017_source_defines_test(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
