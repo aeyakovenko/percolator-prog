@@ -1,5 +1,20 @@
 # Invariant-owned test coverage
 
+## INV-036 clipped fee redirect partitions (2026-09-16)
+
+Owner: [stateful/inv_036_clipped_redirect_partition.rs](stateful/inv_036_clipped_redirect_partition.rs).
+`v16_program_clipped_redirect_fees_preserve_rounding_and_recipient_payouts`
+composes capital-clipped mixed-direction closes with per-charge redirect rounding
+and three distinct fee recipients. Four transports, both participant orders, both
+leg orders, and capital one atom below/above the first fee cover **32 worlds**,
+**712 public transactions**, **288 exact-rollback rejections**, and **96 balanced
+negative controls**. Every world drains all quote through exact recipient and
+trader SPL payouts. Pooling redirects before splitting sides passes the stock
+census but assigns one atom to the wrong side; the independent partition rejects it.
+Maximum observed CU: **466,501**. This adds INV-024/036/038/040 execution evidence;
+production code, dependency pins and invariant statuses are unchanged.
+[Audit, exact selectors, duplicate exclusions and limits](inv_036_clipped_redirect_audit_20260916.md).
+
 ## INV-020 current-observation evidence fidelity (2026-09-16)
 
 Owner: [public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs](public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs).
