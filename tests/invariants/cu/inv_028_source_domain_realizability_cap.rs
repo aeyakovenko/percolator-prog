@@ -58,6 +58,9 @@ mod single_slot_admission;
 #[path = "inv_028_max_source_mixed_availability.rs"]
 mod max_source_mixed_availability;
 
+#[path = "inv_028_shared_discounted_refill.rs"]
+mod shared_discounted_refill;
+
 #[test]
 fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
     const Q: i128 = 1_000 * POS_SCALE as i128;
