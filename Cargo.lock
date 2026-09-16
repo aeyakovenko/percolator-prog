@@ -2672,6 +2672,7 @@ dependencies = [
  "solana-sdk",
  "spl-token",
  "spl-token-2022",
+ "syn 2.0.117",
  "thiserror 1.0.69",
  "tokio",
 ]
