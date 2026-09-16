@@ -1,5 +1,26 @@
 # Invariant-owned test coverage
 
+## INV-060 flat first-open maintenance admission (2026-09-16)
+
+Owner:
+[cu/inv_060_single_sided_margin_and_penalty_accounting.rs](cu/inv_060_single_sided_margin_and_penalty_accounting.rs).
+The selector
+`v16_program_flat_first_open_collects_maintenance_before_margin_admission`
+ages two flat funded portfolios through authenticated market cranks, then submits
+their first risk-increasing trade through all four trade transports. The
+one-atom-too-large open must reject with exact rollback because the wrapper
+collects each account's accrued maintenance before initial-margin admission; the
+exact post-fee boundary then opens and leaves the thin party at zero IM headroom.
+Same-slot explicit maintenance syncs are exact no-ops, proving the fee was
+charged once before first open rather than skipped and later double-collected.
+
+This closes the previously documented flat/no-position branch gap adjacent to
+the existing INV-060 nonflat accrued-fee admission matrix. It is bounded
+INV-060/080 evidence only: it does not promote any invariant status or prove
+arbitrary maintenance-fee histories, exhausted-fee debts, simultaneous funding
+or oracle lag, CPI tail products beyond the four standard trade transports, or
+maximum shapes.
+
 ## Rows 419 and 435 INV-039 coverage closure (2026-09-16)
 
 Owner: [cu/inv_039_pending_loss_obligation_durability.rs](cu/inv_039_pending_loss_obligation_durability.rs).
@@ -29817,12 +29838,11 @@ also start after an explicit debit. Here the direct path must account uncollecte
 inside admission, on both parties, at a one-atom-discriminating new-asset risk boundary.
 
 Scope is already-live portfolios, two assets, one-leg batches, fixed AuthMark prices and fee
-rate, and fully collectible maintenance. Flat/no-position first opens remain an OPEN gap:
-the current `collect_maintenance_fee_before_trade_view` explicitly defers flat-account fees.
-This test does not certify that branch or close reopening 413 / INV-060. Exhausted-capital fee
-debt, simultaneous lag/funding/pending obligations, wider histories, multi-leg batches, and
-maximum shapes remain outside this increment. There are no production, dependency, engine-proof,
-or invariant-status changes, and no direct economic state-byte mutation.
+rate, and fully collectible maintenance. The 2026-09-16 flat-first-open selector now owns the
+flat/no-position first-risk branch. Exhausted-capital fee debt, simultaneous lag/funding/pending
+obligations, wider histories, multi-leg batches, and maximum shapes remain outside this increment.
+There are no production, dependency, engine-proof, or invariant-status changes, and no direct
+economic state-byte mutation.
 
 Validation on base `6abf756f` / engine `495a5590` uses only the supplied cached default SBF
 `230b6db1278dbff258c84f9a3df78c7d9decc6f8653fe06c46fa5ea9834afb20` and the cached auth matcher

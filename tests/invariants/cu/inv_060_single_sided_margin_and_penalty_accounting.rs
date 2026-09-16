@@ -11,7 +11,9 @@
 //! and a four-world exact lane decomposition for maintenance fee plus lag.
 //! The accrued-fee admission matrix adds an exact second-asset opening boundary
 //! for already-live accounts, before any explicit fee synchronization, across all
-//! trade transports and both constrained parties. It does not certify flat first opens.
+//! trade transports and both constrained parties. The flat first-open matrix adds
+//! the same ordering check for accounts whose fee anchor advanced before their
+//! first position.
 //!
 //! Shared independent evidence (F/I/M): `support::fuzz_model` recomputes every
 //! current certificate from raw wrapper state without invoking the engine refresh
@@ -27,6 +29,265 @@
 
 use super::*;
 use crate::support::fuzz_model::{assert_current_certificate_matches_independent, TradeRoute};
+
+#[test]
+fn v16_program_flat_first_open_collects_maintenance_before_margin_admission() {
+    const PRICE: u64 = 100;
+    const START_SLOT: u64 = 1;
+    const ADMISSION_SLOT: u64 = 4;
+    const FEE_PER_SLOT: u128 = 37;
+    const ACCRUED_FEE: u128 = FEE_PER_SLOT * (ADMISSION_SLOT - START_SLOT) as u128;
+    const THIN_CAPITAL: u128 = 200 + ACCRUED_FEE;
+    const PEER_CAPITAL: u128 = 1_000 + ACCRUED_FEE;
+    const SIZE_Q: i128 = 2 * POS_SCALE as i128;
+    const OVER_LIMIT_Q: i128 = SIZE_Q + (POS_SCALE / PRICE as u128) as i128;
+
+    assert_eq!(ACCRUED_FEE, 111);
+    assert_eq!(SIZE_Q.unsigned_abs() * u128::from(PRICE) / POS_SCALE, 200);
+    assert_eq!(
+        OVER_LIMIT_Q.unsigned_abs() * u128::from(PRICE) / POS_SCALE,
+        201
+    );
+    assert!(
+        THIN_CAPITAL >= 201,
+        "skipping flat-account fee collection would admit the larger first open"
+    );
+    assert_eq!(THIN_CAPITAL - ACCRUED_FEE, 200);
+
+    let mut worlds = 0;
+    let mut peak_trade_cu = 0;
+    for thin_party in 0..2 {
+        for route in [
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ] {
+            let label = format!("flat-first/{route:?}/thin={thin_party}");
+            let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+                1,
+                5_000,
+                10_000,
+                500,
+                FEE_PER_SLOT,
+            );
+            env.svm.warp_to_slot(START_SLOT);
+            env.configure_auth_mark_for_asset_as_admin(0, START_SLOT, PRICE);
+            let owners = [Keypair::new(), Keypair::new()];
+            let portfolios = owners.each_ref().map(|owner| env.create_portfolio(owner));
+            let keeper_owner = Keypair::new();
+            let keeper = env.create_portfolio(&keeper_owner);
+            let deposits = std::array::from_fn::<_, 2, _>(|party| {
+                if party == thin_party {
+                    THIN_CAPITAL
+                } else {
+                    PEER_CAPITAL
+                }
+            });
+            let sources = std::array::from_fn::<_, 2, _>(|party| {
+                env.deposit(&owners[party], portfolios[party], deposits[party])
+            });
+            let matcher = matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi).then(|| {
+                auth_matcher_for_lp_via_system_create(&mut env, &owners[1], portfolios[1])
+            });
+            let before_age = portfolios.map(|key| env.svm.get_account(&key));
+            for slot in START_SLOT + 1..=ADMISSION_SLOT {
+                env.svm.warp_to_slot(slot);
+                env.crank(
+                    keeper,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: crank_observations(0),
+                    },
+                );
+            }
+            assert_eq!(
+                portfolios.map(|key| env.svm.get_account(&key)),
+                before_age,
+                "{label}: aging the market cannot mutate flat portfolios"
+            );
+            let aged_group = env.market_state().1;
+            assert_eq!(aged_group.current_slot, ADMISSION_SLOT);
+            assert_eq!(aged_group.c_tot, THIN_CAPITAL + PEER_CAPITAL);
+            assert_eq!(aged_group.insurance, 0);
+            assert_eq!(aged_group.vault, THIN_CAPITAL + PEER_CAPITAL);
+            for party in 0..2 {
+                let account = env.portfolio_state(portfolios[party]);
+                assert_eq!(account.capital.get(), deposits[party], "{label}");
+                assert_eq!(account.last_fee_slot.get(), START_SLOT, "{label}");
+                assert!(active_bitmap(&account).iter().all(|word| *word == 0));
+                assert_eq!(health_cert(&account).certified_initial_req, 0);
+            }
+
+            let trade = |env: &mut V16CuEnv, size_q| {
+                let ix = match route {
+                    TradeRoute::NoCpi => {
+                        env.trade_no_cpi_ix(portfolios[0], portfolios[1], 0, size_q, PRICE, 0)
+                    }
+                    TradeRoute::Cpi => {
+                        env.trade_cpi_ix(portfolios[0], portfolios[1], 0, size_q, 0, PRICE)
+                    }
+                    TradeRoute::BatchNoCpi => env.batch_trade_no_cpi_ix(
+                        portfolios[0],
+                        portfolios[1],
+                        vec![BatchTradeLeg {
+                            asset_index: 0,
+                            market_id: env.asset_market_id(0),
+                            size_q,
+                            exec_price: PRICE,
+                            fee_bps: 0,
+                        }],
+                    ),
+                    TradeRoute::BatchCpi => env.batch_trade_cpi_ix_with_caps(
+                        portfolios[0],
+                        portfolios[1],
+                        vec![BatchTradeCpiLeg {
+                            asset_index: 0,
+                            market_id: env.asset_market_id(0),
+                            size_q,
+                            fee_bps: 0,
+                            limit_price: PRICE,
+                        }],
+                        0,
+                        0,
+                    ),
+                };
+                env.svm.expire_blockhash();
+                if let Some((program, context, delegate)) = matcher {
+                    env.send(
+                        ix,
+                        vec![
+                            AccountMeta::new(owners[0].pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(portfolios[0], false),
+                            AccountMeta::new(portfolios[1], false),
+                            AccountMeta::new_readonly(program, false),
+                            AccountMeta::new(context, false),
+                            AccountMeta::new_readonly(delegate, false),
+                        ],
+                        &[&owners[0]],
+                    )
+                } else {
+                    env.send(
+                        ix,
+                        vec![
+                            AccountMeta::new(owners[0].pubkey(), true),
+                            AccountMeta::new(owners[1].pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(portfolios[0], false),
+                            AccountMeta::new(portfolios[1], false),
+                        ],
+                        &[&owners[0], &owners[1]],
+                    )
+                }
+            };
+            let mut tracked = vec![
+                env.market,
+                portfolios[0],
+                portfolios[1],
+                keeper,
+                env.vault,
+                env.mint,
+                sources[0],
+                sources[1],
+                owners[0].pubkey(),
+                owners[1].pubkey(),
+                keeper_owner.pubkey(),
+                env.admin.pubkey(),
+                env.vault_authority,
+                env.program_id,
+                spl_token::ID,
+            ];
+            if let Some((program, context, delegate)) = matcher {
+                tracked.extend([program, context, delegate]);
+            }
+            let snapshot = |env: &V16CuEnv| {
+                tracked
+                    .iter()
+                    .map(|key| env.svm.get_account(key))
+                    .collect::<Vec<_>>()
+            };
+
+            let before_rejection = snapshot(&env);
+            let error = trade(&mut env, OVER_LIMIT_Q)
+                .expect_err("first open cannot use uncollected flat maintenance as IM headroom");
+            assert!(
+                error.contains(&format!(
+                    "Custom({})",
+                    PercolatorError::EngineInvalidConfig as u32
+                )),
+                "{label}: wrong admission error: {error}"
+            );
+            assert_eq!(
+                snapshot(&env),
+                before_rejection,
+                "{label}: rejected first open must roll back exactly"
+            );
+
+            let trade_cu =
+                trade(&mut env, SIZE_Q).expect("exact post-fee first-open boundary must admit");
+            assert_cu_within(&label, trade_cu, MULTI_ASSET_OPEN_TRADE_CU_LIMIT);
+            peak_trade_cu = peak_trade_cu.max(trade_cu);
+            let group = env.market_state().1;
+            assert_eq!(group.c_tot, THIN_CAPITAL + PEER_CAPITAL - 2 * ACCRUED_FEE);
+            assert_eq!(group.insurance, 2 * ACCRUED_FEE);
+            assert_eq!(group.vault, THIN_CAPITAL + PEER_CAPITAL);
+            assert_eq!(group.vault, group.c_tot + group.insurance);
+            assert_eq!(
+                group.vault,
+                u128::from(env.token_amount(env.vault)),
+                "{label}"
+            );
+            assert_eq!(group.insurance_domain_budget[0], 2 * (ACCRUED_FEE / 2));
+            assert_eq!(
+                group.insurance_domain_budget[1],
+                2 * (ACCRUED_FEE - ACCRUED_FEE / 2)
+            );
+            for party in 0..2 {
+                let account = env.portfolio_state(portfolios[party]);
+                let cert = health_cert(&account);
+                assert_eq!(account.capital.get(), deposits[party] - ACCRUED_FEE);
+                assert_eq!(account.last_fee_slot.get(), ADMISSION_SLOT);
+                assert_eq!(account.fee_credits.get(), 0);
+                assert_eq!(account.pnl.get(), 0);
+                assert_eq!(
+                    active_leg_for_asset(&account, 0).basis_pos_q,
+                    if party == 0 { SIZE_Q } else { -SIZE_Q },
+                    "{label}"
+                );
+                assert_eq!(cert.certified_equity, account.capital.get() as i128);
+                assert_eq!(cert.certified_initial_req, 200);
+                assert_eq!(cert.certified_maintenance_req, 100);
+                assert_eq!(cert.certified_worst_case_loss, 200);
+                assert_eq!(cert.certified_liq_deficit, 0);
+                assert!(
+                    assert_current_certificate_matches_independent(&label, &group, &account)
+                        .expect("flat first-open certificate must match independent model")
+                );
+            }
+            let thin = env.portfolio_state(portfolios[thin_party]);
+            let thin_cert = health_cert(&thin);
+            assert_eq!(
+                thin_cert.certified_equity - thin_cert.certified_initial_req as i128,
+                0,
+                "{label}: thin party is exactly at post-fee IM"
+            );
+            let after_admission = snapshot(&env);
+            for portfolio in portfolios {
+                env.svm.expire_blockhash();
+                env.sync_maintenance_fee_with_cu(portfolio, None, ADMISSION_SLOT);
+                assert_eq!(
+                    snapshot(&env),
+                    after_admission,
+                    "{label}: flat fee must be charged once before first open"
+                );
+            }
+            worlds += 1;
+        }
+    }
+    assert_eq!(worlds, 8);
+    println!("INV-060 flat first-open maintenance: {worlds} worlds, 8 exact rejections, 8 boundary admissions, 16 exact fee no-ops; peak_trade_cu={peak_trade_cu}");
+}
 
 #[test]
 fn v16_program_accrued_maintenance_precedes_new_asset_risk_admission() {
