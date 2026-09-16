@@ -1053,13 +1053,15 @@ fn v16_program_caller_input_roster_owns_every_production_field() {
             .split_once('#')
             .unwrap_or_else(|| panic!("evidence must be path#test on row {}", line_number + 1));
         assert!(
-            evidence_path.starts_with("tests/invariants/") && evidence_path.ends_with(".rs"),
+            evidence_path.starts_with("tests/invariants/")
+                && evidence_path.ends_with(".rs")
+                && !evidence_path.contains(".."),
             "INV-023 evidence path must stay under tests/invariants on row {}: {evidence_path}",
             line_number + 1
         );
         assert!(
-            !evidence_test.is_empty(),
-            "INV-023 evidence test is empty on row {}",
+            evidence_test.starts_with("v16_") || evidence_test.starts_with("host_"),
+            "INV-023 evidence test must be a reviewed v16/host witness on row {}: {evidence_path}#{evidence_test}",
             line_number + 1
         );
         let evidence_source = evidence_sources
