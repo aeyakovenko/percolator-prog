@@ -484,6 +484,246 @@ fn send_admin_control(env: &mut V16CuEnv, instruction: ProgInstruction) -> Resul
     )
 }
 
+// Opposite backing domains share policy supersession, but unchanged fee terms
+// keep retained funding live. A failed funded prefix must consume neither lane.
+#[test]
+fn v16_backing_policy_cross_side_supersession_preserves_retained_funding() {
+    use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const AMOUNT: u64 = 37;
+    const SUPPLY: u64 = 83;
+    let mut peak_cu = 0;
+    let mut rollbacks = 0;
+    for asset in [0u16, 1] {
+        for first_side in [0u16, 1] {
+            let mut env = inv018_public_spl_market_with_params(
+                6,
+                V16CuMarketParams {
+                    max_portfolio_assets: 2,
+                    ..V16CuMarketParams::default()
+                },
+            );
+            let source =
+                create_ata_for_test(&mut env.svm, &env.payer, env.admin.pubkey(), env.mint);
+            send_raw_tx(
+                &mut env.svm,
+                &env.payer,
+                spl_token::instruction::mint_to(
+                    &spl_token::ID,
+                    &env.mint,
+                    &source,
+                    &env.admin.pubkey(),
+                    &[],
+                    SUPPLY,
+                )
+                .unwrap(),
+                &[&env.admin],
+            )
+            .unwrap();
+            let domains = [2 * asset + first_side, 2 * asset + (1 - first_side)];
+            let initial_controls = env.control_sequences(asset as usize);
+            let peer_slot = market_engine_slot_bytes(
+                &env.svm.get_account(&env.market).unwrap().data,
+                usize::from(1 - asset),
+            )
+            .to_vec();
+            let policy = |domain, fee_bps, policy_sequence| Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                data: ProgInstruction::UpdateBackingFeePolicy {
+                    domain,
+                    market_id: env.asset_market_id(asset),
+                    fee_bps,
+                    insurance_share_bps: 0,
+                    policy_sequence,
+                    authority_epoch: initial_controls.authority_epoch,
+                }
+                .encode(),
+            };
+            let funding = |domain, backing_fee_bps| Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                data: ProgInstruction::TopUpBackingBucket {
+                    domain,
+                    market_id: env.asset_market_id(asset),
+                    authority_epoch: initial_controls.authority_epoch,
+                    intent_id: 1,
+                    backing_fee_bps,
+                    insurance_share_bps: 0,
+                    amount: AMOUNT.into(),
+                    expiry_slot: 100,
+                }
+                .encode(),
+            };
+            let first = policy(domains[0], 37, 17);
+            let second = policy(domains[1], 61, 17);
+            let renewed = policy(domains[1], 61, 18);
+            let first_funding = funding(domains[0], 37);
+            let second_funding = funding(domains[1], 0);
+            let sign = |instructions: &[Instruction], nonce: u32| {
+                let mut ixs = vec![
+                    heap_ix(),
+                    ComputeBudgetInstruction::set_compute_unit_limit(1_400_000 - nonce),
+                ];
+                ixs.extend_from_slice(instructions);
+                let tx = Transaction::new_signed_with_payer(
+                    &ixs,
+                    Some(&env.payer.pubkey()),
+                    &[&env.payer, &env.admin],
+                    env.svm.latest_blockhash(),
+                );
+                tx.verify().unwrap();
+                tx
+            };
+            // Retain every envelope before either side writes. Distinct runtime
+            // signatures let the final retry reach the program's policy guards.
+            let aborted = sign(&[first.clone(), first_funding, second.clone()], 0);
+            let first_tx = sign(&[first], 1);
+            let second_tx = sign(&[second], 2);
+            let funding_tx = sign(&[second_funding], 3);
+            let funded_policy_probe = sign(&[renewed.clone()], 4);
+            let renewed_tx = sign(&[renewed], 5);
+            let retained_bytes = [&first_tx, &second_tx, &funding_tx, &renewed_tx]
+                .map(|tx| bincode::serialize(tx).unwrap());
+            let keys = [env.market, env.mint, env.vault, source, env.admin.pubkey()];
+            let frame = |env: &V16CuEnv| keys.map(|key| env.svm.get_account(&key));
+            let initial = frame(&env);
+            for tx in [&first_tx, &second_tx, &funding_tx, &renewed_tx] {
+                env.svm
+                    .simulate_transaction(tx.clone().into())
+                    .expect("each retained request is initially admissible");
+                assert_eq!(frame(&env), initial);
+            }
+            let mut reject = |env: &mut V16CuEnv,
+                              tx: Transaction,
+                              index,
+                              error: PercolatorError,
+                              wrapper_successes,
+                              token_successes| {
+                let before = frame(env);
+                let payer_before = env.svm.get_account(&env.payer.pubkey()).unwrap();
+                let fees = u64::from(tx.message.header.num_required_signatures)
+                    * FeeStructure::default().lamports_per_signature;
+                let failure = env.svm.send_transaction(tx).expect_err("retained refusal");
+                assert_eq!(
+                    failure.err,
+                    TransactionError::InstructionError(
+                        index,
+                        InstructionError::Custom(error as u32)
+                    )
+                );
+                for (program, count) in [
+                    (env.program_id, wrapper_successes),
+                    (spl_token::ID, token_successes),
+                ] {
+                    assert_eq!(
+                        failure
+                            .meta
+                            .logs
+                            .iter()
+                            .filter(|log| { **log == format!("Program {program} success") })
+                            .count(),
+                        count,
+                        "completed prefix must precede refusal"
+                    );
+                }
+                assert_eq!(frame(env), before, "complete economic Account rollback");
+                let mut expected_payer = payer_before;
+                expected_payer.lamports -= fees;
+                assert_eq!(
+                    env.svm.get_account(&env.payer.pubkey()).unwrap(),
+                    expected_payer
+                );
+                peak_cu = peak_cu.max(failure.meta.compute_units_consumed);
+                rollbacks += 1;
+            };
+            reject(&mut env, aborted, 4, PercolatorError::EngineStale, 2, 1);
+            assert_eq!(env.control_sequences(asset as usize), initial_controls);
+            assert_eq!(frame(&env), initial);
+            assert_eq!(bincode::serialize(&first_tx).unwrap(), retained_bytes[0]);
+            env.svm.send_transaction(first_tx).unwrap();
+            assert_eq!(env.backing_fee_policy(domains[0]), (37, 0));
+            assert_eq!(env.backing_fee_policy(domains[1]), (0, 0));
+            assert_eq!(env.control_sequences(asset as usize).backing_fee, 17);
+            assert_eq!(env.control_sequences(asset as usize).backing_top_up, 0);
+            assert_eq!(bincode::serialize(&second_tx).unwrap(), retained_bytes[1]);
+            reject(&mut env, second_tx, 2, PercolatorError::EngineStale, 0, 0);
+
+            // The sibling policy is stale, but its original zero-fee funding
+            // consent is still current and must pay into only that domain.
+            assert_eq!(bincode::serialize(&funding_tx).unwrap(), retained_bytes[2]);
+            env.svm.send_transaction(funding_tx).unwrap();
+            let (_, funded) = env.market_state();
+            assert_eq!(funded.vault, u128::from(AMOUNT));
+            assert_eq!(funded.c_tot, 0);
+            assert_eq!(funded.insurance, 0);
+            for domain in 0..4 {
+                assert_eq!(
+                    funded.source_backing_buckets[domain].fresh_unliened_backing_num,
+                    if domain == usize::from(domains[1]) {
+                        u128::from(AMOUNT) * BOUND_SCALE
+                    } else {
+                        0
+                    }
+                );
+            }
+            assert_eq!(env.token_amount(source), SUPPLY - AMOUNT);
+            assert_eq!(env.token_amount(env.vault), AMOUNT);
+            assert_eq!(env.control_sequences(asset as usize).backing_top_up, 1);
+            reject(
+                &mut env,
+                funded_policy_probe,
+                2,
+                PercolatorError::EngineLockActive,
+                0,
+                0,
+            );
+            assert_eq!(env.control_sequences(asset as usize).backing_fee, 17);
+
+            env.withdraw_backing_bucket_to_admin_token_with_cu(source, domains[1], AMOUNT.into());
+            assert_eq!(bincode::serialize(&renewed_tx).unwrap(), retained_bytes[3]);
+            let success = env
+                .svm
+                .send_transaction(renewed_tx)
+                .expect("unchanged renewal after principal exit");
+            peak_cu = peak_cu.max(success.compute_units_consumed);
+            assert_eq!(env.backing_fee_policy(domains[0]), (37, 0));
+            assert_eq!(env.backing_fee_policy(domains[1]), (61, 0));
+            let mut expected_controls = initial_controls;
+            expected_controls.backing_fee = 18;
+            expected_controls.backing_top_up = 1;
+            assert_eq!(env.control_sequences(asset as usize), expected_controls);
+            assert_eq!(env.market_state().0.backing_trade_fee_policy_count, 2);
+            assert_eq!(env.market_state().1.vault, 0);
+            assert_eq!(env.token_amount(source), SUPPLY);
+            assert_eq!(env.token_amount(env.vault), 0);
+            assert_eq!(env.svm.get_account(&env.mint), initial[1]);
+            assert_eq!(env.svm.get_account(&env.admin.pubkey()), initial[4]);
+            assert_eq!(
+                market_engine_slot_bytes(
+                    &env.svm.get_account(&env.market).unwrap().data,
+                    usize::from(1 - asset)
+                ),
+                peer_slot
+            );
+        }
+    }
+    assert_eq!(rollbacks, 12);
+    assert_cu_within("cross-side policy and retained funding", peak_cu, 1_400_000);
+}
+
 #[test]
 fn v16_control_sequences_accept_gaps_reject_replays_and_keep_lanes_independent() {
     let mut env = V16CuEnv::new();
