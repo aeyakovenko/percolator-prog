@@ -17,6 +17,31 @@
 
 use super::*;
 
+fn inv034_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[test]
 fn v16_program_cross_instance_role_roster_is_source_complete() {
     let public_registry = include_str!("../public_instruction_coverage.tsv")
@@ -79,7 +104,7 @@ fn v16_program_cross_instance_role_roster_is_source_complete() {
                 assert!(
                     test_sources
                         .iter()
-                        .any(|source| source.contains(&format!("fn {test}"))),
+                        .any(|source| inv034_source_defines_test(source, test)),
                     "{variant} cites missing INV-034 evidence {test}"
                 );
             }
