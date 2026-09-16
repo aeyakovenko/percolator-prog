@@ -19,6 +19,18 @@
 
 use super::*;
 
+fn inv080_source_defines_function(source: &str, function: &str) -> bool {
+    let needle = format!("fn {function}");
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with(&needle)
+            && line[needle.len()..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '(' || ch.is_whitespace())
+    })
+}
+
 #[test]
 fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
     struct ErrorDisposition {
@@ -69,9 +81,10 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
     );
     assert_eq!(
         production.matches("map_err(map_v16_error)").count(),
-        // The Recovery committed-state selector added one propagated engine result and one
-        // propagated post-state validation to the prior 133-call census.
-        135,
+        // Recovery committed-state selection, terminal insurance payout, and current mark/reward
+        // custody updates expanded the propagated engine-result census from its prior 133-call
+        // baseline; every future drift still requires an INV-080 disposition review.
+        137,
         "engine-result mapping drift requires an INV-080 disposition review"
     );
     let recovery_handler = production
@@ -112,13 +125,15 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
         assert!(
             witnesses
                 .iter()
-                .any(|source| source.contains(&format!("fn {}", row.witness))),
+                .any(|source| inv080_source_defines_function(source, row.witness)),
             "engine-error disposition lacks public witness {}",
             row.witness
         );
     }
-    assert!(witnesses[0]
-        .contains("fn v16_attack_hybrid_soft_stale_partial_oracle_error_does_not_poison_retry"));
+    assert!(inv080_source_defines_function(
+        witnesses[0],
+        "v16_attack_hybrid_soft_stale_partial_oracle_error_does_not_poison_retry"
+    ));
 }
 
 #[test]
