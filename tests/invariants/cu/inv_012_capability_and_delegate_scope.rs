@@ -167,14 +167,64 @@ fn v16_program_matcher_capability_route_roster_binds_every_current_scope() {
     assert!(matcher_guard.contains("matcher_capability_is_live(expiry_slot, Clock::get()?.slot)"));
 
     let expiry_proof = include_str!("../kani/inv_012_capability_and_delegate_scope.rs");
-    assert!(inv012_source_defines_kani_proof(
+    let mut proof_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [(
+        "tests/invariants/kani/inv_012_capability_and_delegate_scope.rs",
         expiry_proof,
-        "kani_v16_matcher_capability_config_is_exact_at_full_width"
-    ));
-    assert!(inv012_source_defines_test(
-        include_str!("inv_012_capability_and_delegate_scope.rs"),
-        "v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes"
-    ));
+        "kani_v16_matcher_capability_config_is_exact_at_full_width",
+    )] {
+        assert!(
+            path.starts_with("tests/invariants/kani/") && path.ends_with(".rs"),
+            "INV-012 capability proof witness must resolve to a Kani invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("kani_v16_"),
+            "INV-012 capability proof witness must be a reviewed Kani proof: {path}#{witness}"
+        );
+        assert!(
+            proof_witnesses.insert((path, witness)),
+            "duplicate INV-012 capability proof witness {path}#{witness}"
+        );
+        assert!(
+            inv012_source_defines_kani_proof(source, witness),
+            "INV-012 lost capability proof witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        proof_witnesses.len(),
+        1,
+        "INV-012 capability proof witness roster drift"
+    );
+
+    let local_scope_source = include_str!("inv_012_capability_and_delegate_scope.rs");
+    let mut public_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [(
+        "tests/invariants/cu/inv_012_capability_and_delegate_scope.rs",
+        local_scope_source,
+        "v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes",
+    )] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-012 capability public witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "INV-012 capability public witness must be a reviewed v16 regression: {path}#{witness}"
+        );
+        assert!(
+            public_witnesses.insert((path, witness)),
+            "duplicate INV-012 capability public witness {path}#{witness}"
+        );
+        assert!(
+            inv012_source_defines_test(source, witness),
+            "INV-012 lost capability public witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        public_witnesses.len(),
+        1,
+        "INV-012 capability public witness roster drift"
+    );
 
     assert_eq!(
         source
