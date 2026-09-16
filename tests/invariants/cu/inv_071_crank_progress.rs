@@ -3511,7 +3511,9 @@ fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
         for (path, witness) in row.public_witnesses {
             assert!(witnesses.insert(*witness), "duplicate witness {witness}");
             assert!(
-                path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                path.starts_with("tests/invariants/")
+                    && path.ends_with(".rs")
+                    && !path.contains(".."),
                 "liveness class '{}' points outside invariant test sources: {path}",
                 row.class,
             );

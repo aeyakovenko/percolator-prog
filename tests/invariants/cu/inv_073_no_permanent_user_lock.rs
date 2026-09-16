@@ -6921,6 +6921,22 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
             phase.rank_lane,
             phase.transition,
         );
+        assert!(
+            phase.witness_path.starts_with("tests/invariants/")
+                && phase.witness_path.ends_with(".rs")
+                && !phase.witness_path.contains(".."),
+            "terminal phase '{}' points outside invariant test sources: {}",
+            phase.rank_lane,
+            phase.witness_path,
+        );
+        assert!(
+            phase.witness.starts_with("v16_")
+                || phase.witness
+                    == "expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup",
+            "terminal phase '{}' uses an unreviewed witness name: {}",
+            phase.rank_lane,
+            phase.witness,
+        );
         let witness_source = source_cache.entry(phase.witness_path).or_insert_with(|| {
             std::fs::read_to_string(root.join(phase.witness_path))
                 .unwrap_or_else(|error| panic!("read {}: {error}", phase.witness_path))
