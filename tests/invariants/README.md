@@ -23,6 +23,30 @@ generation reuse, terminal receipts and slab retirement remain outside this
 increment. See the [Lane 19 report](lane19_source_capacity_20260916.md) for
 artifact provenance, overlap review, exact commands and limitations.
 
+## Lane 21 mixed-role close preemption (2026-09-16)
+
+The [mixed-role preemption owner](cu/inv_039_mixed_role_close_preemption.rs)
+adds 32 public LiteSVM worlds comparing direct resolution with permissionless
+Recovery/Resolved after an opposing bankrupt close expires. The same portfolio
+retains both zero-basis creditor weight and unsettled cross-asset debt through
+both mode changes. Partial source-support consumption and a fractional peer
+receipt cross both side orientations, asset assignments and terminal orders.
+The existing input-derived owner book checks exact debt, source membership,
+pending weight, residual booking, stock/reservation censuses and SPL entitlements.
+
+The close expires at slot 17, while its source backing remains fresh until 1005.
+Keeper-only preemption at 18 and payout at the five-slot grace boundary preserve
+the 4,000/20,000-atom source discounts and the fractional receipt's extra atom.
+There are 64 successful-prefix rollbacks, 32 grace-period rejections, 16 waiting
+rollbacks, 32 paid-receipt retries and 160 rent-exact portfolio deletions. Peak
+measured continuation/rollback CU is 206,213.
+
+This adds mixed-role attribution to the single-pair close-preemption control;
+Lane 9 owns participating-asset shutdown and Lane 18 owns native slab retirement.
+No production bug was established. Rows **419/435 remain OPEN/missing** and
+INV-039 remains `REFUTED_CURRENT`. The [Lane 21 report](lane21_mixed_debt_attribution_20260916.md)
+records non-overlap, exact verification commands, artifacts and remaining gaps.
+
 ## Lane 16 full-market Hybrid progress (2026-09-15)
 
 The existing [Hybrid/source/backlog owner](cu/inv_077_hybrid_source_backlog.rs)

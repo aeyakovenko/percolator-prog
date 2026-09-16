@@ -412,15 +412,27 @@ fn setup_with_quote(
     debt: u128,
     native: bool,
 ) -> (AttributionWorld, Book) {
+    setup_with_horizons(reverse, assets, debt, native, 1_000, 10)
+}
+
+fn setup_with_horizons(
+    reverse: bool,
+    assets: [usize; 2],
+    debt: u128,
+    native: bool,
+    close_lifetime: u64,
+    h_max: u64,
+) -> (AttributionWorld, Book) {
     let params = V16CuMarketParams {
         max_portfolio_assets: 3,
+        h_max,
         initial_price: 1_000_000,
         maintenance_margin_bps: 1_000,
         initial_margin_bps: 1_000,
         max_price_move_bps_per_slot: 500,
         max_abs_funding_e9_per_slot: 0,
         liquidation_fee_bps: 0,
-        max_bankrupt_close_lifetime_slots: 1_000,
+        max_bankrupt_close_lifetime_slots: close_lifetime,
         ..V16CuMarketParams::default()
     };
     let mut world = if native {

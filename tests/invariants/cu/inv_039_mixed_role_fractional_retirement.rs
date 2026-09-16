@@ -7,6 +7,9 @@
 use super::*;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_039_mixed_role_close_preemption.rs"]
+mod close_preemption;
+
 const EXPIRY: u64 = 25;
 // Debt crystallizes at slot 15; the setup's largest freshness horizon is 1,000.
 const SOURCE_EXPIRY: u64 = 1_015;
