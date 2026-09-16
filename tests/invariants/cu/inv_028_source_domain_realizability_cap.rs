@@ -55,6 +55,9 @@ mod deferred_claim_backing;
 #[path = "inv_028_single_slot_admission.rs"]
 mod single_slot_admission;
 
+#[path = "inv_028_max_source_mixed_availability.rs"]
+mod max_source_mixed_availability;
+
 #[test]
 fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
     const Q: i128 = 1_000 * POS_SCALE as i128;
