@@ -200,54 +200,88 @@ fn v16_program_counterparty_lien_lifecycle_composition_is_source_complete() {
 
     let lifecycle_source =
         include_str!("../stateful/inv_026_reservation_and_encumbrance_conservation.rs");
-    assert!(inv032_source_defines_test(
-        lifecycle_source,
-        "v16_program_counterparty_encumbrance_lifecycle_is_exact_across_routes_sides_and_terminal_modes"
-    ));
     let impairment_source =
         include_str!("../stateful/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs");
-    assert!(inv032_source_defines_test(
-        impairment_source,
-        "v16_program_liened_backing_expiry_route_matrix_preserves_owner_reduction"
-    ));
     let expiry_source = include_str!("inv_028_source_domain_realizability_cap.rs");
-    assert!(inv032_source_defines_test(
-        expiry_source,
-        "v16_program_expired_source_lien_route_matrix_preserves_bounded_owner_exit"
-    ));
-    assert!(inv032_source_defines_test(
-        expiry_source,
-        "v16_program_shared_expiry_progress_matrix_preserves_terminal_progress"
-    ));
     let retry_source =
         include_str!("../stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs");
-    assert!(inv032_source_defines_test(
-        retry_source,
-        "v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing"
-    ));
-    assert!(inv032_source_defines_test(
-        retry_source,
-        "v16_program_shared_lien_expiry_refill_preserves_owner_attribution"
-    ));
-
     let insurance_source = include_str!("inv_033_insurance_backed_lien_single_classification.rs");
-    assert!(inv032_source_defines_test(
-        insurance_source,
-        "v16_program_public_source_lien_classification_never_double_counts_insurance"
-    ));
     let rollback_source = include_str!("inv_080_error_propagation_and_exact_rollback.rs");
-    assert!(inv032_source_defines_test(
-        rollback_source,
-        "v16_program_explicit_engine_error_dispositions_are_source_complete"
-    ));
-    assert!(inv032_source_defines_test(
-        rollback_source,
-        "v16_program_dispatch_and_entrypoints_preserve_every_handler_error"
-    ));
     let transition_source =
         include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(inv032_source_defines_test(
-        transition_source,
-        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
-    ));
+    let mut public_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/stateful/inv_026_reservation_and_encumbrance_conservation.rs",
+            lifecycle_source,
+            "v16_program_counterparty_encumbrance_lifecycle_is_exact_across_routes_sides_and_terminal_modes",
+        ),
+        (
+            "tests/invariants/stateful/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs",
+            impairment_source,
+            "v16_program_liened_backing_expiry_route_matrix_preserves_owner_reduction",
+        ),
+        (
+            "tests/invariants/cu/inv_028_source_domain_realizability_cap.rs",
+            expiry_source,
+            "v16_program_expired_source_lien_route_matrix_preserves_bounded_owner_exit",
+        ),
+        (
+            "tests/invariants/cu/inv_028_source_domain_realizability_cap.rs",
+            expiry_source,
+            "v16_program_shared_expiry_progress_matrix_preserves_terminal_progress",
+        ),
+        (
+            "tests/invariants/stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs",
+            retry_source,
+            "v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing",
+        ),
+        (
+            "tests/invariants/stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs",
+            retry_source,
+            "v16_program_shared_lien_expiry_refill_preserves_owner_attribution",
+        ),
+        (
+            "tests/invariants/cu/inv_033_insurance_backed_lien_single_classification.rs",
+            insurance_source,
+            "v16_program_public_source_lien_classification_never_double_counts_insurance",
+        ),
+        (
+            "tests/invariants/cu/inv_080_error_propagation_and_exact_rollback.rs",
+            rollback_source,
+            "v16_program_explicit_engine_error_dispositions_are_source_complete",
+        ),
+        (
+            "tests/invariants/cu/inv_080_error_propagation_and_exact_rollback.rs",
+            rollback_source,
+            "v16_program_dispatch_and_entrypoints_preserve_every_handler_error",
+        ),
+        (
+            "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+            transition_source,
+            "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-032 lien-lifecycle witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "INV-032 lien-lifecycle witness must be a reviewed v16 regression: {path}#{witness}"
+        );
+        assert!(
+            public_witnesses.insert((path, witness)),
+            "duplicate INV-032 lien-lifecycle witness {path}#{witness}"
+        );
+        assert!(
+            inv032_source_defines_test(source, witness),
+            "INV-032 lost lien-lifecycle witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        public_witnesses.len(),
+        10,
+        "INV-032 lien-lifecycle witness roster drift"
+    );
 }
