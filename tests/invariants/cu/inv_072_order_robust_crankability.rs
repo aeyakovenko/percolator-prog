@@ -1206,16 +1206,29 @@ struct Inv072PlanEvidence {
     witness: &'static str,
 }
 
-fn inv072_source_defines_function(source: &str, function: &str) -> bool {
-    let needle = format!("fn {function}");
-    source.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with(&needle)
-            && line[needle.len()..]
-                .chars()
-                .next()
-                .is_some_and(|ch| ch == '(' || ch.is_whitespace())
-    })
+fn inv072_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
 }
 
 fn inv072_plan_evidence(plan: AutoCrankPlanV16) -> Inv072PlanEvidence {
@@ -1304,7 +1317,7 @@ fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence
         assert!(
             witness_sources
                 .iter()
-                .any(|source| inv072_source_defines_function(source, evidence.witness)),
+                .any(|source| inv072_source_defines_test(source, evidence.witness)),
             "auto-crank plan {} lost public witness {}",
             evidence.plan,
             evidence.witness,
@@ -1337,7 +1350,7 @@ fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence
         assert!(
             parser_sources
                 .iter()
-                .any(|source| inv072_source_defines_function(source, witness)),
+                .any(|source| inv072_source_defines_test(source, witness)),
             "hint-parser stratum lost public witness {witness}",
         );
     }
