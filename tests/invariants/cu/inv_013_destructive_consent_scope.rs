@@ -360,33 +360,64 @@ fn v16_program_destructive_consent_composition_is_source_complete() {
         assert!(handler.contains(guard), "CloseSlab lost guard {guard}");
     }
 
-    let position_evidence = include_str!("inv_004_position_episode_binding.rs");
-    assert!(inv013_source_defines_test(
-        position_evidence,
-        "v16_program_retained_position_binding_and_writer_rosters_are_source_complete"
-    ));
-    let asset_evidence = include_str!("inv_002_asset_generation_binding.rs");
-    assert!(inv013_source_defines_test(
-        asset_evidence,
-        "v16_program_asset_generation_field_and_guard_roster_is_source_complete"
-    ));
     let authority_evidence = include_str!("inv_005_authority_incarnation_binding.rs");
-    assert!(inv013_source_defines_test(
-        authority_evidence,
-        "v16_program_configured_authority_route_dispositions_are_source_complete"
-    ));
     assert!(authority_evidence.contains("let expected_open = std::collections::BTreeSet::new();"));
+    let position_evidence = include_str!("inv_004_position_episode_binding.rs");
+    let asset_evidence = include_str!("inv_002_asset_generation_binding.rs");
     let transaction_domain_evidence =
         include_str!("../public_sbf/inv_006_program_chain_message_type_and_version_binding.rs");
-    assert!(inv013_source_defines_test(
-        transaction_domain_evidence,
-        "deployed_wrapper_has_no_detached_signature_interpreter"
-    ));
     let account_evidence = include_str!("../public_sbf/inv_007_no_aba_reuse.rs");
-    assert!(inv013_source_defines_test(
-        account_evidence,
-        "v16_wrapper_account_incarnation_census_is_source_complete"
-    ));
+    let mut composition_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/cu/inv_004_position_episode_binding.rs",
+            position_evidence,
+            "v16_program_retained_position_binding_and_writer_rosters_are_source_complete",
+        ),
+        (
+            "tests/invariants/cu/inv_002_asset_generation_binding.rs",
+            asset_evidence,
+            "v16_program_asset_generation_field_and_guard_roster_is_source_complete",
+        ),
+        (
+            "tests/invariants/cu/inv_005_authority_incarnation_binding.rs",
+            authority_evidence,
+            "v16_program_configured_authority_route_dispositions_are_source_complete",
+        ),
+        (
+            "tests/invariants/public_sbf/inv_006_program_chain_message_type_and_version_binding.rs",
+            transaction_domain_evidence,
+            "deployed_wrapper_has_no_detached_signature_interpreter",
+        ),
+        (
+            "tests/invariants/public_sbf/inv_007_no_aba_reuse.rs",
+            account_evidence,
+            "v16_wrapper_account_incarnation_census_is_source_complete",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-013 destructive-consent witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_")
+                || witness == "deployed_wrapper_has_no_detached_signature_interpreter",
+            "INV-013 destructive-consent witness must be a reviewed regression: {path}#{witness}"
+        );
+        assert!(
+            composition_witnesses.insert((path, witness)),
+            "duplicate INV-013 destructive-consent witness {path}#{witness}"
+        );
+        assert!(
+            inv013_source_defines_test(source, witness),
+            "INV-013 lost destructive-consent composition witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        composition_witnesses.len(),
+        5,
+        "INV-013 destructive-consent witness roster drift"
+    );
 }
 
 #[test]
