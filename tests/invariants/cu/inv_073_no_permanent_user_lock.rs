@@ -7017,7 +7017,7 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
         "v16_program_absent_provider_dual_quote_earnings_share_one_ledger_and_close",
     ] {
         assert!(
-            inv073_public_witnesses.contains(witness),
+            inv073_source_defines_test(inv073_public_witnesses, witness),
             "row420 source gate lost public SVM witness {witness}",
         );
     }
@@ -7031,7 +7031,7 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
         "v16_program_public_reserve_payments_wait_for_resolved_senior_disposition",
     ] {
         assert!(
-            inv073_public_witnesses.contains(witness),
+            inv073_source_defines_test(inv073_public_witnesses, witness),
             "row433 source gate lost public SVM witness {witness}",
         );
     }
