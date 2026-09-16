@@ -3443,11 +3443,23 @@ fn v16_program_mark_writer_and_trade_exit_composition_is_source_complete() {
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut classes = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
     let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
     for row in CLASSES {
         assert!(classes.insert(row.class), "duplicate mark class");
         assert!(!row.witnesses.is_empty());
         for (path, witness) in row.witnesses {
+            assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            assert!(
+                path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                "mark class '{}' points outside invariant test sources: {path}",
+                row.class,
+            );
+            assert!(
+                witness.starts_with("v16_") || witness.starts_with("kani_v16_"),
+                "mark class '{}' uses an unreviewed witness name: {witness}",
+                row.class,
+            );
             let source = source_cache.entry(path).or_insert_with(|| {
                 std::fs::read_to_string(root.join(path))
                     .unwrap_or_else(|error| panic!("read {path}: {error}"))
@@ -3460,6 +3472,11 @@ fn v16_program_mark_writer_and_trade_exit_composition_is_source_complete() {
         }
     }
     assert_eq!(classes.len(), 8, "mark/availability class roster drift");
+    assert_eq!(
+        witnesses.len(),
+        32,
+        "mark/availability witness roster drift"
+    );
     for (path, marker) in [
         (
             "tests/invariants/cu/inv_045_no_free_mark_movement.rs",
