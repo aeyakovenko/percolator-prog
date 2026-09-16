@@ -57,6 +57,31 @@ fn inv047_source_defines_test(source: &str, function: &str) -> bool {
     false
 }
 
+fn inv047_source_defines_kani_proof(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut proof_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[kani::proof]" {
+            proof_attribute = true;
+        } else if line.starts_with("fn ") {
+            if proof_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            proof_attribute = false;
+        } else if proof_attribute && !line.is_empty() && !line.starts_with("#") {
+            proof_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct OneLegRouteSnapshot {
     vault: u128,
@@ -1660,7 +1685,8 @@ fn v16_program_equivalent_route_family_composition_is_source_complete() {
         "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
     ));
     let flow_proof = include_str!("../kani/inv_024_attributed_quote_value_conservation.rs");
-    assert!(
-        flow_proof.contains("fn kani_inv024_engine_flow_validator_equals_wrapper_value_equation")
-    );
+    assert!(inv047_source_defines_kani_proof(
+        flow_proof,
+        "kani_inv024_engine_flow_validator_equals_wrapper_value_equation"
+    ));
 }
