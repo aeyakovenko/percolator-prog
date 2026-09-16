@@ -1,5 +1,25 @@
 # Invariant-owned test coverage
 
+## INV-077 partial short-B terminal progress (2026-09-16)
+
+The [short-B terminal child](cu/inv_077_short_b_terminal_progress.rs) adds one
+public LiteSVM selector at fourteen active legs and twenty-eight source records.
+A short-side B settlement prefix leaves fractional carry and unsettled loss
+atoms; permissionless resolution plus bounded terminal continuation must still
+reach the same owner payouts as the fully-settled-B control path. The histories
+cross one versus twenty-eight B calls and both claimant orders.
+
+The selector records 366 terminal calls, 428 exact rollback checks, and successful
+terminal/resolution calls below the 1.4M CU transaction ceiling. It composes the
+existing maximum-shape B setup with terminal payout progress; it does not claim
+arbitrary histories, native custody, direct-close fixture coverage or row
+closure.
+
+**Rows 420/421/423/433 remain OPEN; INV-073 remains `REFUTED_CURRENT`;
+INV-077/082 remain `OPEN_EVIDENCE`.** No current behavior mismatch was found.
+See the [report](inv077_short_b_terminal_progress_20260916.md) for exact
+selectors, measurements and limits.
+
 ## Row 433 split beneficiary custody (2026-09-16)
 
 The [split-custody child](cu/inv_073_split_beneficiary_custody.rs) adds one

@@ -3,21 +3,92 @@
 
 use super::*;
 
-#[test]
-fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
-    const ASSETS: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
-    const SOURCES: usize = percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS;
-    const CAPITAL: u128 = 10_000;
+#[path = "inv_077_short_b_terminal_progress.rs"]
+mod terminal_progress;
+
+const ASSETS: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+const SOURCES: usize = percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS;
+const CAPITAL: u128 = 10_000;
+const BUDGET: u128 = 4;
+const LOSS_PER_LEG: u128 = 6;
+const SETTLE_SLOT: u64 = 81;
+const CU_LIMIT: u64 = 1_375_000;
+const SHORT_Q: i128 = (POS_SCALE / 25) as i128;
+
+struct ShortBWorld {
+    env: V16CuEnv,
+    owner: Keypair,
+    target: Pubkey,
+    peer_owner: Keypair,
+    peer: Pubkey,
+    checkpoint_owner: Keypair,
+    checkpoint: Pubkey,
+    counterparties: Vec<(Keypair, Pubkey)>,
+}
+
+fn public_funded_portfolio(env: &mut V16CuEnv, owner: &Keypair, amount: u64) -> Pubkey {
+    env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    let portfolio = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &portfolio,
+        env.portfolio_account_len,
+        env.program_id,
+    );
+    let portfolio = portfolio.pubkey();
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[owner],
+    )
+    .expect("public portfolio initialization");
+    env.portfolios.push(portfolio);
+    let token = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+    if amount != 0 {
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &token,
+                &env.admin.pubkey(),
+                &[],
+                amount,
+            )
+            .unwrap(),
+            &[&env.admin],
+        )
+        .expect("public collateral minting");
+        env.send(
+            env.deposit_ix(portfolio, u128::from(amount)),
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(token, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        )
+        .expect("public collateral deposit");
+    }
+    assert_eq!(env.token_amount(token), 0);
+    portfolio
+}
+
+fn public_short_b_world() -> ShortBWorld {
     const HISTORY_Q: i128 = (POS_SCALE / 50) as i128;
-    const SHORT_Q: i128 = (POS_SCALE / 25) as i128;
-    const BUDGET: u128 = 4;
-    const LOSS_PER_LEG: u128 = 6;
     const HISTORY_SLOT: u64 = 16;
     const OPEN_SLOT: u64 = 40;
-    const SETTLE_SLOT: u64 = 81;
-    const CU_LIMIT: u64 = 1_375_000;
 
-    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+    let mut env = crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params(0, V16CuMarketParams {
         max_portfolio_assets: ASSETS,
         h_max: 100,
         maintenance_margin_bps: 1_000,
@@ -32,13 +103,11 @@ fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
         env.configure_auth_mark_for_asset_as_admin(asset, 1, 100);
     }
     let owner = Keypair::new();
-    let target = env.create_portfolio(&owner);
-    env.deposit(&owner, target, CAPITAL);
+    let target = public_funded_portfolio(&mut env, &owner, CAPITAL as u64);
     let peer_owner = Keypair::new();
-    let peer = env.create_portfolio(&peer_owner);
-    env.deposit(&peer_owner, peer, CAPITAL);
+    let peer = public_funded_portfolio(&mut env, &peer_owner, CAPITAL as u64);
     let checkpoint_owner = Keypair::new();
-    let checkpoint = env.create_portfolio(&checkpoint_owner);
+    let checkpoint = public_funded_portfolio(&mut env, &checkpoint_owner, 0);
 
     let checkpoint_marks = |env: &mut V16CuEnv, slot: u64, price: u64| {
         env.svm.warp_to_slot(slot);
@@ -121,8 +190,7 @@ fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
     let mut counterparties = Vec::new();
     for asset in 0..ASSETS {
         let loss_owner = Keypair::new();
-        let loss = env.create_portfolio(&loss_owner);
-        env.deposit(&loss_owner, loss, 2);
+        let loss = public_funded_portfolio(&mut env, &loss_owner, 2);
         env.try_trade_asset_with_cu(asset, &owner, target, &loss_owner, loss, -SHORT_Q, 300, 0)
             .unwrap_or_else(|error| panic!("B cohort short open {asset}: {error}"));
         counterparties.push((loss_owner, loss));
@@ -172,6 +240,30 @@ fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
             0
         );
     }
+
+    ShortBWorld {
+        env,
+        owner,
+        target,
+        peer_owner,
+        peer,
+        checkpoint_owner,
+        checkpoint,
+        counterparties,
+    }
+}
+
+#[test]
+fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
+    let ShortBWorld {
+        mut env,
+        owner,
+        target,
+        peer,
+        checkpoint,
+        counterparties,
+        ..
+    } = public_short_b_world();
 
     let initial = env.portfolio_state(target);
     let group_before = env.market_state().1;
