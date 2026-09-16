@@ -3253,7 +3253,28 @@ stock and encumbrance reconciliation.
 
 **Row 427 remains OPEN.** This is bounded funding/liability conformance. It does
 not cover nonunit ADL, arbitrary histories, larger pair graphs, mixed lifecycle
-states, partial matcher fills, or maximum-shape side-cap products.
+states, partial matcher fills, or maximum shapes.
+
+## INV-058 side-OI cap witness roster source guard (2026-09-16)
+
+Owner:
+[`cu/inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs`](cu/inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs),
+selector `v16_program_side_oi_cap_witness_roster_is_source_complete`.
+
+The source guard pins the current engine revision and requires every row427
+side-OI witness file to remain mounted in the compiled INV-058 test graph:
+single/split route cap checks, distinct owner pairs, funding accrual, reduction
+and cross-zero histories, recreated counterparties, hostile batch-CPI precheck,
+liquidation/reopen reuse, atomic OI+fee handoff, multi-asset handoff, generated
+existing-pair schedules, fee-bearing existing-pair competition, capped-PnL
+terminal handoff, and full source-claim terminal exit. It also locks the current
+wrapper production surface: `ensure_trade_side_oi_cap_view` remains the shared
+long/short `MAX_OI_SIDE_Q` helper, and both single and batch trade
+implementations call it after the engine transition.
+
+This is a drift guard, not a new generic row427 proof. A future engine pin,
+position writer, route implementation, cap predicate, or row427 witness rename
+must now update the source-composition roster deliberately.
 
 Base: `origin/codex/astra-open-holdout-ledger-20260912` at exactly
 `4886d7bdae8a48ebb2f0e9bcd7702e7980f0a289`. Branch:

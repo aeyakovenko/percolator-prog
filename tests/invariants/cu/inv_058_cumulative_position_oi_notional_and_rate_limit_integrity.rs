@@ -1635,3 +1635,181 @@ fn v16_program_batch_tradecpi_configured_leg_cap_rejects_before_hostile_matcher_
     assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
     assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
 }
+
+fn inv058_source_defines_function(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&marker)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+fn inv058_function_body<'a>(production: &'a str, function: &str) -> &'a str {
+    let start = production
+        .find(&format!("fn {function}"))
+        .unwrap_or_else(|| panic!("missing production function {function}"));
+    let tail = &production[start..];
+    let end = tail[1..]
+        .find("\n    fn ")
+        .or_else(|| tail[1..].find("\n    #["))
+        .map_or(tail.len(), |offset| offset + 1);
+    &tail[..end]
+}
+
+#[test]
+fn v16_program_side_oi_cap_witness_roster_is_source_complete() {
+    const ENGINE_PIN: &str = "94979ede7db934545e53a8f210dd063a9ea3ea63";
+    const WITNESSES: &[(&str, &str)] = &[
+        (
+            "inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs",
+            "v16_program_split_fills_cannot_cross_position_or_side_oi_cap_on_any_route_pair",
+        ),
+        (
+            "inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs",
+            "v16_program_distinct_owner_pairs_cannot_cross_shared_side_oi_cap",
+        ),
+        (
+            "inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs",
+            "v16_program_funding_accrual_does_not_open_shared_side_oi_headroom",
+        ),
+        (
+            "inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs",
+            "v16_program_post_transition_caps_match_across_reduction_and_cross_zero_histories",
+        ),
+        (
+            "inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs",
+            "v16_program_recreated_counterparty_preserves_post_transition_cumulative_limits",
+        ),
+        (
+            "inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs",
+            "v16_program_batch_tradecpi_configured_leg_cap_rejects_before_hostile_matcher_cpi",
+        ),
+        (
+            "inv_058_liquidation_lifecycle.rs",
+            "v16_program_liquidation_reset_reopen_reuses_capacity_and_preserves_live_notional",
+        ),
+        (
+            "inv_058_atomic_oi_fee_handoff.rs",
+            "v16_program_disjoint_pair_oi_handoff_preserves_fees_across_transaction_partitions",
+        ),
+        (
+            "inv_058_atomic_oi_fee_handoff.rs",
+            "v16_program_cpi_disjoint_pair_oi_handoff_rolls_back_matcher_and_stock_across_routes",
+        ),
+        (
+            "inv_058_multi_asset_oi_fee_handoff.rs",
+            "v16_program_two_asset_oi_fee_handoff_is_atomic_across_clear_resize_and_route_switch",
+        ),
+        (
+            "inv_058_generated_side_oi_composition.rs",
+            "v16_program_generated_existing_pair_side_oi_caps_compose_across_split_merge_routes",
+        ),
+        (
+            "inv_058_existing_leg_fee_competition.rs",
+            "v16_existing_pairs_compete_for_fee_bearing_side_headroom_across_pair_order",
+        ),
+        (
+            "inv_058_pnl_terminal_handoff.rs",
+            "v16_program_capped_pair_pnl_survives_headroom_handoff_and_ranked_terminal_payout",
+        ),
+        (
+            "inv_058_capacity_claim_composition.rs",
+            "v16_program_full_source_claims_compose_with_side_oi_handoff_and_terminal_exit",
+        ),
+    ];
+    const MODULE_LINKS: &[(&str, &str)] = &[
+        (
+            "inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs",
+            "mod liquidation_lifecycle;",
+        ),
+        (
+            "inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs",
+            "mod atomic_oi_fee_handoff;",
+        ),
+        ("inv_058_atomic_oi_fee_handoff.rs", "mod multi_asset;"),
+        (
+            "inv_058_multi_asset_oi_fee_handoff.rs",
+            "mod generated_side_oi_composition;",
+        ),
+        (
+            "inv_058_multi_asset_oi_fee_handoff.rs",
+            "mod existing_leg_fee_competition;",
+        ),
+        (
+            "inv_058_multi_asset_oi_fee_handoff.rs",
+            "mod pnl_terminal_handoff;",
+        ),
+        (
+            "inv_058_multi_asset_oi_fee_handoff.rs",
+            "mod capacity_claim_composition;",
+        ),
+    ];
+
+    let cargo = include_str!("../../../Cargo.toml");
+    let lock = include_str!("../../../Cargo.lock");
+    assert_eq!(
+        cargo.matches(&format!("rev = \"{ENGINE_PIN}\"")).count(),
+        2,
+        "INV-058 side-OI roster must be reviewed on every engine pin change",
+    );
+    assert!(
+        lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")),
+        "Cargo.lock must resolve the side-OI certified engine revision",
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/invariants/cu");
+    let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
+    let mut witness_set = std::collections::BTreeSet::new();
+    for (path, witness) in WITNESSES {
+        assert!(witness_set.insert(*witness), "duplicate witness {witness}");
+        let source = source_cache.entry(path).or_insert_with(|| {
+            std::fs::read_to_string(root.join(path))
+                .unwrap_or_else(|error| panic!("read {path}: {error}"))
+        });
+        assert!(
+            inv058_source_defines_function(source, witness),
+            "INV-058 side-OI roster lost public witness {path}#{witness}",
+        );
+    }
+    assert_eq!(
+        witness_set.len(),
+        14,
+        "INV-058 side-OI witness roster drift"
+    );
+    for (path, marker) in MODULE_LINKS {
+        let source = source_cache.entry(path).or_insert_with(|| {
+            std::fs::read_to_string(root.join(path))
+                .unwrap_or_else(|error| panic!("read {path}: {error}"))
+        });
+        assert!(
+            source.contains(marker),
+            "INV-058 side-OI witness module not mounted: {path} missing {marker}",
+        );
+    }
+
+    let production = include_str!("../../../src/v16_program.rs");
+    let production = production
+        .split("    #[cfg(test)]\n    mod tests")
+        .next()
+        .expect("production prefix exists");
+    assert_eq!(
+        production.matches("ensure_trade_side_oi_cap_view(").count(),
+        3,
+        "side-OI cap must remain one shared helper plus the two public trade implementations",
+    );
+    let guard = inv058_function_body(production, "ensure_trade_side_oi_cap_view");
+    assert!(guard.contains("asset.oi_eff_long_q.get() > percolator::MAX_OI_SIDE_Q"));
+    assert!(guard.contains("asset.oi_eff_short_q.get() > percolator::MAX_OI_SIDE_Q"));
+    assert!(guard.contains("Err(PercolatorError::EngineInvalidLeg.into())"));
+    for function in [
+        "handle_trade_nocpi_zero_copy",
+        "handle_batch_execute_zero_copy",
+    ] {
+        let body = inv058_function_body(production, function);
+        assert!(
+            body.contains("ensure_trade_side_oi_cap_view(&group"),
+            "{function} lost post-transition side-OI cap enforcement",
+        );
+    }
+}
