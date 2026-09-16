@@ -153,7 +153,7 @@
 413	LoF	BLOCKER	INV-027	independent-discovery	[BLOCKER LoF] Crystallize flat fees before first open
 414	LoF	PRIVILEGED	INV-012	independent-discovery	[PRIVILEGED LoF] Bind matcher grants to asset generations
 415	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Bind retained insurance withdrawals to stock sequence
-416	LoF	PRIVILEGED	INV-005	missing	[PRIVILEGED LoF] Prevent cold-admin takeover of funded oracle
+416	LoF	PRIVILEGED	INV-005	independent-discovery	[PRIVILEGED LoF] Prevent cold-admin takeover of funded oracle
 417	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Preserve resolved receipts across late backing expiry
 418	DoS	BLOCKER	INV-070	independent-discovery	[BLOCKER DoS] Retire native wSOL terminal insurance
 419	LoF	BLOCKER	INV-039	missing	[BLOCKER LoF] Retain pending loss weight through resolution

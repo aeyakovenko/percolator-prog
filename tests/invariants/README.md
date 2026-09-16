@@ -182,11 +182,18 @@ cell: a public trade/crank/expiry sequence leaves `impaired_liened_backing_num`
 as the only nonzero funded bucket term, then a cold-admin rotation plus a real
 SPL withdrawal prefix rolls back when the cold admin tries to replace the
 incumbent backing provider. The incumbent-consented handoff succeeds and a
-strict public reduction remains live. Row **416 remains missing**: the new
-checks are bounded source-composition and impaired-stock witnesses over the
-current handoff branch, not a generic funded-role generator over arbitrary
-histories, positions, claims, coalesced market roles, lifecycle states,
-clock/oracle schedules, or future handler restructurings.
+strict public reduction remains live.
+
+The 2026-09-16 public-SBF regression
+`v16_attack_funded_asset_admin_cannot_seize_oracle_and_redistribute_user_value`
+adds the held-out funded-oracle route: after independently funded matched
+exposure exists, a cold asset admin cannot seize `oracle_authority`, publish an
+AuthMark settlement mark, and redirect terminal value. The production guard now
+treats funded oracle control as exposure/loss backed, while deliberately leaving
+active-but-empty mode-only assets administrable. Row **416 is no longer
+missing** in `open_findings.tsv`; it remains OPEN as a generic proof target over
+arbitrary histories, claims, coalesced market roles, lifecycle states,
+clock/oracle schedules, and future handler restructurings.
 Detailed scope is in
 [inv_005_funded_role_source_composition_20260914.md](inv_005_funded_role_source_composition_20260914.md).
 
