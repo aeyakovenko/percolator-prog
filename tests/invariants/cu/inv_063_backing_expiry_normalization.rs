@@ -262,12 +262,22 @@ fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
         })
         .collect::<std::collections::BTreeSet<_>>();
     let mut expected = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
     for class in CLASSES {
         assert!(!class.disposition.is_empty());
         assert!(
-            witness_sources
-                .iter()
-                .any(|source| inv063_source_defines_test(source, class.witness)),
+            class.witness.starts_with("v16_"),
+            "INV-063 backing class '{}' uses an unreviewed witness name {}",
+            class.disposition,
+            class.witness,
+        );
+        witnesses.insert(class.witness);
+        let matches = witness_sources
+            .iter()
+            .filter(|source| inv063_source_defines_test(source, class.witness))
+            .count();
+        assert!(
+            matches == 1,
             "INV-063 backing class '{}' lost executable witness {}",
             class.disposition,
             class.witness,
@@ -279,6 +289,7 @@ fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
             );
         }
     }
+    assert_eq!(witnesses.len(), 12, "INV-063 backing witness roster drift");
     assert_eq!(
         actual, expected,
         "every production processor function that names backing needs an INV-063 expiry disposition and executable witness"
