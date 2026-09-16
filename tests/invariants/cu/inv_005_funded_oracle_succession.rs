@@ -16,6 +16,9 @@ mod cold_oracle_funded_containment;
 #[path = "inv_005_cold_oracle_insurance_containment.rs"]
 mod cold_oracle_insurance_containment;
 
+#[path = "inv_005_cold_oracle_resolved_containment.rs"]
+mod cold_oracle_resolved_containment;
+
 const PRINCIPAL: [u128; 2] = [17, 29];
 const PEER_BACKING: u128 = 31;
 const CAPITAL: u128 = 23;

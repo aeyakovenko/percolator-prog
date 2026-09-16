@@ -1,5 +1,25 @@
 # Invariant-owned test coverage
 
+## Lane 24 funded oracle containment across resolution (2026-09-16)
+
+The [resolved containment owner](cu/inv_005_cold_oracle_resolved_containment.rs)
+adds eight public LiteSVM worlds crossing both assets, oracle/provider overlap
+with either distinct insurance role, and oracle replacement before/after market
+resolution. A cold-admin oracle replacement, resolution and unsigned backing
+payout roll back together when a funded-role takeover suffix rejects. After
+cold-admin burn, retained funded requests reject stale epochs, renewed incumbent
+self-handoffs succeed, and unsigned payouts preserve the separate live operator,
+terminal beneficiary and backing-provider entitlements. No funded holder signs
+the committed oracle replacement or terminal payouts.
+
+The selector checks 104 exact rollbacks, 88 restored SPL transfers and 40
+committed unsigned payouts; peak CU is 64,969 below 300,000. This finite product
+has no positions, Hybrid round trip, earned backing or beneficiary succession,
+and does not duplicate Lane 14. No production bug was found. **Row 416 remains
+OPEN/missing; INV-005 remains `REFUTED_CURRENT`.** See the
+[Lane 24 report](lane24_funded_oracle_containment_20260916.md) for non-overlap,
+exact commands/results, artifact hashes and remaining limits.
+
 ## Lane 19 latent Hybrid source realization across backlog (2026-09-16)
 
 The existing [INV-028 Hybrid carry owner](cu/inv_028_hybrid_capacity_carry.rs)
