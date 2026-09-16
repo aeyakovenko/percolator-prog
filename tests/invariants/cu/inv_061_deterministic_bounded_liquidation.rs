@@ -2303,6 +2303,7 @@ fn v16_program_liquidation_composition_is_source_complete() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut classes = std::collections::BTreeSet::new();
     let mut proofs = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
     let mut source_cache = std::collections::BTreeMap::<&str, String>::new();
     for row in CLASSES {
         assert!(classes.insert(row.class), "duplicate liquidation class");
@@ -2316,6 +2317,17 @@ fn v16_program_liquidation_composition_is_source_complete() {
             );
         }
         for (path, witness) in row.public_witnesses {
+            assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            assert!(
+                path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                "liquidation class '{}' points outside invariant test sources: {path}",
+                row.class,
+            );
+            assert!(
+                witness.starts_with("v16_"),
+                "liquidation class '{}' uses an unreviewed witness name: {witness}",
+                row.class,
+            );
             let source = source_cache.entry(path).or_insert_with(|| {
                 std::fs::read_to_string(root.join(path))
                     .unwrap_or_else(|error| panic!("read {path}: {error}"))
@@ -2329,6 +2341,7 @@ fn v16_program_liquidation_composition_is_source_complete() {
     }
     assert_eq!(classes.len(), 7, "liquidation class roster drift");
     assert_eq!(proofs.len(), 18, "liquidation proof roster drift");
+    assert_eq!(witnesses.len(), 12, "liquidation witness roster drift");
 
     let production = include_str!("../../../src/v16_program.rs");
     let production = production
