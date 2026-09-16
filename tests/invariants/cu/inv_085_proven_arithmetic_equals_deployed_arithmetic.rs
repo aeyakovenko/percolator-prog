@@ -25,6 +25,44 @@ use super::*;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 
+fn inv085_source_defines_function(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.strip_prefix(&expected)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+            || line
+                .strip_prefix("pub ")
+                .and_then(|tail| tail.strip_prefix(&expected))
+                .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+fn inv085_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[test]
 fn v16_program_public_sbf_custody_encoding_preserves_atom_carries_and_partitions() {
     use super::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
@@ -1679,7 +1717,7 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
             "ORACLE" | "POLICY" | "COMPOSITE" => assert!(
                 witness_sources
                     .iter()
-                    .any(|source| source.contains(&format!("fn {}", row.evidence))),
+                    .any(|source| inv085_source_defines_test(source, row.evidence)),
                 "{} lacks executable arithmetic evidence {}",
                 row.function,
                 row.evidence
@@ -1705,7 +1743,7 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         .expect("policy module terminates before processor");
     for adapter in CANONICAL_ADAPTERS {
         assert!(
-            policy_source.contains(&format!("fn {adapter}")),
+            inv085_source_defines_function(policy_source, adapter),
             "canonical arithmetic adapter {adapter} escaped policy_v16"
         );
     }
