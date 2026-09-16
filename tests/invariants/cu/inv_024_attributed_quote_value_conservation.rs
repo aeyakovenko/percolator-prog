@@ -705,7 +705,9 @@ fn v16_program_entitlement_effect_roster_is_source_complete() {
             .split_once('#')
             .unwrap_or_else(|| panic!("entitlement owner must be path#function: {line}"));
         assert!(
-            owner_path.starts_with("tests/invariants/") && owner_path.ends_with(".rs"),
+            owner_path.starts_with("tests/invariants/")
+                && owner_path.ends_with(".rs")
+                && !owner_path.contains(".."),
             "entitlement owner must stay inside invariant source files: {owner_path}"
         );
         assert!(
