@@ -1871,7 +1871,9 @@ fn v16_program_reference_model_dimension_composition_is_source_complete() {
         for (path, witness) in row.witnesses {
             assert!(witnesses.insert(*witness), "duplicate witness {witness}");
             assert!(
-                path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                path.starts_with("tests/invariants/")
+                    && path.ends_with(".rs")
+                    && !path.contains(".."),
                 "model dimension '{}' points outside invariant test sources: {path}",
                 row.dimension,
             );
