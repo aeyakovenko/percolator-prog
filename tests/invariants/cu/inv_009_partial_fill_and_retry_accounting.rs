@@ -69,6 +69,41 @@ fn inv009_variant_body<'a>(instruction_enum: &'a str, variant: &str) -> &'a str 
     panic!("unterminated instruction variant {variant}");
 }
 
+fn inv009_source_defines_test(source: &str, function: &str) -> bool {
+    inv009_source_defines_attributed_function(source, function, "#[test]")
+}
+
+fn inv009_source_defines_kani_proof(source: &str, function: &str) -> bool {
+    inv009_source_defines_attributed_function(source, function, "#[kani::proof]")
+}
+
+fn inv009_source_defines_attributed_function(
+    source: &str,
+    function: &str,
+    attribute: &str,
+) -> bool {
+    let marker = format!("fn {function}");
+    let mut saw_attribute = false;
+    for line in source.lines() {
+        let line = line.trim();
+        if line == attribute {
+            saw_attribute = true;
+        } else if line.starts_with("fn ") {
+            if saw_attribute
+                && line
+                    .strip_prefix(&marker)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            saw_attribute = false;
+        } else if saw_attribute && !line.is_empty() && !line.starts_with('#') {
+            saw_attribute = false;
+        }
+    }
+    false
+}
+
 #[test]
 fn v16_program_one_shot_trade_consent_composition_is_source_complete() {
     assert_certified_engine_pin("INV-008/009/011/059 one-shot trade consent");
@@ -151,22 +186,29 @@ fn v16_program_one_shot_trade_consent_composition_is_source_complete() {
 
     let transaction_envelope =
         include_str!("../public_sbf/inv_006_program_chain_message_type_and_version_binding.rs");
-    assert!(transaction_envelope
-        .contains("fn retained_transaction_binds_program_market_kind_schema_and_blockhash("));
-    assert!(
-        transaction_envelope.contains("fn deployed_wrapper_has_no_detached_signature_interpreter(")
-    );
+    assert!(inv009_source_defines_test(
+        transaction_envelope,
+        "retained_transaction_binds_program_market_kind_schema_and_blockhash"
+    ));
+    assert!(inv009_source_defines_test(
+        transaction_envelope,
+        "deployed_wrapper_has_no_detached_signature_interpreter"
+    ));
 
     let episode_proof = include_str!("../kani/inv_004_position_episode_binding.rs");
-    assert!(episode_proof
-        .contains("fn kani_v16_successful_episode_consumption_invalidates_the_old_binding("));
+    assert!(inv009_source_defines_kani_proof(
+        episode_proof,
+        "kani_v16_successful_episode_consumption_invalidates_the_old_binding"
+    ));
     let partial_proof = include_str!("../kani/inv_009_partial_fill_and_retry_accounting.rs");
-    assert!(
-        partial_proof.contains("fn kani_v16_atomic_batch_accepts_only_exact_bound_matcher_fill(")
-    );
+    assert!(inv009_source_defines_kani_proof(
+        partial_proof,
+        "kani_v16_atomic_batch_accepts_only_exact_bound_matcher_fill"
+    ));
     let aggregate_owner = include_str!("inv_011_signed_aggregate_economic_bounds.rs");
-    assert!(aggregate_owner.contains(
-        "fn v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically("
+    assert!(inv009_source_defines_test(
+        aggregate_owner,
+        "v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically"
     ));
 }
 
