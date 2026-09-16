@@ -1,5 +1,23 @@
 # Invariant-owned test coverage
 
+## INV-039 resolution discovery metadata binding (2026-09-16)
+
+Owner:
+[public_sbf/inv_039_pending_loss_obligation_durability.rs](public_sbf/inv_039_pending_loss_obligation_durability.rs).
+The selector
+`v16_pending_loss_discovery_metadata_preserves_distinct_resolution_evidence`
+binds rows 419 and 435 to their respective reviewed discovery fingerprints,
+executable selectors, and attribution oracles. Row 419 compares Recovery-to-Resolved
+landing orders with a retained obligation and an opposing debtor. Row 435 requires
+one portfolio to be both creditor and debtor across source domains. Invariant
+ownership alone does not make these witnesses interchangeable.
+
+On base `6f7a41c4`, swapping only the two benchmark IDs in
+`independent_discoveries.tsv` passed both generic benchmark and reopening gates.
+The new guard rejects that swap; the original mappings pass. This closes a
+metadata conformance gap without changing either row's classification, production
+behavior, or the bounded scope of the existing public-route evidence.
+
 ## INV-060 flat first-open maintenance admission (2026-09-16)
 
 Owner:
