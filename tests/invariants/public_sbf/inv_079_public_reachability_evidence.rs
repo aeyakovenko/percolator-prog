@@ -1334,6 +1334,57 @@ fn v16_public_instruction_coverage_registry_matches_production_roster() {
 }
 
 #[test]
+fn v16_public_instruction_coverage_registry_points_to_executable_evidence() {
+    let registry = parse_public_instruction_coverage_registry(include_str!(
+        "../public_instruction_coverage.tsv"
+    ));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut source_cache = std::collections::BTreeMap::<String, String>::new();
+
+    for row in registry {
+        for (column, evidence) in [
+            ("public_route_coverage", row.public_route_coverage),
+            ("cu_coverage", row.cu_coverage),
+        ] {
+            let (kind, target) = evidence.split_once(':').unwrap_or_else(|| {
+                panic!("{} {} evidence lacks TYPE:path#test", row.variant, column)
+            });
+            assert!(
+                matches!(kind, "OWNED" | "SHARED" | "CROSS"),
+                "{} {} evidence has unknown coverage kind {kind}",
+                row.variant,
+                column
+            );
+            let (path, test) = target
+                .split_once('#')
+                .unwrap_or_else(|| panic!("{} {} evidence lacks path#test", row.variant, column));
+            assert!(
+                path.starts_with("tests/invariants/"),
+                "{} {} evidence must stay inside tests/invariants: {path}",
+                row.variant,
+                column
+            );
+            let source = source_cache.entry(path.to_owned()).or_insert_with(|| {
+                std::fs::read_to_string(root.join(path)).unwrap_or_else(|error| {
+                    panic!("read {} {} evidence {path}: {error}", row.variant, column)
+                })
+            });
+            assert!(
+                source_defines_test(source, test),
+                "{} {} evidence points to a missing executable test {path}#{test}",
+                row.variant,
+                column
+            );
+        }
+        assert_eq!(
+            row.omission_reason, "-",
+            "{} has executable route/CU evidence and must not carry an omission reason",
+            row.variant
+        );
+    }
+}
+
+#[test]
 fn v16_public_instruction_dispatch_registry_matches_reviewed_handlers() {
     let production = include_str!("../../../src/v16_program.rs");
     let dispatch_roster = production_public_instruction_dispatch_roster(production);
