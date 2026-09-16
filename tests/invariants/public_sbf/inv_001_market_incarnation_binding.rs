@@ -87,7 +87,7 @@ fn v16_program_market_incarnation_and_transaction_domain_composition_is_source_c
         ),
     ] {
         assert!(
-            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            path.starts_with("tests/invariants/") && path.ends_with(".rs") && !path.contains(".."),
             "INV-001 market-incarnation witness must resolve to an invariant source file: {path}"
         );
         assert!(

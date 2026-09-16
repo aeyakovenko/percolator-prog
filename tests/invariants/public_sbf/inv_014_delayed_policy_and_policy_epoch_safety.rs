@@ -201,7 +201,7 @@ fn v16_program_delayed_control_matrix_is_source_complete() {
         ),
     ] {
         assert!(
-            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            path.starts_with("tests/invariants/") && path.ends_with(".rs") && !path.contains(".."),
             "INV-014 delayed-policy witness must resolve to an invariant source file: {path}"
         );
         assert!(

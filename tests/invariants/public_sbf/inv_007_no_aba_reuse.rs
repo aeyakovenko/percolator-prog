@@ -142,7 +142,7 @@ fn v16_wrapper_account_incarnation_census_is_source_complete() {
         ),
     ] {
         assert!(
-            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            path.starts_with("tests/invariants/") && path.ends_with(".rs") && !path.contains(".."),
             "INV-007 ABA witness must resolve to an invariant source file: {path}"
         );
         assert!(
