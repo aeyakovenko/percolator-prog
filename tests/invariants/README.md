@@ -54,6 +54,35 @@ See the [local report](row422_native_terminal_reward_20260916.md) for the public
 trace, exact commands, results and remaining limits. No current behavior violation
 was found in this product.
 
+## Row 417 funded custody recreation after receipt retirement (2026-09-16)
+
+The [post-close custody child](cu/inv_067_receipt_post_close_custody.rs) adds one
+bounded public LiteSVM selector with four histories: classic/native secondary
+custody crossed with absent/prefunded ATA addresses. Two unequal receipts finish
+their staggered-expiry top-ups, all portfolios close, and `CloseSlab` commits its
+tombstone. Both receipt owners then spend their payouts and close their payout
+ATAs. An independent sponsor recreates both canonical vaults and all four payout
+ATAs at the original addresses, with enough liquidity on either rail to pay
+either former claimant in full.
+
+Retained claims and closes cannot revive an entitlement. Thirty-two failing
+suffixes undo successful ATA creation and real SPL/native funding, including
+mint supply, native backing and rent. After committed recreation, 72 retained
+receipt/slab retries preserve complete economic accounts at slots 17 and 100.
+The separate fee payer loses only the exact signature fee; prefunding contributes
+to each replacement ATA's rent exactly once. All 24 committed ATA recreations and
+104 exact rollback checks pass. Peak measured continuation CU is 59,810 classic
+and 58,310 native, with a peak transaction size of 854 bytes.
+
+Existing alternating-rail and dual-vault retirement tests stop before funded
+post-close custody recreation; existing destination-repair tests retain a live
+market. This increment covers that remaining intersection. Deliberately donated
+post-close liquidity is not a new claim, and recovery of those donations is not
+asserted. **Row 417 remains OPEN/missing; INV-067 remains `REFUTED_CURRENT`.**
+See the [report](row417_post_close_custody_20260916.md) for exact selectors,
+provenance, adjacent controls and remaining limits. No current behavior violation
+was found in this product.
+
 ## Row 417 receipt clear through dual-rail CloseSlab (2026-09-16)
 
 The [receipt CloseSlab child](cu/inv_067_receipt_close_slab_rail.rs) extends the

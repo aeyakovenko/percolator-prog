@@ -3,6 +3,9 @@
 
 use super::*;
 
+#[path = "inv_067_receipt_post_close_custody.rs"]
+mod post_close_custody;
+
 #[derive(Default)]
 struct Evidence {
     rollbacks: usize,
