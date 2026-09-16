@@ -299,19 +299,23 @@ Detailed scope is in
 
 Owner: [cu/inv_045_no_free_mark_movement.rs](cu/inv_045_no_free_mark_movement.rs),
 `v16_program_mark_writer_and_trade_exit_composition_is_source_complete`.
-The current-surface source gate now pins the `PermissionlessCrank` liquidation
+The current-surface source gate pins the `PermissionlessCrank` liquidation
 reward ordering: complete health-observation coverage is checked before the
 engine-selected crank, insurance is snapshotted only after maintenance
 collection, the selected liquidation asset drives fee attribution, trade-driven
 mark penalties are not reclaimable as rewards or domain budgets, and any cranker
 credit is capped by the retained liquidation fee before the remaining atoms are
-split to domains.
+split to domains. The guard also requires the row422 witness family to remain
+mounted: paid-origin route attribution, stale-penalty handoff, fresh-report
+handoff, exposed keeper provenance, maintenance catchup, policy catchup, terminal
+redemption, corroborated mark fees, and Hybrid recipient routing.
 
 This strengthens row 422 against wrapper drift that would pay stale or
-trade-origin rewards from the wrong provenance path. Row **422 remains missing**:
-the new check is a source-composition guard over the current route, not a generic
-Hybrid reward-history generator or proof over arbitrary paid-origin, fresh-report,
-recipient, funding, maintenance, policy, and terminal-cohort histories.
+trade-origin rewards from the wrong provenance path. Row **422 remains open** as
+a generic proof target over arbitrary paid-origin, fresh-report, recipient,
+funding, maintenance, policy, and terminal-cohort histories; the current guard is
+a finite whole-route witness roster plus source-composition check for the
+deployed route.
 
 ## Row 426 current Hybrid rescue closure (2026-09-14)
 

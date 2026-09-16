@@ -3291,6 +3291,67 @@ fn v16_program_mark_writer_and_trade_exit_composition_is_source_complete() {
             ],
         },
         Inv045MarkClass {
+            class: "row422 liquidation reward provenance",
+            witnesses: &[
+                (
+                    "tests/invariants/cu/inv_045_accepted_price_reward.rs",
+                    "v16_program_fresh_report_liquidation_rewards_follow_accepted_price_through_spl_exit",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_reward_catchup_order.rs",
+                    "v16_program_reward_price_tracks_actual_catchup_across_report_and_crank_orders",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_trade_origin_catchup.rs",
+                    "v16_program_trade_origin_liquidation_prices_and_entitlements_survive_catchup_order",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_corroborated_mark_fees.rs",
+                    "v16_program_corroborated_paid_mark_only_distributes_new_liquidation_fees",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_authenticated_reward_handoff.rs",
+                    "v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper_exit",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_authenticated_reward_handoff.rs",
+                    "v16_program_nonzero_funding_fresh_handoff_preserves_owner_and_keeper_entitlement",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_retained_penalty_handoff.rs",
+                    "v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_paid_origin_routes.rs",
+                    "v16_program_paid_origin_routes_preserve_old_penalty_and_block_trade_origin_rewards",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_paid_origin_hybrid_recipient.rs",
+                    "v16_program_paid_origin_penalty_survives_dual_hybrid_recipient_catchup",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_exposed_keeper_provenance.rs",
+                    "v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybrid_catchup",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_reward_maintenance_catchup.rs",
+                    "v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchup",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_reward_policy_catchup.rs",
+                    "v16_program_reward_policy_succession_preserves_receipts_and_effective_price_catchup",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_reward_terminal_redemption.rs",
+                    "v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order",
+                ),
+                (
+                    "tests/invariants/cu/inv_045_hybrid_recipient_provenance.rs",
+                    "v16_program_dual_hybrid_reward_lineage_survives_recipient_routes_and_payout",
+                ),
+            ],
+        },
+        Inv045MarkClass {
             class: "clock, same-slot, and pending-target sequencing",
             witnesses: &[
                 (
@@ -3382,7 +3443,70 @@ fn v16_program_mark_writer_and_trade_exit_composition_is_source_complete() {
             );
         }
     }
-    assert_eq!(classes.len(), 7, "mark/availability class roster drift");
+    assert_eq!(classes.len(), 8, "mark/availability class roster drift");
+    for (path, marker) in [
+        (
+            "tests/invariants/cu/inv_045_no_free_mark_movement.rs",
+            "mod accepted_price_reward;",
+        ),
+        (
+            "tests/invariants/cu/inv_045_no_free_mark_movement.rs",
+            "mod trade_origin_catchup;",
+        ),
+        (
+            "tests/invariants/cu/inv_045_accepted_price_reward.rs",
+            "mod reward_catchup_order;",
+        ),
+        (
+            "tests/invariants/cu/inv_045_trade_origin_catchup.rs",
+            "mod authenticated_reward_handoff;",
+        ),
+        (
+            "tests/invariants/cu/inv_045_trade_origin_catchup.rs",
+            "mod corroborated_mark_fees;",
+        ),
+        (
+            "tests/invariants/cu/inv_045_authenticated_reward_handoff.rs",
+            "mod retained_penalty_handoff;",
+        ),
+        (
+            "tests/invariants/cu/inv_045_authenticated_reward_handoff.rs",
+            "mod reward_policy_catchup;",
+        ),
+        (
+            "tests/invariants/cu/inv_045_authenticated_reward_handoff.rs",
+            "mod exposed_keeper_provenance;",
+        ),
+        (
+            "tests/invariants/cu/inv_045_authenticated_reward_handoff.rs",
+            "mod reward_maintenance_catchup;",
+        ),
+        (
+            "tests/invariants/cu/inv_045_authenticated_reward_handoff.rs",
+            "mod reward_terminal_redemption;",
+        ),
+        (
+            "tests/invariants/cu/inv_045_authenticated_reward_handoff.rs",
+            "mod hybrid_recipient_provenance;",
+        ),
+        (
+            "tests/invariants/cu/inv_045_retained_penalty_handoff.rs",
+            "mod paid_origin_routes;",
+        ),
+        (
+            "tests/invariants/cu/inv_045_retained_penalty_handoff.rs",
+            "mod paid_origin_hybrid_recipient;",
+        ),
+    ] {
+        let source = source_cache.entry(path).or_insert_with(|| {
+            std::fs::read_to_string(root.join(path))
+                .unwrap_or_else(|error| panic!("read {path}: {error}"))
+        });
+        assert!(
+            source.contains(marker),
+            "row422 witness module not mounted: {path} missing {marker}",
+        );
+    }
 
     let production = include_str!("../../../src/v16_program.rs");
     let production = production
