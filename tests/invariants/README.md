@@ -47,6 +47,24 @@ No production bug was established. Rows **419/435 remain OPEN/missing** and
 INV-039 remains `REFUTED_CURRENT`. The [Lane 21 report](lane21_mixed_debt_attribution_20260916.md)
 records non-overlap, exact verification commands, artifacts and remaining gaps.
 
+## Lane 20 deferred receipt and fee across expiry (2026-09-16)
+
+The [INV-067 deferred-fee child](cu/inv_067_receipt_deferred_fee.rs) crosses a
+late junior receipt AND its unpaid final maintenance fee with backing expiry.
+Seventy-two public LiteSVM histories vary the early junior identity, exact/late
+expiry, three fee timings and all six claimant orders. Only one junior receipt
+exists at expiry; the backed claimant can receive an exact receipt while the
+other junior still holds an unreceipted bound. Every prefix checks receipt and
+owner identity, exact bound replacement, fee-domain attribution and SPL payouts.
+An aborted expiry/two-replacement/three-payment bundle restores complete accounts;
+retained requests then finish, all five portfolios close and insurance pays out.
+
+This adds nonzero fees to INV-066's deferred-receipt product and defers a junior
+receipt that Lane 17 always creates before expiry. **Row 417 remains OPEN/missing;
+INV-067 remains `REFUTED_CURRENT`.** Production and machine statuses are unchanged.
+The [Lane 20 report](lane20_resolved_receipt_expiry_20260916.md) records non-overlap
+with lanes 1-18, exact commands/results, artifact hashes and finite limits.
+
 ## Lane 16 full-market Hybrid progress (2026-09-15)
 
 The existing [Hybrid/source/backlog owner](cu/inv_077_hybrid_source_backlog.rs)

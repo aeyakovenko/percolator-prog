@@ -11,6 +11,9 @@
 use super::{late_expiry::World, *};
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_067_receipt_deferred_fee.rs"]
+mod deferred_fee;
+
 const RATE: u128 = 7;
 const FACES: [u128; 5] = [700, 0, 1_000, 0, 1_300];
 const TOTAL_FACE: u128 = 3_000;
