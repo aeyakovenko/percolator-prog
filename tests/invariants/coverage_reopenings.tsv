@@ -1023,6 +1023,10 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # vault residue. No ADL, underfunded receipt, insurance recredit, CPI,
 # multi-leg batch, maximum-shape, production or status change. Scope/validation:
 # astra_scope_y_mixed_fractional_cohort_20260914.md.
+# 2026-09-16 hygiene: focused wrapper PR #440 supersedes the older row419
+# wrapper PR and includes the pending-obligation resolved-close public
+# regression on the current engine fix line. This row remains OPEN until the
+# fix lands and the benchmark registry is reconciled on the merged pin.
 419	LoF	BLOCKER	INV-039	INV-024,INV-037,INV-039,INV-041,INV-048,INV-066,INV-067,INV-073,INV-076,INV-081,INV-086	pending-obligation+x-resolution+x-close-order	obligation-attribution-persists-until-the-opposing-economic-debt-settles	OPEN
 # Rows 420/421 partial conformance (2026-09-10): cu/inv_073_absent_insurer_spent_retirement.rs,
 # v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion.
@@ -2311,4 +2315,8 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # fractional claimant and a cross-asset debtor, and the paired public baseline
 # proves the debt-normalized owner vector with only explicit vault residue. ADL,
 # underfunded receipts, recredit, arbitrary histories and max shape remain OPEN.
+# 2026-09-16 hygiene: the old row419/435 wrapper PRs were closed as superseded.
+# Focused wrapper PR #440 and engine PR #202 now carry the current public
+# INV-039/076 regressions and engine fix line. This row remains OPEN until that
+# branch lands and the benchmark registry is reconciled on the merged pin.
 435	LoF	BLOCKER	INV-039	INV-039	pending-obligation+x-resolution+x-mixed-role-attribution	mixed-role-resolved-debt-attribution-preserves-owner-obligation-through-resolution	OPEN

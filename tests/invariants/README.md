@@ -1,5 +1,20 @@
 # Invariant-owned test coverage
 
+## Row 419/435 focused replacement PR (2026-09-16)
+
+The older row419/435 PRs were closed as superseded by the focused engine/wrapper
+pair:
+
+- engine #202, `codex/row419-terminal-attribution-20260916`
+- wrapper #440, `codex/row419-resolved-source-regression-20260916`
+
+That pair carries the current engine fix line plus two public LiteSVM
+regressions: the INV-039 mixed-role terminal-fee/source-conversion case and the
+INV-076 resolved-close pending-obligation attribution case. The historical
+benchmark rows remain `OPEN` in `coverage_reopenings.tsv` until the focused
+fix lands and the registry is reconciled against the merged pin; this note is
+PR hygiene and traceability, not an invariant-status promotion.
+
 ## INV-077 partial short-B terminal progress (2026-09-16)
 
 The [short-B terminal child](cu/inv_077_short_b_terminal_progress.rs) adds one
