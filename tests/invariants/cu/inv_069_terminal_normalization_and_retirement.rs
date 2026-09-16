@@ -14,16 +14,29 @@
 
 use super::*;
 
-fn inv069_source_defines_function(source: &str, function: &str) -> bool {
-    let needle = format!("fn {function}");
-    source.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with(&needle)
-            && line[needle.len()..]
-                .chars()
-                .next()
-                .is_some_and(|ch| ch == '(' || ch.is_whitespace())
-    })
+fn inv069_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
 }
 
 // Expired principal is still booked custody after its slot is retired and reused.
@@ -1086,7 +1099,7 @@ fn v16_program_terminal_blocker_census_composes_engine_retirement_before_wrapper
             assert!(
                 witness_sources
                     .iter()
-                    .any(|source| inv069_source_defines_function(source, witness)),
+                    .any(|source| inv069_source_defines_test(source, witness)),
                 "terminal blocker class '{}' lacks public witness {witness}",
                 row.class,
             );
