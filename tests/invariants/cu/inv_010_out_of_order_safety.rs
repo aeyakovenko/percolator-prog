@@ -50,6 +50,29 @@ fn inv010_source_defines_test(source: &str, function: &str) -> bool {
     false
 }
 
+fn inv010_source_defines_kani_proof(source: &str, function: &str) -> bool {
+    let marker = format!("fn {function}");
+    let mut saw_proof = false;
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[kani::proof]" {
+            saw_proof = true;
+        } else if line.starts_with("fn ") {
+            if saw_proof
+                && line
+                    .strip_prefix(&marker)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            saw_proof = false;
+        } else if saw_proof && !line.is_empty() && !line.starts_with('#') {
+            saw_proof = false;
+        }
+    }
+    false
+}
+
 fn inv010_evidence_parts(evidence: &str) -> (&str, &str) {
     let evidence = evidence
         .split_once(':')
@@ -206,10 +229,9 @@ fn v16_program_every_public_route_has_an_explicit_history_relation() {
     ] {
         let proof = std::fs::read_to_string(root.join(path))
             .unwrap_or_else(|error| panic!("read history theorem {path}: {error}"));
-        assert!(proof.contains("#[kani::proof]"));
         assert!(
-            proof.contains(&format!("fn {theorem}(")),
-            "missing history theorem {path}#{theorem}"
+            inv010_source_defines_kani_proof(&proof, theorem),
+            "missing #[kani::proof] history theorem {path}#{theorem}"
         );
     }
 }
@@ -316,8 +338,10 @@ fn v16_program_out_of_order_induction_composition_is_source_complete() {
     let kani =
         std::fs::read_to_string(root.join("tests/invariants/kani/inv_010_out_of_order_safety.rs"))
             .expect("read INV-010 one-step theorem");
-    assert!(kani.contains("#[kani::proof]"));
-    assert!(kani.contains("fn kani_v16_matcher_sequence_accepts_only_current_expected_value("));
+    assert!(inv010_source_defines_kani_proof(
+        &kani,
+        "kani_v16_matcher_sequence_accepts_only_current_expected_value"
+    ));
     assert!(kani.contains("if current != expected || current == u64::MAX"));
     assert!(kani.contains("assert_eq!(result.unwrap(), current + 1)"));
 }
