@@ -1185,18 +1185,31 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
     // The three calls in the public crank handler are distinct routes: committed Recovery work,
     // expired-close Recovery declaration, and ordinary live-account selection. Keep an executable
     // public witness for each route instead of allowing the aggregate call count to hide one.
+    let mut auto_crank_witnesses = std::collections::BTreeSet::new();
     for witness in [
         "v16_program_recovery_seeded_frontier_preserves_bounded_owner_exit",
         "v16_program_auto_crank_expired_close_uses_authenticated_slot_not_stale_market_slot",
         "v16_program_auto_crank_current_solvent_partial_liquidation_makes_progress",
     ] {
+        assert!(witness.starts_with("v16_"));
         assert!(
-            witness_sources
-                .iter()
-                .any(|source| inv088_source_defines_test(source, witness)),
+            auto_crank_witnesses.insert(witness),
+            "duplicate public auto-crank route witness {witness}",
+        );
+        let matches = witness_sources
+            .iter()
+            .filter(|source| inv088_source_defines_test(source, witness))
+            .count();
+        assert!(
+            matches == 1,
             "public auto-crank route lacks executable witness {witness}",
         );
     }
+    assert_eq!(
+        auto_crank_witnesses.len(),
+        3,
+        "public auto-crank route witness roster drift"
+    );
     let mut certificate_disposition_classes = [0usize; 4];
     for row in ROWS {
         assert!(!row.summary_family.is_empty());
@@ -1208,9 +1221,18 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
         };
         certificate_disposition_classes[certificate_disposition_index] += 1;
         assert!(
-            witness_sources
-                .iter()
-                .any(|source| inv088_source_defines_test(source, row.witness)),
+            row.witness.starts_with("v16_"),
+            "{}.{} uses an unreviewed witness name {}",
+            row.owner,
+            row.method,
+            row.witness,
+        );
+        let witness_matches = witness_sources
+            .iter()
+            .filter(|source| inv088_source_defines_test(source, row.witness))
+            .count();
+        assert!(
+            witness_matches == 1,
             "{}.{} lacks executable witness {}",
             row.owner,
             row.method,
