@@ -2357,14 +2357,24 @@ fn v16_program_loss_stale_economic_routes_have_a_complete_seniority_disposition(
         include_str!("../stateful/inv_082_state_indexed_liveness_theorem.rs"),
     ];
     let mut expected = std::collections::BTreeMap::new();
+    let mut witnesses = std::collections::BTreeSet::new();
     for row in ROWS {
         assert!(!row.disposition.is_empty());
         assert!(!row.witnesses.is_empty());
         for witness in row.witnesses {
             assert!(
-                witness_sources
-                    .iter()
-                    .any(|source| inv027_source_defines_test(source, witness)),
+                witness.starts_with("v16_"),
+                "{}.{} uses an unreviewed witness name {witness}",
+                row.owner,
+                row.marker,
+            );
+            witnesses.insert(*witness);
+            let matches = witness_sources
+                .iter()
+                .filter(|source| inv027_source_defines_test(source, witness))
+                .count();
+            assert!(
+                matches == 1,
                 "{}.{} lacks executable seniority witness {witness}",
                 row.owner,
                 row.marker,
@@ -2379,6 +2389,7 @@ fn v16_program_loss_stale_economic_routes_have_a_complete_seniority_disposition(
             row.marker,
         );
     }
+    assert_eq!(witnesses.len(), 7, "seniority witness roster drift");
     assert_eq!(
         actual, expected,
         "every current loss-stale economic ingress needs an explicit seniority disposition",
