@@ -1376,6 +1376,16 @@ fn v16_program_split_merge_operation_family_composition_is_source_complete() {
         assert!(!row.witnesses.is_empty());
         for (path, witness) in row.witnesses {
             assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            assert!(
+                path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                "partition class '{}' points outside invariant test sources: {path}",
+                row.class,
+            );
+            assert!(
+                witness.starts_with("v16_"),
+                "partition class '{}' uses an unreviewed witness name: {witness}",
+                row.class,
+            );
             let source = source_cache.entry(path).or_insert_with(|| {
                 std::fs::read_to_string(root.join(path))
                     .unwrap_or_else(|error| panic!("read {path}: {error}"))
