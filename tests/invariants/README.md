@@ -1,5 +1,29 @@
 # Invariant-owned test coverage
 
+## Row 411 retained route consent with existing open interest (2026-09-16)
+
+The [existing-OI mark-consent child](cu/inv_014_retained_oi_mark_consent.rs) adds
+one LiteSVM selector with four public histories: single/batch bilateral openings
+in both directions, followed by retained batch-CPI continuation. After signing,
+the base policy rises from 19 to 37 bps and one EWMA slot elapses. The resulting
+movement fee must cover the existing position's exposure, which exceeds the new
+fill's notional. Previously paid fees remain separately attributed.
+
+Twelve initial simulations prove the retained requests are admissible before
+the update. Exact-minus-one atom caps reject after the matcher; stale-policy
+suffixes roll back completed deposits, fills, fee allocation and staged marks.
+Eight complete Account rollback checks and four exact-cap continuations reconcile
+owner capital, base-fee budgets, unbudgeted movement fees, epochs and fixed SPL
+supply. No economic program-owned bytes are injected or mutated by the harness.
+
+This extends the empty-OI retained mark-cap and fixed-mark mixed-route tests with
+an existing-position externality and rollback after successful mark staging.
+It ends with open positions and a pending paid mark. It does not establish
+single-CPI total-fee caps, independent LP dynamic-fee consent, later catchup or
+full route closure. **Row 411 remains OPEN; INV-014 remains `REFUTED_CURRENT`.**
+See the [report](row411_retained_oi_mark_consent_20260916.md) for exact commands,
+CU/rollback evidence, overlap assessment and the public setup constraint.
+
 ## Row 416 lien-retirement role boundary (2026-09-16)
 
 The [lien-retirement child](cu/inv_005_lien_release_role_boundary.rs) crosses

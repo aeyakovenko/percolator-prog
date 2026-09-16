@@ -19,6 +19,9 @@ mod retained_fee_authority_epoch;
 #[path = "inv_014_retained_policy_route_budgets.rs"]
 mod retained_policy_route_budgets;
 
+#[path = "inv_014_retained_oi_mark_consent.rs"]
+mod retained_oi_mark_consent;
+
 #[path = "inv_014_retained_underfunded_close.rs"]
 mod retained_underfunded_close;
 
