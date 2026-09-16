@@ -3218,13 +3218,29 @@ struct Inv045MarkClass {
     witnesses: &'static [(&'static str, &'static str)],
 }
 
-fn inv045_source_defines_function(source: &str, function: &str) -> bool {
-    let marker = format!("fn {function}");
-    source.lines().any(|line| {
-        line.trim()
-            .strip_prefix(&marker)
-            .is_some_and(|tail| tail.trim_start().starts_with('('))
-    })
+fn inv045_source_defines_executable_witness(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut executable_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" || line == "#[kani::proof]" {
+            executable_attribute = true;
+        } else if line.starts_with("fn ") {
+            if executable_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            executable_attribute = false;
+        } else if executable_attribute && !line.is_empty() && !line.starts_with("#") {
+            executable_attribute = false;
+        }
+    }
+
+    false
 }
 
 fn inv045_function_body<'a>(production: &'a str, function: &str) -> &'a str {
@@ -3437,7 +3453,7 @@ fn v16_program_mark_writer_and_trade_exit_composition_is_source_complete() {
                     .unwrap_or_else(|error| panic!("read {path}: {error}"))
             });
             assert!(
-                inv045_source_defines_function(source, witness),
+                inv045_source_defines_executable_witness(source, witness),
                 "mark class '{}' lacks executable witness {path}#{witness}",
                 row.class,
             );
