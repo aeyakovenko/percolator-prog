@@ -1073,15 +1073,19 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             fields[0],
             fields[1]
         );
-        assert!(
-            independent_sources.iter().any(|(owner, covered, source)| {
+        let discovery_matches = independent_sources
+            .iter()
+            .filter(|(owner, covered, source)| {
                 covered.contains(&invariant)
                     && source_defines_test(source, fields[2])
                     && (*owner == invariant
                         || source.contains(&format!("Secondary coverage: INV-{invariant:03}")))
-            }),
+            })
+            .count();
+        assert!(
+            discovery_matches == 1,
             "discovery generator is not an executable INV-{invariant:03}-owned or explicitly \
-             secondary test: {}",
+             secondary test, or resolves ambiguously: {}",
             fields[2],
         );
         assert!(
@@ -1250,10 +1254,12 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                 | "prerequisite-unreachable"
                 | "transient-only"
         ));
+        let claim_matches = nonqualifying_sources
+            .iter()
+            .filter(|source| source_defines_test(source, fields[2]))
+            .count();
         assert!(
-            nonqualifying_sources
-                .iter()
-                .any(|source| source_defines_test(source, fields[2])),
+            claim_matches == 1,
             "nonqualifying claim lacks executable public-route evidence: {}",
             fields[2]
         );
