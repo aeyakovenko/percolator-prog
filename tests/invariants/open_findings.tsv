@@ -153,6 +153,11 @@
 413	LoF	BLOCKER	INV-027	independent-discovery	[BLOCKER LoF] Crystallize flat fees before first open
 414	LoF	PRIVILEGED	INV-012	independent-discovery	[PRIVILEGED LoF] Bind matcher grants to asset generations
 415	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Bind retained insurance withdrawals to stock sequence
+# Row 416 conformance audit (2026-09-16): row416_conformance_audit_20260916.md
+# records five passing public LiteSVM selectors for funded-role containment and
+# authority incarnation. Oracle replacement itself is admitted; separate funded
+# rights and retained-request rejection are checked. This bounded evidence does
+# not establish independent discovery or a nonqualifying disposition: still missing.
 416	LoF	PRIVILEGED	INV-005	missing	[PRIVILEGED LoF] Prevent cold-admin takeover of funded oracle
 417	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Preserve resolved receipts across late backing expiry
 418	DoS	BLOCKER	INV-070	independent-discovery	[BLOCKER DoS] Retire native wSOL terminal insurance

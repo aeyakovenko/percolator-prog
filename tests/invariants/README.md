@@ -1,5 +1,23 @@
 # Invariant-owned test coverage
 
+## Row 416 conformance evidence audit (2026-09-16)
+
+Existing INV-005 public LiteSVM coverage already exercises the bounded
+authority-incarnation and funded-role containment slice. Five exact selectors
+pass at `5c870324`: fresh backing and insurance coholders, retained terminal
+envelopes, burned-admin restoration, and the last-lien/refunding boundary.
+Together they execute 20 histories and 166 exact Account rollback checks.
+No additional Rust test is needed for these already executable assertions.
+
+Cold-admin oracle replacement itself succeeds in these histories; it does not
+transfer the incumbent's separately funded rights. Those assertions do not
+establish arbitrary funded-oracle economic containment or independently discover
+the historical finding. **Row 416 remains OPEN/missing; INV-005 remains
+`REFUTED_CURRENT`.** The [focused audit](row416_conformance_audit_20260916.md)
+records exact selectors, public-account provenance, measured CU, artifact hash,
+and the remaining evidence boundary. This reconciliation changes only docs and
+the row's ledger commentary.
+
 ## Row 419/435 focused replacement PR (2026-09-16)
 
 The older row419/435 PRs were closed as superseded by the focused engine/wrapper
