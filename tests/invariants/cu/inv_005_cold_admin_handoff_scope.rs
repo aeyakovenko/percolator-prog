@@ -11,6 +11,9 @@ mod funded_role_zero_transition;
 #[path = "inv_005_terminal_oracle_role.rs"]
 mod terminal_oracle_role;
 
+#[path = "inv_005_disabled_role_restoration.rs"]
+mod disabled_role_restoration;
+
 const ROLES: [u8; 3] = [
     processor::ASSET_AUTH_INSURANCE,
     processor::ASSET_AUTH_INSURANCE_OPERATOR,

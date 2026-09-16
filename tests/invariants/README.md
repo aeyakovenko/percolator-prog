@@ -1,5 +1,31 @@
 # Invariant-owned test coverage
 
+## Row 416 burned asset-admin restoration (2026-09-16)
+
+The [disabled-role child](cu/inv_005_disabled_role_restoration.rs) adds four
+bounded public LiteSVM histories: `A -> zero` or `A -> B -> zero` for the cold
+asset-admin role, crossed with AuthMark/EWMA reports. A also owns 41 backing and
+59 insurance atoms. Required oracle, backing and insurance roles reject zero;
+the burned admin cannot restore itself in the same generation. A's independent
+funded exits remain authorized, while B cannot exercise them.
+
+After those exits, public retirement, the one-slot cooldown, reactivation and
+a consented admin handoff restore A in a new asset generation. Public
+self-handoffs and top-ups recreate the original authority and control counters.
+Retained signed reports, oracle configuration, admin/oracle handoffs and funded
+payouts still reject in both Live and Resolved states. A successful peer SPL
+payout precedes each rejection; a separate failed suffix rolls back reactivation
+and the generation frontier as well. Current-generation controls are admissible,
+and both funded owners ultimately receive exactly their own atoms.
+
+All four histories pass, including 104 complete Account/SPL rollback checks;
+peak measured CU is 65,434 under 300,000. This adds burned-role restoration with
+counter collisions, not same-generation zero-oracle restoration, open-lien
+impairment or another terminal-closure product. No current behavior violation
+was found. **Row 416 remains OPEN/missing; INV-005 remains `REFUTED_CURRENT`.**
+See the [restoration report](row416_disabled_role_restoration_20260916.md) for
+the reachable schedule, exact commands, artifacts and remaining limits.
+
 ## Row 417 alternating receipt rails across two expiries (2026-09-16)
 
 The [receipt rail history child](cu/inv_067_receipt_rail_history.rs) adds bounded
