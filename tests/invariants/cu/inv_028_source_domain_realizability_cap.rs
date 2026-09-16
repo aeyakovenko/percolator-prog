@@ -1533,15 +1533,6 @@ fn v16_bpf_trade_paths_respect_source_credit_watermark_permutations() {
     }
 }
 
-fn inv028_source_defines_function(source: &str, function: &str) -> bool {
-    let marker = format!("fn {function}");
-    source.lines().any(|line| {
-        line.trim()
-            .strip_prefix(&marker)
-            .is_some_and(|tail| tail.trim_start().starts_with('('))
-    })
-}
-
 #[test]
 fn v16_program_source_realizability_cap_composition_is_source_complete() {
     crate::assert_certified_engine_pin("INV-028 realizability-cap composition");
@@ -1723,7 +1714,7 @@ fn v16_program_source_realizability_cap_composition_is_source_complete() {
                 .unwrap_or_else(|error| panic!("read {path}: {error}"))
         });
         assert!(
-            inv028_source_defines_function(source, witness),
+            inv028_source_defines_test(source, witness),
             "row423 admission/resource witness missing {path}#{witness}",
         );
     }
