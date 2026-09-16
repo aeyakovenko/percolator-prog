@@ -49,6 +49,40 @@ mod cure_revocation;
 #[path = "inv_012_joint_incarnation_binding.rs"]
 mod joint_incarnation_binding;
 
+fn inv012_source_defines_function(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix(&expected)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
+fn inv012_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 fn issue406_matcher_inventory(data: &[u8]) -> i128 {
     i128::from_le_bytes(data[160..176].try_into().unwrap())
 }
@@ -117,9 +151,14 @@ fn v16_program_matcher_capability_route_roster_binds_every_current_scope() {
     assert!(matcher_guard.contains("matcher_capability_is_live(expiry_slot, Clock::get()?.slot)"));
 
     let expiry_proof = include_str!("../kani/inv_012_capability_and_delegate_scope.rs");
-    assert!(expiry_proof.contains("fn kani_v16_matcher_capability_config_is_exact_at_full_width("));
-    assert!(include_str!("inv_012_capability_and_delegate_scope.rs")
-        .contains("fn v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes("));
+    assert!(inv012_source_defines_function(
+        expiry_proof,
+        "kani_v16_matcher_capability_config_is_exact_at_full_width"
+    ));
+    assert!(inv012_source_defines_test(
+        include_str!("inv_012_capability_and_delegate_scope.rs"),
+        "v16_program_matcher_capability_expiry_is_clock_bound_on_both_cpi_routes"
+    ));
 
     assert_eq!(
         source
