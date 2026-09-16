@@ -10,6 +10,9 @@ use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::
 #[path = "inv_039_mixed_role_close_preemption.rs"]
 mod close_preemption;
 
+#[path = "inv_039_mixed_role_unsettled_expiry.rs"]
+mod unsettled_expiry;
+
 const EXPIRY: u64 = 25;
 // Debt crystallizes at slot 15; the setup's largest freshness horizon is 1,000.
 const SOURCE_EXPIRY: u64 = 1_015;

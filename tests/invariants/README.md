@@ -1,5 +1,31 @@
 # Invariant-owned test coverage
 
+## Lane 25 source expiry before mixed-role settlement (2026-09-16)
+
+The [unsettled-expiry owner](cu/inv_039_mixed_role_unsettled_expiry.rs) adds 48
+public LiteSVM histories crossing source expiry before either mixed role settles:
+just-before, exact and late expiry; partial/exact net debt; both sides and asset
+assignments; and two terminal orders. At resolution the same owner retains
+zero-basis creditor weight and an unsettled debtor leg. Normalization expires
+180,000 backing atoms without changing either leg, its K/B snapshots, source
+membership, residual, OI or owner entitlement. Subsequent settlement charges both
+debts to that owner and pays the original peer.
+
+The independent expired-source book checks owner entitlements, source-domain
+attribution, receipts, weight/count/OI and stock/reservation censuses at each
+prefix. The fresh control retains the existing 4,000/20,000 source discounts;
+after expiry, uncovered debt consumes claim face at par and custody drains to
+zero. All 240 portfolios close. There are 32 normalization-only steps, 272
+successful-prefix rollbacks, 48 waiting rollbacks and 64 paid-receipt retries;
+peak measured CU is 205,111.
+
+Lane 21 expires the opposing close with backing still fresh; Lane 18 and older
+retirement tests expire backing after mixed-role settlement. This increment
+expires the claimant's backing while both obligations remain unsettled. No
+production bug was found. **Rows 419/435 remain OPEN/missing; INV-039 remains
+`REFUTED_CURRENT`.** See the [Lane 25 report](lane25_mixed_role_unsettled_expiry_20260916.md)
+for the public trace, non-overlap, validation commands and finite limits.
+
 ## Lane 24 funded oracle containment across resolution (2026-09-16)
 
 The [resolved containment owner](cu/inv_005_cold_oracle_resolved_containment.rs)
