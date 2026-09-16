@@ -7,6 +7,9 @@
 
 use super::*;
 
+#[path = "inv_014_retained_residual_batch_cap.rs"]
+mod retained_residual_batch_cap;
+
 const OPEN_CAP: u64 = 37;
 const OPEN_FRESH: u64 = 53;
 const CLOSE_FRESH: u64 = 71;
