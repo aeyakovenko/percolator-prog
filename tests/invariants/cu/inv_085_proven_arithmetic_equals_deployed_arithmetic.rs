@@ -1679,7 +1679,7 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         );
     }
     assert!(
-        !production.contains("fn scale_decimal_to_e6("),
+        !inv085_source_defines_function(production, "scale_decimal_to_e6"),
         "the legacy Chainlink-only decimal scaler must not return",
     );
     let mut current_function = "<module>";
