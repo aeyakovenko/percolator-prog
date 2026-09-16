@@ -20,6 +20,31 @@
 
 use super::*;
 
+fn inv040_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 fn assert_underfunded_exit_drops_only_uncollectible_fee(path: NoCpiReportedPricePath) {
     const MARK: u64 = 1_000_000;
     const SIZE_Q: i128 = POS_SCALE as i128;
@@ -687,7 +712,7 @@ fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed() {
             assert!(
                 witness_sources
                     .iter()
-                    .any(|source| source.contains(&format!("fn {witness}"))),
+                    .any(|source| inv040_source_defines_test(source, witness)),
                 "{}.{} lacks executable public witness {witness}",
                 row.owner,
                 row.method,
