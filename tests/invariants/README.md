@@ -85,6 +85,25 @@ shape, native custody, arbitrary report histories and whole-cohort terminal
 redemption remain outside this increment. See the [Lane 15 report](lane15_hybrid_reward_competing_recipients_20260915.md)
 for the exact invariant, non-overlap review, artifacts and validation.
 
+## Lane 14 funded insurance with open oracle rotation (2026-09-15)
+
+The existing [insurance-funded owner](cu/inv_005_cold_oracle_insurance_containment.rs)
+adds 24 public LiteSVM worlds crossing beneficiary-only, operator-only and combined
+oracle coholders, both assets, rising/falling marks, and AuthMark/Hybrid reports.
+Both insurance domains stay funded while independent traders retain open
+positions across an oracle round trip. Cold-admin insurance seizure suffixes
+restore completed SPL payouts, role changes and report ingestion; current public
+cranks, position closure, PnL conversion and exact owner withdrawals remain live.
+
+An input-derived price/size oracle checks the 992/1,008 trader payouts, 23-atom
+flat-owner entitlement and 30-atom insurance-operator payout. AuthMark and Hybrid
+outcomes agree. The selector checks 168 exact rollbacks, including 120 completed
+SPL prefixes, with peak measured CU 136,165 against a 300,000 bound. This adds
+bounded INV-005/020/024 coverage beyond Lane 11's flat consumed-backing product.
+**Row 416 remains OPEN/missing**, and machine dispositions are unchanged. See the
+[Lane 14 report](lane14_funded_hybrid_open_rotation_20260915.md) for the role matrix,
+independent oracle, overlap review, exact commands and remaining gaps.
+
 ## Lane 9 mixed-role shutdown and pending debt (2026-09-15)
 
 The existing [INV-039 mixed-role owner](cu/inv_039_mixed_role_resolution.rs)
