@@ -12,6 +12,9 @@
 //! top-ups and a newly created ledger roll back on a later engine error, then the identical prefix
 //! commits. Its three scopes cover base-market funding and both sides of a non-base asset; this
 //! is finite transaction-composition evidence, not coverage of arbitrary reserve histories.
+//! The deposit witness uses a public SPL self-delegate allowance to fail Transfer after engine
+//! credit and sequence advancement. Exact rollback preserves the captured request for retry after
+//! public revocation, followed by full principal withdrawal. This covers one Live deposit shape.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -1687,30 +1690,76 @@ fn v16_attack_liquidation_wrong_owner_rolls_back_legacy_reward_realloc() {
 
 #[test]
 fn v16_bpf_failed_deposit_spl_transfer_rolls_back_engine_credit() {
-    let mut env = V16CuEnv::new();
-    let owner = Keypair::new();
-    let portfolio = env.create_portfolio(&owner);
-    let source = Pubkey::new_unique();
-    env.svm
-        .set_account(
-            source,
-            Account {
-                lamports: 1_000_000_000,
-                data: make_token_data(env.mint, owner.pubkey(), 100),
-                owner: Pubkey::new_unique(),
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
 
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
-    let source_before = env.svm.get_account(&source).unwrap();
-    let vault_before = env.svm.get_account(&env.vault).unwrap();
-    let result = env.send(
-        env.deposit_ix(portfolio, 100),
+    const DEPOSIT: u64 = 100;
+    const SOURCE_BALANCE: u64 = DEPOSIT + 7;
+    let mut env = inv018_public_spl_market(6);
+    let owner = Keypair::new();
+    env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    let portfolio_key = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &portfolio_key,
+        env.portfolio_account_len,
+        env.program_id,
+    );
+    let portfolio = portfolio_key.pubkey();
+    env.send(
+        ProgInstruction::InitPortfolio,
         vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    )
+    .unwrap();
+    let source = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &env.mint,
+            &source,
+            &env.admin.pubkey(),
+            &[],
+            SOURCE_BALANCE,
+        )
+        .unwrap(),
+        &[&env.admin],
+    )
+    .unwrap();
+    // The owner and balance pass wrapper preflight. SPL selects the delegate branch for
+    // this same authority and rejects the allowance only after the engine has credited it.
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::approve(
+            &spl_token::ID,
+            &source,
+            &owner.pubkey(),
+            &owner.pubkey(),
+            &[],
+            DEPOSIT - 1,
+        )
+        .unwrap(),
+        &[&owner],
+    )
+    .unwrap();
+    let source_state = TokenAccount::unpack(&env.svm.get_account(&source).unwrap().data).unwrap();
+    assert_eq!(source_state.amount, SOURCE_BALANCE);
+    assert_eq!(source_state.delegate, COption::Some(owner.pubkey()));
+    assert_eq!(source_state.delegated_amount, DEPOSIT - 1);
+    let sequence_before = env.portfolio_matcher_sequence(portfolio);
+    let deposit = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
             AccountMeta::new(portfolio, false),
@@ -1718,22 +1767,133 @@ fn v16_bpf_failed_deposit_spl_transfer_rolls_back_engine_credit() {
             AccountMeta::new(env.vault, false),
             AccountMeta::new_readonly(spl_token::ID, false),
         ],
-        &[&owner],
+        data: env.deposit_ix(portfolio, DEPOSIT.into()).encode(),
+    };
+    let transaction = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), deposit.clone()],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &owner],
+        env.svm.latest_blockhash(),
     );
+    let fee = FeeStructure::default().lamports_per_signature
+        * u64::from(transaction.message.header.num_required_signatures);
+    let mut keys = transaction.message.account_keys.clone();
+    keys.extend([env.mint, env.admin.pubkey(), env.vault_authority]);
+    keys.sort_unstable();
+    keys.dedup();
+    keys.retain(|key| *key != env.payer.pubkey());
+    let before: Vec<_> = keys
+        .iter()
+        .map(|key| (*key, env.svm.get_account(key)))
+        .collect();
+    let mut expected_payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+    let rejection = env
+        .svm
+        .send_transaction(transaction)
+        .expect_err("late SPL failure");
 
-    assert!(
-        result.is_err(),
-        "deposit must fail when the token CPI cannot debit the source account"
+    assert_eq!(
+        rejection.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(spl_token::error::TokenError::InsufficientFunds as u32),
+        ),
+        "the SPL error must propagate through the public deposit handler"
     );
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
-    assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
-    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert!(
+        rejection
+            .meta
+            .logs
+            .contains(&format!("Program {} invoke [2]", spl_token::ID)),
+        "the failure must reach the transfer CPI beyond wrapper preflight"
+    );
+    assert!(rejection
+        .meta
+        .logs
+        .iter()
+        .any(|line| line == "Program log: Instruction: Transfer"));
+    for (key, account) in before {
+        assert_eq!(
+            env.svm.get_account(&key),
+            account,
+            "complete rollback for {key}"
+        );
+    }
+    expected_payer.lamports -= fee;
+    assert_eq!(
+        env.svm.get_account(&env.payer.pubkey()).unwrap(),
+        expected_payer
+    );
     let (_, group) = env.market_state();
-    let account = env.portfolio_state(portfolio);
     assert_eq!(group.vault, 0);
     assert_eq!(group.c_tot, 0);
-    assert_eq!(account.capital.get(), 0);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+    assert_eq!(env.portfolio_matcher_sequence(portfolio), sequence_before);
+
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::revoke(&spl_token::ID, &source, &owner.pubkey(), &[]).unwrap(),
+        &[&owner],
+    )
+    .expect("public revocation repairs the source allowance");
+    env.svm.expire_blockhash();
+    let retry_cu = send_raw_tx(&mut env.svm, &env.payer, deposit, &[&owner])
+        .expect("identical deposit bytes and sequence remain executable after rollback");
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, DEPOSIT.into());
+    assert_eq!(group.c_tot, DEPOSIT.into());
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), DEPOSIT.into());
+    assert_eq!(
+        env.portfolio_matcher_sequence(portfolio),
+        sequence_before + 1
+    );
+    assert_eq!(env.token_amount(source), SOURCE_BALANCE - DEPOSIT);
+    assert_eq!(env.token_amount(env.vault), DEPOSIT);
+
+    let withdraw_cu = env
+        .send(
+            env.withdraw_ix(portfolio, DEPOSIT.into()),
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .expect("the retried deposit remains fully withdrawable");
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+    assert_eq!(
+        env.portfolio_matcher_sequence(portfolio),
+        sequence_before + 2
+    );
+    assert_eq!(env.token_amount(source), SOURCE_BALANCE);
+    assert_eq!(env.token_amount(env.vault), 0);
+    assert_eq!(
+        Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+            .unwrap()
+            .supply,
+        SOURCE_BALANCE
+    );
+    let reject_cu = rejection.meta.compute_units_consumed;
+    for (label, cu) in [
+        ("deposit late CPI failure", reject_cu),
+        ("deposit unchanged request retry", retry_cu),
+        ("deposit retry principal exit", withdraw_cu),
+    ] {
+        assert_cu_within(label, cu, CUSTODY_CU_LIMIT);
+    }
+    println!(
+        "INV-080 deposit CPI: rollbacks=1 retries=1 payouts=1 reject_cu={reject_cu} \
+         retry_cu={retry_cu} withdraw_cu={withdraw_cu}"
+    );
 }
 
 #[test]
