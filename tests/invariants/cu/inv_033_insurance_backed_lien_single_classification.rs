@@ -395,13 +395,28 @@ fn v16_program_mixed_reserve_payout_bundle_preserves_live_lien_classification() 
             AccountMeta::new_readonly(spl_token::ID, false),
         ]
     };
-    let mut max_bundle_cu = 0;
-    for (amount, accepted) in [(SURPLUS + 1, false), (SURPLUS, true)] {
-        env.svm.expire_blockhash();
-        let tx = Transaction::new_signed_with_payer(
-            &[
-                heap_ix(),
-                ComputeBudgetInstruction::set_compute_unit_limit((2 * CUSTODY_CU_LIMIT) as u32),
+    let mut max_payout_cu = 0;
+    for (instructions, signers, expected_index, expected_error, expect_spl_prefix, label) in [
+        (
+            vec![Instruction {
+                program_id: env.program_id,
+                accounts: payout_accounts(&env, 3),
+                data: ProgInstruction::WithdrawBackingBucket {
+                    domain: DOMAIN as u16,
+                    market_id: env.asset_market_id(0),
+                    authority_epoch: epoch,
+                    amount: SURPLUS + 1,
+                }
+                .encode(),
+            }],
+            vec![&env.payer, &owners[3]],
+            2,
+            PercolatorError::EngineLockActive,
+            false,
+            "backing overdraw cannot borrow liened atoms",
+        ),
+        (
+            vec![
                 Instruction {
                     program_id: env.program_id,
                     accounts: payout_accounts(&env, 2),
@@ -416,13 +431,30 @@ fn v16_program_mixed_reserve_payout_bundle_preserves_live_lien_classification() 
                         domain: DOMAIN as u16,
                         market_id: env.asset_market_id(0),
                         authority_epoch: epoch,
-                        amount,
+                        amount: SURPLUS,
                     }
                     .encode(),
                 },
             ],
+            vec![&env.payer, &owners[2], &owners[3]],
+            3,
+            PercolatorError::EngineStale,
+            true,
+            "same-epoch reserve bundle rolls back after insurance prefix",
+        ),
+    ] {
+        env.svm.expire_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[
+                vec![
+                    heap_ix(),
+                    ComputeBudgetInstruction::set_compute_unit_limit((2 * CUSTODY_CU_LIMIT) as u32),
+                ],
+                instructions,
+            ]
+            .concat(),
             Some(&env.payer.pubkey()),
-            &[&env.payer, &owners[2], &owners[3]],
+            &signers,
             env.svm.latest_blockhash(),
         );
         let fee = u64::from(tx.message.header.num_required_signatures)
@@ -443,50 +475,84 @@ fn v16_program_mixed_reserve_payout_bundle_preserves_live_lien_classification() 
             .iter()
             .map(|key| env.svm.get_account(key))
             .collect::<Vec<_>>();
-        let result = env.svm.send_transaction(tx);
-        let meta = if accepted {
-            result.expect("insurance and genuinely surplus backing are independently payable")
-        } else {
-            let failed = result.expect_err("insurance cannot replace one missing backing atom");
-            assert_eq!(
-                failed.err,
-                TransactionError::InstructionError(
-                    3,
-                    InstructionError::Custom(PercolatorError::EngineLockActive as u32)
-                )
-            );
-            assert!(
-                failed
-                    .meta
-                    .logs
-                    .iter()
-                    .any(|line| line == &format!("Program {} success", spl_token::ID)),
-                "insurance SPL transfer must complete before the backing rejection"
-            );
-            for (key, mut account) in keys.iter().zip(before) {
-                if *key == env.payer.pubkey() {
-                    account.as_mut().unwrap().lamports -= fee;
-                }
-                assert_eq!(
-                    env.svm.get_account(key),
-                    account,
-                    "mixed-payout rollback: {key}"
-                );
+        let failed = env.svm.send_transaction(tx).expect_err(label);
+        assert_eq!(
+            failed.err,
+            TransactionError::InstructionError(
+                expected_index,
+                InstructionError::Custom(expected_error as u32)
+            ),
+            "{label}"
+        );
+        assert_eq!(
+            failed
+                .meta
+                .logs
+                .iter()
+                .any(|line| line == &format!("Program {} success", spl_token::ID)),
+            expect_spl_prefix,
+            "{label}: SPL prefix expectation"
+        );
+        for (key, mut account) in keys.iter().zip(before) {
+            if *key == env.payer.pubkey() {
+                account.as_mut().unwrap().lamports -= fee;
             }
-            assert_state(&env, 0, 0, LIEN, false, false);
-            failed.meta
-        };
+            assert_eq!(env.svm.get_account(key), account, "{label}: {key}");
+        }
+        assert_state(&env, 0, 0, LIEN, false, false);
         assert_cu_within(
-            "INV-033 mixed reserve payout bundle",
-            meta.compute_units_consumed,
+            "INV-033 mixed reserve payout rejection",
+            failed.meta.compute_units_consumed,
             2 * CUSTODY_CU_LIMIT,
         );
-        max_bundle_cu = max_bundle_cu.max(meta.compute_units_consumed);
+        max_payout_cu = max_payout_cu.max(failed.meta.compute_units_consumed);
         assert_eq!(
             [winner, counterparty].map(|key| env.svm.get_account(&key)),
             portfolio_before
         );
     }
+
+    let insurance_cu = env
+        .send(
+            env.withdraw_insurance_asset_instruction(wallets[2], 0, INSURANCE),
+            payout_accounts(&env, 2),
+            &[&owners[2]],
+        )
+        .expect("insurance payout succeeds independently");
+    assert_cu_within(
+        "INV-033 independent insurance payout",
+        insurance_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    max_payout_cu = max_payout_cu.max(insurance_cu);
+    assert_state(&env, INSURANCE, 0, LIEN, false, false);
+    assert_eq!(
+        [winner, counterparty].map(|key| env.svm.get_account(&key)),
+        portfolio_before
+    );
+
+    let backing_cu = env
+        .send(
+            ProgInstruction::WithdrawBackingBucket {
+                domain: DOMAIN as u16,
+                market_id: env.asset_market_id(0),
+                authority_epoch: env.control_sequences(0).authority_epoch,
+                amount: SURPLUS,
+            },
+            payout_accounts(&env, 3),
+            &[&owners[3]],
+        )
+        .expect("genuinely surplus backing remains independently payable");
+    assert_cu_within(
+        "INV-033 independent backing payout",
+        backing_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    max_payout_cu = max_payout_cu.max(backing_cu);
+    assert_eq!(
+        [winner, counterparty].map(|key| env.svm.get_account(&key)),
+        portfolio_before
+    );
     assert_state(&env, INSURANCE, SURPLUS, LIEN, false, false);
 
     for (asset, size, price) in [(1, 11, 95), (0, 20, 105)] {
@@ -597,7 +663,7 @@ fn v16_program_mixed_reserve_payout_bundle_preserves_live_lien_classification() 
     assert_cu_within("INV-033 owner payout", cu, CUSTODY_CU_LIMIT);
     assert_state(&env, INSURANCE, BACKING, 0, true, true);
     assert_eq!(env.svm.get_account(&counterparty), flat_counterparty);
-    println!("INV-031/032/033 mixed reserve bundle: lien={LIEN}, insurance={INSURANCE}, provider={SURPLUS}+{LIEN}, claim={CLAIM}, owner={}, release_steps={release_steps}, CU trade={trade_cu}, bundle={max_bundle_cu}, release={release_cu}, released_payout={released_payout_cu}, refresh={refresh_cu}, conversion={convert_cu}, withdrawal={cu}", DEPOSIT - LOSS + CLAIM);
+    println!("INV-031/032/033 mixed reserve bundle: lien={LIEN}, insurance={INSURANCE}, provider={SURPLUS}+{LIEN}, claim={CLAIM}, owner={}, release_steps={release_steps}, CU trade={trade_cu}, payout={max_payout_cu}, release={release_cu}, released_payout={released_payout_cu}, refresh={refresh_cu}, conversion={convert_cu}, withdrawal={cu}", DEPOSIT - LOSS + CLAIM);
 }
 
 #[derive(Debug)]
