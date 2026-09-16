@@ -685,6 +685,7 @@ fn v16_program_entitlement_effect_roster_is_source_complete() {
     .into_iter()
     .collect::<std::collections::BTreeSet<_>>();
     let mut entitlement_rows = std::collections::BTreeSet::new();
+    let mut entitlement_owners = std::collections::BTreeSet::new();
     let mut observed_effects = std::collections::BTreeSet::new();
     let mut trade_routes = std::collections::BTreeSet::new();
     for line in include_str!("../inv_024_entitlement_route_dispositions.tsv")
@@ -703,6 +704,15 @@ fn v16_program_entitlement_effect_roster_is_source_complete() {
         let (owner_path, owner_test) = columns[4]
             .split_once('#')
             .unwrap_or_else(|| panic!("entitlement owner must be path#function: {line}"));
+        assert!(
+            owner_path.starts_with("tests/invariants/") && owner_path.ends_with(".rs"),
+            "entitlement owner must stay inside invariant source files: {owner_path}"
+        );
+        assert!(
+            owner_test.starts_with("v16_"),
+            "entitlement owner must be a reviewed v16 regression: {owner_path}#{owner_test}"
+        );
+        entitlement_owners.insert((owner_path, owner_test));
         let source = std::fs::read_to_string(root.join(owner_path))
             .unwrap_or_else(|error| panic!("read entitlement owner {owner_path}: {error}"));
         assert!(
@@ -730,6 +740,11 @@ fn v16_program_entitlement_effect_roster_is_source_complete() {
         "every public instruction needs exactly one owner-level entitlement disposition"
     );
     assert_eq!(entitlement_rows.len(), 49);
+    assert_eq!(
+        entitlement_owners.len(),
+        18,
+        "INV-024 entitlement evidence owner roster drift"
+    );
     assert_eq!(
         observed_effects, allowed_effects,
         "unused effect class drift"
