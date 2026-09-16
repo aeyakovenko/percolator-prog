@@ -332,6 +332,7 @@ fn v16_program_account_role_matrix_roster_is_source_complete() {
     let test_source = include_str!("inv_017_signer_writable_role_and_account_alias_safety.rs");
     let mut roster = std::collections::BTreeMap::new();
     let mut status_counts = std::collections::BTreeMap::<&str, usize>::new();
+    let mut evidence_witnesses = std::collections::BTreeSet::new();
     for line in include_str!("../inv_017_account_role_coverage.tsv").lines() {
         if line.starts_with('#') || line.is_empty() || line.starts_with("tag\t") {
             continue;
@@ -353,6 +354,11 @@ fn v16_program_account_role_matrix_roster_is_source_complete() {
             "EXHAUSTIVE" => {
                 assert_eq!(gap, "-", "closed matrix {variant} must have no gap");
                 assert!(
+                    evidence.starts_with("v16_"),
+                    "closed matrix {variant} must point to a reviewed v16 evidence test"
+                );
+                evidence_witnesses.insert(evidence);
+                assert!(
                     inv017_source_defines_test(test_source, evidence),
                     "closed matrix {variant} lacks executable evidence {evidence}"
                 );
@@ -360,6 +366,11 @@ fn v16_program_account_role_matrix_roster_is_source_complete() {
             "PARTIAL" => {
                 assert_ne!(evidence, "-");
                 assert_ne!(gap, "-");
+                assert!(
+                    evidence.starts_with("v16_"),
+                    "partial matrix {variant} must point to a reviewed v16 evidence test"
+                );
+                evidence_witnesses.insert(evidence);
                 assert!(inv017_source_defines_test(test_source, evidence));
             }
             "OPEN" => {
@@ -376,6 +387,11 @@ fn v16_program_account_role_matrix_roster_is_source_complete() {
             .collect::<std::collections::BTreeSet<_>>(),
         source_variants.iter().map(String::as_str).collect(),
         "every production instruction needs an INV-017 matrix disposition"
+    );
+    assert_eq!(
+        evidence_witnesses.len(),
+        20,
+        "INV-017 executable account-role evidence roster drift"
     );
     assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&49));
     assert_eq!(status_counts.get("PARTIAL"), None);
