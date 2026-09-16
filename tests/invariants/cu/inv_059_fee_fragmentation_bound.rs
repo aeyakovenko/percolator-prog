@@ -36,6 +36,31 @@ use super::*;
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
+fn inv059_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 fn liquidation_fee_oracle(
     closed_q: u128,
     price: u64,
@@ -1367,12 +1392,14 @@ fn v16_program_liquidation_fee_surface_is_single_route_and_engine_selected() {
         "caller-selected close quantity would make liquidation partitioning public"
     );
     let one_shot = include_str!("inv_009_partial_fill_and_retry_accounting.rs");
-    assert!(
-        one_shot.contains("fn v16_program_one_shot_trade_consent_composition_is_source_complete(")
-    );
+    assert!(inv059_source_defines_test(
+        one_shot,
+        "v16_program_one_shot_trade_consent_composition_is_source_complete"
+    ));
     let aggregate = include_str!("inv_011_signed_aggregate_economic_bounds.rs");
-    assert!(aggregate.contains(
-        "fn v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically("
+    assert!(inv059_source_defines_test(
+        aggregate,
+        "v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically"
     ));
     crate::assert_certified_engine_pin("INV-059 engine-selected liquidation evidence");
 }

@@ -15,6 +15,31 @@
 
 use super::*;
 
+fn inv042_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[test]
 fn v16_program_force_close_healthy_asset_rejected() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
@@ -363,8 +388,10 @@ fn v16_program_recovery_fallback_pricing_is_absent_and_force_close_uses_frozen_m
 
     let public_recovery_evidence =
         include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs");
-    assert!(public_recovery_evidence
-        .contains("fn v16_program_dual_adl_force_close_clamps_stale_and_raw_work"));
+    assert!(inv042_source_defines_test(
+        public_recovery_evidence,
+        "v16_program_dual_adl_force_close_clamps_stale_and_raw_work"
+    ));
 
     crate::assert_certified_engine_pin("INV-042 disabled recovery-fallback profile evidence");
 }

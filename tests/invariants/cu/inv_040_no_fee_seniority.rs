@@ -751,8 +751,10 @@ fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed() {
 
     let activation_evidence =
         include_str!("../public_sbf/inv_036_fee_destination_and_policy_version_integrity.rs");
-    assert!(activation_evidence
-        .contains("fn v16_program_pr314_permissionless_activation_fee_requires_creator_consent"));
+    assert!(inv040_source_defines_test(
+        activation_evidence,
+        "v16_program_pr314_permissionless_activation_fee_requires_creator_consent"
+    ));
     assert!(processor.contains("permissionless_market_init_fee_for_asset("));
     assert!(processor.contains("fee > max_init_fee"));
 
