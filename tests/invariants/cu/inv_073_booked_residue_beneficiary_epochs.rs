@@ -4,6 +4,9 @@
 
 use super::*;
 
+#[path = "inv_073_partial_recredit_disabled_custody.rs"]
+mod partial_recredit_disabled_custody;
+
 const RECOVERY_PREFIX: u64 = SPENT / 2;
 
 fn assert_absent(env: &V16CuEnv, key: Pubkey) {
