@@ -1271,10 +1271,34 @@ fn source_defines_test(source: &str, function: &str) -> bool {
     false
 }
 
+fn source_defines_function(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.strip_prefix(&expected).is_some_and(|tail| {
+            let tail = tail.trim_start();
+            tail.starts_with('(') || tail.starts_with('<')
+        }) || line
+            .strip_prefix("pub ")
+            .and_then(|tail| tail.strip_prefix(&expected))
+            .is_some_and(|tail| {
+                let tail = tail.trim_start();
+                tail.starts_with('(') || tail.starts_with('<')
+            })
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PublicInstructionRoute {
     tag: u8,
     variant: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublicInstructionDispatch {
+    tag: u8,
+    variant: String,
+    handler: String,
 }
 
 #[derive(Debug)]
@@ -1309,6 +1333,144 @@ fn v16_public_instruction_coverage_registry_matches_production_roster() {
     );
 }
 
+#[test]
+fn v16_public_instruction_dispatch_registry_matches_reviewed_handlers() {
+    let production = include_str!("../../../src/v16_program.rs");
+    let dispatch_roster = production_public_instruction_dispatch_roster(production);
+    let expected = [
+        (0, "InitMarket", "handle_init_market"),
+        (1, "InitPortfolio", "handle_init_portfolio"),
+        (3, "Deposit", "handle_deposit"),
+        (4, "Withdraw", "handle_withdraw"),
+        (5, "PermissionlessCrank", "handle_permissionless_crank"),
+        (6, "TradeNoCpi", "handle_trade_nocpi"),
+        (8, "ClosePortfolio", "handle_close_portfolio"),
+        (9, "TopUpInsurance", "handle_top_up_insurance"),
+        (10, "TradeCpi", "handle_trade_cpi"),
+        (13, "CloseSlab", "handle_close_slab"),
+        (19, "ResolveMarket", "handle_resolve_market"),
+        (24, "TopUpBackingBucket", "handle_top_up_backing_bucket"),
+        (28, "ConvertReleasedPnl", "handle_convert_released_pnl"),
+        (30, "CloseResolved", "handle_close_resolved"),
+        (32, "UpdateAuthority", "handle_update_authority"),
+        (
+            34,
+            "ConfigureHybridOracle",
+            "handle_configure_hybrid_oracle",
+        ),
+        (35, "ConfigureEwmaMark", "handle_configure_managed_mark"),
+        (36, "PushEwmaMark", "handle_push_managed_mark"),
+        (
+            37,
+            "UpdateLiquidationFeePolicy",
+            "handle_update_market_authority_policy",
+        ),
+        (
+            38,
+            "ConfigurePermissionlessResolve",
+            "handle_configure_permissionless_resolve",
+        ),
+        (
+            39,
+            "ResolveStalePermissionless",
+            "handle_resolve_stale_permissionless",
+        ),
+        (40, "UpdateAssetLifecycle", "handle_update_asset_lifecycle"),
+        (42, "CureAndCancelClose", "handle_cure_and_cancel_close"),
+        (43, "ForfeitRecoveryLeg", "handle_forfeit_recovery_leg"),
+        (44, "RebalanceReduce", "handle_rebalance_reduce"),
+        (45, "FinalizeResetSide", "handle_finalize_reset_side"),
+        (
+            46,
+            "ClaimResolvedPayoutTopup",
+            "handle_claim_resolved_payout_topup",
+        ),
+        (48, "SyncMaintenanceFee", "handle_sync_maintenance_fee"),
+        (
+            49,
+            "UpdateMaintenanceFeePolicy",
+            "handle_update_market_authority_policy",
+        ),
+        (
+            50,
+            "WithdrawBackingBucket",
+            "handle_withdraw_backing_bucket",
+        ),
+        (
+            51,
+            "UpdateBackingFeePolicy",
+            "handle_update_backing_fee_policy",
+        ),
+        (
+            52,
+            "WithdrawBackingBucketEarnings",
+            "handle_withdraw_backing_bucket_earnings",
+        ),
+        (
+            53,
+            "SyncBackingDomainLedger",
+            "handle_sync_backing_domain_ledger",
+        ),
+        (54, "SyncInsuranceLedger", "handle_sync_insurance_ledger"),
+        (55, "UpdateTradeFeePolicy", "handle_update_trade_fee_policy"),
+        (56, "TopUpInsuranceDomain", "handle_top_up_insurance"),
+        (
+            57,
+            "WithdrawInsuranceAsset",
+            "handle_withdraw_insurance_asset",
+        ),
+        (
+            58,
+            "UpdateFeeRedirectPolicy",
+            "handle_update_market_authority_policy",
+        ),
+        (
+            59,
+            "UpdateMarketInitFeePolicy",
+            "handle_update_market_authority_policy",
+        ),
+        (60, "UpdateBaseUnitMints", "handle_update_base_unit_mints"),
+        (
+            61,
+            "SwapSecondaryForPrimary",
+            "handle_swap_secondary_for_primary",
+        ),
+        (62, "ConfigureAuthMark", "handle_configure_managed_mark"),
+        (63, "PushAuthMark", "handle_push_managed_mark"),
+        (
+            64,
+            "ForceCloseAbandonedAsset",
+            "handle_force_close_abandoned_asset",
+        ),
+        (65, "UpdateAssetAuthority", "handle_update_asset_authority"),
+        (66, "BatchTradeNoCpi", "handle_batch_trade_nocpi"),
+        (67, "BatchTradeCpi", "handle_batch_trade_cpi"),
+        (68, "SetMatcherConfig", "handle_set_matcher_config"),
+        (69, "RestartAssetOracle", "handle_restart_asset_oracle"),
+    ]
+    .into_iter()
+    .map(|(tag, variant, handler)| PublicInstructionDispatch {
+        tag,
+        variant: variant.to_owned(),
+        handler: handler.to_owned(),
+    })
+    .collect::<Vec<_>>();
+
+    assert_eq!(
+        dispatch_roster, expected,
+        "a public instruction changed dispatch handler; review its invariant evidence and \
+         registry row before accepting the route change"
+    );
+    for row in &dispatch_roster {
+        assert!(
+            source_defines_function(production, &row.handler),
+            "{} dispatches to missing handler {}",
+            row.variant,
+            row.handler,
+        );
+    }
+}
+
 fn production_public_instruction_roster(source: &str) -> Vec<PublicInstructionRoute> {
     let variants = instruction_enum_variants(source);
     let tags = instruction_decode_tags(source);
@@ -1327,6 +1489,71 @@ fn production_public_instruction_roster(source: &str) -> Vec<PublicInstructionRo
     }
     roster.sort_by_key(|route| route.tag);
     roster
+}
+
+fn production_public_instruction_dispatch_roster(source: &str) -> Vec<PublicInstructionDispatch> {
+    let routes = production_public_instruction_roster(source);
+    let block = braced_block_after(source, "match Instruction::decode(instruction_data)?");
+    let mut arms = std::collections::BTreeMap::<String, String>::new();
+    let mut current: Option<(String, String)> = None;
+
+    for raw_line in block.lines() {
+        let line = raw_line.split("//").next().unwrap_or("").trim();
+        if let Some(variant) = instruction_arm_variant(line) {
+            if let Some((prior_variant, prior_body)) = current.replace((variant, line.to_owned())) {
+                let handler = dispatch_handler_from_arm(&prior_body)
+                    .unwrap_or_else(|| panic!("Instruction::{prior_variant} lacks handler"));
+                assert!(
+                    arms.insert(prior_variant.clone(), handler).is_none(),
+                    "duplicate dispatch arm for Instruction::{prior_variant}"
+                );
+            }
+        } else if let Some((_, body)) = &mut current {
+            body.push('\n');
+            body.push_str(line);
+        }
+    }
+    if let Some((prior_variant, prior_body)) = current {
+        let handler = dispatch_handler_from_arm(&prior_body)
+            .unwrap_or_else(|| panic!("Instruction::{prior_variant} lacks handler"));
+        assert!(
+            arms.insert(prior_variant.clone(), handler).is_none(),
+            "duplicate dispatch arm for Instruction::{prior_variant}"
+        );
+    }
+
+    routes
+        .into_iter()
+        .map(|route| {
+            let handler = arms
+                .remove(&route.variant)
+                .unwrap_or_else(|| panic!("Instruction::{} lacks dispatch arm", route.variant));
+            PublicInstructionDispatch {
+                tag: route.tag,
+                variant: route.variant,
+                handler,
+            }
+        })
+        .collect()
+}
+
+fn instruction_arm_variant(line: &str) -> Option<String> {
+    let tail = line.strip_prefix("Instruction::")?;
+    let name: String = tail
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+fn dispatch_handler_from_arm(body: &str) -> Option<String> {
+    let tail = body.split_once("=>")?.1;
+    let handler_start = tail.find("handle_")?;
+    let handler = tail[handler_start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect::<String>();
+    (!handler.is_empty()).then_some(handler)
 }
 
 fn instruction_enum_variants(source: &str) -> Vec<String> {
