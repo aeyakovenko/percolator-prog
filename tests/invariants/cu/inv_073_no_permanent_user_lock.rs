@@ -7022,6 +7022,7 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
         include_str!("inv_073_recredited_insurance_quote_rails.rs"),
         include_str!("inv_073_native_recredit_custody.rs"),
     ];
+    let mut row421_witnesses = std::collections::BTreeSet::new();
     for witness in [
         "v16_program_terminal_insurance_exit_does_not_require_former_beneficiary_ledger",
         "v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion",
@@ -7034,6 +7035,11 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
         "v16_program_recredited_insurance_switches_quote_rails_without_operator_signatures",
         "v16_program_recredited_insurance_recreates_native_custody_without_role_signatures",
     ] {
+        assert!(witness.starts_with("v16_"));
+        assert!(
+            row421_witnesses.insert(witness),
+            "duplicate row421 public SVM witness {witness}",
+        );
         assert!(
             row421_sources
                 .iter()
@@ -7041,6 +7047,7 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
             "row421 source gate lost public SVM witness {witness}",
         );
     }
+    assert_eq!(row421_witnesses.len(), 10, "row421 witness roster drift");
     let row421_parent = include_str!("inv_073_no_permanent_user_lock.rs");
     for marker in [
         "mod absent_insurer_spent_retirement;",
@@ -7064,6 +7071,7 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
         );
     }
     let inv073_public_witnesses = include_str!("inv_073_no_permanent_user_lock.rs");
+    let mut row420_witnesses = std::collections::BTreeSet::new();
     for witness in [
         "v16_program_absent_provider_replaced_custody_preserves_unpaid_principal_and_earnings",
         "v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature",
@@ -7071,11 +7079,18 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
         "v16_program_absent_native_provider_redeemed_prefix_preserves_public_remainder_and_close",
         "v16_program_absent_provider_dual_quote_earnings_share_one_ledger_and_close",
     ] {
+        assert!(witness.starts_with("v16_"));
+        assert!(
+            row420_witnesses.insert(witness),
+            "duplicate row420 public SVM witness {witness}",
+        );
         assert!(
             inv073_source_defines_test(inv073_public_witnesses, witness),
             "row420 source gate lost public SVM witness {witness}",
         );
     }
+    assert_eq!(row420_witnesses.len(), 5, "row420 witness roster drift");
+    let mut row433_witnesses = std::collections::BTreeSet::new();
     for witness in [
         "v16_program_generated_reserve_wallet_absence_preserves_fee_claims_across_expiry",
         "v16_program_recovery_reserve_repair_crosses_last_portfolio_cleanup_without_beneficiary_signatures",
@@ -7085,11 +7100,17 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
         "v16_program_terminal_public_reserve_disposition_preserves_value_across_orders",
         "v16_program_public_reserve_payments_wait_for_resolved_senior_disposition",
     ] {
+        assert!(witness.starts_with("v16_"));
+        assert!(
+            row433_witnesses.insert(witness),
+            "duplicate row433 public SVM witness {witness}",
+        );
         assert!(
             inv073_source_defines_test(inv073_public_witnesses, witness),
             "row433 source gate lost public SVM witness {witness}",
         );
     }
+    assert_eq!(row433_witnesses.len(), 7, "row433 witness roster drift");
 
     let resolved = inv073_braced_body_after(production, "fn handle_close_resolved<'a>(");
     assert!(resolved.contains("expect_portfolio_view_owner(&portfolio, owner.key)?"));
