@@ -22,6 +22,31 @@ use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::{
 };
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+fn inv023_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with('#') {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 fn inv023_boundary_send(
     env: &mut V16CuEnv,
     instruction: Instruction,
@@ -1035,8 +1060,8 @@ fn v16_program_caller_input_roster_owns_every_production_field() {
                 })
             });
         assert!(
-            evidence_source.contains(&format!("fn {evidence_test}(")),
-            "INV-023 evidence function {evidence_path}#{evidence_test} is missing",
+            inv023_source_defines_test(evidence_source, evidence_test),
+            "INV-023 evidence function {evidence_path}#{evidence_test} is missing or is not a #[test]",
         );
 
         for field in columns[1].split(',') {
