@@ -166,6 +166,8 @@
 # independent discovery; row 417 stays missing with no invariant-status promotion.
 417	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Preserve resolved receipts across late backing expiry
 418	DoS	BLOCKER	INV-070	independent-discovery	[BLOCKER DoS] Retire native wSOL terminal insurance
+# Rows 419/435 conformance boundary: row419_435_heldout_gap_20260916.md.
+# Historical owner-debt transitions still need an independent reference model.
 419	LoF	BLOCKER	INV-039	missing	[BLOCKER LoF] Retain pending loss weight through resolution
 420	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Make terminal provider claims permissionlessly payable
 421	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Make terminal insurance payout permissionless
@@ -183,4 +185,5 @@
 432	LoF	PRIVILEGED	INV-014	independent-discovery	[PRIVILEGED LoF] Enforce retained single-CPI taker fee terms
 433	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Permit unsigned terminal reserve payouts
 434	LoF	BLOCKER	INV-027	independent-discovery	Settle flat-account fees before risk admission
+# Same reference-model gap as row 419; finite mixed-role conformance is not discovery.
 435	LoF	BLOCKER	INV-039	missing	[BLOCKER LoF] Preserve mixed-role resolved debt attribution
