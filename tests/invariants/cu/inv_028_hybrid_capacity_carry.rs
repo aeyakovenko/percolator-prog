@@ -10,6 +10,9 @@ use crate::support::fuzz_model::{
 };
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_028_hybrid_latent_backlog.rs"]
+mod hybrid_latent_backlog;
+
 const HYBRID: usize = ASSETS - 1;
 const CAP_BPS: u64 = 150;
 const OPEN_LOTS: i128 = 7;

@@ -1,5 +1,28 @@
 # Invariant-owned test coverage
 
+## Lane 19 latent Hybrid source realization across backlog (2026-09-16)
+
+The existing [INV-028 Hybrid carry owner](cu/inv_028_hybrid_capacity_carry.rs)
+adds eight public LiteSVM histories in which thirteen detached two-sided
+histories occupy twenty-six source domains, a seven-lot Hybrid position realizes
+one more domain, and a same-slot target replacement resets nonzero carry before
+the final latent domain materializes across a 64-slot backlog. Cadenced and
+deferred settlement both reach the same final-domain claims and exact SPL
+payouts. Every keeper continuation first executes as a completed prefix of a
+transaction whose withdrawal suffix rejects, then the identical public crank
+commits with exact Account rollback and a decreasing liveness rank.
+
+The selector checks 48 completed-prefix rollbacks, 40 ranked catch-up/settlement
+calls and eight same-slot target replacements. Peak measured history CU is
+870,754 under a 1,375,000 bound. This is bounded INV-028/077 evidence for
+latent source realization after Hybrid reversal; it is not a generic admission
+proof or terminal source-capacity proof. **Row 423 remains OPEN; INV-028 remains
+`REFUTED_CURRENT`; INV-077 remains `OPEN_EVIDENCE`.** Maximum active-Hybrid
+shape, distinct-feed fanout, liens, expiry, liquidation, ADL/reset, Recovery,
+generation reuse, terminal receipts and slab retirement remain outside this
+increment. See the [Lane 19 report](lane19_source_capacity_20260916.md) for
+artifact provenance, overlap review, exact commands and limitations.
+
 ## Lane 16 full-market Hybrid progress (2026-09-15)
 
 The existing [Hybrid/source/backlog owner](cu/inv_077_hybrid_source_backlog.rs)
