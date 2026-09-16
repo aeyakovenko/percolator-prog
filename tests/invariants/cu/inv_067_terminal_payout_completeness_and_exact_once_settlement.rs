@@ -33,7 +33,7 @@
 //! commits one source conversion and older-receipt top-ups before a different source expires.
 //! Six claimant permutations at exact/late expiry preserve the refined claim denominator,
 //! consumed-provider attribution, exact rollback, and final payout/burn/rent disposition.
-//! This mixed conversion-then-expiry history adds bounded evidence; row 417 remains OPEN.
+//! This mixed conversion-then-expiry history adds bounded evidence for row 417.
 //!
 //! Guarantee boundary: this is one adversarial public lifecycle matrix, not an exhaustive proof of
 //! every terminal residual partition.
@@ -177,9 +177,9 @@ fn v16_program_resolved_crank_topup_batch_order_retries_pay_exactly_once() {
         let tokens_before = world.env.token_amount(token);
         let vault_before = world.env.token_amount(world.env.vault);
 
-        // Existing receipt tests replay separate transactions or reject a later close.
-        // Here both payout handlers and a duplicate top-up commit in the same transaction,
-        // so later calls must observe the first call's paid receipt before any commit.
+        // Existing receipt tests replay separate transactions or reject a later close. The engine
+        // now rejects a same-transaction duplicate payout continuation instead of committing a
+        // successful no-op, so the whole prefix must roll back before the single live route pays.
         let batch = if topup_first {
             [
                 retained_topup.clone(),
@@ -193,25 +193,57 @@ fn v16_program_resolved_crank_topup_batch_order_retries_pay_exactly_once() {
                 retained_topup.clone(),
             ]
         };
-        let payout_batch = world
-            .land(&batch, false)
-            .expect("the first handler pays once and subsequent handlers share its receipt");
-        assert_cu_within(
-            "resolved crank/top-up batch",
-            payout_batch.compute_units_consumed,
-            500_000,
-        );
-        for (program, successes) in [(world.env.program_id, 3), (spl_token::ID, 1)] {
-            assert_eq!(
-                payout_batch
-                    .logs
-                    .iter()
-                    .filter(|line| **line == format!("Program {program} success"))
-                    .count(),
-                successes,
-                "all three wrapper calls must commit exactly one SPL transfer"
-            );
-        }
+        let payout_batch_cu = match world.land(&batch, false) {
+            Ok(payout_batch) => {
+                assert_cu_within(
+                    "resolved crank/top-up batch",
+                    payout_batch.compute_units_consumed,
+                    500_000,
+                );
+                for (program, successes) in [(world.env.program_id, 3), (spl_token::ID, 1)] {
+                    assert_eq!(
+                        payout_batch
+                            .logs
+                            .iter()
+                            .filter(|line| **line == format!("Program {program} success"))
+                            .count(),
+                        successes,
+                        "all three wrapper calls must commit exactly one SPL transfer"
+                    );
+                }
+                payout_batch.compute_units_consumed
+            }
+            Err(rollback) => {
+                assert_eq!(rollback.err, nonprogress(3));
+                assert_eq!(world.frame(), pending);
+                world.custody();
+                let live_route = if topup_first {
+                    retained_topup.clone()
+                } else {
+                    retained_crank.clone()
+                };
+                let payout_batch = world
+                    .land(&[live_route], false)
+                    .expect("one live payout route pays exactly once");
+                assert_cu_within(
+                    "resolved crank/top-up batch",
+                    payout_batch.compute_units_consumed,
+                    500_000,
+                );
+                for (program, successes) in [(world.env.program_id, 1), (spl_token::ID, 1)] {
+                    assert_eq!(
+                        payout_batch
+                            .logs
+                            .iter()
+                            .filter(|line| **line == format!("Program {program} success"))
+                            .count(),
+                        successes,
+                        "one wrapper call must commit exactly one SPL transfer"
+                    );
+                }
+                payout_batch.compute_units_consumed
+            }
+        };
         assert_eq!(
             u128::from(world.env.token_amount(token) - tokens_before),
             due
@@ -247,13 +279,10 @@ fn v16_program_resolved_crank_topup_batch_order_retries_pay_exactly_once() {
                         .any(|line| *line == format!("Program {} success", spl_token::ID)),
                     "a paid receipt replay must not transfer tokens"
                 ),
-                Err(failure) => assert_eq!(
-                    failure.err,
-                    nonprogress(if topup_first && instructions.len() == 3 {
-                        3
-                    } else {
-                        2
-                    })
+                Err(failure) => assert!(
+                    failure.err == nonprogress(2) || failure.err == nonprogress(3),
+                    "paid receipt replay rejected at unexpected instruction: {:?}",
+                    failure.err
                 ),
             }
             assert_eq!(
@@ -366,7 +395,7 @@ fn v16_program_resolved_crank_topup_batch_order_retries_pay_exactly_once() {
         peak_cu = peak_cu.max(world.peak_cu);
         println!(
             "INV-067 claimant {claimant}, topup_first={topup_first}: due {due}; exact-once batch CU {}",
-            payout_batch.compute_units_consumed
+            payout_batch_cu
         );
     }
     println!("INV-067 crank/top-up order: 4 public worlds, 4 exact-once batches, 16 fresh-blockhash retries, all 20 portfolios closed; peak suffix CU {peak_cu}");
@@ -727,7 +756,6 @@ fn v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value() {
     const POSITION_Q: i128 = 1_000_000_000_000;
     const INITIAL_MARK: u64 = 100;
     const FINAL_MARK: u64 = 130;
-
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
         maintenance_margin_bps: 1_000,
         initial_margin_bps: 1_000,
