@@ -18,6 +18,31 @@
 
 use super::*;
 
+fn inv031_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 // security.md sweep — base-unit deposit/withdraw mint routing (#5 / README L122): deposits accept ONLY
 // the primary base-unit mint, but a holder may withdraw in EITHER the primary or the secondary mint.
 #[test]
@@ -705,7 +730,10 @@ fn v16_program_single_use_lifecycle_composition_is_source_complete() {
 
     let public_source =
         include_str!("../public_sbf/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs");
-    assert!(public_source.contains("fn v16_program_cross_domain_backing_is_consumed_once"));
+    assert!(inv031_source_defines_test(
+        public_source,
+        "v16_program_cross_domain_backing_is_consumed_once"
+    ));
 
     let stateful_source =
         include_str!("../stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs");
@@ -715,29 +743,36 @@ fn v16_program_single_use_lifecycle_composition_is_source_complete() {
         "v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing",
     ] {
         assert!(
-            stateful_source.contains(&format!("fn {witness}")),
+            inv031_source_defines_test(stateful_source, witness),
             "missing INV-031 public ownership witness {witness}",
         );
     }
 
     let lifecycle_source =
         include_str!("../stateful/inv_026_reservation_and_encumbrance_conservation.rs");
-    assert!(lifecycle_source.contains(
-        "fn v16_program_counterparty_encumbrance_lifecycle_is_exact_across_routes_sides_and_terminal_modes"
+    assert!(inv031_source_defines_test(
+        lifecycle_source,
+        "v16_program_counterparty_encumbrance_lifecycle_is_exact_across_routes_sides_and_terminal_modes"
     ));
     let insurance_source = include_str!("inv_033_insurance_backed_lien_single_classification.rs");
-    assert!(insurance_source.contains(
-        "fn v16_program_public_source_lien_classification_never_double_counts_insurance"
+    assert!(inv031_source_defines_test(
+        insurance_source,
+        "v16_program_public_source_lien_classification_never_double_counts_insurance"
     ));
     let rollback_source = include_str!("inv_080_error_propagation_and_exact_rollback.rs");
-    assert!(rollback_source
-        .contains("fn v16_program_explicit_engine_error_dispositions_are_source_complete"));
-    assert!(rollback_source
-        .contains("fn v16_program_dispatch_and_entrypoints_preserve_every_handler_error"));
+    assert!(inv031_source_defines_test(
+        rollback_source,
+        "v16_program_explicit_engine_error_dispositions_are_source_complete"
+    ));
+    assert!(inv031_source_defines_test(
+        rollback_source,
+        "v16_program_dispatch_and_entrypoints_preserve_every_handler_error"
+    ));
     let transition_source =
         include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(transition_source.contains(
-        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    assert!(inv031_source_defines_test(
+        transition_source,
+        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
     ));
 
     let value_proof = include_str!("../kani/inv_024_attributed_quote_value_conservation.rs");
