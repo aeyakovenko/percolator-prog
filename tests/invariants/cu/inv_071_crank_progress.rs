@@ -3235,6 +3235,31 @@ fn inv071_source_defines_function(source: &str, function: &str) -> bool {
     })
 }
 
+fn inv071_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[test]
 fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
     const ENGINE_PIN: &str = "94979ede7db934545e53a8f210dd063a9ea3ea63";
@@ -3474,7 +3499,7 @@ fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
                     .unwrap_or_else(|error| panic!("read {path}: {error}"))
             });
             assert!(
-                inv071_source_defines_function(source, witness),
+                inv071_source_defines_test(source, witness),
                 "liveness class '{}' lacks executable witness {path}#{witness}",
                 row.class,
             );
