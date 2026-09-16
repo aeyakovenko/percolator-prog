@@ -622,29 +622,83 @@ fn v16_program_signed_aggregate_bound_composition_is_source_complete() {
         .map(|(body, _)| body)
         .expect("shared batch executor");
     assert!(executor.contains("outcome.fee_a > cap"));
-    assert!(inv011_source_defines_test(
-        include_str!("inv_011_signed_aggregate_economic_bounds.rs"),
-        "v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically"
-    ));
+    let local_source = include_str!("inv_011_signed_aggregate_economic_bounds.rs");
+    let mut public_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [(
+        "tests/invariants/cu/inv_011_signed_aggregate_economic_bounds.rs",
+        local_source,
+        "v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically",
+    )] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-011 aggregate-bound public witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "INV-011 aggregate-bound public witness must be a reviewed v16 regression: {path}#{witness}"
+        );
+        assert!(
+            public_witnesses.insert((path, witness)),
+            "duplicate INV-011 aggregate-bound public witness {path}#{witness}"
+        );
+        assert!(
+            inv011_source_defines_test(source, witness),
+            "INV-011 lost aggregate-bound public witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        public_witnesses.len(),
+        1,
+        "INV-011 aggregate-bound public witness roster drift"
+    );
     let decoder_proofs =
         include_str!("../kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs");
-    assert!(inv011_source_defines_kani_proof(
-        decoder_proofs,
-        "kani_v16_batch_cpi_preserves_aggregate_slippage_cap"
-    ));
-    assert!(inv011_source_defines_kani_proof(
-        decoder_proofs,
-        "kani_v16_batch_cpi_preserves_aggregate_fee_cap"
-    ));
     let aggregate_proofs = include_str!("../kani/inv_011_signed_aggregate_economic_bounds.rs");
-    assert!(inv011_source_defines_kani_proof(
-        aggregate_proofs,
-        "kani_v16_adverse_slippage_direction_is_exact"
-    ));
-    assert!(inv011_source_defines_kani_proof(
-        aggregate_proofs,
-        "kani_v16_aggregate_slippage_accumulator_is_exact_and_fail_closed"
-    ));
+    let mut proof_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs",
+            decoder_proofs,
+            "kani_v16_batch_cpi_preserves_aggregate_slippage_cap",
+        ),
+        (
+            "tests/invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs",
+            decoder_proofs,
+            "kani_v16_batch_cpi_preserves_aggregate_fee_cap",
+        ),
+        (
+            "tests/invariants/kani/inv_011_signed_aggregate_economic_bounds.rs",
+            aggregate_proofs,
+            "kani_v16_adverse_slippage_direction_is_exact",
+        ),
+        (
+            "tests/invariants/kani/inv_011_signed_aggregate_economic_bounds.rs",
+            aggregate_proofs,
+            "kani_v16_aggregate_slippage_accumulator_is_exact_and_fail_closed",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/kani/") && path.ends_with(".rs"),
+            "INV-011 aggregate-bound proof witness must resolve to a Kani invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("kani_v16_"),
+            "INV-011 aggregate-bound proof witness must be a reviewed Kani proof: {path}#{witness}"
+        );
+        assert!(
+            proof_witnesses.insert((path, witness)),
+            "duplicate INV-011 aggregate-bound proof witness {path}#{witness}"
+        );
+        assert!(
+            inv011_source_defines_kani_proof(source, witness),
+            "INV-011 lost aggregate-bound proof witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        proof_witnesses.len(),
+        4,
+        "INV-011 aggregate-bound proof witness roster drift"
+    );
 }
 
 #[test]
