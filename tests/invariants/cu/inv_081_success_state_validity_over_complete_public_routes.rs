@@ -242,6 +242,21 @@ fn v16_program_success_state_validity_composition_is_source_complete() {
     let mut layers = std::collections::BTreeSet::new();
     for owner in OWNERS {
         assert!(layers.insert(owner.layer), "duplicate INV-081 layer");
+        assert!(
+            owner.path.starts_with("tests/invariants/") && owner.path.ends_with(".rs"),
+            "INV-081 layer '{}' must resolve to an invariant source file: {}",
+            owner.layer,
+            owner.path,
+        );
+        assert!(
+            owner.test.starts_with("v16_")
+                || owner.test.starts_with("inv037_")
+                || owner.test == "deployed_wrapper_has_no_detached_signature_interpreter",
+            "INV-081 layer '{}' must point to a reviewed regression: {}#{}",
+            owner.layer,
+            owner.path,
+            owner.test,
+        );
         let source = std::fs::read_to_string(root.join(owner.path))
             .unwrap_or_else(|error| panic!("read {}: {error}", owner.path));
         assert!(
@@ -255,6 +270,14 @@ fn v16_program_success_state_validity_composition_is_source_complete() {
     assert_eq!(layers.len(), 24, "INV-081 composition layer drift");
 
     for (path, theorem) in KANI_OWNERS {
+        assert!(
+            path.starts_with("tests/invariants/kani/") && path.ends_with(".rs"),
+            "INV-081 proof owner must resolve to a Kani invariant source file: {path}"
+        );
+        assert!(
+            theorem.starts_with("kani_"),
+            "INV-081 proof owner must point to a reviewed Kani proof: {path}#{theorem}"
+        );
         let source = std::fs::read_to_string(root.join(path))
             .unwrap_or_else(|error| panic!("read {path}: {error}"));
         assert!(
