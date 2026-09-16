@@ -1,5 +1,12 @@
 # Invariant-owned test coverage
 
+## Rows 419/435 held-out coverage audit (2026-09-16)
+
+The [focused INV-039 audit](row419_435_heldout_gap_20260916.md) does not establish
+independent rediscovery. Generated solvent cohorts and finite mixed-role
+conformance matrices leave a gap in historical owner-debt attribution across
+resolution. **Both rows remain OPEN/missing; INV-039 remains `REFUTED_CURRENT`.**
+
 ## Row 422 INV-045 reward-provenance audit (2026-09-16)
 
 The existing public-route products cover reward accounting through same-slot
