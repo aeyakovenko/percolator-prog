@@ -874,6 +874,14 @@ fn v16_program_funded_role_guard_and_oracle_handoff_are_source_complete() {
             witnesses.insert(*witness),
             "duplicate row416 witness {witness}"
         );
+        assert!(
+            path.starts_with("inv_005_") && path.ends_with(".rs"),
+            "row416 funded-role witness points outside the INV-005 CU family: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "row416 funded-role witness uses an unreviewed test name: {witness}"
+        );
         let source = source_cache.entry(path).or_insert_with(|| {
             std::fs::read_to_string(root.join(path))
                 .unwrap_or_else(|error| panic!("read {path}: {error}"))
