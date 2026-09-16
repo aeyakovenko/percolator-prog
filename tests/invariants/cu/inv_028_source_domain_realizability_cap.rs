@@ -1709,6 +1709,14 @@ fn v16_program_source_realizability_cap_composition_is_source_complete() {
             witnesses.insert(*witness),
             "duplicate row423 witness {witness}"
         );
+        assert!(
+            path.starts_with("inv_028_") && path.ends_with(".rs"),
+            "row423 witness points outside the INV-028 CU invariant family: {path}",
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "row423 witness uses an unreviewed test name: {witness}",
+        );
         let source = source_cache.entry(path).or_insert_with(|| {
             std::fs::read_to_string(root.join(path))
                 .unwrap_or_else(|error| panic!("read {path}: {error}"))
