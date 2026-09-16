@@ -1636,13 +1636,29 @@ fn v16_program_batch_tradecpi_configured_leg_cap_rejects_before_hostile_matcher_
     assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
 }
 
-fn inv058_source_defines_function(source: &str, function: &str) -> bool {
-    let marker = format!("fn {function}");
-    source.lines().any(|line| {
-        line.trim()
-            .strip_prefix(&marker)
-            .is_some_and(|tail| tail.trim_start().starts_with('('))
-    })
+fn inv058_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
 }
 
 fn inv058_function_body<'a>(production: &'a str, function: &str) -> &'a str {
@@ -1768,7 +1784,7 @@ fn v16_program_side_oi_cap_witness_roster_is_source_complete() {
                 .unwrap_or_else(|error| panic!("read {path}: {error}"))
         });
         assert!(
-            inv058_source_defines_function(source, witness),
+            inv058_source_defines_test(source, witness),
             "INV-058 side-OI roster lost public witness {path}#{witness}",
         );
     }
