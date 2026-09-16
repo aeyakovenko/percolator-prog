@@ -1392,15 +1392,42 @@ fn v16_program_liquidation_fee_surface_is_single_route_and_engine_selected() {
         "caller-selected close quantity would make liquidation partitioning public"
     );
     let one_shot = include_str!("inv_009_partial_fill_and_retry_accounting.rs");
-    assert!(inv059_source_defines_test(
-        one_shot,
-        "v16_program_one_shot_trade_consent_composition_is_source_complete"
-    ));
     let aggregate = include_str!("inv_011_signed_aggregate_economic_bounds.rs");
-    assert!(inv059_source_defines_test(
-        aggregate,
-        "v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically"
-    ));
+    let mut composition_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/cu/inv_009_partial_fill_and_retry_accounting.rs",
+            one_shot,
+            "v16_program_one_shot_trade_consent_composition_is_source_complete",
+        ),
+        (
+            "tests/invariants/cu/inv_011_signed_aggregate_economic_bounds.rs",
+            aggregate,
+            "v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-059 fee-fragmentation witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "INV-059 fee-fragmentation witness must be a reviewed v16 regression: {path}#{witness}"
+        );
+        assert!(
+            composition_witnesses.insert((path, witness)),
+            "duplicate INV-059 fee-fragmentation witness {path}#{witness}"
+        );
+        assert!(
+            inv059_source_defines_test(source, witness),
+            "INV-059 lost fee-fragmentation composition witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        composition_witnesses.len(),
+        2,
+        "INV-059 fee-fragmentation witness roster drift"
+    );
     crate::assert_certified_engine_pin("INV-059 engine-selected liquidation evidence");
 }
 
