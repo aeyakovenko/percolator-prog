@@ -49,13 +49,29 @@ mod cure_revocation;
 #[path = "inv_012_joint_incarnation_binding.rs"]
 mod joint_incarnation_binding;
 
-fn inv012_source_defines_function(source: &str, function: &str) -> bool {
+fn inv012_source_defines_kani_proof(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
-    source.lines().any(|line| {
-        line.trim_start()
-            .strip_prefix(&expected)
-            .is_some_and(|tail| tail.trim_start().starts_with('('))
-    })
+    let mut proof_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[kani::proof]" {
+            proof_attribute = true;
+        } else if line.starts_with("fn ") {
+            if proof_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            proof_attribute = false;
+        } else if proof_attribute && !line.is_empty() && !line.starts_with("#") {
+            proof_attribute = false;
+        }
+    }
+
+    false
 }
 
 fn inv012_source_defines_test(source: &str, function: &str) -> bool {
@@ -151,7 +167,7 @@ fn v16_program_matcher_capability_route_roster_binds_every_current_scope() {
     assert!(matcher_guard.contains("matcher_capability_is_live(expiry_slot, Clock::get()?.slot)"));
 
     let expiry_proof = include_str!("../kani/inv_012_capability_and_delegate_scope.rs");
-    assert!(inv012_source_defines_function(
+    assert!(inv012_source_defines_kani_proof(
         expiry_proof,
         "kani_v16_matcher_capability_config_is_exact_at_full_width"
     ));
