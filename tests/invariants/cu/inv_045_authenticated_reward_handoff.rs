@@ -30,6 +30,9 @@ mod hybrid_recipient_provenance;
 #[path = "inv_045_reward_destination_retry.rs"]
 mod reward_destination_retry;
 
+#[path = "inv_045_cpi_reward_provenance.rs"]
+mod cpi_reward_provenance;
+
 fn values(env: &V16CuEnv, portfolios: [Pubkey; 5]) -> [i128; 5] {
     portfolios.map(|key| {
         let account = env.portfolio_state(key);

@@ -72,6 +72,33 @@ remains OPEN/missing; INV-005 remains `REFUTED_CURRENT`.** See the
 [terminal-envelope report](row416_terminal_oracle_role_20260916.md) for exact
 commands, non-overlap, artifact provenance and remaining limits.
 
+## Row 422 CPI switching across retained penalties and clipped rewards (2026-09-16)
+
+The [CPI reward-provenance child](cu/inv_045_cpi_reward_provenance.rs) adds 32
+public LiteSVM histories: all sixteen ordered single/batch CPI/no-CPI discovery
+and reduction pairs, with the fresh liquidation recipient present or omitted.
+Each history retains an earlier stale-report penalty, rotates the public matcher
+context, clips keeper maintenance, accepts fresh evidence while the mark still
+lags, catches up, reduces effective post-ADL positions and pays the keeper in SPL.
+The complete engine group and five engine portfolios agree across routes after
+normalizing only account/owner/market identities, separately for each recipient
+schedule. Paid discovery and the stale penalty never become fresh source budget.
+
+Independent fee rounding and source books distinguish maintenance domains 0/1
+from liquidation domains 2/3. Later recipients cannot reclaim the omitted
+2,762-atom reward; replenishment cannot recharge forgiven maintenance. Successful
+observation/reward prefixes roll back when a suffix changes the recipient, uses
+an equivocal report or presents a superseded matcher tuple. The two selectors
+check 64 liquidations, 608 exact Account rollbacks and 32 payouts. The largest
+measured transaction uses 350,689 CU. Lane 23 lacks route switching; Lane 26 lacks
+retained stale penalties, clipped maintenance and matcher succession.
+
+This is bounded conformance with one Hybrid source, distinct owners, fixed
+policies, zero funding and live residual positions, not a general provenance or
+terminal-exit proof. **Row 422 remains OPEN/missing; INV-045 remains
+`REFUTED_CURRENT`.** See the [local report](row422_cpi_reward_provenance_20260916.md)
+for the trace, arithmetic, exact selectors, artifact hashes and validation.
+
 ## Lane 25 source expiry before mixed-role settlement (2026-09-16)
 
 The [unsettled-expiry owner](cu/inv_039_mixed_role_unsettled_expiry.rs) adds 48
