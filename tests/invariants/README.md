@@ -340,6 +340,29 @@ terminal-exit proof. **Row 422 remains OPEN/missing; INV-045 remains
 `REFUTED_CURRENT`.** See the [local report](row422_cpi_reward_provenance_20260916.md)
 for the trace, arithmetic, exact selectors, artifact hashes and validation.
 
+## Rows 419/435 mixed debt ADL and rebalance (2026-09-16)
+
+The [ADL rebalance child](cu/inv_039_mixed_role_adl_rebalance.rs) adds one public
+LiteSVM product with 32 worlds: two debts, mirrored sides, both creditor/debtor
+asset assignments, effective-quantity versus raw-basis owner requests, and
+close-expiry preemption versus direct resolution. A peer reduction halves the
+mixed owner's effective debt exposure while preserving its raw basis and
+accrued debt. Owner rebalance clears that debt leg, charges the full original
+debt, and preserves the separate zero-basis creditor obligation. Side reset,
+Recovery/Resolved preemption, and final residual booking cannot erase or move
+the creditor's 20,000-atom loss. Input-derived owner entitlements, exact close
+partition, effective OI, current/reset-epoch weight, source ownership, custody,
+and stock/reservation censuses are checked through all five portfolio deletions.
+
+The product records 160 successful-prefix rollbacks, 32 side finalizations and
+32 paid-receipt retries; the measured peak is 254,319 CU. It extends Lane 21's
+preemption history with prior debt-side ADL/rebalance and extends single-pair
+ADL cleanup with a surviving cross-asset creditor residual. It does not add
+underfunded-receipt, funding, cross-zero, source-expiry or slab-retirement
+coverage. No current bug was found. **Rows 419/435 remain OPEN/missing;
+INV-039 remains `REFUTED_CURRENT`.** The [report](row419_435_adl_rebalance_20260916.md)
+records the audit, exact selectors, validation and finite limits.
+
 ## Rows 419/435 mixed ADL and underfunded receipts (2026-09-16)
 
 The [receipt frontier owner](cu/inv_039_mixed_underfunded_receipt.rs) adds 24
