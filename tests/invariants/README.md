@@ -1,5 +1,42 @@
 # Invariant-owned test coverage
 
+## INV-014 runnable retained-fee witnesses (2026-09-16)
+
+Owner:
+[cu/inv_014_delayed_policy_and_policy_epoch_safety.rs](cu/inv_014_delayed_policy_and_policy_epoch_safety.rs).
+`v16_program_retained_fee_consent_witness_roster_is_source_complete` now parses
+each witness's complete module path from its CU or stateful integration-test
+root, requires the declared source file, and checks an unconditional, non-ignored
+`#[test]` function. Comments and strings cannot supply declarations. Conditional
+compilation, expected-panic tests, inline modules, and macro-transformed evidence
+require renewed review. `syn` is a host dev-dependency already present in the lockfile.
+All twelve previous witnesses remain; the round-trip consent witness, previously
+checked only by a module-name substring, is now the thirteenth full-path witness.
+
+On remote-main base `cc3b1a502583253a84bdead6a19717680b3e76fd`, deleting the
+recipient-succession mount left the old guard passing **1/1** while removing that
+economic test from the binary. The strengthened guard rejects the same mutation.
+`v16_retained_fee_witness_guard_rejects_unmounted_or_disabled_evidence` checks
+eleven mutations of actual sources in memory: removed root/child mounts,
+commented and conditional mounts, redirected source paths, disabled files,
+string-only test decoys, and ignored/expected-panic/conditional tests.
+
+Validation: the two exact CU metadata selectors pass **2/2**; the INV-079
+benchmark, charter/index, machine-status, reopening, and audit-summary selectors
+pass **5/5**. The external unmount control changes from the old guard's **1/1 pass**
+to the new guard's **1/1 expected failure**, then **1/1 pass** after restoration.
+The changed Rust file passes `rustfmt --check` with `skip_children=true`, and
+`git diff --check` passes. Repository-wide `cargo fmt --all -- --check` reports
+pre-existing drift in seven untouched INV-024/045/070/073 files.
+
+This repairs evidence reachability for the retained-policy roster associated with
+holdouts 411/432. It does not discover a new economic counterexample or copy a
+finding's fix. No production code, benchmark classification, or invariant status
+changes. Row 411's arbitrary fee-bearing route/history obligation remains OPEN;
+row 432's bounded coverage is unchanged. Other invariants' source scanners,
+macro-generated witnesses, arbitrary retained histories, and public SBF execution
+are outside this metadata-only increment.
+
 ## INV-047 route witness composition guard (2026-09-16)
 
 Owner: [cu/inv_047_equivalent_route_semantics.rs](cu/inv_047_equivalent_route_semantics.rs).

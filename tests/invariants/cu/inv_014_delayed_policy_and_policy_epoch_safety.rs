@@ -48,32 +48,123 @@ mod reserve_debit_epoch;
 #[derive(Clone, Copy)]
 struct Inv014RetainedFeeWitness {
     path: &'static str,
+    modules: &'static str,
     function: &'static str,
 }
 
-fn inv014_source_defines_test(source: &str, function: &str) -> bool {
-    let expected = format!("fn {function}");
-    let mut test_attribute = false;
+fn inv014_unconditional_attributes(attrs: &[syn::Attribute]) -> bool {
+    // Conditional, ignored, expected-panic, or macro-transformed evidence needs
+    // separate review; the current roster consists of ordinary unconditional tests.
+    attrs.iter().all(|attr| {
+        [
+            "doc", "path", "test", "allow", "expect", "warn", "deny", "forbid",
+        ]
+        .iter()
+        .any(|name| attr.path().is_ident(name))
+    })
+}
 
-    for line in source.lines() {
-        let line = line.trim();
-        if line == "#[test]" {
-            test_attribute = true;
-        } else if line.starts_with("fn ") {
-            if test_attribute
-                && line
-                    .strip_prefix(&expected)
-                    .is_some_and(|tail| tail.trim_start().starts_with('('))
-            {
-                return true;
-            }
-            test_attribute = false;
-        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
-            test_attribute = false;
+fn inv014_validate_mounted_witness(
+    witness: Inv014RetainedFeeWitness,
+    mut read: impl FnMut(&std::path::Path) -> Result<String, String>,
+) -> Result<(), String> {
+    use std::path::{Component, Path};
+
+    let harness = if witness.path.starts_with("tests/invariants/cu/") {
+        "tests/v16_cu.rs"
+    } else if witness.path.starts_with("tests/invariants/stateful/") {
+        "tests/v16_program_stateful_fuzz.rs"
+    } else {
+        return Err(format!("unreviewed witness harness: {}", witness.path));
+    };
+    let mut path = Path::new(harness).to_path_buf();
+    let mut modules = witness.modules.split("::");
+    loop {
+        let file = syn::parse_file(&read(&path)?)
+            .map_err(|error| format!("parse {}: {error}", path.display()))?;
+        if !inv014_unconditional_attributes(&file.attrs) {
+            return Err(format!(
+                "conditional/transformed witness file: {}",
+                path.display()
+            ));
         }
+        let Some(module) = modules.next() else {
+            if path != Path::new(witness.path) {
+                return Err(format!(
+                    "witness path mismatch: {} != {}",
+                    path.display(),
+                    witness.path
+                ));
+            }
+            let tests: Vec<_> = file
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::Item::Fn(item) if item.sig.ident == witness.function => Some(item),
+                    _ => None,
+                })
+                .collect();
+            if tests.len() != 1
+                || !tests[0]
+                    .attrs
+                    .iter()
+                    .any(|attr| matches!(&attr.meta, syn::Meta::Path(p) if p.is_ident("test")))
+                || !inv014_unconditional_attributes(&tests[0].attrs)
+            {
+                return Err(format!(
+                    "missing/unreviewed runnable test: {}#{}",
+                    witness.path, witness.function
+                ));
+            }
+            return Ok(());
+        };
+        let mounts: Vec<_> = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Mod(item) if item.ident == module => Some(item),
+                _ => None,
+            })
+            .collect();
+        if mounts.len() != 1 {
+            return Err(format!(
+                "missing/ambiguous module {module} in {}",
+                path.display()
+            ));
+        }
+        let mount = mounts[0];
+        if mount.content.is_some() || !inv014_unconditional_attributes(&mount.attrs) {
+            return Err(format!(
+                "conditional/transformed module {module} in {}",
+                path.display()
+            ));
+        }
+        let paths: Vec<_> = mount
+            .attrs
+            .iter()
+            .filter_map(|attr| match &attr.meta {
+                syn::Meta::NameValue(meta) if meta.path.is_ident("path") => match &meta.value {
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(value),
+                        ..
+                    }) => Some(value.value()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        if paths.len() != 1
+            || !Path::new(&paths[0])
+                .components()
+                .all(|c| matches!(c, Component::Normal(_)))
+        {
+            return Err(format!(
+                "unreviewed module path for {module} in {}",
+                path.display()
+            ));
+        }
+        path = path.parent().unwrap().join(&paths[0]);
     }
-
-    false
 }
 
 #[test]
@@ -82,58 +173,75 @@ fn v16_program_retained_fee_consent_witness_roster_is_source_complete() {
     const WITNESSES: &[Inv014RetainedFeeWitness] = &[
         Inv014RetainedFeeWitness {
             path: "tests/invariants/cu/inv_014_delayed_policy_and_policy_epoch_safety.rs",
+            modules: "inv_014_delayed_policy_and_policy_epoch_safety",
             function:
                 "v16_retained_fee_terms_bound_partial_and_exact_fill_routes_after_policy_change",
         },
         Inv014RetainedFeeWitness {
             path: "tests/invariants/cu/inv_014_retained_partial_fee_routes.rs",
+            modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_partial_fee_routes",
             function:
                 "v16_retained_partial_fill_fee_rate_matches_exact_routes_after_funded_rejection",
         },
         Inv014RetainedFeeWitness {
             path: "tests/invariants/cu/inv_014_generated_partial_policy_words.rs",
+            modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_partial_fee_routes::generated_partial_policy_words",
             function: "v16_generated_partial_policy_words_preserve_retained_fee_and_retry_budgets",
         },
         Inv014RetainedFeeWitness {
             path: "tests/invariants/cu/inv_014_retained_single_cpi_policy_history.rs",
+            modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history",
             function:
                 "v16_retained_single_cpi_fee_consent_survives_policy_detours_and_funded_rollback",
         },
         Inv014RetainedFeeWitness {
             path: "tests/invariants/cu/inv_014_retained_single_cpi_policy_history.rs",
+            modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history",
             function:
                 "v16_retained_cpi_and_direct_policy_histories_differ_only_by_explicit_route_fees",
         },
         Inv014RetainedFeeWitness {
             path: "tests/invariants/cu/inv_014_retained_policy_route_budgets.rs",
+            modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_policy_route_budgets",
             function: "v16_retained_policy_route_budgets_bound_each_committed_prefix",
         },
         Inv014RetainedFeeWitness {
             path: "tests/invariants/cu/inv_014_retained_mixed_route_fees.rs",
+            modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_mixed_route_fees",
             function:
                 "v16_retained_mixed_route_fee_budgets_survive_bilateral_revocation_and_renewal",
         },
         Inv014RetainedFeeWitness {
+            path: "tests/invariants/cu/inv_014_retained_round_trip_fee_consent.rs",
+            modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_round_trip_fee_consent",
+            function: "v16_retained_single_cpi_round_trip_cannot_pool_instruction_fee_consent",
+        },
+        Inv014RetainedFeeWitness {
             path: "tests/invariants/cu/inv_014_retained_maintenance_reward.rs",
+            modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_partial_fee_routes::retained_maintenance_reward",
             function:
                 "v16_retained_trade_fees_exclude_counterparty_maintenance_rewards_across_routes",
         },
         Inv014RetainedFeeWitness {
             path: "tests/invariants/cu/inv_014_retained_redirect_entitlement.rs",
+            modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_redirect_entitlement",
             function:
                 "v16_retained_fee_routes_preserve_recipient_entitlement_after_paid_redirect_history",
         },
         Inv014RetainedFeeWitness {
             path: "tests/invariants/cu/inv_014_retained_recipient_succession.rs",
+            modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_redirect_entitlement::retained_recipient_succession",
             function:
                 "v16_retained_trade_and_payout_consent_diverge_across_live_recipient_succession",
         },
         Inv014RetainedFeeWitness {
             path: "tests/invariants/stateful/inv_014_retained_backing_fee_cap.rs",
+            modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_backing_fee_cap",
             function: "v16_program_retained_backing_fee_caps_follow_participant_and_route_consent",
         },
         Inv014RetainedFeeWitness {
             path: "tests/invariants/stateful/inv_010_out_of_order_safety.rs",
+            modules: "inv_010_out_of_order_safety",
             function:
                 "v16_program_retained_bilateral_fee_terms_survive_both_policy_relaxation_orders",
         },
@@ -149,33 +257,7 @@ fn v16_program_retained_fee_consent_witness_roster_is_source_complete() {
     assert!(lock.contains(&format!("rev={ENGINE_PIN}#{ENGINE_PIN}")));
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let parent = include_str!("inv_014_delayed_policy_and_policy_epoch_safety.rs");
-    for mounted_child in [
-        "mod retained_partial_fee_routes;",
-        "mod retained_single_cpi_policy_history;",
-        "mod retained_redirect_entitlement;",
-    ] {
-        assert!(
-            parent.contains(mounted_child),
-            "INV-014 retained-fee child module is no longer mounted: {mounted_child}",
-        );
-    }
-
-    let partial_parent = include_str!("inv_014_retained_partial_fee_routes.rs");
-    assert!(partial_parent.contains("mod generated_partial_policy_words;"));
-    assert!(partial_parent.contains("mod retained_maintenance_reward;"));
-    let cpi_parent = include_str!("inv_014_retained_single_cpi_policy_history.rs");
-    for mounted_child in [
-        "mod retained_policy_route_budgets;",
-        "mod retained_mixed_route_fees;",
-        "mod retained_round_trip_fee_consent;",
-    ] {
-        assert!(
-            cpi_parent.contains(mounted_child),
-            "retained single-CPI child module is no longer mounted: {mounted_child}",
-        );
-    }
-
+    let mut sources = std::collections::BTreeMap::new();
     let mut seen = std::collections::BTreeSet::new();
     for witness in WITNESSES {
         assert!(seen.insert(witness.function), "duplicate INV-014 witness");
@@ -192,16 +274,112 @@ fn v16_program_retained_fee_consent_witness_roster_is_source_complete() {
             witness.path,
             witness.function
         );
-        let source = std::fs::read_to_string(root.join(witness.path))
-            .unwrap_or_else(|error| panic!("read {}: {error}", witness.path));
+        inv014_validate_mounted_witness(*witness, |path| {
+            sources
+                .entry(path.to_path_buf())
+                .or_insert_with(|| {
+                    std::fs::read_to_string(root.join(path))
+                        .map_err(|error| format!("read {}: {error}", path.display()))
+                })
+                .clone()
+        })
+        .unwrap_or_else(|error| panic!("INV-014 {}#{}: {error}", witness.path, witness.function));
+    }
+    assert_eq!(seen.len(), 13, "retained-fee witness roster drift");
+}
+
+#[test]
+fn v16_retained_fee_witness_guard_rejects_unmounted_or_disabled_evidence() {
+    const WITNESS: Inv014RetainedFeeWitness = Inv014RetainedFeeWitness {
+        path: "tests/invariants/cu/inv_014_retained_recipient_succession.rs",
+        modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_redirect_entitlement::retained_recipient_succession",
+        function: "v16_retained_trade_and_payout_consent_diverge_across_live_recipient_succession",
+    };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let parent_path = "tests/invariants/cu/inv_014_retained_redirect_entitlement.rs";
+    let parent = std::fs::read_to_string(root.join(parent_path)).unwrap();
+    let leaf = std::fs::read_to_string(root.join(WITNESS.path)).unwrap();
+    let mount = "#[path = \"inv_014_retained_recipient_succession.rs\"]\nmod retained_recipient_succession;";
+    let test = format!("#[test]\nfn {}", WITNESS.function);
+    assert_eq!(parent.matches(mount).count(), 1);
+    assert_eq!(leaf.matches(&test).count(), 1);
+
+    // Mutate actual witness sources in memory; neither the repository nor the
+    // public economic tests change while the guard's rejection paths are tested.
+    let mut mutations = vec![
+        (
+            parent_path,
+            parent.replace(mount, ""),
+            "missing/ambiguous module",
+        ),
+        (
+            parent_path,
+            parent.replace(mount, &format!("/* {mount} */")),
+            "missing/ambiguous module",
+        ),
+        (
+            parent_path,
+            parent.replace(mount, &format!("#[cfg(any())]\n{mount}")),
+            "conditional/transformed module",
+        ),
+        (
+            parent_path,
+            parent.replace(
+                "inv_014_retained_recipient_succession.rs",
+                "inv_014_retained_single_cpi_policy_history.rs",
+            ),
+            "witness path mismatch",
+        ),
+        (
+            WITNESS.path,
+            format!("#![cfg(any())]\n{leaf}"),
+            "conditional/transformed witness file",
+        ),
+        (
+            WITNESS.path,
+            format!("const DECOY: &str = r####\"{leaf}\"####;"),
+            "missing/unreviewed runnable test",
+        ),
+    ];
+    for attribute in [
+        "ignore",
+        "should_panic",
+        "cfg(any())",
+        "cfg_attr(all(), ignore)",
+    ] {
+        mutations.push((
+            WITNESS.path,
+            leaf.replace(
+                &test,
+                &format!("#[test]\n#[{attribute}]\nfn {}", WITNESS.function),
+            ),
+            "missing/unreviewed runnable test",
+        ));
+    }
+    let harness_path = "tests/v16_cu.rs";
+    let harness = std::fs::read_to_string(root.join(harness_path)).unwrap();
+    let root_mount = "#[path = \"invariants/cu/inv_014_delayed_policy_and_policy_epoch_safety.rs\"]\nmod inv_014_delayed_policy_and_policy_epoch_safety;";
+    assert_eq!(harness.matches(root_mount).count(), 1);
+    mutations.push((
+        harness_path,
+        harness.replace(root_mount, ""),
+        "missing/ambiguous module",
+    ));
+    for (path, mutated, expected) in &mutations {
+        let error = inv014_validate_mounted_witness(WITNESS, |candidate| {
+            if candidate == std::path::Path::new(path) {
+                Ok(mutated.clone())
+            } else {
+                std::fs::read_to_string(root.join(candidate)).map_err(|error| error.to_string())
+            }
+        })
+        .expect_err("mutated fee-consent witness must lose its evidence claim");
         assert!(
-            inv014_source_defines_test(&source, witness.function),
-            "INV-014 retained-fee witness missing {}#{}",
-            witness.path,
-            witness.function,
+            error.contains(expected),
+            "{path}: expected {expected}, got {error}"
         );
     }
-    assert_eq!(seen.len(), 12, "retained-fee witness roster drift");
+    assert_eq!(mutations.len(), 11);
 }
 
 #[test]
