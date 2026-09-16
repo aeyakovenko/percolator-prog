@@ -1870,6 +1870,21 @@ fn v16_program_reference_model_dimension_composition_is_source_complete() {
         assert!(!row.witnesses.is_empty());
         for (path, witness) in row.witnesses {
             assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            assert!(
+                path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                "model dimension '{}' points outside invariant test sources: {path}",
+                row.dimension,
+            );
+            assert!(
+                witness.starts_with("v16_")
+                    || matches!(
+                        *witness,
+                        "retained_transaction_binds_program_market_kind_schema_and_blockhash"
+                            | "insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_payout"
+                    ),
+                "model dimension '{}' uses an unreviewed witness name: {witness}",
+                row.dimension,
+            );
             let source = source_cache.entry(path).or_insert_with(|| {
                 std::fs::read_to_string(root.join(path))
                     .unwrap_or_else(|error| panic!("read {path}: {error}"))
