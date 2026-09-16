@@ -25,6 +25,31 @@ terminal state; owner exits and slab retirement are outside this increment.
 [rail history report](row417_rail_receipt_20260916.md) for exact commands, results,
 artifact provenance and limits. This bounded coverage does not establish closure.
 
+## Row 421 disabled beneficiary restoration (2026-09-16)
+
+The [disabled-beneficiary child](cu/inv_073_disabled_beneficiary_restoration.rs)
+adds four public LiteSVM histories crossing classic/native quote and insurance
+handoff before/after a funded senior's exit. Delegated beneficiary custody blocks
+unsigned payouts; consented `A -> B -> A` succession plus SPL revocation restores
+the public payout path without reviving old A authority epochs. Attempts to set
+the beneficiary to zero roll back completed senior or insurance payouts exactly.
+Incoming consent, cold-admin seizure, owner-only portfolio deletion and signed
+terminal cleanup boundaries are checked with real funded custody.
+
+All four histories preserve the user's 137 atoms, pay B exactly 7 insurance atoms
+and restored A exactly 40, then sweep only 11 external surplus atoms at closure.
+Native histories separately return 13 unsynced lamports and redeem all four token
+accounts after closure. There are 68 exact Account rollbacks; peak CU is 91,458
+classic and 90,047 native, below 300,000. No current behavior violation was found.
+
+This is bounded single-asset, flat-user coverage. Zero-beneficiary transitions
+are rejected, not synthesized. The residue is external surplus; booked-residue
+burn/escheat, provider expiry, insurance recredit and absent restoration signers
+are not new claims. It is distinct from Lane 22's partial recredit and Lane 27's
+provider-expiry succession. **Row 421 remains OPEN/missing; INV-073 remains
+`REFUTED_CURRENT`.** See the [worker report](row421_disabled_beneficiary_restoration_20260916.md)
+for exact selectors, validation, authority assumptions and limitations.
+
 ## Lane 25 source expiry before mixed-role settlement (2026-09-16)
 
 The [unsettled-expiry owner](cu/inv_039_mixed_role_unsettled_expiry.rs) adds 48

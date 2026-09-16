@@ -21,6 +21,9 @@ const PREFIX: u64 = 17;
 #[path = "inv_073_successor_expiry_residue.rs"]
 mod successor_expiry_residue;
 
+#[path = "inv_073_disabled_beneficiary_restoration.rs"]
+mod disabled_beneficiary_restoration;
+
 fn ata(wallet: Pubkey, mint: Pubkey) -> Pubkey {
     Pubkey::find_program_address(
         &[wallet.as_ref(), spl_token::ID.as_ref(), mint.as_ref()],
