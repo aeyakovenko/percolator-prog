@@ -1937,6 +1937,115 @@ fn v16_special_verification_method_registry_matches_charter() {
     );
 }
 
+#[test]
+fn v16_special_method_cross_invariant_evidence_is_reviewed() {
+    let indexed = parse_special_method_registry(include_str!("../special_method_coverage.tsv"));
+    let reviewed_cross_invariant_evidence = [
+        (
+            "INV-008",
+            "M",
+            "tests/invariants/cu/inv_009_partial_fill_and_retry_accounting.rs",
+            "v16_program_one_shot_trade_consent_composition_is_source_complete",
+        ),
+        (
+            "INV-038",
+            "M",
+            "tests/invariants/stateful/inv_052_split_merge_invariance.rs",
+            "v16_program_backing_fee_partitions_are_conservative_and_value_exact",
+        ),
+        (
+            "INV-051",
+            "M",
+            "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+            "v16_attack_public_14_leg_28_source_equal_risk_liquidation_stays_bounded",
+        ),
+        (
+            "INV-029",
+            "R",
+            "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+            "v16_program_bounded_reference_graph_exhausts_public_action_words",
+        ),
+        (
+            "INV-046",
+            "R",
+            "tests/invariants/cu/inv_045_no_free_mark_movement.rs",
+            "v16_program_mark_writer_and_trade_exit_composition_is_source_complete",
+        ),
+        (
+            "INV-057",
+            "R",
+            "tests/invariants/cu/inv_071_crank_progress.rs",
+            "v16_program_crank_progress_and_recovery_composition_is_source_complete",
+        ),
+        (
+            "INV-067",
+            "R",
+            "tests/invariants/cu/inv_066_resolved_payout_fairness_and_order_independence.rs",
+            "v16_program_resolved_payout_induction_composition_is_source_complete",
+        ),
+        (
+            "INV-073",
+            "R",
+            "tests/invariants/cu/inv_071_crank_progress.rs",
+            "v16_program_crank_progress_and_recovery_composition_is_source_complete",
+        ),
+        (
+            "INV-078",
+            "R",
+            "tests/invariants/cu/inv_071_crank_progress.rs",
+            "v16_program_crank_progress_and_recovery_composition_is_source_complete",
+        ),
+        (
+            "INV-082",
+            "R",
+            "tests/invariants/cu/inv_071_crank_progress.rs",
+            "v16_program_crank_progress_and_recovery_composition_is_source_complete",
+        ),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    let mut observed_cross_invariant_evidence = std::collections::BTreeSet::new();
+
+    for row in indexed.iter().filter(|row| row.status != "OMITTED") {
+        let path = row
+            .evidence_path
+            .expect("covered or partial method row has evidence path");
+        let function = row
+            .evidence_function
+            .expect("covered or partial method row has evidence function");
+        let evidence_invariant = evidence_path_invariant_id(path)
+            .unwrap_or_else(|| panic!("method evidence path lacks invariant id: {path}"));
+        if evidence_invariant == row.invariant {
+            continue;
+        }
+
+        let claim = (row.invariant, row.method, path, function);
+        assert!(
+            reviewed_cross_invariant_evidence.contains(&claim),
+            "{} {} borrows {}#{} without an explicit reviewed cross-invariant allowance",
+            row.invariant,
+            row.method,
+            path,
+            function
+        );
+        observed_cross_invariant_evidence.insert(claim);
+    }
+
+    assert_eq!(
+        observed_cross_invariant_evidence, reviewed_cross_invariant_evidence,
+        "reviewed cross-invariant method evidence allowlist is stale"
+    );
+}
+
+fn evidence_path_invariant_id(path: &str) -> Option<String> {
+    let file_name = path.rsplit('/').next()?;
+    let digits = file_name.strip_prefix("inv_")?.get(..3)?;
+    digits
+        .chars()
+        .all(|ch| ch.is_ascii_digit())
+        .then(|| format!("INV-{digits}"))
+}
+
 fn charter_special_method_requirements(
     charter: &str,
 ) -> std::collections::BTreeSet<SpecialMethodRequirement> {
@@ -1982,6 +2091,9 @@ fn charter_special_method_requirements(
 struct SpecialMethodCoverageRow<'a> {
     invariant: &'a str,
     method: &'a str,
+    status: &'a str,
+    evidence_path: Option<&'a str>,
+    evidence_function: Option<&'a str>,
 }
 
 fn parse_special_method_registry(tsv: &str) -> Vec<SpecialMethodCoverageRow<'_>> {
@@ -2026,6 +2138,9 @@ fn parse_special_method_registry(tsv: &str) -> Vec<SpecialMethodCoverageRow<'_>>
             line_index + 1
         );
 
+        let mut evidence_path = None;
+        let mut evidence_function = None;
+
         match status {
             "PARTIAL" | "COVERED" => {
                 let (path, function) = evidence.split_once('#').unwrap_or_else(|| {
@@ -2047,6 +2162,8 @@ fn parse_special_method_registry(tsv: &str) -> Vec<SpecialMethodCoverageRow<'_>>
                     "row {} evidence {path} does not define #[test] fn {function}",
                     line_index + 1
                 );
+                evidence_path = Some(path);
+                evidence_function = Some(function);
                 if status == "COVERED" {
                     assert_eq!(
                         remaining_gap,
@@ -2075,7 +2192,13 @@ fn parse_special_method_registry(tsv: &str) -> Vec<SpecialMethodCoverageRow<'_>>
             ),
         }
 
-        rows.push(SpecialMethodCoverageRow { invariant, method });
+        rows.push(SpecialMethodCoverageRow {
+            invariant,
+            method,
+            status,
+            evidence_path,
+            evidence_function,
+        });
     }
 
     assert!(saw_header, "special method registry header is missing");
