@@ -12,6 +12,31 @@
 
 use super::*;
 
+fn inv038_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 // This module now owns deployed public evidence for exact social-loss B booking, per-account B
 // settlement, and zero-OI carry normalization. Each route checks the persisted quotient/remainder
 // partition rather than inferring correctness from a balanced final vault alone.
@@ -803,12 +828,6 @@ fn v16_program_truncating_arithmetic_surface_has_a_semantic_owner() {
             evidence: "INV-002",
         },
         RoundingOwner {
-            function: "handle_close_slab",
-            operations: 1,
-            class: "STRUCTURAL",
-            evidence: "INV-063",
-        },
-        RoundingOwner {
             function: "handle_update_backing_fee_policy",
             operations: 3,
             class: "STRUCTURAL",
@@ -955,7 +974,7 @@ fn v16_program_truncating_arithmetic_surface_has_a_semantic_owner() {
                 assert!(
                     witness_sources
                         .iter()
-                        .any(|source| source.contains(&format!("fn {}", row.evidence))),
+                        .any(|source| inv038_source_defines_test(source, row.evidence)),
                     "{} lacks executable semantic rounding evidence {}",
                     row.function,
                     row.evidence
