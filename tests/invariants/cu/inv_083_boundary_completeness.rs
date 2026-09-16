@@ -37,6 +37,31 @@ fn inv083_boundary_transaction(env: &V16CuEnv, instruction: Instruction) -> Tran
     tx
 }
 
+fn inv083_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 fn inv083_land_boundary(
     env: &mut V16CuEnv,
     tx: Transaction,
@@ -604,7 +629,7 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
                     .unwrap_or_else(|error| panic!("read {evidence_file}: {error}"))
             });
         assert!(
-            evidence_source.contains(&format!("fn {evidence_test}(")),
+            inv083_source_defines_test(evidence_source, evidence_test),
             "{type_name} boundary owner is missing executable evidence {}",
             columns[3]
         );
