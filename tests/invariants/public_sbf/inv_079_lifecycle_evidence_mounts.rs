@@ -1,10 +1,14 @@
 //! INV-079: module reachability of evidence claimed for INV-063 through INV-089.
 //!
-//! Existing ledgers check test declarations. Also require the declaring file to
-//! belong to a public harness's module tree; include_str! alone is not a mount.
-//! This checks source mounts, not execution, test bodies, or macro expansion.
+//! Require both a mounted file and an unconditional, nonignored test item.
+//! Text in comments, strings or nested functions cannot supply test evidence.
+//! The existing proptest! declaration form is recognized explicitly. Other macro
+//! expansion, execution and test-body fidelity remain separate obligations.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 const ROOTS: [&str; 3] = [
     "tests/v16_cu.rs",
@@ -31,7 +35,85 @@ fn unconditional_test_mount(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
-fn mounted_sources(replacement: Option<(&str, &str)>) -> BTreeMap<PathBuf, String> {
+#[derive(Clone)]
+struct MountedSource {
+    source: String,
+    available_tests: BTreeSet<String>,
+}
+
+fn available_test(attrs: &[syn::Attribute]) -> bool {
+    unconditional_test_mount(attrs)
+        && attrs.iter().any(|attr| attr.path().is_ident("test"))
+        && !attrs.iter().any(|attr| attr.path().is_ident("ignore"))
+}
+
+struct PropertyTests(BTreeSet<String>);
+
+impl syn::parse::Parse for PropertyTests {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let config = input.call(syn::Attribute::parse_inner)?;
+        if config
+            .iter()
+            .any(|attr| !attr.path().is_ident("proptest_config"))
+        {
+            return Err(input.error("unreviewed proptest configuration attribute"));
+        }
+        let mut tests = BTreeSet::new();
+        while !input.is_empty() {
+            let attrs = input.call(syn::Attribute::parse_outer)?;
+            input.parse::<syn::Token![fn]>()?;
+            let name = input.parse::<syn::Ident>()?;
+            let arguments;
+            syn::parenthesized!(arguments in input);
+            // Proptest's strategy arguments are not Rust function parameters.
+            // Consume their token trees without searching inside them for tests.
+            while !arguments.is_empty() {
+                arguments.step(|cursor| {
+                    cursor
+                        .token_tree()
+                        .map(|(_, rest)| ((), rest))
+                        .ok_or_else(|| cursor.error("expected property-test argument"))
+                })?;
+            }
+            input.parse::<syn::Block>()?;
+            if available_test(&attrs) {
+                tests.insert(name.to_string());
+            }
+        }
+        Ok(Self(tests))
+    }
+}
+
+impl MountedSource {
+    fn from_parsed(source: String, file: &syn::File) -> Self {
+        let mut available_tests = BTreeSet::new();
+        if unconditional_test_mount(&file.attrs) {
+            for item in &file.items {
+                match item {
+                    syn::Item::Fn(function) if available_test(&function.attrs) => {
+                        available_tests.insert(function.sig.ident.to_string());
+                    }
+                    syn::Item::Macro(item)
+                        if item.mac.path.is_ident("proptest")
+                            && unconditional_test_mount(&item.attrs) =>
+                    {
+                        // Unsupported macro forms supply no evidence until reviewed.
+                        if let Ok(tests) = item.mac.parse_body::<PropertyTests>() {
+                            available_tests.extend(tests.0);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Self {
+            source,
+            available_tests,
+        }
+    }
+}
+
+fn mounted_sources(replacement: Option<(&str, &str)>) -> BTreeMap<PathBuf, MountedSource> {
     let mut pending = ROOTS.map(PathBuf::from).to_vec();
     let mut mounted = BTreeMap::new();
     while let Some(path) = pending.pop() {
@@ -50,6 +132,7 @@ fn mounted_sources(replacement: Option<(&str, &str)>) -> BTreeMap<PathBuf, Strin
         if !unconditional_test_mount(&file.attrs) {
             continue;
         }
+        let indexed = MountedSource::from_parsed(source, &file);
         for item in file.items {
             let syn::Item::Mod(module) = item else {
                 continue;
@@ -88,12 +171,12 @@ fn mounted_sources(replacement: Option<(&str, &str)>) -> BTreeMap<PathBuf, Strin
                 }
             }
         }
-        mounted.insert(path, source);
+        mounted.insert(path, indexed);
     }
     mounted
 }
 
-fn evidence_gaps(mounted: &BTreeMap<PathBuf, String>) -> (usize, Vec<String>) {
+fn evidence_gaps(mounted: &BTreeMap<PathBuf, MountedSource>) -> (usize, Vec<String>) {
     let mut checked = 0;
     let mut gaps = Vec::new();
     for (ledger, width, column) in [
@@ -114,9 +197,12 @@ fn evidence_gaps(mounted: &BTreeMap<PathBuf, String>) -> (usize, Vec<String>) {
                 let (path, function) = evidence.split_once('#').expect("path#test evidence");
                 if !mounted
                     .get(&PathBuf::from(path))
-                    .is_some_and(|source| super::source_defines_test(source, function))
+                    .is_some_and(|source| source.available_tests.contains(function))
                 {
-                    gaps.push(format!("{}: unmounted evidence {evidence}", fields[0]));
+                    gaps.push(format!(
+                        "{}: unavailable test evidence {evidence}",
+                        fields[0]
+                    ));
                 }
             }
         }
@@ -132,12 +218,15 @@ fn evidence_gaps(mounted: &BTreeMap<PathBuf, String>) -> (usize, Vec<String>) {
         assert_eq!(fields.len(), 5, "discovery ledger schema changed");
         checked += 1;
         // The benchmark gate owns reviewed cross-invariant borrowing. Here its
-        // named witness must also survive in a mounted source file.
+        // named witness must also survive as an available test in a mounted file.
         if !mounted
             .values()
-            .any(|source| super::source_defines_test(source, fields[2]))
+            .any(|source| source.available_tests.contains(fields[2]))
         {
-            gaps.push(format!("{}: unmounted discovery {}", fields[0], fields[2]));
+            gaps.push(format!(
+                "{}: unavailable discovery {}",
+                fields[0], fields[2]
+            ));
         }
     }
     (checked, gaps)
@@ -150,7 +239,7 @@ fn v16_lifecycle_metadata_evidence_is_mounted_in_public_harnesses() {
     assert!(checked > 0, "the scoped evidence census must not be empty");
     assert!(gaps.is_empty(), "{}", gaps.join("\n"));
     eprintln!(
-        "INV-079 lifecycle evidence: {checked} references across {} mounted sources",
+        "INV-079 lifecycle evidence: {checked} available test references across {} mounted sources",
         mounted.len()
     );
 }
@@ -180,7 +269,7 @@ fn v16_lifecycle_evidence_mount_guard_rejects_detached_and_disabled_owners() {
         ),
     ];
     for (parent, child, module, witness) in cases {
-        let source = &baseline[&PathBuf::from(parent)];
+        let source = &baseline[&PathBuf::from(parent)].source;
         let mount = format!("#[path = \"{child}\"]\nmod {module};");
         assert_eq!(
             source.matches(&mount).count(),
@@ -203,4 +292,110 @@ fn v16_lifecycle_evidence_mount_guard_rejects_detached_and_disabled_owners() {
     eprintln!(
         "INV-079 lifecycle mount guard rejected 9 detached/commented/disabled evidence mutations"
     );
+}
+
+#[test]
+fn v16_lifecycle_evidence_guard_rejects_disabled_and_decoy_test_declarations() {
+    let baseline = mounted_sources(None);
+    assert!(evidence_gaps(&baseline).1.is_empty());
+    let cases = [
+        (
+            "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+            "v16_attack_public_10m_market_max_source_owner_exit_stays_bounded",
+        ),
+        (
+            "tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs",
+            "v16_program_reference_model_dimension_composition_is_source_complete",
+        ),
+        (
+            "tests/invariants/public_sbf/inv_079_public_reachability_evidence.rs",
+            "v16_public_terminal_classifier_exhausts_normalized_outcome_space",
+        ),
+        (
+            "tests/invariants/stateful/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs",
+            "v16_program_source_credit_rate_lifecycle_matches_independent_oracle",
+        ),
+    ];
+    let mut rejected = 0;
+    let mut accepted = 0;
+    for (path, witness) in cases {
+        let source = &baseline[&PathBuf::from(path)].source;
+        let substituted_gaps = |source: String| {
+            let file = syn::parse_file(&source).expect("valid substitution syntax");
+            let mut mutated = baseline.clone();
+            mutated.insert(
+                PathBuf::from(path),
+                MountedSource::from_parsed(source, &file),
+            );
+            evidence_gaps(&mutated).1
+        };
+        let declaration = format!("fn {witness}(");
+        assert_eq!(source.matches(&declaration).count(), 1);
+        let mut replacements = Vec::new();
+        for attr in [
+            "#[ignore]",
+            "#[ignore = \"disabled evidence\"]",
+            "#[cfg(any())]",
+            "#[cfg(all(test, any()))]",
+            "#[cfg_attr(test, ignore)]",
+        ] {
+            replacements.push(source.replacen(&declaration, &format!("{attr}\n{declaration}"), 1));
+        }
+        let decoy = format!("#[test]\nfn {witness}() {{}}");
+        replacements.extend([
+            format!("/*\n{decoy}\n*/"),
+            format!("const DECOY: &str = r#\"\n{decoy}\n\"#;"),
+            format!("fn helper() {{\n{decoy}\n}}"),
+            format!("#[cfg(any())]\nmod disabled {{\n{decoy}\n}}"),
+        ]);
+        for source in replacements {
+            assert!(
+                super::source_defines_test(&source, witness),
+                "negative control must be accepted by the old declaration recognizer"
+            );
+            let gaps = substituted_gaps(source);
+            assert!(
+                gaps.iter().any(|gap| gap.contains(witness)),
+                "disabled or decoy declaration must invalidate {path}#{witness}: {gaps:?}"
+            );
+            rejected += 1;
+        }
+        for attr in [
+            "#[cfg(test)]",
+            "#[allow(dead_code)]",
+            "#[doc = \"#[ignore] is only documentation here\"]",
+        ] {
+            let source = source.replacen(&declaration, &format!("{attr}\n{declaration}"), 1);
+            assert!(
+                substituted_gaps(source).is_empty(),
+                "unconditional test evidence must survive {attr}: {path}#{witness}"
+            );
+            accepted += 1;
+        }
+    }
+    assert_eq!((rejected, accepted), (36, 12));
+    eprintln!("INV-079 test availability: {rejected} rejected substitutions, {accepted} positive controls");
+}
+
+#[test]
+fn v16_lifecycle_property_evidence_requires_enabled_macro_and_test_items() {
+    let path = PathBuf::from(
+        "tests/invariants/stateful/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs",
+    );
+    let witness = "v16_program_source_credit_rate_lifecycle_matches_independent_oracle";
+    let baseline = mounted_sources(None);
+    assert!(evidence_gaps(&baseline).1.is_empty());
+    let source = &baseline[&path].source;
+    let invocation = "proptest! {";
+    assert_eq!(source.matches(invocation).count(), 1);
+    for attr in ["#[cfg(any())]", "#[cfg_attr(test, cfg(any()))]"] {
+        let source = source.replacen(invocation, &format!("{attr}\n{invocation}"), 1);
+        assert!(super::source_defines_test(&source, witness));
+        let file = syn::parse_file(&source).unwrap();
+        let mut mutated = baseline.clone();
+        mutated.insert(path.clone(), MountedSource::from_parsed(source, &file));
+        let (_, gaps) = evidence_gaps(&mutated);
+        assert!(gaps.iter().any(|gap| gap.contains(witness)), "{gaps:?}");
+    }
+    eprintln!("INV-079 property-test availability: 2 rejected disabled macro invocations");
 }

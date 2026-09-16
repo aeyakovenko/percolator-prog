@@ -106,3 +106,8 @@ No SBF execution, CU measurement, Kani proof, liveness theorem or whole-invarian
 closure is claimed. Public-route behavior and the broader open benchmark
 obligations remain unchanged. Integration is suitable as a host-test/doc change;
 normal integration CI should rerun the exact selectors on the merged tree.
+
+The subsequent [test-availability increment](lifecycle_evidence_availability_audit_20260916.md)
+extends this same guard to function-level conditions, ignored tests and declaration
+decoys, including the existing `proptest!` form. Its mutation evidence and SBF
+positive control are recorded separately; they do not change the results above.
