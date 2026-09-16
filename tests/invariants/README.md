@@ -1,5 +1,20 @@
 # Invariant-owned test coverage
 
+## INV-061 nonunit liquidation fee boundaries (2026-09-16)
+
+Owner: [cu/inv_061_nonunit_fee_boundary_sizing.rs](cu/inv_061_nonunit_fee_boundary_sizing.rs),
+mounted under INV-061's enumerated public sizing module. A linear, input-derived
+quantity oracle crosses public ADL haircuts with rounded partial liquidation,
+minimum-fee full-close fallback, and cure before a queued keeper lands.
+The 144 LiteSVM worlds require **72 partial closes, 24 full closes, 48 cured
+queues, 336 exact rollback rejections, and 432 actual SPL payouts**. Complete
+versus omitted hints preserve economics; complete hints additionally permit one
+unpaid flat-certificate refresh after full close. Peak measured CU is **259,038**.
+Two temporary wrong-oracle controls fail at the matched-OI assertion.
+No production or invariant-status change; INV-061 remains `OPEN_EVIDENCE`.
+Exact commands, comparison with existing coverage, and limits:
+[audit](inv_061_nonunit_fee_boundary_audit_20260916.md).
+
 ## INV-020 current-observation evidence fidelity (2026-09-16)
 
 Owner: [public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs](public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs).
