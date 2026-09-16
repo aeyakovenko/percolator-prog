@@ -1,5 +1,29 @@
 # Invariant-owned test coverage
 
+## Row 433 split beneficiary custody (2026-09-16)
+
+The [split-custody child](cu/inv_073_split_beneficiary_custody.rs) adds one
+public LiteSVM selector under the successor-custody owner. Two resolved assets
+start with the same insurance beneficiary and the same SPL custody address. One
+asset transfers beneficiary authority to a successor, and the original
+beneficiary voluntarily transfers the shared token account to that successor.
+The transferred account must become valid only for the successor asset while the
+peer asset's current request keeps its entitlement but rejects until a keeper
+creates replacement custody for the original beneficiary.
+
+The four worlds cross which asset transfers and which remaining claim is paid
+first. Failed bundles roll back completed custody transfer, beneficiary
+succession, ledger initialization and SPL payouts; the successful retries pay
+the input-derived reserve remainders to the correct owner-specific custody. This
+extends missing/successor-custody coverage with a shared-address split and peer
+entitlement preservation, without adding positions, receipts, provider claims or
+maximum-shape evidence.
+
+**Rows 420, 421 and 433 remain OPEN; INV-073 remains `REFUTED_CURRENT`.** No
+current behavior violation was found. See the
+[report](row433_split_beneficiary_custody_20260916.md) for the exact selector,
+commands, CU/rollback evidence and scope limits.
+
 ## Row 424 expired-lien terminal classification (2026-09-16)
 
 The [INV-025 child](cu/inv_025_terminal_expiry_classification.rs) adds one public
