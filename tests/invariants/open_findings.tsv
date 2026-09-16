@@ -159,6 +159,11 @@
 # rights and retained-request rejection are checked. This bounded evidence does
 # not establish independent discovery or a nonqualifying disposition: still missing.
 416	LoF	PRIVILEGED	INV-005	missing	[PRIVILEGED LoF] Prevent cold-admin takeover of funded oracle
+# Row 417 receipt-oracle follow-up (2026-09-16):
+# row417_independent_coverage_audit_20260916.md records the reference-frontier gap:
+# removed episodes need independent entitlement checks after later stock release,
+# including custody-conserving misallocation. Existing conformance does not establish
+# independent discovery; row 417 stays missing with no invariant-status promotion.
 417	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Preserve resolved receipts across late backing expiry
 418	DoS	BLOCKER	INV-070	independent-discovery	[BLOCKER DoS] Retire native wSOL terminal insurance
 419	LoF	BLOCKER	INV-039	missing	[BLOCKER LoF] Retain pending loss weight through resolution
