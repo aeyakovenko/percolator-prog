@@ -1307,6 +1307,7 @@ fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence
         include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
     ];
     let mut plan_names = std::collections::BTreeSet::new();
+    let mut plan_witnesses = std::collections::BTreeSet::new();
     for plan in plans {
         let evidence = inv072_plan_evidence(plan);
         assert!(
@@ -1315,9 +1316,24 @@ fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence
             evidence.plan,
         );
         assert!(
-            witness_sources
-                .iter()
-                .any(|source| inv072_source_defines_test(source, evidence.witness)),
+            evidence.witness.starts_with("v16_"),
+            "auto-crank plan {} uses an unreviewed witness name {}",
+            evidence.plan,
+            evidence.witness,
+        );
+        let shared_terminal_dispatch = evidence.witness
+            == "v16_program_recovery_and_resolved_dispatch_treat_hints_as_discovery_only";
+        assert!(
+            plan_witnesses.insert(evidence.witness) || shared_terminal_dispatch,
+            "duplicate auto-crank plan witness needs explicit review: {}",
+            evidence.witness,
+        );
+        let matches = witness_sources
+            .iter()
+            .filter(|source| inv072_source_defines_test(source, evidence.witness))
+            .count();
+        assert!(
+            matches == 1,
             "auto-crank plan {} lost public witness {}",
             evidence.plan,
             evidence.witness,
@@ -1327,6 +1343,11 @@ fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence
         plan_names.len(),
         10,
         "NoAction, both RefreshAccount shapes, and all seven other plans need evidence",
+    );
+    assert_eq!(
+        plan_witnesses.len(),
+        9,
+        "auto-crank plan witness roster drift"
     );
 
     let parser_witnesses = [
@@ -1346,14 +1367,27 @@ fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence
         include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs"),
         include_str!("../stateful/inv_072_order_robust_crankability.rs"),
     ];
+    let mut parser_witness_set = std::collections::BTreeSet::new();
     for witness in parser_witnesses {
+        assert!(witness.starts_with("v16_"));
         assert!(
-            parser_sources
-                .iter()
-                .any(|source| inv072_source_defines_test(source, witness)),
+            parser_witness_set.insert(witness),
+            "duplicate parser witness {witness}",
+        );
+        let matches = parser_sources
+            .iter()
+            .filter(|source| inv072_source_defines_test(source, witness))
+            .count();
+        assert!(
+            matches == 1,
             "hint-parser stratum lost public witness {witness}",
         );
     }
+    assert_eq!(
+        parser_witness_set.len(),
+        8,
+        "hint-parser witness roster drift"
+    );
 
     let production = include_str!("../../../src/v16_program.rs");
     let production = production
