@@ -630,6 +630,10 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
             !evidence_test.is_empty(),
             "{type_name} field evidence test is empty"
         );
+        assert!(
+            evidence_test.starts_with("v16_") || evidence_test.starts_with("host_"),
+            "{type_name} field evidence must be a reviewed v16 or host regression: {evidence_file}#{evidence_test}"
+        );
         let evidence_source = field_evidence_sources
             .entry(evidence_file.to_owned())
             .or_insert_with(|| {
