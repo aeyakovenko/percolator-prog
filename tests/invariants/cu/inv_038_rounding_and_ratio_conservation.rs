@@ -972,9 +972,17 @@ fn v16_program_truncating_arithmetic_surface_has_a_semantic_owner() {
             "ENGINE" | "STRUCTURAL" => assert!(row.evidence.starts_with("INV-")),
             "AGGREGATE_CEIL" | "ORACLE" | "POLICY" | "EXACT_PARTITION" | "CUMULATIVE_FLOOR" => {
                 assert!(
-                    witness_sources
-                        .iter()
-                        .any(|source| inv038_source_defines_test(source, row.evidence)),
+                    row.evidence.starts_with("v16_"),
+                    "{} uses unreviewed semantic rounding evidence {}",
+                    row.function,
+                    row.evidence,
+                );
+                let matches = witness_sources
+                    .iter()
+                    .filter(|source| inv038_source_defines_test(source, row.evidence))
+                    .count();
+                assert!(
+                    matches == 1,
                     "{} lacks executable semantic rounding evidence {}",
                     row.function,
                     row.evidence
