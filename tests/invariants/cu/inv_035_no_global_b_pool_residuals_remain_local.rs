@@ -180,6 +180,16 @@ fn v16_program_domain_local_b_composition_is_source_complete() {
         }
         for (path, witness) in route.public_witnesses {
             assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            assert!(
+                path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                "residual class '{}' points outside invariant test sources: {path}",
+                route.class,
+            );
+            assert!(
+                witness.starts_with("v16_"),
+                "residual class '{}' uses an unreviewed witness name: {witness}",
+                route.class,
+            );
             let source = source_cache.entry(path).or_insert_with(|| {
                 std::fs::read_to_string(root.join(path))
                     .unwrap_or_else(|error| panic!("read {path}: {error}"))
