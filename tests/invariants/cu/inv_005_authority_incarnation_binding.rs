@@ -272,7 +272,7 @@ fn inv005_evidence_parts(evidence: &str) -> (&str, &str) {
         .split_once('#')
         .unwrap_or_else(|| panic!("role evidence must be path#test: {evidence}"));
     assert!(
-        path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+        path.starts_with("tests/invariants/") && path.ends_with(".rs") && !path.contains(".."),
         "role evidence path must stay under tests/invariants: {path}"
     );
     assert!(
