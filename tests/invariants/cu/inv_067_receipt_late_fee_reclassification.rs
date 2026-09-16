@@ -14,6 +14,9 @@ use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::
 #[path = "inv_067_receipt_deferred_fee.rs"]
 mod deferred_fee;
 
+#[path = "inv_067_receipt_policy_reward.rs"]
+mod policy_reward;
+
 const RATE: u128 = 7;
 const FACES: [u128; 5] = [700, 0, 1_000, 0, 1_300];
 const TOTAL_FACE: u128 = 3_000;
