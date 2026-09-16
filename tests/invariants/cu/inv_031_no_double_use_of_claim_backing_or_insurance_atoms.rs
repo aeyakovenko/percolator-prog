@@ -43,6 +43,31 @@ fn inv031_source_defines_test(source: &str, function: &str) -> bool {
     false
 }
 
+fn inv031_source_defines_kani_proof(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut proof_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[kani::proof]" {
+            proof_attribute = true;
+        } else if line.starts_with("fn ") {
+            if proof_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            proof_attribute = false;
+        } else if proof_attribute && !line.is_empty() && !line.starts_with("#") {
+            proof_attribute = false;
+        }
+    }
+
+    false
+}
+
 // security.md sweep — base-unit deposit/withdraw mint routing (#5 / README L122): deposits accept ONLY
 // the primary base-unit mint, but a holder may withdraw in EITHER the primary or the secondary mint.
 #[test]
@@ -776,14 +801,18 @@ fn v16_program_single_use_lifecycle_composition_is_source_complete() {
     ));
 
     let value_proof = include_str!("../kani/inv_024_attributed_quote_value_conservation.rs");
-    assert!(
-        value_proof.contains("fn kani_inv024_engine_flow_validator_equals_wrapper_value_equation")
-    );
+    assert!(inv031_source_defines_kani_proof(
+        value_proof,
+        "kani_inv024_engine_flow_validator_equals_wrapper_value_equation"
+    ));
     let stock_proof = include_str!("../kani/inv_025_exact_stock_reconciliation.rs");
-    assert!(
-        stock_proof.contains("fn kani_inv025_engine_partition_composes_with_wrapper_spl_custody")
-    );
+    assert!(inv031_source_defines_kani_proof(
+        stock_proof,
+        "kani_inv025_engine_partition_composes_with_wrapper_spl_custody"
+    ));
     let residual_source = include_str!("../stateful/inv_037_exact_residual_partition.rs");
-    assert!(residual_source
-        .contains("fn inv037_public_cure_preserves_exact_partition_across_routes_and_sides"));
+    assert!(inv031_source_defines_test(
+        residual_source,
+        "inv037_public_cure_preserves_exact_partition_across_routes_and_sides"
+    ));
 }
