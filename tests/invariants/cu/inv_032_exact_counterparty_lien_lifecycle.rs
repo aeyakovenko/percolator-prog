@@ -263,7 +263,7 @@ fn v16_program_counterparty_lien_lifecycle_composition_is_source_complete() {
         ),
     ] {
         assert!(
-            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            path.starts_with("tests/invariants/") && path.ends_with(".rs") && !path.contains(".."),
             "INV-032 lien-lifecycle witness must resolve to an invariant source file: {path}"
         );
         assert!(
