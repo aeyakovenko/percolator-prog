@@ -37,6 +37,41 @@ struct SignedLegPartitionOutcome {
     quote_fee_slippage: [u128; 4],
 }
 
+fn inv011_source_defines_test(source: &str, function: &str) -> bool {
+    inv011_source_defines_attributed_function(source, function, "#[test]")
+}
+
+fn inv011_source_defines_kani_proof(source: &str, function: &str) -> bool {
+    inv011_source_defines_attributed_function(source, function, "#[kani::proof]")
+}
+
+fn inv011_source_defines_attributed_function(
+    source: &str,
+    function: &str,
+    attribute: &str,
+) -> bool {
+    let marker = format!("fn {function}");
+    let mut saw_attribute = false;
+    for line in source.lines() {
+        let line = line.trim();
+        if line == attribute {
+            saw_attribute = true;
+        } else if line.starts_with("fn ") {
+            if saw_attribute
+                && line
+                    .strip_prefix(&marker)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            saw_attribute = false;
+        } else if saw_attribute && !line.is_empty() && !line.starts_with('#') {
+            saw_attribute = false;
+        }
+    }
+    false
+}
+
 fn run_signed_leg_partition(
     case: &SignedLegPartitionCase,
     schedule: &[Vec<usize>],
@@ -587,19 +622,29 @@ fn v16_program_signed_aggregate_bound_composition_is_source_complete() {
         .map(|(body, _)| body)
         .expect("shared batch executor");
     assert!(executor.contains("outcome.fee_a > cap"));
-    assert!(
-        include_str!("inv_011_signed_aggregate_economic_bounds.rs").contains(
-            "fn v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically("
-        )
-    );
+    assert!(inv011_source_defines_test(
+        include_str!("inv_011_signed_aggregate_economic_bounds.rs"),
+        "v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically"
+    ));
     let decoder_proofs =
         include_str!("../kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs");
-    assert!(decoder_proofs.contains("fn kani_v16_batch_cpi_preserves_aggregate_slippage_cap("));
-    assert!(decoder_proofs.contains("fn kani_v16_batch_cpi_preserves_aggregate_fee_cap("));
+    assert!(inv011_source_defines_kani_proof(
+        decoder_proofs,
+        "kani_v16_batch_cpi_preserves_aggregate_slippage_cap"
+    ));
+    assert!(inv011_source_defines_kani_proof(
+        decoder_proofs,
+        "kani_v16_batch_cpi_preserves_aggregate_fee_cap"
+    ));
     let aggregate_proofs = include_str!("../kani/inv_011_signed_aggregate_economic_bounds.rs");
-    assert!(aggregate_proofs.contains("fn kani_v16_adverse_slippage_direction_is_exact("));
-    assert!(aggregate_proofs
-        .contains("fn kani_v16_aggregate_slippage_accumulator_is_exact_and_fail_closed("));
+    assert!(inv011_source_defines_kani_proof(
+        aggregate_proofs,
+        "kani_v16_adverse_slippage_direction_is_exact"
+    ));
+    assert!(inv011_source_defines_kani_proof(
+        aggregate_proofs,
+        "kani_v16_aggregate_slippage_accumulator_is_exact_and_fail_closed"
+    ));
 }
 
 #[test]
