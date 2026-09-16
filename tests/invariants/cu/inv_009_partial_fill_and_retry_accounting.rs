@@ -186,30 +186,87 @@ fn v16_program_one_shot_trade_consent_composition_is_source_complete() {
 
     let transaction_envelope =
         include_str!("../public_sbf/inv_006_program_chain_message_type_and_version_binding.rs");
-    assert!(inv009_source_defines_test(
-        transaction_envelope,
-        "retained_transaction_binds_program_market_kind_schema_and_blockhash"
-    ));
-    assert!(inv009_source_defines_test(
-        transaction_envelope,
-        "deployed_wrapper_has_no_detached_signature_interpreter"
-    ));
+    let aggregate_owner = include_str!("inv_011_signed_aggregate_economic_bounds.rs");
+    let mut public_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/public_sbf/inv_006_program_chain_message_type_and_version_binding.rs",
+            transaction_envelope,
+            "retained_transaction_binds_program_market_kind_schema_and_blockhash",
+        ),
+        (
+            "tests/invariants/public_sbf/inv_006_program_chain_message_type_and_version_binding.rs",
+            transaction_envelope,
+            "deployed_wrapper_has_no_detached_signature_interpreter",
+        ),
+        (
+            "tests/invariants/cu/inv_011_signed_aggregate_economic_bounds.rs",
+            aggregate_owner,
+            "v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-009 partial-fill public witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_")
+                || witness == "retained_transaction_binds_program_market_kind_schema_and_blockhash"
+                || witness == "deployed_wrapper_has_no_detached_signature_interpreter",
+            "INV-009 partial-fill public witness must be a reviewed regression: {path}#{witness}"
+        );
+        assert!(
+            public_witnesses.insert((path, witness)),
+            "duplicate INV-009 partial-fill public witness {path}#{witness}"
+        );
+        assert!(
+            inv009_source_defines_test(source, witness),
+            "INV-009 lost partial-fill public witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        public_witnesses.len(),
+        3,
+        "INV-009 partial-fill public witness roster drift"
+    );
 
     let episode_proof = include_str!("../kani/inv_004_position_episode_binding.rs");
-    assert!(inv009_source_defines_kani_proof(
-        episode_proof,
-        "kani_v16_successful_episode_consumption_invalidates_the_old_binding"
-    ));
     let partial_proof = include_str!("../kani/inv_009_partial_fill_and_retry_accounting.rs");
-    assert!(inv009_source_defines_kani_proof(
-        partial_proof,
-        "kani_v16_atomic_batch_accepts_only_exact_bound_matcher_fill"
-    ));
-    let aggregate_owner = include_str!("inv_011_signed_aggregate_economic_bounds.rs");
-    assert!(inv009_source_defines_test(
-        aggregate_owner,
-        "v16_program_batch_cpi_aggregate_quote_caps_abort_matcher_and_wrapper_atomically"
-    ));
+    let mut proof_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/kani/inv_004_position_episode_binding.rs",
+            episode_proof,
+            "kani_v16_successful_episode_consumption_invalidates_the_old_binding",
+        ),
+        (
+            "tests/invariants/kani/inv_009_partial_fill_and_retry_accounting.rs",
+            partial_proof,
+            "kani_v16_atomic_batch_accepts_only_exact_bound_matcher_fill",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/kani/") && path.ends_with(".rs"),
+            "INV-009 partial-fill proof witness must resolve to a Kani invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("kani_v16_"),
+            "INV-009 partial-fill proof witness must be a reviewed Kani proof: {path}#{witness}"
+        );
+        assert!(
+            proof_witnesses.insert((path, witness)),
+            "duplicate INV-009 partial-fill proof witness {path}#{witness}"
+        );
+        assert!(
+            inv009_source_defines_kani_proof(source, witness),
+            "INV-009 lost partial-fill proof witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        proof_witnesses.len(),
+        2,
+        "INV-009 partial-fill proof witness roster drift"
+    );
 }
 
 #[derive(Clone, Copy, Debug)]
