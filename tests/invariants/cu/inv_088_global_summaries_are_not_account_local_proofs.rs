@@ -32,6 +32,18 @@ mod liveness_read_contract;
 #[path = "inv_088_resolved_actionability.rs"]
 mod resolved_actionability;
 
+fn inv088_source_defines_function(source: &str, function: &str) -> bool {
+    let needle = format!("fn {function}");
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with(&needle)
+            && line[needle.len()..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '(' || ch.is_whitespace())
+    })
+}
+
 fn inv_088_scan_asset(
     portfolios: &[PortfolioAccountV16],
     asset_index: usize,
@@ -1168,7 +1180,7 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
         assert!(
             witness_sources
                 .iter()
-                .any(|source| source.contains(&format!("fn {witness}"))),
+                .any(|source| inv088_source_defines_function(source, witness)),
             "public auto-crank route lacks executable witness {witness}",
         );
     }
@@ -1185,7 +1197,7 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
         assert!(
             witness_sources
                 .iter()
-                .any(|source| source.contains(&format!("fn {}", row.witness))),
+                .any(|source| inv088_source_defines_function(source, row.witness)),
             "{}.{} lacks executable witness {}",
             row.owner,
             row.method,

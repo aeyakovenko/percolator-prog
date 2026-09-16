@@ -14,6 +14,18 @@
 
 use super::*;
 
+fn inv069_source_defines_function(source: &str, function: &str) -> bool {
+    let needle = format!("fn {function}");
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with(&needle)
+            && line[needle.len()..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '(' || ch.is_whitespace())
+    })
+}
+
 // Expired principal is still booked custody after its slot is retired and reused.
 // A new provider must recover only its own funding; CloseSlab owns the old residue.
 #[test]
@@ -1074,7 +1086,7 @@ fn v16_program_terminal_blocker_census_composes_engine_retirement_before_wrapper
             assert!(
                 witness_sources
                     .iter()
-                    .any(|source| source.contains(&format!("fn {witness}"))),
+                    .any(|source| inv069_source_defines_function(source, witness)),
                 "terminal blocker class '{}' lacks public witness {witness}",
                 row.class,
             );
