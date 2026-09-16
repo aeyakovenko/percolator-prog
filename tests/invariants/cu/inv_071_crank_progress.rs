@@ -3510,6 +3510,16 @@ fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
         }
         for (path, witness) in row.public_witnesses {
             assert!(witnesses.insert(*witness), "duplicate witness {witness}");
+            assert!(
+                path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                "liveness class '{}' points outside invariant test sources: {path}",
+                row.class,
+            );
+            assert!(
+                witness.starts_with("v16_"),
+                "liveness class '{}' uses an unreviewed witness name: {witness}",
+                row.class,
+            );
             let source = source_cache.entry(path).or_insert_with(|| {
                 std::fs::read_to_string(root.join(path))
                     .unwrap_or_else(|error| panic!("read {path}: {error}"))
