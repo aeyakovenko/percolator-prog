@@ -8,6 +8,9 @@ use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::
 const ENDOWMENTS: [u64; 4] = [313, 1_000, 211, 500];
 const SCALE: u128 = BOUND_SCALE;
 
+#[path = "inv_025_terminal_expiry_classification.rs"]
+mod terminal_expiry_classification;
+
 #[derive(Clone, Debug, Default)]
 struct Ledger {
     capital: [u128; 3],

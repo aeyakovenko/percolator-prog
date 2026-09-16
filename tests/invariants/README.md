@@ -1,5 +1,31 @@
 # Invariant-owned test coverage
 
+## Row 424 expired-lien terminal classification (2026-09-16)
+
+The [INV-025 child](cu/inv_025_terminal_expiry_classification.rs) adds one public
+LiteSVM product across both source sides, expiry-before/after-Recovery shutdown,
+and independently ordered owner forfeits and resolved payouts. Sixteen worlds
+carry a real 53/61-atom counterparty lien beside 83 insurance atoms through
+impairment, zero-basis obligation cleanup, all portfolio deletions and `CloseSlab`.
+The input-derived book requires owner payouts of 363/950, insurance return of
+83, and exactly 167 burned backing atoms. Raw/decoded stock and reservation
+censuses, immutable owner accounts, SPL supply and exact rent refunds bind each
+classification to actual custody.
+
+The product checks 56 complete Account rollbacks, including eight waiting
+steps and sixteen bundles in which a 40-atom insurance SPL payout executes
+before the correctly versioned slab close rejects. Retrying the payout succeeds;
+after all insurance exits, one more insurance atom rejects despite 167 raw
+vault atoms remaining. Final closure burns those atoms without a token sweep.
+
+This joins impaired-lien expiry and Recovery to terminal disposition; existing
+native booked-residue, shared-custody, normal closure and persisted-scan products
+retain their scope. Public insurance-credit reservation is still absent, so no
+insurance-backed lien lifecycle is claimed. **Row 424 remains OPEN and all
+machine statuses are unchanged.** No current bug was found. The
+[focused report](row424_terminal_lien_classification_20260916.md) records the
+coverage audit, exact validation commands, measurements and limitations.
+
 ## Row 411 retained route consent with existing open interest (2026-09-16)
 
 The [existing-OI mark-consent child](cu/inv_014_retained_oi_mark_consent.rs) adds
