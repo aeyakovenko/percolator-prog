@@ -206,13 +206,40 @@ fn v16_program_retained_position_binding_and_writer_rosters_are_source_complete(
 
     let recovery_evidence =
         include_str!("../stateful/inv_081_success_state_validity_over_complete_public_routes.rs");
-    assert!(inv004_source_defines_test(
-        recovery_evidence,
-        "v16_program_owner_recovery_forfeit_strictly_reduces_each_position_episode"
-    ));
     let resolved_evidence = include_str!("inv_068_receipt_uniqueness_and_monotonic_topups.rs");
-    assert!(inv004_source_defines_test(
-        resolved_evidence,
-        "v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail"
-    ));
+    let mut composition_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/stateful/inv_081_success_state_validity_over_complete_public_routes.rs",
+            recovery_evidence,
+            "v16_program_owner_recovery_forfeit_strictly_reduces_each_position_episode",
+        ),
+        (
+            "tests/invariants/cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs",
+            resolved_evidence,
+            "v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-004 position-episode witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "INV-004 position-episode witness must be a reviewed v16 regression: {path}#{witness}"
+        );
+        assert!(
+            composition_witnesses.insert((path, witness)),
+            "duplicate INV-004 position-episode witness {path}#{witness}"
+        );
+        assert!(
+            inv004_source_defines_test(source, witness),
+            "INV-004 lost position-episode composition witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        composition_witnesses.len(),
+        2,
+        "INV-004 position-episode witness roster drift"
+    );
 }
