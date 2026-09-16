@@ -1,5 +1,26 @@
 # Invariant-owned test coverage
 
+## Row 416 lien-retirement role boundary (2026-09-16)
+
+The [lien-retirement child](cu/inv_005_lien_release_role_boundary.rs) crosses
+two assets and both source sides through live lien creation, impairment, owner
+closes, public normalization, empty oracle/backing takeover, coholder restoration
+and opposite-side re-funding. Closing positions alone does not open the funded
+role. A failed old-oracle suffix restores the completed SPL payout, final lien
+normalization and both role changes. The successful retry leaves the trader's
+120-atom positive claim intact.
+
+An empty-role request is prevalidated after restoration. The same instruction
+bytes reject after 13 atoms fund the opposite side, still reject at one atom,
+and commit after its incumbent withdraws the last atom, all without changing
+the intervening authority epoch. This extends the open-impaired-lien and flat
+re-funding tests across the actual last-lien boundary. It does not establish
+arbitrary funded-oracle containment or full claim redemption.
+
+**Row 416 remains OPEN/missing; INV-005 remains `REFUTED_CURRENT`.** See the
+[boundary report](row416_lien_release_role_boundary_20260916.md) for the exact
+selectors, economic book, rollback/CU measurements and remaining limits.
+
 ## Row 422 Hybrid rewards through portfolio deletion and CloseSlab (2026-09-16)
 
 The [reward slab child](cu/inv_045_reward_slab_closure.rs) adds one bounded

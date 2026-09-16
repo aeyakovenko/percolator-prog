@@ -21,6 +21,9 @@ const RISK_INCREASE_Q: i128 = 2 * POS_SCALE as i128;
 #[path = "inv_005_cold_oracle_impaired_containment.rs"]
 mod cold_oracle_impaired_containment;
 
+#[path = "inv_005_lien_release_role_boundary.rs"]
+mod lien_release_role_boundary;
+
 struct LienedWorld {
     env: V16CuEnv,
     provider: Keypair,
