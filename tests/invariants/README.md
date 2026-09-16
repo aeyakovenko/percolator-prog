@@ -23411,7 +23411,32 @@ Run a 24-hour agent loop under the scope and evidence rules in
    24-hour budget ends. Report reviewed and integrated work separately from pending agent output,
    with exact verification results and unresolved gaps; elapsed time is not completion.
 
-Active 2026-09-13 Astra/Ultra queue. The coordinator branch is
+Active 2026-09-16 Astra/Ultra queue. The coordinator branch is
+`codex/astra-invariant-cycle-20260915` at `da83e0e6`. The authoritative benchmark
+snapshot contains 166 rows: 144 independent-discovery, 17 nonqualifying, and 5
+missing rows. The current missing rows are **416, 417, 419, 422, and 435**.
+Row 421 is now promoted by the INV-073 terminal-insurance public payout trace and
+remains reopened only as broader invariant work, not as missing benchmark
+coverage.
+
+Current assignments are narrow and non-overlapping:
+
+- Row 422 / INV-045: active Astra/Ultra worker
+  `01a0a9ad-accc-7992-af0a-e5d65b5eb4c4` audits Hybrid reward provenance as a
+  held-out coverage target. It may only promote row 422 if the evidence is
+  invariant-owned and finding-blind.
+- Rows 419/435 / INV-039: active Astra/Ultra worker
+  `01a0a9b2-3684-7691-93c5-7e1c93a80ce3` audits pending-loss and mixed-debt
+  attribution. Finite row-shaped conformance stays missing.
+- Row 417 / INV-067: active Astra/Ultra worker
+  `01a0a9b2-5471-7340-a274-561998658cfc` audits resolved-receipt preservation.
+  Separate row417 engine/wrapper replacement PRs exist, but PR135 should not
+  absorb their fix.
+- Row 416 / INV-005: the latest public conformance audit is integrated and
+  intentionally keeps row 416 missing. Oracle replacement itself is admitted;
+  funded-role containment and stale retained requests are checked separately.
+
+Historical 2026-09-13 Astra/Ultra queue. The coordinator branch was
 `codex/astra-open-holdout-ledger-20260912` at `8f62a5c5`. The main checkout
 `/home/anatoly/percolator-prog` is intentionally excluded because it is on a different conflicted
 branch; all work must start from `/tmp/percolator-astra-watch.Cb2E7d` or an isolated worktree based
