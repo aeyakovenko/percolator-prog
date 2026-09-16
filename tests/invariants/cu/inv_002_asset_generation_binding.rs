@@ -139,45 +139,107 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
         assert!(body.contains("market_id: u64"), "{leg} lost market_id");
     }
 
-    assert!(inv002_source_defines_test(
-        public_generation_evidence,
-        "v16_program_stale_backing_earnings_withdrawal_rejects_across_asset_generation"
-    ));
-    assert!(inv002_source_defines_test(
-        transaction_domain_evidence,
-        "retained_transaction_binds_program_market_kind_schema_and_blockhash"
-    ));
-    assert!(inv002_source_defines_test(
-        generated_generation_evidence,
-        "v16_program_asset_generation_operation_matrix_discovers_stale_intents"
-    ));
-    assert!(inv002_source_defines_test(
-        public_generation_evidence,
-        "v16_program_retained_activation_binds_exact_next_generation_frontier"
-    ));
-    assert!(inv002_source_defines_kani_proof(
-        predicate_proofs,
-        "kani_v16_asset_generation_binding_is_exact"
-    ));
-    assert!(inv002_source_defines_kani_proof(
-        predicate_proofs,
-        "kani_v16_asset_lifecycle_binding_selects_current_or_frontier_exactly"
-    ));
+    let mut test_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/public_sbf/inv_002_asset_generation_binding.rs",
+            public_generation_evidence,
+            "v16_program_stale_backing_earnings_withdrawal_rejects_across_asset_generation",
+        ),
+        (
+            "tests/invariants/public_sbf/inv_006_program_chain_message_type_and_version_binding.rs",
+            transaction_domain_evidence,
+            "retained_transaction_binds_program_market_kind_schema_and_blockhash",
+        ),
+        (
+            "tests/invariants/stateful/inv_002_asset_generation_binding.rs",
+            generated_generation_evidence,
+            "v16_program_asset_generation_operation_matrix_discovers_stale_intents",
+        ),
+        (
+            "tests/invariants/public_sbf/inv_002_asset_generation_binding.rs",
+            public_generation_evidence,
+            "v16_program_retained_activation_binds_exact_next_generation_frontier",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-002 asset-generation test witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_")
+                || witness == "retained_transaction_binds_program_market_kind_schema_and_blockhash",
+            "INV-002 asset-generation witness must be a reviewed regression: {path}#{witness}"
+        );
+        assert!(
+            test_witnesses.insert((path, witness)),
+            "duplicate INV-002 asset-generation test witness {path}#{witness}"
+        );
+        assert!(
+            inv002_source_defines_test(source, witness),
+            "INV-002 lost asset-generation test witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        test_witnesses.len(),
+        4,
+        "INV-002 asset-generation test witness roster drift"
+    );
+    let mut proof_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/kani/inv_002_asset_generation_binding.rs",
+            predicate_proofs,
+            "kani_v16_asset_generation_binding_is_exact",
+        ),
+        (
+            "tests/invariants/kani/inv_002_asset_generation_binding.rs",
+            predicate_proofs,
+            "kani_v16_asset_lifecycle_binding_selects_current_or_frontier_exactly",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/kani/") && path.ends_with(".rs"),
+            "INV-002 asset-generation proof witness must resolve to a Kani invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("kani_v16_"),
+            "INV-002 asset-generation proof witness must be a reviewed Kani proof: {path}#{witness}"
+        );
+        assert!(
+            proof_witnesses.insert((path, witness)),
+            "duplicate INV-002 asset-generation proof witness {path}#{witness}"
+        );
+        assert!(
+            inv002_source_defines_kani_proof(source, witness),
+            "INV-002 lost asset-generation proof witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        proof_witnesses.len(),
+        2,
+        "INV-002 asset-generation proof witness roster drift"
+    );
     assert!(lifecycle_composition
         .contains("proof_v16_restart_empty_asset_core_preserves_budgets_and_assigns_fresh_market"));
     assert!(lifecycle_composition.contains("contract_check_asset_restart_next_counters"));
-    assert!(inv002_source_defines_test(
-        ordering_composition,
-        "v16_program_out_of_order_induction_composition_is_source_complete"
-    ));
+    let ordering_witness = "v16_program_out_of_order_induction_composition_is_source_complete";
+    assert!(ordering_witness.starts_with("v16_"));
+    assert!(
+        inv002_source_defines_test(ordering_composition, ordering_witness),
+        "INV-002 lost ordering composition witness {ordering_witness}"
+    );
 
     let matcher_config = variant_body(instruction_enum, "SetMatcherConfig");
     assert!(!matcher_config.contains("asset_index"));
     assert!(!matcher_config.contains("market_id"));
-    assert!(inv002_source_defines_test(
-        matcher_scope_evidence,
-        "v16_program_matcher_capability_route_roster_binds_every_current_scope"
-    ));
+    let matcher_scope_witness =
+        "v16_program_matcher_capability_route_roster_binds_every_current_scope";
+    assert!(matcher_scope_witness.starts_with("v16_"));
+    assert!(
+        inv002_source_defines_test(matcher_scope_evidence, matcher_scope_witness),
+        "INV-002 lost matcher-scope composition witness {matcher_scope_witness}"
+    );
     assert!(
         instruction_enum.contains("ClaimResolvedPayoutTopup,"),
         "resolved claims remain permissionless current-state transitions without retained asset consent"
