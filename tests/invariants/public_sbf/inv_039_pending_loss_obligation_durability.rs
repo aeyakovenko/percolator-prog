@@ -13,6 +13,51 @@
 use super::*;
 
 #[test]
+fn v16_pending_loss_discovery_metadata_preserves_distinct_resolution_evidence() {
+    let discoveries = include_str!("../independent_discoveries.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 5, "malformed discovery row: {line}");
+            fields
+        })
+        .collect::<Vec<_>>();
+
+    // The generic gates check invariant ownership and executable selectors, but
+    // distinct-portfolio ordering cannot stand in for same-portfolio mixed debt.
+    for (pr, fingerprint, generator, oracle) in [
+        (
+            "419",
+            "recovery-resolution/pending-obligation-order",
+            "v16_attack_recovery_resolved_cannot_clear_unreleased_loss_weight_before_debtor",
+            "resolved-close-must-retain-pending-loss-weight-until-opposing-debt-settles",
+        ),
+        (
+            "435",
+            "resolved-close/mixed-creditor-debtor",
+            "v16_program_mixed_creditor_debtor_preserves_pending_attribution_through_resolved_close_order",
+            "mixed-role-resolved-debt-attribution-preserves-owner-obligation-through-resolution",
+        ),
+    ] {
+        let evidence = discoveries
+            .iter()
+            .filter(|fields| fields[4].split(',').any(|mapped| mapped == pr))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            evidence.len(),
+            1,
+            "row {pr} must retain exactly one reviewed INV-039 discovery mapping"
+        );
+        assert_eq!(
+            &evidence[0][..4],
+            &["INV-039", fingerprint, generator, oracle],
+            "row {pr} must retain its own resolution scenario and attribution oracle"
+        );
+    }
+}
+
+#[test]
 fn v16_program_pr380_trade_order_preserves_elapsed_funding() {
     for route in [
         TradeRoute::NoCpi,
