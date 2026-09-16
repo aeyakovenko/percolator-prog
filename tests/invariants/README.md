@@ -1,5 +1,29 @@
 # Invariant-owned test coverage
 
+## INV-058 distinct-owner side-OI metadata guard (2026-09-16)
+
+Owner:
+[cu/inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs](cu/inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs).
+`v16_row427_metadata_retains_distinct_owner_side_oi_conformance` preserves row
+427's shared side-OI obligation across disjoint owner pairs. The generic INV-079
+ledger gates validate cross-product shape and metadata consistency, but do not
+reject substituting an account-local position-cap obligation for this aggregate
+limit. The existing INV-058 source roster guards executable witnesses separately.
+
+The new guard also preserves the `Conformance` / `LIMIT` classification and
+excludes row 427 from the security benchmark and independent-discovery mappings.
+It deliberately does not pin `OPEN` versus `COVERED`: future evidence can close
+the obligation without weakening it or claiming independent-user loss from a
+limit violation alone. This is metadata coverage only, with no new public-route
+behavior claim, production change, or invariant-status promotion.
+
+Negative control: temporarily replacing only row 427's property with
+`per-position-cap-enforcement-on-each-trade` leaves the five INV-079 charter,
+status, reopening, benchmark and audit-summary gates green, but fails the new
+guard at the aggregate-side-OI assertion. The ledger is restored after this
+check. The guard and existing INV-058 witness roster also pass on the unchanged
+ledger. No SBF execution is claimed for this metadata-only increment.
+
 ## INV-060 flat first-open maintenance admission (2026-09-16)
 
 Owner:
