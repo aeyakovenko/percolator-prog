@@ -40,6 +40,9 @@
 
 use super::*;
 
+#[path = "inv_067_receipt_custody_boundary.rs"]
+mod receipt_custody_boundary;
+
 #[path = "inv_067_receipt_spend_replay.rs"]
 mod receipt_spend_replay;
 

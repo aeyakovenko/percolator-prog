@@ -1,5 +1,27 @@
 # Invariant-owned test coverage
 
+## INV-067 receipt custody account boundaries (2026-09-16)
+
+Owner: [cu/inv_067_receipt_custody_boundary.rs](cu/inv_067_receipt_custody_boundary.rs),
+mounted under INV-067. The public LiteSVM selector crosses both unequal receipts
+with `ClaimResolvedPayoutTopup`, `CloseResolved`, and resolved `PermissionlessCrank`.
+Three-account expiry progress releases backing without custody accounts. Once a
+receipt has positive due, all four custody-tail truncations and both readonly
+token roles must reject with exact receipt, ledger and Account rollback, with
+only the runtime signature fee charged to the payer.
+An alternate route then pays the full 82/151-atom due; three-account zero-due
+retries become usable again, and every claimant completes economic exit and
+mechanical portfolio close with exact rent disposition.
+
+Final exact selectors: **3 passed, 0 failed, 0 ignored**. The new selector covers
+**6 worlds, 36 exact rollbacks, 6 alternate-route top-ups and 30 portfolio closes**,
+with **236,210 peak CU** against the existing 300,000 custody limit.
+
+This adds a state-dependent account requirement to the existing destination
+identity, receipt order and rejected-transaction-suffix coverage. It changes no
+production code, dependency pin, finding classification or invariant status.
+[Gap comparison, exact commands, results and limits](inv_067_receipt_custody_boundary_audit_20260916.md).
+
 ## INV-006 loaded lookup-table identity (2026-09-16)
 
 Owner: [public_sbf/inv_006_lookup_table_retained_identity.rs](public_sbf/inv_006_lookup_table_retained_identity.rs),
