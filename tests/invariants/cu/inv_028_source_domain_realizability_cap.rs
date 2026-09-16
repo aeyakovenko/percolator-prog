@@ -1752,35 +1752,64 @@ fn v16_program_source_realizability_cap_composition_is_source_complete() {
         );
     }
 
-    let max_shape = include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs");
-    assert!(inv028_source_defines_test(
-        max_shape,
-        "v16_program_max_source_conversion_and_owner_exit_are_bounded"
-    ));
-    assert!(inv028_source_defines_test(
-        max_shape,
-        "v16_program_sequential_all_source_lien_mutation_shape_is_bounded"
-    ));
-
     let lifecycle = include_str!("inv_032_exact_counterparty_lien_lifecycle.rs");
-    assert!(inv028_source_defines_test(
-        lifecycle,
-        "v16_program_counterparty_lien_lifecycle_composition_is_source_complete"
-    ));
     let insurance = include_str!("inv_033_insurance_backed_lien_single_classification.rs");
-    assert!(inv028_source_defines_test(
-        insurance,
-        "v16_program_public_source_lien_classification_never_double_counts_insurance"
-    ));
-
     let transitions = include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(inv028_source_defines_test(
-        transitions,
-        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
-    ));
     let cycles = include_str!("../stateful/inv_028_source_domain_realizability_cap.rs");
-    assert!(inv028_source_defines_test(
-        cycles,
-        "v16_program_reciprocal_cross_asset_cycle_cannot_mint_credit"
-    ));
+    let max_shape = include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs");
+    let mut composition_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+            max_shape,
+            "v16_program_max_source_conversion_and_owner_exit_are_bounded",
+        ),
+        (
+            "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
+            max_shape,
+            "v16_program_sequential_all_source_lien_mutation_shape_is_bounded",
+        ),
+        (
+            "tests/invariants/cu/inv_032_exact_counterparty_lien_lifecycle.rs",
+            lifecycle,
+            "v16_program_counterparty_lien_lifecycle_composition_is_source_complete",
+        ),
+        (
+            "tests/invariants/cu/inv_033_insurance_backed_lien_single_classification.rs",
+            insurance,
+            "v16_program_public_source_lien_classification_never_double_counts_insurance",
+        ),
+        (
+            "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+            transitions,
+            "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness",
+        ),
+        (
+            "tests/invariants/stateful/inv_028_source_domain_realizability_cap.rs",
+            cycles,
+            "v16_program_reciprocal_cross_asset_cycle_cannot_mint_credit",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-028 source-realizability witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "INV-028 source-realizability witness must be a reviewed v16 regression: {path}#{witness}"
+        );
+        assert!(
+            composition_witnesses.insert((path, witness)),
+            "duplicate INV-028 source-realizability witness {path}#{witness}"
+        );
+        assert!(
+            inv028_source_defines_test(source, witness),
+            "INV-028 lost source-realizability composition witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        composition_witnesses.len(),
+        6,
+        "INV-028 source-realizability composition witness roster drift"
+    );
 }
