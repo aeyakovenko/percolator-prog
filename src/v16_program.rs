@@ -16803,6 +16803,16 @@ pub mod entrypoint {
             // processor still uses AccountInfo internally, so this adapter is
             // the only compatibility bridge; persisted state serialization is
             // handled explicitly by `state`, not by raw Rust layout casts.
+            //
+            // The processor grows accounts through the legacy
+            // `AccountInfo::realloc`, whose bounds check reads the original
+            // data length from the four bytes preceding `key`
+            // (`RuntimeAccount.padding`). Pinocchio only records that length
+            // there when its `account-resize` feature is enabled, which
+            // `anchor-lang-v2/account-resize` turns on in Cargo.toml. Without
+            // it the field stays zero and every growth past
+            // `MAX_PERMITTED_DATA_INCREASE` bytes of total size fails with
+            // `InvalidRealloc` (see tests/anchor_v2_realloc_probe.rs).
             let lamports_ref = unsafe { &mut (*raw).lamports };
             let data_ref = unsafe {
                 from_raw_parts_mut(
