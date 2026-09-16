@@ -16,6 +16,39 @@
 use super::*;
 
 #[test]
+fn v16_row422_metadata_retains_effective_price_lineage_obligation() {
+    fn row422(tsv: &str, width: usize) -> Vec<&str> {
+        let rows = tsv
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .map(|line| line.split('\t').collect::<Vec<_>>())
+            .filter(|fields| fields[0] == "422")
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1, "row 422 must have one metadata entry");
+        assert_eq!(rows[0].len(), width, "row 422 metadata schema changed");
+        rows.into_iter().next().unwrap()
+    }
+
+    let finding = row422(include_str!("../open_findings.tsv"), 6);
+    let reopening = row422(include_str!("../coverage_reopenings.tsv"), 8);
+    assert_eq!(finding[3], "INV-045");
+    assert_eq!(
+        reopening[3], finding[3],
+        "the benchmark and reopening must retain the same invariant owner"
+    );
+    assert!(reopening[4].split(',').any(|id| id == finding[3]));
+    assert_eq!(
+        reopening[5], "mark-provenance+x-fresh-report+x-liquidation-reward",
+        "row 422 must retain the paid-origin/fresh-report reward composition"
+    );
+    assert_eq!(
+        reopening[6],
+        "liquidation-reward-provenance-follows-the-effective-price-until-catchup",
+        "report freshness alone cannot replace the effective-price-lineage obligation"
+    );
+}
+
+#[test]
 fn v16_program_pr260_pending_ewma_inheritance_rejects_then_trades_on_every_route() {
     for route in [
         TradeRoute::NoCpi,
