@@ -1764,14 +1764,24 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
             row.function
         );
         match row.class {
-            "ORACLE" | "POLICY" | "COMPOSITE" => assert!(
-                witness_sources
+            "ORACLE" | "POLICY" | "COMPOSITE" => {
+                assert!(
+                    row.evidence.starts_with("v16_") || row.evidence.starts_with("host_"),
+                    "{} uses unreviewed executable arithmetic evidence {}",
+                    row.function,
+                    row.evidence,
+                );
+                let matches = witness_sources
                     .iter()
-                    .any(|source| inv085_source_defines_test(source, row.evidence)),
-                "{} lacks executable arithmetic evidence {}",
-                row.function,
-                row.evidence
-            ),
+                    .filter(|source| inv085_source_defines_test(source, row.evidence))
+                    .count();
+                assert!(
+                    matches == 1,
+                    "{} lacks executable arithmetic evidence {}",
+                    row.function,
+                    row.evidence
+                )
+            }
             "STRUCTURAL" => assert!(row.evidence.starts_with("INV-")),
             "ENGINE_HOST_FACADE" => {
                 assert_eq!(row.evidence, "engine-owned host serialization model")
