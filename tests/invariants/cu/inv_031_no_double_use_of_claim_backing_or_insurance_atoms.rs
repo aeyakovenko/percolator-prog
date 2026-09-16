@@ -755,75 +755,126 @@ fn v16_program_single_use_lifecycle_composition_is_source_complete() {
 
     let public_source =
         include_str!("../public_sbf/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs");
-    assert!(inv031_source_defines_test(
-        public_source,
-        "v16_program_cross_domain_backing_is_consumed_once"
-    ));
-
     let stateful_source =
         include_str!("../stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs");
-    let mut stateful_witnesses = std::collections::BTreeSet::new();
-    for witness in [
-        "v16_program_live_source_lien_route_pairs_preserve_single_backing_ownership",
-        "v16_program_two_accounts_cannot_reserve_the_same_source_backing_atoms",
-        "v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing",
+    let lifecycle_source =
+        include_str!("../stateful/inv_026_reservation_and_encumbrance_conservation.rs");
+    let insurance_source = include_str!("inv_033_insurance_backed_lien_single_classification.rs");
+    let rollback_source = include_str!("inv_080_error_propagation_and_exact_rollback.rs");
+    let transition_source =
+        include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
+    let residual_source = include_str!("../stateful/inv_037_exact_residual_partition.rs");
+    let mut public_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/public_sbf/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs",
+            public_source,
+            "v16_program_cross_domain_backing_is_consumed_once",
+        ),
+        (
+            "tests/invariants/stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs",
+            stateful_source,
+            "v16_program_live_source_lien_route_pairs_preserve_single_backing_ownership",
+        ),
+        (
+            "tests/invariants/stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs",
+            stateful_source,
+            "v16_program_two_accounts_cannot_reserve_the_same_source_backing_atoms",
+        ),
+        (
+            "tests/invariants/stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs",
+            stateful_source,
+            "v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing",
+        ),
+        (
+            "tests/invariants/stateful/inv_026_reservation_and_encumbrance_conservation.rs",
+            lifecycle_source,
+            "v16_program_counterparty_encumbrance_lifecycle_is_exact_across_routes_sides_and_terminal_modes",
+        ),
+        (
+            "tests/invariants/cu/inv_033_insurance_backed_lien_single_classification.rs",
+            insurance_source,
+            "v16_program_public_source_lien_classification_never_double_counts_insurance",
+        ),
+        (
+            "tests/invariants/cu/inv_080_error_propagation_and_exact_rollback.rs",
+            rollback_source,
+            "v16_program_explicit_engine_error_dispositions_are_source_complete",
+        ),
+        (
+            "tests/invariants/cu/inv_080_error_propagation_and_exact_rollback.rs",
+            rollback_source,
+            "v16_program_dispatch_and_entrypoints_preserve_every_handler_error",
+        ),
+        (
+            "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+            transition_source,
+            "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness",
+        ),
+        (
+            "tests/invariants/stateful/inv_037_exact_residual_partition.rs",
+            residual_source,
+            "inv037_public_cure_preserves_exact_partition_across_routes_and_sides",
+        ),
     ] {
-        assert!(witness.starts_with("v16_"));
         assert!(
-            stateful_witnesses.insert(witness),
-            "duplicate INV-031 public ownership witness {witness}",
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-031 single-use public witness must resolve to an invariant source file: {path}"
         );
         assert!(
-            inv031_source_defines_test(stateful_source, witness),
-            "missing INV-031 public ownership witness {witness}",
+            witness.starts_with("v16_") || witness.starts_with("inv037_"),
+            "INV-031 single-use public witness must be a reviewed regression: {path}#{witness}"
+        );
+        assert!(
+            public_witnesses.insert((path, witness)),
+            "duplicate INV-031 single-use public witness {path}#{witness}"
+        );
+        assert!(
+            inv031_source_defines_test(source, witness),
+            "INV-031 lost single-use public witness {path}#{witness}"
         );
     }
     assert_eq!(
-        stateful_witnesses.len(),
-        3,
-        "INV-031 public ownership witness roster drift"
+        public_witnesses.len(),
+        10,
+        "INV-031 single-use public witness roster drift"
     );
 
-    let lifecycle_source =
-        include_str!("../stateful/inv_026_reservation_and_encumbrance_conservation.rs");
-    assert!(inv031_source_defines_test(
-        lifecycle_source,
-        "v16_program_counterparty_encumbrance_lifecycle_is_exact_across_routes_sides_and_terminal_modes"
-    ));
-    let insurance_source = include_str!("inv_033_insurance_backed_lien_single_classification.rs");
-    assert!(inv031_source_defines_test(
-        insurance_source,
-        "v16_program_public_source_lien_classification_never_double_counts_insurance"
-    ));
-    let rollback_source = include_str!("inv_080_error_propagation_and_exact_rollback.rs");
-    assert!(inv031_source_defines_test(
-        rollback_source,
-        "v16_program_explicit_engine_error_dispositions_are_source_complete"
-    ));
-    assert!(inv031_source_defines_test(
-        rollback_source,
-        "v16_program_dispatch_and_entrypoints_preserve_every_handler_error"
-    ));
-    let transition_source =
-        include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(inv031_source_defines_test(
-        transition_source,
-        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
-    ));
-
     let value_proof = include_str!("../kani/inv_024_attributed_quote_value_conservation.rs");
-    assert!(inv031_source_defines_kani_proof(
-        value_proof,
-        "kani_inv024_engine_flow_validator_equals_wrapper_value_equation"
-    ));
     let stock_proof = include_str!("../kani/inv_025_exact_stock_reconciliation.rs");
-    assert!(inv031_source_defines_kani_proof(
-        stock_proof,
-        "kani_inv025_engine_partition_composes_with_wrapper_spl_custody"
-    ));
-    let residual_source = include_str!("../stateful/inv_037_exact_residual_partition.rs");
-    assert!(inv031_source_defines_test(
-        residual_source,
-        "inv037_public_cure_preserves_exact_partition_across_routes_and_sides"
-    ));
+    let mut proof_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/kani/inv_024_attributed_quote_value_conservation.rs",
+            value_proof,
+            "kani_inv024_engine_flow_validator_equals_wrapper_value_equation",
+        ),
+        (
+            "tests/invariants/kani/inv_025_exact_stock_reconciliation.rs",
+            stock_proof,
+            "kani_inv025_engine_partition_composes_with_wrapper_spl_custody",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/kani/") && path.ends_with(".rs"),
+            "INV-031 single-use proof witness must resolve to a Kani invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("kani_inv"),
+            "INV-031 single-use proof witness must be a reviewed Kani proof: {path}#{witness}"
+        );
+        assert!(
+            proof_witnesses.insert((path, witness)),
+            "duplicate INV-031 single-use proof witness {path}#{witness}"
+        );
+        assert!(
+            inv031_source_defines_kani_proof(source, witness),
+            "INV-031 lost single-use proof witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        proof_witnesses.len(),
+        2,
+        "INV-031 single-use proof witness roster drift"
+    );
 }
