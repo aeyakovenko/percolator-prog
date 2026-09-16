@@ -15,6 +15,9 @@ use super::*;
 #[path = "inv_021_funded_lifecycle_atomicity.rs"]
 mod funded_lifecycle_atomicity;
 
+#[path = "inv_021_native_close_refund_alias.rs"]
+mod native_close_refund_alias;
+
 fn inv021_init_portfolio_ix(env: &V16CuEnv, owner: Pubkey, portfolio: Pubkey) -> Instruction {
     Instruction {
         program_id: env.program_id,
