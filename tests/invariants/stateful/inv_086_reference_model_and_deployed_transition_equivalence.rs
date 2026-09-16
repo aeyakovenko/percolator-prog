@@ -1615,6 +1615,10 @@ fn v16_program_reference_model_dimension_composition_is_source_complete() {
                     "v16_public_instruction_coverage_registry_matches_production_roster",
                 ),
                 (
+                    "tests/invariants/public_sbf/inv_079_public_reachability_evidence.rs",
+                    "v16_public_instruction_dispatch_registry_matches_reviewed_handlers",
+                ),
+                (
                     "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
                     "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness",
                 ),
@@ -1874,7 +1878,7 @@ fn v16_program_reference_model_dimension_composition_is_source_complete() {
         }
     }
     assert_eq!(dimensions.len(), 9, "model dimension roster drift");
-    assert_eq!(witnesses.len(), 48, "model witness roster drift");
+    assert_eq!(witnesses.len(), 49, "model witness roster drift");
 
     let model = include_str!("../../support/fuzz_model.rs");
     for required in [
