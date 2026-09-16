@@ -1,5 +1,21 @@
 # Invariant-owned test coverage
 
+## INV-020 current-observation evidence fidelity (2026-09-16)
+
+Owner: [public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs](public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs).
+`v16_row426_metadata_retains_current_observation_omission_evidence` preserves
+the row426 omission/prior-slot rescue witness and the complete-current-observation
+obligation. A supplied-report timestamp-coherence witness was accepted as a
+substitute by all five generic metadata gates; the new guard rejects it. Weakening
+the obligation to supplied-report coherence likewise gives **5 passed, 1 expected
+failure**, with only the new guard failing.
+
+Restored validation: **6 metadata tests passed**, plus **1 rescue LiteSVM test**
+and **1 coherence property test (8 cases)** on freshly built default-feature SBF.
+The change adds evidence fidelity, not new economic discovery. INV-020 remains
+`OPEN_EVIDENCE`; no ledger classification or production code changes.
+[Audit, exact selectors, negative controls, artifact hashes, and remaining gaps](inv_020_current_observation_evidence_audit_20260916.md).
+
 ## INV-045 fractional-carry evidence fidelity (2026-09-16)
 
 Owner: [public_sbf/inv_045_no_free_mark_movement.rs](public_sbf/inv_045_no_free_mark_movement.rs).
