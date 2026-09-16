@@ -55,6 +55,9 @@ mod generated_prefix_actionability;
 #[path = "inv_070_terminal_scan_recredit.rs"]
 mod terminal_scan_recredit;
 
+#[path = "inv_070_terminal_scan_evidence.rs"]
+mod terminal_scan_evidence;
+
 #[path = "inv_070_terminal_prefix_custody_actionability.rs"]
 mod terminal_prefix_custody_actionability;
 
