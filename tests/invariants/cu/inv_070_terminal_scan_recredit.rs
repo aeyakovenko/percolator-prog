@@ -13,6 +13,322 @@ use inv_071_crank_progress::terminal_prefix_recredit::{
 };
 use solana_sdk::{instruction::InstructionError, system_program};
 
+// INV-070/071/073, rows 424/433: the scanner must rediscover the remaining
+// insurance after a SECOND expiry invalidates a rebuilt prefix. The single-wave
+// scan control below never revisits a paid recredit; generated actionability
+// uses local withdrawals to recredit, rather than the scanner itself. Here two
+// sibling buckets mature separately, and the first recovery is already paid
+// before the second becomes actionable. No receipt or custody repair is involved.
+#[test]
+fn v16_program_terminal_scan_recredits_only_unpaid_insurance_across_sibling_expiries() {
+    use inv_071_crank_progress::terminal_prefix_recredit::fixture_with_maturities;
+
+    const BACKING: [u64; 2] = [37, 83];
+    const DEADLINES: [u64; 2] = [EXPIRY, EXPIRY + 3];
+    const TOTAL: u64 = BACKING[0] + BACKING[1];
+    let lock = InstructionError::Custom(PercolatorError::EngineLockActive as u32);
+    let mut peak = 0;
+    for side in 0..2 {
+        let RecreditFixture {
+            mut env,
+            admin,
+            beneficiary,
+            owners,
+            portfolios,
+            tokens,
+            reserve,
+            destination,
+            peak: fixture_peak,
+        } = fixture_with_maturities(
+            side,
+            &[
+                (side, BACKING[0], DEADLINES[0]),
+                (1 - side, BACKING[1], DEADLINES[1]),
+            ],
+        );
+        peak = peak.max(fixture_peak);
+        let beneficiary_key = beneficiary.pubkey();
+        drop(beneficiary);
+        assert_ne!(env.payer.pubkey(), beneficiary_key);
+        assert_ne!(admin.pubkey(), beneficiary_key);
+        let mut tracked = vec![
+            env.market,
+            env.vault,
+            env.mint,
+            reserve,
+            destination,
+            admin.pubkey(),
+            beneficiary_key,
+            solana_sdk::sysvar::clock::ID,
+        ];
+        tracked.extend(tokens);
+        tracked.extend(portfolios);
+        tracked.extend(owners.each_ref().map(Signer::pubkey));
+        let initial_epoch = env.control_sequences(0).authority_epoch;
+        let initial_ledger = env.market_state().1.resolved_payout_ledger;
+        let reserve_frame = env.svm.get_account(&reserve).unwrap();
+        let vault_frame = env.svm.get_account(&env.vault).unwrap();
+        let mint_frame = env.svm.get_account(&env.mint).unwrap();
+        let close = |env: &V16CuEnv, debits| {
+            wrap(
+                env,
+                ProgInstruction::CloseSlab {
+                    authority_epoch: initial_epoch + debits,
+                },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new(destination, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(env.mint, false),
+                ],
+            )
+        };
+        let mut send = |env: &mut V16CuEnv,
+                        ixs: &[Instruction],
+                        signers: &[&Keypair],
+                        changed: &[Pubkey],
+                        rejection,
+                        successes| {
+            peak = peak.max(land(
+                env, ixs, signers, &tracked, changed, rejection, successes,
+            ));
+        };
+        let check = |env: &V16CuEnv, normalized: usize, restored: u64, paid: u64, cursor| {
+            let (cfg, group) = env.market_state();
+            assert_eq!(cfg.terminal_slab_scan_progress, cursor);
+            assert_eq!(group.mode, MarketModeV16::Resolved);
+            assert_eq!(
+                (
+                    group.c_tot,
+                    group.pnl_pos_tot,
+                    group.materialized_portfolio_count
+                ),
+                (0, 0, 0)
+            );
+            assert_eq!(group.vault, u128::from(TOTAL - paid));
+            assert_eq!(group.insurance, u128::from(restored - paid));
+            assert_eq!(
+                group.insurance_domain_budget[side],
+                u128::from(SPENT - paid)
+            );
+            assert_eq!(
+                group.insurance_domain_spent[side],
+                u128::from(SPENT - restored)
+            );
+            assert_eq!(
+                group.source_credit[1 - side].provider_receivable_num,
+                u128::from(CAPITAL[1]) * BOUND_SCALE
+            );
+            for wave in 0..2 {
+                let domain = 2 + if wave == 0 { side } else { 1 - side };
+                let bucket = group.source_backing_buckets[domain];
+                let expired = wave < normalized;
+                assert_eq!(bucket.expiry_slot, DEADLINES[wave]);
+                assert_eq!(
+                    bucket.status,
+                    if expired {
+                        BackingBucketStatusV16::Expired
+                    } else {
+                        BackingBucketStatusV16::Fresh
+                    }
+                );
+                let fresh = if expired {
+                    0
+                } else {
+                    u128::from(BACKING[wave]) * BOUND_SCALE
+                };
+                assert_eq!(bucket.fresh_unliened_backing_num, fresh);
+                assert_eq!(
+                    group.source_credit[domain].fresh_reserved_backing_num,
+                    fresh
+                );
+            }
+            let mut ledger = initial_ledger;
+            ledger.snapshot_residual += u128::from(BACKING[..normalized].iter().sum::<u64>());
+            assert_eq!(group.resolved_payout_ledger, ledger);
+            assert_eq!(
+                env.control_sequences(0).authority_epoch,
+                initial_epoch + u64::from(paid > 0) + u64::from(paid == SPENT)
+            );
+            for (key, frame, amount) in [
+                (reserve, &reserve_frame, paid),
+                (env.vault, &vault_frame, TOTAL - paid),
+            ] {
+                let mut expected = frame.clone();
+                let mut token = TokenAccount::unpack(&expected.data).unwrap();
+                token.amount = amount;
+                TokenAccount::pack(token, &mut expected.data).unwrap();
+                assert_eq!(env.svm.get_account(&key), Some(expected));
+            }
+            assert_eq!(tokens.map(|key| env.token_amount(key)), PAYOUTS);
+            assert_eq!(env.token_amount(destination), 0);
+            assert_eq!(env.svm.get_account(&env.mint), Some(mint_frame.clone()));
+            assert_eq!(
+                Mint::unpack(&mint_frame.data).unwrap().supply,
+                PAYOUTS.iter().sum::<u64>() + paid + env.token_amount(env.vault)
+            );
+            let market = env.svm.get_account(&env.market).unwrap();
+            crate::support::fuzz_model::assert_market_stock_census(
+                "sibling expiry scan",
+                &group,
+                &market.data,
+                &[],
+                u128::from(TOTAL - paid),
+            )
+            .unwrap();
+            crate::support::fuzz_model::assert_reservation_encumbrance_census(
+                "sibling expiry scan",
+                &group,
+                &[],
+            )
+            .unwrap();
+        };
+        let market_only = [env.market];
+        let payment = [env.market, env.vault, reserve];
+        check(&env, 0, 0, 0, 0);
+        let scan = close(&env, 0);
+        send(&mut env, &[scan], &[&admin], &market_only, None, (1, 0));
+        check(&env, 0, 0, 0, 1);
+        let mut paid = 0;
+        for wave in 0..2 {
+            let scan = close(&env, wave as u64);
+            send(
+                &mut env,
+                &[scan.clone()],
+                &[&admin],
+                &[],
+                Some((2, lock.clone())),
+                (0, 0),
+            );
+            check(&env, wave, paid, paid, 1);
+            let before_expiry = env.svm.get_account(&env.market).unwrap();
+            // The second release is deliberately late and occurs after a committed payout.
+            env.svm.warp_to_slot(DEADLINES[wave] + wave as u64);
+            assert_eq!(
+                env.svm.get_account(&env.market),
+                Some(before_expiry.clone())
+            );
+            let recovered = if wave == 0 {
+                BACKING[0]
+            } else {
+                SPENT - BACKING[0]
+            };
+            let payout = wrap(
+                &env,
+                ProgInstruction::WithdrawInsuranceAsset {
+                    asset_index: 0,
+                    market_id: env.asset_market_id(0),
+                    authority_epoch: initial_epoch + wave as u64,
+                    amount: recovered.into(),
+                },
+                vec![
+                    AccountMeta::new_readonly(beneficiary_key, false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(reserve, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+            );
+            assert!(payout.accounts.iter().all(|meta| !meta.is_signer));
+            let bad_suffix = Instruction {
+                program_id: system_program::ID,
+                accounts: vec![],
+                data: vec![255],
+            };
+            // All three wrapper transitions and the SPL payment must execute, then roll
+            // back together to the saved prefix, including its prior committed payment.
+            send(
+                &mut env,
+                &[scan.clone(), scan.clone(), payout.clone(), bad_suffix],
+                &[&admin],
+                &[],
+                Some((5, InstructionError::InvalidInstructionData)),
+                (3, 1),
+            );
+            check(&env, wave, paid, paid, 1);
+            send(
+                &mut env,
+                &[scan.clone()],
+                &[&admin],
+                &market_only,
+                None,
+                (1, 0),
+            );
+            check(&env, wave + 1, paid, paid, 0);
+            let start =
+                MARKET_GROUP_OFF + std::mem::size_of::<percolator::MarketGroupV16HeaderAccount>();
+            let end =
+                start + std::mem::size_of::<percolator::Market<state::AssetOracleStorageV16>>();
+            assert_eq!(
+                &env.svm.get_account(&env.market).unwrap().data[start..end],
+                &before_expiry.data[start..end]
+            );
+            send(
+                &mut env,
+                &[scan.clone()],
+                &[&admin],
+                &market_only,
+                None,
+                (1, 0),
+            );
+            check(&env, wave + 1, paid + recovered, paid, 0);
+            let waiting = if wave == 0 {
+                vec![scan.clone(), scan]
+            } else {
+                vec![scan]
+            };
+            send(
+                &mut env,
+                &waiting,
+                &[&admin],
+                &[],
+                Some((if wave == 0 { 3 } else { 2 }, lock.clone())),
+                (usize::from(wave == 0), 0),
+            );
+            check(&env, wave + 1, paid + recovered, paid, 0);
+            send(&mut env, &[payout], &[], &payment, None, (1, 1));
+            paid += recovered;
+            check(&env, wave + 1, paid, paid, 0);
+            if wave == 0 {
+                let scan = close(&env, 1);
+                send(&mut env, &[scan], &[&admin], &market_only, None, (1, 0));
+                check(&env, 1, paid, paid, 1);
+                env.svm.warp_to_slot(DEADLINES[1] - 1);
+            }
+        }
+        assert_eq!(paid, SPENT);
+        let market = env.svm.get_account(&env.market).unwrap();
+        let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();
+        let mut expected_mint = mint_frame.clone();
+        let mut mint = Mint::unpack(&expected_mint.data).unwrap();
+        mint.supply -= TOTAL - SPENT;
+        Mint::pack(mint, &mut expected_mint.data).unwrap();
+        let scan = close(&env, 2);
+        let closing = [env.market, env.vault, env.mint, admin.pubkey()];
+        send(&mut env, &[scan], &[&admin], &closing, None, (1, 2));
+        let tombstone = env.svm.get_account(&env.market).unwrap();
+        assert_closed_market_tombstone(&tombstone);
+        assert_eq!(
+            tombstone.lamports,
+            env.svm
+                .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN)
+        );
+        expected_admin.lamports += market.lamports - tombstone.lamports + vault_frame.lamports;
+        assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
+        assert_eq!(env.svm.get_account(&env.mint), Some(expected_mint));
+        assert!(env.svm.get_account(&env.vault).is_none_or(
+            |account| account.lamports == 0 && account.data.iter().all(|byte| *byte == 0)
+        ));
+        assert_eq!(env.token_amount(reserve), SPENT);
+        assert_eq!(mint.supply, PAYOUTS.iter().sum::<u64>() + SPENT);
+    }
+    eprintln!("INV-070/071/073 sibling expiries: 2 worlds, scanner recredits 37 then 63, pays 100 once, retires 20, peak={peak} CU");
+}
+
 #[test]
 fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() {
     let lock = InstructionError::Custom(PercolatorError::EngineLockActive as u32);

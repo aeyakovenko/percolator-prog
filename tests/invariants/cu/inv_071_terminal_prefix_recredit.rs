@@ -320,8 +320,16 @@ pub(crate) struct RecreditFixture {
 }
 
 pub(crate) fn fixture(side: usize, backing: u64) -> RecreditFixture {
+    fixture_with_maturities(side, &[(side, backing, EXPIRY)])
+}
+
+pub(crate) fn fixture_with_maturities(
+    side: usize,
+    maturities: &[(usize, u64, u64)],
+) -> RecreditFixture {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 
+    let backing = maturities.iter().map(|(_, amount, _)| amount).sum::<u64>();
     let mut peak = 0;
     let mut env = inv018_public_spl_market_with_params(
         0,
@@ -448,12 +456,14 @@ pub(crate) fn fixture(side: usize, backing: u64) -> RecreditFixture {
         &[&beneficiary],
     )
     .unwrap();
-    env.top_up_backing_bucket_from_admin_token_with_cu(
-        destination,
-        (2 + side) as u16,
-        backing.into(),
-        EXPIRY,
-    );
+    for &(backing_side, amount, expiry) in maturities {
+        env.top_up_backing_bucket_from_admin_token_with_cu(
+            destination,
+            (2 + backing_side) as u16,
+            amount.into(),
+            expiry,
+        );
+    }
     env.trade_asset_with_cu(
         0,
         &owners[0],
