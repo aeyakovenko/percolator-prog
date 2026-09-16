@@ -73,9 +73,34 @@ fn assert_source_edges(source: &str, class: &str, edges: &[&str]) {
     }
 }
 
+fn inv087_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 fn assert_named_witness(source: &str, label: &str, witness: &str) {
     assert!(
-        source.contains(&format!("fn {witness}")),
+        inv087_source_defines_test(source, witness),
         "{label} missing executable public mutation witness {witness}",
     );
 }
@@ -464,7 +489,7 @@ fn v16_program_wrapper_config_static_inventory_covers_every_persisted_field() {
         "v16_program_liquidation_cranker_share_policy_is_enforced_at_public_crank",
     ] {
         assert!(
-            tests.contains(&format!("fn {witness}")),
+            inv087_source_defines_test(tests, witness),
             "WrapperConfigV16 inventory depends on executable witness {witness}"
         );
     }
@@ -796,7 +821,7 @@ fn v16_program_wrapper_security_control_roster_has_source_edges_and_witnesses() 
             );
         }
         assert!(
-            tests.contains(&format!("fn {witness}")),
+            inv087_source_defines_test(tests, witness),
             "{label} missing executable INV-087 witness {witness}"
         );
     }
@@ -997,6 +1022,7 @@ fn v16_program_every_wrapper_persisted_security_field_has_a_named_mutation_witne
                 "oracle_target_price_e6",
                 "oracle_target_publish_time",
                 "last_good_oracle_slot",
+                "effective_price_provenance",
                 "oracle_leg_feeds",
                 "oracle_leg_prices_e6",
                 "oracle_leg_publish_times",
