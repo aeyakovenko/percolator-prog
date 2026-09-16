@@ -231,12 +231,28 @@ struct Inv048PositionMutationRoute {
 }
 
 fn inv048_source_defines_test(source: &str, function: &str) -> bool {
-    let marker = format!("fn {function}");
-    source.lines().any(|line| {
-        line.trim()
-            .strip_prefix(&marker)
-            .is_some_and(|tail| tail.trim_start().starts_with('('))
-    })
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
 }
 
 #[derive(Clone, Copy)]
@@ -359,6 +375,18 @@ fn v16_program_typed_matched_book_obligation_oracle_is_source_complete() {
             model.contains(&format!("{}:", obligation.census_field)),
             "matched-book census lacks typed field {}",
             obligation.census_field
+        );
+        assert!(
+            obligation.path.starts_with("tests/invariants/") && obligation.path.ends_with(".rs"),
+            "{} points outside invariant test sources: {}",
+            obligation.category,
+            obligation.path,
+        );
+        assert!(
+            obligation.witness.starts_with("v16_"),
+            "{} uses an unreviewed witness name: {}",
+            obligation.category,
+            obligation.witness,
         );
         let source = std::fs::read_to_string(root.join(obligation.path))
             .unwrap_or_else(|error| panic!("read {}: {error}", obligation.path));
@@ -564,6 +592,18 @@ fn v16_program_position_mutation_composition_is_source_complete() {
         assert!(!route.disposition.is_empty());
         assert!(!route.witnesses.is_empty());
         for (path, witness) in route.witnesses {
+            assert!(
+                path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                "{}.{} points outside invariant test sources: {path}",
+                route.owner,
+                route.method,
+            );
+            assert!(
+                witness.starts_with("v16_"),
+                "{}.{} uses an unreviewed witness name: {witness}",
+                route.owner,
+                route.method,
+            );
             let source = source_cache.entry(path).or_insert_with(|| {
                 std::fs::read_to_string(root.join(path))
                     .unwrap_or_else(|error| panic!("read {path}: {error}"))
