@@ -23,6 +23,9 @@
 
 use super::*;
 
+#[path = "inv_036_multi_source_fee_partition.rs"]
+mod multi_source_fee_partition;
+
 #[test]
 fn v16_program_retained_source_fees_survive_repricing_policy_and_settlement_orders() {
     use crate::support::{
