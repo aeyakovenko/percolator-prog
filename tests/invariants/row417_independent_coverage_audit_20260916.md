@@ -54,6 +54,33 @@ that independent discovery exhaust all histories. Finding-blind finite tests
 can qualify when they demonstrably detect the class; these passing controls
 and source/proof registrations do not establish that result.
 
+### Receipt Reference-Model Follow-Up (2026-09-16)
+
+Review at `b95c8155c3230c383b966628c8a622c47a367cca` also checked
+`run_bounded_receipt_conflict_reference_frontier` in
+[`tests/support/fuzz_model.rs`](../support/fuzz_model.rs). Its
+`assert_bounded_receipt_conflict_edge` computes removal entitlement from the
+observed payout-ledger rate. When `before.present` is false, it rejects receipt
+resurrection but returns without recomputing the removed episode's entitlement.
+Graph exploration and terminal-outcome equality therefore do not supply the
+missing independent receipt-accounting oracle.
+
+The required model must keep episode face and cumulative payments after removal,
+derive later entitlement from public stock events, and detect a positive unpaid
+delta even when no receipt remains. A useful sensitivity control would redirect
+that delta to a residual beneficiary while preserving aggregate custody; the
+episode oracle must reject it. This control is not implemented or claimed here.
+Existing benchmark, reopening and machine-status guards already reconcile the
+metadata. No non-duplicative public-sequence test or metadata check was identified
+in this review; row 417 remains **OPEN/missing**, INV-067 **`REFUTED_CURRENT`**.
+
+Follow-up validation: all six metadata selectors listed below pass (6/6). Only
+the generated overdue-history CU selector was rerun: PASS (1/1), 66 worlds,
+1,461 commits, 181 rollbacks, 396 portfolio closes, 66 slab calls, peak 541,178 CU.
+The cached SBF hash and production/build inputs match the baseline recorded below.
+Logs: `/tmp/row417-receipt-oracle-gap-20260916-{metadata,conformance}.log`;
+private target: `/dev/shm/row417-receipt-oracle-gap-20260916-target`.
+
 ## Next Generic Coverage
 
 1. Extend the INV-067 public history generator with an independent claim-episode
@@ -79,7 +106,7 @@ and source/proof registrations do not establish that result.
    economic loss before adding a discovery fingerprint. Do not import the
    held-out replacement test or fix as coverage ownership.
 
-## Verification
+## Original Audit Verification
 
 All six metadata checks below pass after the README edit. All five focused
 controls pass: one composition gate and four public suites totaling 90 worlds.
@@ -122,5 +149,6 @@ cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --t
 ```
 
 Logs: `/tmp/pr135-inv067-row417-audit-20260916-logs/`. The private build cache
-was removed after validation to reclaim disk space. Only this report and its
-README index entry change; all TSVs and executable sources remain unchanged.
+was removed after validation to reclaim disk space. That original audit changed
+only this report and its README index entry; it left TSVs and executable sources
+unchanged.
