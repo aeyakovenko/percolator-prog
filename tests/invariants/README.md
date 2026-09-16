@@ -99,6 +99,29 @@ terminal-exit proof. **Row 422 remains OPEN/missing; INV-045 remains
 `REFUTED_CURRENT`.** See the [local report](row422_cpi_reward_provenance_20260916.md)
 for the trace, arithmetic, exact selectors, artifact hashes and validation.
 
+## Rows 419/435 mixed ADL and underfunded receipts (2026-09-16)
+
+The [receipt frontier owner](cu/inv_039_mixed_underfunded_receipt.rs) adds 24
+public LiteSVM histories: two mixed-role debts, fresh/exact/late peer-backing
+expiry, two continuation orders and both resolved payout handlers. A real ADL
+reduction precedes an underfunded receipt while the peer retains an unconverted
+backed claim and another owner retains all 777 senior deposit atoms. Every
+suffix checks owner-specific senior capital and payments, immutable receipt
+face, source conversion, disjoint backing/insurance stocks and bounded progress.
+All five portfolios and the slab close; fresh realization permits exactly 123
+insurance atoms to be recredited once, while expiry before realization permits
+none. The suite records 172 successful-prefix rollbacks, 24 waiting rollbacks,
+72 receipt retries and a measured peak of 348,183 CU.
+
+This is **bounded checkpoint-based coverage**, not a full independent oracle
+for the preceding liquidation history or arbitrary mixed-debt schedules. Lane
+21 covers close-expiry preemption; Lane 25 covers source expiry before mixed
+settlement. This increment crosses an existing partial receipt with a different
+owner's source realization/expiry, senior exit and terminal insurance recredit.
+No current behavior violation was found. **Rows 419/435 remain OPEN/missing;
+INV-039 remains `REFUTED_CURRENT`.** See the [sidecar report](row419_435_underfunded_receipt_20260916.md)
+for scope, exact selectors, commands, artifacts and limitations.
+
 ## Lane 25 source expiry before mixed-role settlement (2026-09-16)
 
 The [unsettled-expiry owner](cu/inv_039_mixed_role_unsettled_expiry.rs) adds 48

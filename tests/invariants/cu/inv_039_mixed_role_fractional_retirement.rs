@@ -13,6 +13,9 @@ mod close_preemption;
 #[path = "inv_039_mixed_role_unsettled_expiry.rs"]
 mod unsettled_expiry;
 
+#[path = "inv_039_mixed_underfunded_receipt.rs"]
+mod underfunded_receipt;
+
 const EXPIRY: u64 = 25;
 // Debt crystallizes at slot 15; the setup's largest freshness horizon is 1,000.
 const SOURCE_EXPIRY: u64 = 1_015;
