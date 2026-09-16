@@ -1084,6 +1084,7 @@ fn v16_program_terminal_blocker_census_composes_engine_retirement_before_wrapper
     ];
     let mut classes = std::collections::BTreeSet::new();
     let mut proofs = std::collections::BTreeSet::new();
+    let mut witnesses = std::collections::BTreeSet::new();
     for row in CLASSES {
         assert!(
             classes.insert(row.class),
@@ -1097,14 +1098,23 @@ fn v16_program_terminal_blocker_census_composes_engine_retirement_before_wrapper
         }
         for witness in row.public_witnesses {
             assert!(
-                witness_sources
-                    .iter()
-                    .any(|source| inv069_source_defines_test(source, witness)),
+                witness.starts_with("v16_"),
+                "terminal blocker class '{}' uses an unreviewed witness name: {witness}",
+                row.class,
+            );
+            witnesses.insert(*witness);
+            let matches = witness_sources
+                .iter()
+                .filter(|source| inv069_source_defines_test(source, witness))
+                .count();
+            assert!(
+                matches == 1,
                 "terminal blocker class '{}' lacks public witness {witness}",
                 row.class,
             );
         }
     }
+    assert_eq!(witnesses.len(), 11, "terminal blocker witness roster drift");
 
     let production = include_str!("../../../src/v16_program.rs");
     let production = production
