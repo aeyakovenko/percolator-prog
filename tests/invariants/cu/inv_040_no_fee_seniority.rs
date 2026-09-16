@@ -705,14 +705,24 @@ fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed() {
         include_str!("../stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs"),
     ];
     let mut expected = std::collections::BTreeMap::new();
+    let mut witnesses = std::collections::BTreeSet::new();
     for row in ROWS {
         assert!(!row.fee_class.is_empty());
         assert!(!row.witnesses.is_empty());
         for witness in row.witnesses {
             assert!(
-                witness_sources
-                    .iter()
-                    .any(|source| inv040_source_defines_test(source, witness)),
+                witness.starts_with("v16_"),
+                "{}.{} uses an unreviewed witness name {witness}",
+                row.owner,
+                row.method,
+            );
+            witnesses.insert(*witness);
+            let matches = witness_sources
+                .iter()
+                .filter(|source| inv040_source_defines_test(source, witness))
+                .count();
+            assert!(
+                matches == 1,
                 "{}.{} lacks executable public witness {witness}",
                 row.owner,
                 row.method,
@@ -727,6 +737,7 @@ fn v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed() {
             row.method,
         );
     }
+    assert_eq!(witnesses.len(), 9, "fee-seniority witness roster drift");
     assert_eq!(
         actual, expected,
         "every wrapper ingress to an engine fee-bearing transition needs an INV-040 class and public witness",
