@@ -1682,6 +1682,8 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         ".abs_diff(",
         "10u128.pow(",
         "/ 10_000",
+        "/ denominator",
+        "/ den",
         "/ percolator::",
         "% den",
         "% denominator",
