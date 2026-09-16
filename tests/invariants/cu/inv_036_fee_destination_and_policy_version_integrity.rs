@@ -2348,30 +2348,60 @@ fn v16_program_fee_policy_and_destination_census_is_source_complete() {
 
     let supersession_evidence =
         include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs");
-    assert!(inv036_source_defines_test(
-        supersession_evidence,
-        "v16_program_superseded_control_matrix_rejects_stale_overwrites"
-    ));
     let custody_evidence =
         include_str!("inv_018_quote_mint_vault_token_program_and_authority_integrity.rs");
-    assert!(inv036_source_defines_test(
-        custody_evidence,
-        "v16_primary_quote_routes_match_actual_spl_and_internal_accounting_deltas"
-    ));
     let stock_evidence = include_str!("inv_025_exact_stock_reconciliation.rs");
-    assert!(inv036_source_defines_test(
-        stock_evidence,
-        "v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks"
-    ));
     let seniority_evidence = include_str!("inv_040_no_fee_seniority.rs");
-    assert!(inv036_source_defines_test(
-        seniority_evidence,
-        "v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed"
-    ));
     let transition_evidence =
         include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(inv036_source_defines_test(
-        transition_evidence,
-        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
-    ));
+    let mut composition_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs",
+            supersession_evidence,
+            "v16_program_superseded_control_matrix_rejects_stale_overwrites",
+        ),
+        (
+            "tests/invariants/cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs",
+            custody_evidence,
+            "v16_primary_quote_routes_match_actual_spl_and_internal_accounting_deltas",
+        ),
+        (
+            "tests/invariants/cu/inv_025_exact_stock_reconciliation.rs",
+            stock_evidence,
+            "v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks",
+        ),
+        (
+            "tests/invariants/cu/inv_040_no_fee_seniority.rs",
+            seniority_evidence,
+            "v16_program_internal_fee_ingress_is_engine_owned_and_publicly_witnessed",
+        ),
+        (
+            "tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs",
+            transition_evidence,
+            "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-036 fee-destination witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "INV-036 fee-destination witness must be a reviewed v16 regression: {path}#{witness}"
+        );
+        assert!(
+            composition_witnesses.insert((path, witness)),
+            "duplicate INV-036 fee-destination witness {path}#{witness}"
+        );
+        assert!(
+            inv036_source_defines_test(source, witness),
+            "INV-036 lost fee-destination composition witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        composition_witnesses.len(),
+        5,
+        "INV-036 fee-destination composition witness roster drift"
+    );
 }
