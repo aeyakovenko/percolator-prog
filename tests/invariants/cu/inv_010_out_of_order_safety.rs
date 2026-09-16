@@ -77,9 +77,18 @@ fn inv010_evidence_parts(evidence: &str) -> (&str, &str) {
     let evidence = evidence
         .split_once(':')
         .map_or(evidence, |(_, evidence)| evidence);
-    evidence
+    let (path, function) = evidence
         .split_once('#')
-        .unwrap_or_else(|| panic!("history evidence must be path#test: {evidence}"))
+        .unwrap_or_else(|| panic!("history evidence must be path#test: {evidence}"));
+    assert!(
+        path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+        "history evidence path must stay under tests/invariants: {path}"
+    );
+    assert!(
+        !function.is_empty(),
+        "history evidence test function is empty for {path}"
+    );
+    (path, function)
 }
 
 #[test]
@@ -165,7 +174,6 @@ fn v16_program_every_public_route_has_an_explicit_history_relation() {
         used_relations.insert(relation);
 
         let (path, function) = inv010_evidence_parts(evidence);
-        assert!(path.starts_with("tests/invariants/"));
         let source = source_cache.entry(path.to_owned()).or_insert_with(|| {
             std::fs::read_to_string(root.join(path))
                 .unwrap_or_else(|error| panic!("read history evidence {path}: {error}"))
