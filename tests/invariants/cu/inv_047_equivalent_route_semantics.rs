@@ -32,6 +32,9 @@ mod fee_leg_partition;
 #[path = "inv_047_inventory_cashflow_partitions.rs"]
 mod inventory_cashflow_partitions;
 
+#[path = "inv_047_clipped_fee_routes.rs"]
+mod clipped_fee_routes;
+
 #[derive(Debug, PartialEq, Eq)]
 struct OneLegRouteSnapshot {
     vault: u128,
