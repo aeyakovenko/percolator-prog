@@ -1534,6 +1534,66 @@ fn v16_bpf_trade_paths_respect_source_credit_watermark_permutations() {
 }
 
 #[test]
+fn v16_row423_metadata_preserves_latent_admission_evidence_and_exit_resource_obligation() {
+    fn row423(tsv: &str, width: usize) -> Vec<&str> {
+        let rows = tsv
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .map(|line| line.split('\t').collect::<Vec<_>>())
+            .filter(|fields| fields[0] == "423")
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1, "row 423 must have one metadata entry");
+        assert_eq!(rows[0].len(), width, "row 423 metadata schema changed");
+        rows.into_iter().next().unwrap()
+    }
+
+    let finding = row423(include_str!("../open_findings.tsv"), 6);
+    let reopening = row423(include_str!("../coverage_reopenings.tsv"), 8);
+    assert_eq!(
+        &finding[1..5],
+        &["DoS", "BLOCKER", "INV-028", "independent-discovery"]
+    );
+    assert_eq!(&reopening[1..4], &finding[1..4]);
+    for invariant in ["INV-028", "INV-031"] {
+        assert!(
+            reopening[4].split(',').any(|id| id == invariant),
+            "row 423 must retain its source-capacity and single-use obligations"
+        );
+    }
+    assert_eq!(
+        reopening[5], "historical-capacity+x-latent-domain+x-position-admission",
+        "isolated source occupancy cannot replace history-dependent admission"
+    );
+    assert_eq!(
+        reopening[6], "risk-admission-reserves-every-future-settlement-resource-needed-for-exit",
+        "a bounded source-slot witness cannot narrow the full exit-resource obligation"
+    );
+
+    // The generic benchmark accepts other INV-028 tests. Retain the actual
+    // used-generation discovery instead of substituting an older capacity check.
+    let discoveries = include_str!("../independent_discoveries.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 5, "malformed discovery row: {line}");
+            fields
+        })
+        .filter(|fields| fields[4].split(',').any(|id| id == "423"))
+        .collect::<Vec<_>>();
+    assert!(
+        discoveries.iter().any(|fields| fields[..4]
+            == [
+                "INV-028",
+                "source-capacity/used-generation-latent-reservation",
+                "v16_program_used_generation_admission_reserves_latent_capacity_through_exact_exit",
+                "surviving-live-legs-reserve-latent-domains-before-risk-admission",
+            ]),
+        "row 423 must retain its used-generation latent-reservation witness and oracle"
+    );
+}
+
+#[test]
 fn v16_program_source_realizability_cap_composition_is_source_complete() {
     crate::assert_certified_engine_pin("INV-028 realizability-cap composition");
 
