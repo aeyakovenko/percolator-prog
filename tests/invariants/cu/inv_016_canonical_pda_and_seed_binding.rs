@@ -1296,22 +1296,51 @@ fn v16_program_stateless_pda_incarnation_composition_is_source_complete() {
     assert!(binding.contains("state::read_portfolio_position_epoch(data)?"));
 
     let market_aba = include_str!("../public_sbf/inv_007_no_aba_reuse.rs");
-    assert!(inv016_source_defines_test(
-        market_aba,
-        "v16_program_whole_market_recreate_aba_matrix_is_public_and_nonvacuous"
-    ));
     let portfolio_aba = include_str!("../public_sbf/inv_003_portfolio_incarnation_binding.rs");
-    assert!(inv016_source_defines_test(
-        portfolio_aba,
-        "v16_program_all_retained_portfolio_intents_reject_after_same_pubkey_recreate"
-    ));
     let matcher_transport = include_str!("inv_019_cpi_invocation_and_return_data_binding.rs");
-    assert!(inv016_source_defines_test(
-        matcher_transport,
-        "v16_program_matcher_cpi_identity_incarnation_census_is_source_complete"
-    ));
-    assert!(inv016_source_defines_test(
-        matcher_transport,
-        "v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi"
-    ));
+    let mut composition_witnesses = std::collections::BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/public_sbf/inv_007_no_aba_reuse.rs",
+            market_aba,
+            "v16_program_whole_market_recreate_aba_matrix_is_public_and_nonvacuous",
+        ),
+        (
+            "tests/invariants/public_sbf/inv_003_portfolio_incarnation_binding.rs",
+            portfolio_aba,
+            "v16_program_all_retained_portfolio_intents_reject_after_same_pubkey_recreate",
+        ),
+        (
+            "tests/invariants/cu/inv_019_cpi_invocation_and_return_data_binding.rs",
+            matcher_transport,
+            "v16_program_matcher_cpi_identity_incarnation_census_is_source_complete",
+        ),
+        (
+            "tests/invariants/cu/inv_019_cpi_invocation_and_return_data_binding.rs",
+            matcher_transport,
+            "v16_stateful_matcher_context_incarnations_bind_single_and_batch_cpi",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-016 canonical-PDA witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "INV-016 canonical-PDA witness must be a reviewed v16 regression: {path}#{witness}"
+        );
+        assert!(
+            composition_witnesses.insert((path, witness)),
+            "duplicate INV-016 canonical-PDA witness {path}#{witness}"
+        );
+        assert!(
+            inv016_source_defines_test(source, witness),
+            "INV-016 lost canonical-PDA composition witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        composition_witnesses.len(),
+        4,
+        "INV-016 canonical-PDA witness roster drift"
+    );
 }
