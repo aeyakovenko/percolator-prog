@@ -585,8 +585,8 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
     use std::collections::{BTreeMap, BTreeSet};
 
     const HEADER: &str = "type\tfields\tclassification\tevidence";
-    // 236 named public fields plus the three unit-variant no-data subjects.
-    const EXPECTED_FIELD_COUNT: usize = 239;
+    // 238 named public fields plus the three unit-variant no-data subjects.
+    const EXPECTED_FIELD_COUNT: usize = 241;
     const EXPECTED_TYPE_COUNT: usize = 52;
 
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -622,6 +622,14 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
         let (evidence_file, evidence_test) = columns[3]
             .split_once('#')
             .expect("field evidence is path#test");
+        assert!(
+            evidence_file.starts_with("tests/invariants/") && evidence_file.ends_with(".rs"),
+            "{type_name} field evidence must stay under tests/invariants: {evidence_file}"
+        );
+        assert!(
+            !evidence_test.is_empty(),
+            "{type_name} field evidence test is empty"
+        );
         let evidence_source = field_evidence_sources
             .entry(evidence_file.to_owned())
             .or_insert_with(|| {
@@ -672,7 +680,7 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
         ("duration", 9),
         ("enum", 5),
         ("expiry", 2),
-        ("identity", 76),
+        ("identity", 78),
         ("ignored", 1),
         ("index", 24),
         ("key", 9),
@@ -695,6 +703,16 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
             .evidence
             .split_once('#')
             .expect("boundary profile evidence is path#test");
+        assert!(
+            owner_file.starts_with("tests/invariants/") && owner_file.ends_with(".rs"),
+            "boundary profile {} evidence must stay under tests/invariants: {owner_file}",
+            profile.name
+        );
+        assert!(
+            !test_function.is_empty(),
+            "boundary profile {} evidence test is empty",
+            profile.name
+        );
         let source = std::fs::read_to_string(manifest.join(owner_file))
             .unwrap_or_else(|error| panic!("read {owner_file}: {error}"));
         assert!(
