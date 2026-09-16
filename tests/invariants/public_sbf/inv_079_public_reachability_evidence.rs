@@ -773,11 +773,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
     assert_eq!(rows, 166, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(
-        missing, 6,
+        missing, 2,
         "post-PR135 counterexamples remain missing generic invariant-owned discovery coverage"
     );
     assert_eq!(
-        independent, 143,
+        independent, 147,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
@@ -933,6 +933,16 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             include_str!("../cu/inv_039_pending_loss_obligation_durability.rs"),
         ),
         (
+            39,
+            &[39],
+            include_str!("../cu/inv_039_pending_loss_funded_resolution.rs"),
+        ),
+        (
+            39,
+            &[39],
+            include_str!("../cu/inv_039_mixed_role_resolution.rs"),
+        ),
+        (
             45,
             &[45],
             include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
@@ -978,6 +988,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
             67,
             &[67],
             include_str!("../cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"),
+        ),
+        (
+            67,
+            &[67],
+            include_str!("../cu/inv_067_receipt_close_slab_rail.rs"),
         ),
         (
             70,
@@ -1076,6 +1091,9 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "composite-oracle-legs-must-share-one-coherent-observation-epoch"
                     | "terminal-payout-is-invariant-to-flattened-dust-position"
                     | "terminal-residual-cannot-double-charge-provider-principal"
+                    | "terminal-receipt-identity-and-cumulative-payment-survive-late-stock-release"
+                    | "pending-owner-debt-survives-resolved-detachment-until-opposing-settlement"
+                    | "mixed-role-resolved-settlement-preserves-each-owners-debt-and-source-discount"
                     | "insurance-spend-remains-source-domain-local"
                     | "backing-atoms-cannot-support-claims-from-another-source"
                     | "b-loss-reduces-only-the-originating-source-domain-and-owner-exits"
@@ -2116,7 +2134,9 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         independently_discovered_open_findings,
-        [411, 420, 423, 424, 433].into_iter().collect(),
+        [411, 417, 419, 420, 421, 423, 424, 433, 435]
+            .into_iter()
+            .collect(),
         "only explicitly qualified discoveries retain broader OPEN obligations"
     );
     let expected_reopenings = missing_findings

@@ -138,3 +138,9 @@ INV-073	terminal-reserve/unsigned-partial-payout-orders	v16_program_terminal_pub
 INV-027	flat-first-risk/direct-maintenance-crystallization	v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled	all-accrued-liabilities-precede-every-risk-increasing-admission	413
 INV-008	reserve-debit/live-resolved-authority-epoch	v16_resolved_insurance_debit_consumes_reserve_authority_epoch	successful-insurance-debit-consumes-authorizing-reserve-authority-epoch	428
 INV-024	shutdown-reserve/submitter-beneficiary-separation	v16_program_shutdown_submitter_cannot_receive_foreign_reserve_cleanup	shutdown-submitters-cannot-receive-or-relabel-another-role-attributed-reserve	410,429
+# Bounded mechanism evidence only; terminal_conformance_slice_20260916.md records
+# exact public selectors, independent books, dependencies and OPEN scope limits.
+INV-067	resolved-receipt/late-expiry/quote-rail/owner-deletion	v16_program_partial_receipts_cannot_repay_across_owner_deletion_and_close_slab_rails	terminal-receipt-identity-and-cumulative-payment-survive-late-stock-release	417
+INV-039	pending-loss/resolution/funding/delayed-debtor-orders	v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders	pending-owner-debt-survives-resolved-detachment-until-opposing-settlement	419
+INV-073	terminal-insurance/absent-beneficiary/partial-payment-orders	v16_program_terminal_public_reserve_disposition_preserves_value_across_orders	resolved-reserve-payouts-preserve-beneficiary-value-without-beneficiary-signatures	421
+INV-039	mixed-creditor-debtor/resolution/residual-booking/close-orders	v16_program_mixed_creditor_debtor_roles_preserve_owner_entitlement_through_resolution	mixed-role-resolved-settlement-preserves-each-owners-debt-and-source-discount	435

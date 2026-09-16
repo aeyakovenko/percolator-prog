@@ -1,5 +1,27 @@
 # Invariant-owned test coverage
 
+## Terminal benchmark evidence reconciliation (2026-09-16)
+
+Rows **417/419/421/435** now have `independent-discovery` mappings to existing,
+executable public-instruction tests. No new economic test is needed for these
+bounded mechanisms. The [slice report](terminal_conformance_slice_20260916.md)
+records exact selectors, input-derived oracles, account-construction provenance,
+commands and results: five LiteSVM tests pass across 72 public histories.
+
+| Row | Executable evidence | Qualification |
+| --- | --- | --- |
+| 417 | INV-067 dual-rail receipt/owner-deletion/CloseSlab product, eight histories | Unequal receipt identities and cumulative payouts survive two late backing expiries, claimant order, retries and final custody closure. Arbitrary later stock histories remain OPEN. |
+| 419 | INV-039 funded pending-debt resolution product, sixteen histories; mixed-role product supplies the bankruptcy-residual control | Price/funding debt survives pending-leg detachment and delayed opposing settlement with exact per-owner payouts and rollback. The focused engine/wrapper fix dependency remains OPEN. |
+| 421 | INV-073 unsigned reserve product, twelve histories; four classic/native disabled-custody recredit histories | Insurance reaches its beneficiary without beneficiary/provider signatures, including replacement custody and terminal recredit. Empty-portfolio deletion and slab closure retain their required signatures. |
+| 435 | INV-039 same-portfolio creditor/debtor product, thirty-two histories | Each owner's original debt, bankruptcy debit and source-face discount survive both residual-booking and close orders. Fees/funding composition and the focused fix dependency remain OPEN. |
+
+All four `coverage_reopenings.tsv` rows remain **OPEN**. INV-039/067/070/073
+machine verdicts are unchanged. This reconciles finite mechanism evidence, not
+whole-invariant completion, severity acceptance, a new bug discovery or a
+vulnerable/fixed-pin comparison. Earlier dated notes retaining `missing` describe
+their historical disposition; this reconciliation supersedes those evidence
+labels only. Production, dependency pins, INV-005 and INV-045 are unchanged.
+
 ## Row 419/435 focused replacement PR (2026-09-16)
 
 The older row419/435 PRs were closed as superseded by the focused engine/wrapper
@@ -28737,10 +28759,10 @@ Verdicts mean:
 
 ## Known-finding benchmark
 
-The current TSV has 166 rows: 143 `independent-discovery`, 17 `nonqualifying`, and 6 `missing`.
+The current TSV has 166 rows: 147 `independent-discovery`, 17 `nonqualifying`, and 2 `missing`.
 These are recorded evidence dispositions, not new impact or severity acceptance under
 `scripts/loop.md`. Historical severity strings, including `REAL`, are not current classification
-labels; this documentation audit does not reclassify or promote any finding.
+labels; this evidence reconciliation does not reclassify impact or severity.
 
 Row 428's live GitHub title is normalized to `[BLOCKER LoF] Consume insurance withdrawal epoch on
 retained debit`. It is now covered by the public Live/Resolved reserve-debit epoch selector; row
@@ -28749,8 +28771,10 @@ retained debit`. It is now covered by the public Live/Resolved reserve-debit epo
 `open_findings.tsv` includes the historical 2026-08-03 snapshot of 143 open PRs whose titles identify
 a public-route LoF or DoS class. It maps every row to a primary invariant. That dated snapshot has 0
 **Direct regression** rows, 0 **Missing** rows, 126 **Independent discovery** rows, and seventeen
-**Nonqualifying** rows. PRs 415, 416, 417, 419, 421, 422, and 435 remain appended as 7
-**Missing** rows. PR 411 is covered by the
+**Nonqualifying** rows. PRs 416 and 422 remain appended as 2 **Missing** rows.
+PRs 417/419/421/435 have the bounded public conformance mappings in the terminal
+benchmark reconciliation above, with all four broader reopenings still OPEN.
+PR 415 has the retained stock/retry mapping documented above. PR 411 is covered by the
 narrow retained single-CPI taker-cap case in the generic INV-014 fee-consent matrix; PR 412 is now covered by
 the independent generic INV-012 retained matcher-grant position-episode oracle; PR 413 is covered by the
 direct flat first-admission maintenance crystallization regression; PR 425 is covered by
@@ -28760,7 +28784,7 @@ PRs 410 and 429 are covered by the shutdown reserve beneficiary cleanup regressi
 PR 432 is covered by the independent generic INV-014 fee-consent matrix through its retained single-CPI taker-base-fee
 case; PR 434 is covered by the independent INV-027 flat-reopen fee-history selector; PRs 420/423/424/433
 have the qualified discovery mappings documented above; and PR 418 is covered by the native
-booked-residue regression. The 142 independent
+booked-residue regression. The 147 independent
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older
 `tests/support/open_lof_manifest.rs` retains the executable adapter mapping for its 99-LoF snapshot:

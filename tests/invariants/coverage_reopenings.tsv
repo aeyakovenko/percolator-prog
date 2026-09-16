@@ -790,6 +790,12 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Finite evidence only; arbitrary rates/populations/words, Recovery, insurance,
 # other routes/rails, absent roles, maxima and slab retirement remain open.
 # No generic generator/oracle, vulnerable-pin experiment, production or status change.
+# 2026-09-16 benchmark reconciliation: independent-discovery maps to
+# inv_067_receipt_close_slab_rail.rs::v16_program_partial_receipts_cannot_repay_across_owner_deletion_and_close_slab_rails.
+# Eight public histories preserve unequal receipts through two late expiries,
+# both claimant priorities, alternate quote rails, exact payouts and slab close.
+# This finite mechanism evidence does not prove every later stock reclassification.
+# Exact commands/provenance/limits: terminal_conformance_slice_20260916.md.
 417	LoF	BLOCKER	INV-067	INV-010,INV-024,INV-029,INV-063,INV-066,INV-067,INV-068,INV-070	receipt+x-late-expiry+x-claimant-order	terminal-claim-identity-survives-every-later-stock-reclassification	OPEN
 # Row 418 partial conformance (2026-09-10): cu/inv_077_terminal_quote_variants.rs,
 # v16_program_freezable_quote_terminal_retry_preserves_retirement_and_rent.
@@ -1027,6 +1033,13 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # wrapper PR and includes the pending-obligation resolved-close public
 # regression on the current engine fix line. This row remains OPEN until the
 # fix lands and the benchmark registry is reconciled on the merged pin.
+# 2026-09-16 benchmark reconciliation: independent-discovery maps to
+# inv_039_pending_loss_funded_resolution.rs::v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders.
+# Sixteen public histories retain input-derived price/funding debt across pending
+# leg detachment, waiting rollback, debtor deletion and delayed payout orders.
+# The mixed-role selector mapped for 435 separately checks unbooked bankruptcy B.
+# The focused engine/wrapper dependency above and the broader reopening remain OPEN.
+# Exact commands/provenance/limits: terminal_conformance_slice_20260916.md.
 419	LoF	BLOCKER	INV-039	INV-024,INV-037,INV-039,INV-041,INV-048,INV-066,INV-067,INV-073,INV-076,INV-081,INV-086	pending-obligation+x-resolution+x-close-order	obligation-attribution-persists-until-the-opposing-economic-debt-settles	OPEN
 # Rows 420/421 partial conformance (2026-09-10): cu/inv_073_absent_insurer_spent_retirement.rs,
 # v16_program_absent_insurance_roles_reach_retirement_only_after_exact_exhaustion.
@@ -1276,6 +1289,14 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # to remain mounted. Row421 remains OPEN because this is current-surface composition,
 # not arbitrary terminal-history generation, absent-admin retirement, maximum shape,
 # or every pending-claim/liability product.
+# 2026-09-16 benchmark reconciliation: independent-discovery maps to the INV-073
+# owner v16_program_terminal_public_reserve_disposition_preserves_value_across_orders.
+# Twelve public histories drop beneficiary/provider keys before partial unsigned
+# payouts in every reserve order. The partial-recredit disabled-custody child
+# adds keeper-created replacement custody and exact classic/native terminal exit.
+# Signed empty-portfolio deletion and admin slab closure remain mechanical steps;
+# no universal funded-state or permissionless mechanical-closure claim is made.
+# Exact commands/provenance/limits: terminal_conformance_slice_20260916.md.
 421	DoS	BLOCKER	INV-073	INV-017,INV-018,INV-021,INV-027,INV-064,INV-067,INV-069,INV-070,INV-071,INV-073,INV-078,INV-082	insurance-claim+x-missing-signer+x-terminal-close	terminal-economic-progress-does-not-require-an-adversarial-operator-signature	OPEN
 # Row 422 bounded policy-succession conformance (2026-09-12):
 # cu/inv_045_reward_policy_catchup.rs,
@@ -2319,4 +2340,12 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # Focused wrapper PR #440 and engine PR #202 now carry the current public
 # INV-039/076 regressions and engine fix line. This row remains OPEN until that
 # branch lands and the benchmark registry is reconciled on the merged pin.
+# 2026-09-16 benchmark reconciliation: independent-discovery maps to
+# inv_039_mixed_role_resolution.rs::v16_program_mixed_creditor_debtor_roles_preserve_owner_entitlement_through_resolution.
+# Thirty-two public histories combine same-owner pending creditor weight and
+# cross-asset debt, mirrored sides/assets, Live/Resolved B booking and close orders.
+# Input-derived owner payouts include the source-face discount; total custody
+# alone cannot pass. Zero funding/fees and integral rates do not cover the focused
+# engine/wrapper dependency above or arbitrary mixed-role histories; OPEN remains.
+# Exact commands/provenance/limits: terminal_conformance_slice_20260916.md.
 435	LoF	BLOCKER	INV-039	INV-039	pending-obligation+x-resolution+x-mixed-role-attribution	mixed-role-resolved-debt-attribution-preserves-owner-obligation-through-resolution	OPEN
