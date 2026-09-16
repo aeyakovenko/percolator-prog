@@ -7040,10 +7040,12 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
             row421_witnesses.insert(witness),
             "duplicate row421 public SVM witness {witness}",
         );
+        let matches = row421_sources
+            .iter()
+            .filter(|source| inv073_source_defines_test(source, witness))
+            .count();
         assert!(
-            row421_sources
-                .iter()
-                .any(|source| inv073_source_defines_test(source, witness)),
+            matches == 1,
             "row421 source gate lost public SVM witness {witness}",
         );
     }
