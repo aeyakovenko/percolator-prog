@@ -563,3 +563,335 @@ fn v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper
 fn v16_program_nonzero_funding_fresh_handoff_preserves_owner_and_keeper_entitlement() {
     run_authenticated_handoff(1_000, &[MARK], &[3_333], &[980_000]);
 }
+
+// INV-005/020/045: an oracle-authority round trip cannot relabel a pending paid
+// Hybrid mark as fresh evidence. Old-epoch control must also roll back a completed
+// liquidation or keeper payout, without consuming the permissionless retry.
+#[test]
+fn v16_program_oracle_authority_round_trip_preserves_pending_mark_reward_provenance() {
+    const SHARE: u128 = 3_333;
+    const PRICE: u64 = ENTRY - ENTRY * 24 / 10_000;
+    let mut peak_cu = 0;
+    let mut rollbacks = 0;
+    for fresh_report in [false, true] {
+        let mut env = inv018_public_spl_market_with_params(
+            6,
+            V16CuMarketParams {
+                max_abs_funding_e9_per_slot: 0,
+                ..production_risk_params()
+            },
+        );
+        set_test_clock(&mut env, 1, 100);
+        env.update_liquidation_fee_policy_with_cu(SHARE as u16);
+        let feed = [0x7c; 32];
+        let initial = env.set_pyth_price_with_conf(&feed, ENTRY as i64, -6, 0, 100);
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0; 32], [0; 32]],
+            &[initial],
+            1,
+            100,
+            0,
+            0,
+            1,
+            0,
+        )
+        .unwrap();
+        let owners: [Keypair; 5] = std::array::from_fn(|i| {
+            if i == 4 {
+                env.admin.insecure_clone()
+            } else {
+                Keypair::new()
+            }
+        });
+        let funded = std::array::from_fn::<_, 5, _>(|i| fund(&mut env, &owners[i], FUNDS[i]));
+        let portfolios = funded.map(|pair| pair.0);
+        let tokens = funded.map(|pair| pair.1);
+        let [target, peer, trader_a, trader_b, keeper] = portfolios;
+        let successor = Keypair::new();
+        env.svm.airdrop(&successor.pubkey(), 1_000_000_000).unwrap();
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::set_authority(
+                &spl_token::ID,
+                &env.mint,
+                None,
+                spl_token::instruction::AuthorityType::MintTokens,
+                &owners[4].pubkey(),
+                &[],
+            )
+            .unwrap(),
+            &[&owners[4]],
+        )
+        .unwrap();
+        env.trade_asset_with_cu(
+            0,
+            &owners[0],
+            target,
+            &owners[1],
+            peer,
+            (100 * POS_SCALE) as i128,
+            ENTRY,
+            0,
+        );
+        set_test_clock(&mut env, 5, 1_000);
+        let clock_only = observe(&env, keeper, owners[4].pubkey(), Some(initial), None);
+        submit(&mut env, &owners[4], &[clock_only], &portfolios, None);
+        env.trade_asset_with_cu(
+            0,
+            &owners[2],
+            trader_a,
+            &owners[3],
+            trader_b,
+            POS_SCALE as i128,
+            900_000,
+            0,
+        );
+        let required = (2 * 100 * u128::from(ENTRY) * 77).div_ceil(10_000);
+        let trade_bps = (required * 10_000).div_ceil(2 * u128::from(ACCEPTED_PRINT));
+        let paid = fee(POS_SCALE, ACCEPTED_PRINT, trade_bps);
+        let staged = env.market_state().1;
+        assert_eq!(staged.insurance, 2 * paid);
+        assert_eq!(staged.insurance_domain_budget_remaining_total, 0);
+        assert_eq!(staged.assets[0].effective_price, ENTRY);
+        assert_eq!(staged.assets[0].raw_oracle_target_price, MARK);
+
+        set_test_clock(&mut env, 6, 1_001);
+        let report = if fresh_report {
+            env.set_pyth_price_with_conf(&feed, MARK as i64, -6, 0, 1_001)
+        } else {
+            initial
+        };
+        let mut tracked = vec![
+            env.market,
+            env.mint,
+            env.vault,
+            initial,
+            report,
+            successor.pubkey(),
+        ];
+        tracked.extend(portfolios);
+        tracked.extend(tokens);
+        tracked.extend(owners.each_ref().map(Signer::pubkey));
+        let custody = [env.mint, env.vault].map(|key| env.svm.get_account(&key));
+        let profile = |env: &V16CuEnv| {
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+                .unwrap()
+        };
+        let original_profile = profile(&env);
+        let original_sequences = env.control_sequences(0);
+        let retained_control = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(owners[4].pubkey(), true),
+                AccountMeta::new(owners[4].pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: ProgInstruction::UpdateAssetAuthority {
+                asset_index: 0,
+                market_id: env.asset_market_id(0),
+                authority_epoch: original_sequences.authority_epoch,
+                kind: processor::ASSET_AUTH_ORACLE,
+                new_pubkey: owners[4].pubkey().to_bytes(),
+            }
+            .encode(),
+        };
+        let retained_crank = observe(&env, target, owners[4].pubkey(), Some(report), Some(keeper));
+        for ix in [&retained_control, &retained_crank] {
+            let tx = Transaction::new_signed_with_payer(
+                &[heap_ix(), cu_ix(), ix.clone()],
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &owners[4]],
+                env.svm.latest_blockhash(),
+            );
+            tx.verify().unwrap();
+            env.svm
+                .simulate_transaction(tx.into())
+                .expect("retained request is initially valid");
+        }
+        let framed_keys = tracked
+            .iter()
+            .copied()
+            .filter(|key| *key != env.market)
+            .collect::<Vec<_>>();
+        let framed = framed_keys
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>();
+        for (step, from, to) in [(1, &owners[4], &successor), (2, &successor, &owners[4])] {
+            peak_cu = peak_cu.max(
+                env.try_update_per_asset_authority_with_cu(
+                    from,
+                    Some(to),
+                    0,
+                    processor::ASSET_AUTH_ORACLE,
+                    to.pubkey().to_bytes(),
+                )
+                .unwrap(),
+            );
+            let mut expected_profile = original_profile;
+            expected_profile.oracle_authority = to.pubkey().to_bytes();
+            assert_eq!(
+                profile(&env),
+                expected_profile,
+                "handoff preserves every provenance field"
+            );
+            let mut expected_sequences = original_sequences;
+            expected_sequences.authority_epoch += step;
+            assert_eq!(env.control_sequences(0), expected_sequences);
+            assert_eq!(
+                env.market_state().1,
+                staged,
+                "handoff preserves all economic state"
+            );
+            assert_eq!(
+                framed_keys
+                    .iter()
+                    .map(|key| env.svm.get_account(key))
+                    .collect::<Vec<_>>(),
+                framed
+            );
+        }
+
+        let mut liquidation = None;
+        for _ in 0..6 {
+            let before = env.market_state().1;
+            let before_values = values(&env, portfolios);
+            let peers = [peer, trader_a, trader_b].map(|key| env.svm.get_account(&key));
+            peak_cu = peak_cu.max(submit(
+                &mut env,
+                &owners[4],
+                &[retained_crank.clone(), retained_control.clone()],
+                &tracked,
+                Some((
+                    3,
+                    InstructionError::Custom(PercolatorError::EngineStale as u32),
+                )),
+            ));
+            rollbacks += 1;
+            peak_cu = peak_cu.max(submit(
+                &mut env,
+                &owners[4],
+                &[retained_crank.clone()],
+                &tracked,
+                None,
+            ));
+            let current = census(&env, portfolios);
+            let after = env.market_state().1;
+            assert_eq!(after.assets[0].effective_price, PRICE);
+            assert_eq!(after.assets[0].raw_oracle_target_price, MARK);
+            assert_eq!(
+                profile(&env).last_good_oracle_slot,
+                if fresh_report { 6 } else { 1 }
+            );
+            assert_eq!(
+                profile(&env).oracle_target_publish_time,
+                if fresh_report { 1_001 } else { 100 }
+            );
+            assert_eq!(
+                [peer, trader_a, trader_b].map(|key| env.svm.get_account(&key)),
+                peers
+            );
+            assert_eq!(
+                [env.mint, env.vault].map(|key| env.svm.get_account(&key)),
+                custody
+            );
+            let closed = before.assets[0].oi_eff_long_q - after.assets[0].oi_eff_long_q;
+            if closed == 0 {
+                assert_eq!(values(&env, portfolios)[4], before_values[4]);
+                assert_eq!(after.insurance, before.insurance);
+                continue;
+            }
+            assert!(closed > 0 && closed < 100 * POS_SCALE && current[0]);
+            let penalty = fee(closed, PRICE, 5);
+            let reward = if fresh_report {
+                penalty * SHARE / 10_000
+            } else {
+                0
+            };
+            assert!(penalty > 0 && (!fresh_report || reward > 0));
+            assert_ne!(
+                penalty,
+                fee(closed, MARK, 5),
+                "the effective price still lags the paid target"
+            );
+            let mut expected = before_values;
+            expected[0] -= penalty as i128;
+            expected[4] += reward as i128;
+            assert_eq!(values(&env, portfolios), expected);
+            assert_eq!(after.insurance, 2 * paid + penalty - reward);
+            let budget = if fresh_report { penalty - reward } else { 0 };
+            assert_eq!(
+                &after.insurance_domain_budget[..2],
+                &[budget / 2, budget.div_ceil(2)]
+            );
+            assert_eq!(after.insurance_domain_budget_remaining_total, budget);
+            liquidation = Some((penalty, reward));
+            break;
+        }
+        let (penalty, reward) =
+            liquidation.expect("bounded liquidation after the authority round trip");
+        for account in [peer, trader_a, trader_b] {
+            let ix = observe(&env, account, owners[4].pubkey(), Some(report), None);
+            peak_cu = peak_cu.max(submit(&mut env, &owners[4], &[ix], &tracked, None));
+        }
+        let loss = i128::from(ENTRY - PRICE);
+        let mut expected = FUNDS.map(i128::from);
+        expected[0] -= 100 * loss + penalty as i128;
+        expected[1] += 100 * loss;
+        expected[2] -= paid as i128 + loss;
+        expected[3] += loss - paid as i128;
+        expected[4] += reward as i128;
+        assert_eq!(values(&env, portfolios), expected);
+        let payout = FUNDS[4] as u128 + reward;
+        let withdraw = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(owners[4].pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(keeper, false),
+                AccountMeta::new(tokens[4], false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: env.withdraw_ix(keeper, payout).encode(),
+        };
+        peak_cu = peak_cu.max(submit(
+            &mut env,
+            &owners[4],
+            &[withdraw.clone(), retained_control],
+            &tracked,
+            Some((
+                3,
+                InstructionError::Custom(PercolatorError::EngineStale as u32),
+            )),
+        ));
+        rollbacks += 1;
+        peak_cu = peak_cu.max(submit(&mut env, &owners[4], &[withdraw], &tracked, None));
+        expected[4] = 0;
+        assert_eq!(values(&env, portfolios), expected);
+        assert_eq!(env.token_amount(tokens[4]) as u128, payout);
+        assert_eq!(env.svm.get_account(&env.mint), custody[0]);
+        assert!(tokens[..4].iter().all(|key| env.token_amount(*key) == 0));
+        census(&env, portfolios);
+        let group = env.market_state().1;
+        assert_eq!(
+            expected.iter().sum::<i128>() + group.insurance as i128,
+            group.vault as i128
+        );
+        assert_eq!(
+            group.vault + payout,
+            FUNDS.iter().map(|value| *value as u128).sum::<u128>()
+        );
+        assert_eq!(env.token_amount(env.vault) as u128, group.vault);
+    }
+    assert!(
+        rollbacks >= 4,
+        "both liquidation and payout roll back in each history"
+    );
+    eprintln!("oracle round trip with pending paid mark: 2 histories, {rollbacks} exact rollbacks, peak {peak_cu} CU");
+}
