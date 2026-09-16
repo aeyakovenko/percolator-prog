@@ -6720,11 +6720,28 @@ fn inv073_braced_body_after<'a>(source: &'a str, marker: &str) -> &'a str {
 }
 
 fn inv073_source_defines_test(source: &str, function: &str) -> bool {
-    source.lines().any(|line| {
-        line.trim()
-            .strip_prefix(&format!("fn {function}"))
-            .is_some_and(|tail| tail.trim_start().starts_with('('))
-    })
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
 }
 
 fn inv073_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
