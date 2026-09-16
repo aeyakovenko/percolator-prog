@@ -1,5 +1,47 @@
 # Invariant-owned test coverage
 
+## INV-021 native CloseSlab refund alias (2026-09-16)
+
+`cu/inv_021_native_close_refund_alias.rs`, mounted by INV-021, adds the successful
+`CloseSlab` boundary where the signing administrator, lamport-refund recipient and
+native SPL destination share one account. Four public LiteSVM worlds cross
+separate/aliased recipients with native primary/secondary custody. An independent
+user first deposits and withdraws 101 atoms and closes its portfolio. Cleanup then
+sweeps 43 wrapped native atoms and 29 SPL atoms, closes both vaults, refunds their
+rent plus 17 unsynced native lamports, and retains exact slab tombstone rent.
+
+The alias is constructed through System allocation/assignment and SPL initialization;
+the administrator's preexisting SOL becomes an independently tracked initial native
+balance. The administrator meta is readonly in alias worlds, so the real compiled
+duplicate must supply its writable privilege. Complete Account frames, including
+the separate payer's exact fees, prove that refund lamports do not silently increase
+the token amount. Public `SyncNative` incorporates exactly those refunds, and SPL
+closure redeems the entire balance and native rent to a separate beneficiary.
+The unrelated user's tokens, both mint accounts and all other framed state remain
+unchanged. The only genesis fixture is LiteSVM's missing native mint.
+
+**Net-new against `4a1d375e` (including `635007c7`):** INV-017's new resolved-owner
+alias covers nonnative portfolio receipts and token-account rent recovery, not
+`CloseSlab` depositing two vault refunds and the slab refund into native custody.
+INV-070's native-close test has distinct System administrators and SPL destinations;
+INV-017's slab alias matrix substitutes a System account into the token role and
+rejects. Neither exercises a valid native refund alias or the different CPI ordering
+when native custody is secondary. This is success-path coverage, not a production
+bug, new rollback claim, or invariant-status promotion. No production code changes.
+
+Validation on `4a1d375e`: fresh default-feature SBF (`cargo build-sbf --tools-version
+v1.52`), SHA-256 `87011b683219d59bd5e3f328569bc675b7198d503532491d8f3b31341d54f776`.
+The exact new selector plus
+`inv_070_zero_unattributed_terminal_residue_and_close_slab::v16_program_native_quote_terminal_surplus_sync_has_exact_token_and_lamport_disposition`
+and `inv_017_signer_writable_role_and_account_alias_safety::v16_program_close_slab_account_roles_are_exhaustive`
+pass together: **3 passed, 0 failed, 1,429 filtered**. The new selector is
+`inv_021_account_creation_reallocation_close_rent_and_lamport_safety::native_close_refund_alias::v16_program_close_slab_native_refund_alias_preserves_wrapped_value_and_rent`;
+it covers four worlds, eight vault closes, four tombstones, and four exact native
+sync/redemptions, at peak **44,512 CU** under the **300,000** guard. Scoped
+`rustfmt --edition 2021 --check --config skip_children=true` on both changed Rust
+files and `git diff --check` pass. The SBF production sources and dependency pins
+are unchanged from the initial build at `f408b516` through this validation base.
+
 ## INV-017 valid resolved owner/destination alias (2026-09-16)
 
 Owner: [cu/inv_017_resolved_owner_destination_alias.rs](cu/inv_017_resolved_owner_destination_alias.rs).
