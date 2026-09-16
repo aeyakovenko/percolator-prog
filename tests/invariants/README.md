@@ -74,6 +74,31 @@ OPEN/missing; INV-073 remains `REFUTED_CURRENT`.** See the
 [terminal-insurance succession report](lane25_terminal_insurance_succession_expiry_20260916.md) for the
 non-overlap analysis, exact commands/results, artifact hashes and limitations.
 
+## Lane 28 funded oracle replacement across open lien impairment (2026-09-16)
+
+The [open impaired-backing child](cu/inv_005_cold_oracle_impaired_containment.rs)
+adds eight public LiteSVM worlds crossing both assets, both source sides and
+oracle replacement before/after exact-expiry impairment. The incumbent really
+holds and exercises the oracle role while owning backing encumbered by an open
+portfolio's source lien. Correctly signed cold-admin seizure and incoming-oracle
+withdrawal suffixes restore a completed owner SPL payout, oracle replacement and
+authenticated report. The identical prefix commits without the funded holder or
+market authority signing; the outgoing oracle then loses publication authority.
+
+Input price/size equity, owner-local lien sums, stock/encumbrance censuses, fixed
+SPL supply and full Account frames check both schedules. Impaired-only subject
+backing still requires incumbent consent, strict position reduction remains
+live, and the bystander receives exactly 20 atoms. The two schedules finish with
+identical source stocks, custody and trader equity. The existing impaired-role
+selector keeps its original assertions and schedule through extracted setup.
+
+This is distinct from Lane 24's reserve-only resolution/cold burn, Lane 14's
+insurance-funded Hybrid round trip and the earlier cold-admin ABA, earned,
+zero-role and consumed-only subject products. **Row 416 remains OPEN/missing;
+INV-005 remains `REFUTED_CURRENT`.** See the
+[Lane 28 report](lane25_cold_oracle_impaired_containment_20260916.md) for exact
+commands, results, CU bounds, non-overlap and remaining limits.
+
 ## Lane 24 funded oracle containment across resolution (2026-09-16)
 
 The [resolved containment owner](cu/inv_005_cold_oracle_resolved_containment.rs)

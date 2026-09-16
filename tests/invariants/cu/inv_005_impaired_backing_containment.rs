@@ -18,235 +18,283 @@ const WINNING_SIZE_Q: i128 = 20 * POS_SCALE as i128;
 const ADVERSE_SIZE_Q: i128 = 10 * POS_SCALE as i128;
 const RISK_INCREASE_Q: i128 = 2 * POS_SCALE as i128;
 
-#[test]
-fn v16_program_cold_admin_cannot_seize_impaired_backing_only_role() {
-    let mut peak = [0; 3]; // impairment setup, rollback rejection, consented management/reduction
-    for winner_long in [false, true] {
-        let direction = if winner_long { 1 } else { -1 };
-        let winning_mark = if winner_long { 105 } else { 95 };
-        let expiry_winning_mark = if winner_long { 106 } else { 94 };
-        let adverse_mark = if winner_long { 95 } else { 105 };
-        let domain = u16::from(winner_long);
+#[path = "inv_005_cold_oracle_impaired_containment.rs"]
+mod cold_oracle_impaired_containment;
 
-        let mut env = inv018_public_spl_market_with_params(
-            0,
-            V16CuMarketParams {
-                max_portfolio_assets: 2,
-                maintenance_margin_bps: 1_000,
-                initial_margin_bps: 1_000,
-                max_price_move_bps_per_slot: 500,
-                ..V16CuMarketParams::default()
-            },
-        );
-        let admin = env.admin.insecure_clone();
-        let provider = Keypair::new();
-        let cold = Keypair::new();
-        let owners = [Keypair::new(), Keypair::new(), Keypair::new()];
-        let actors = [&owners[0], &owners[1], &owners[2], &provider, &admin, &cold];
-        for actor in actors {
-            env.ensure_signer_account(actor.pubkey());
-        }
-        env.svm.warp_to_slot(1);
-        env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
-        env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
-        env.try_update_per_asset_authority_with_cu(
-            &admin,
-            Some(&provider),
-            0,
-            processor::ASSET_AUTH_BACKING_BUCKET,
-            provider.pubkey().to_bytes(),
-        )
-        .expect("install independent backing provider before funding");
+struct LienedWorld {
+    env: V16CuEnv,
+    provider: Keypair,
+    cold: Keypair,
+    owners: [Keypair; 3],
+    wallets: [Pubkey; 6],
+    portfolios: [Pubkey; 3],
+}
 
-        let wallets = actors
-            .map(|actor| create_ata_for_test(&mut env.svm, &env.payer, actor.pubkey(), env.mint));
-        for (destination, amount) in [
-            (wallets[0], WINNER_DEPOSIT),
-            (wallets[1], COUNTERPARTY_DEPOSIT),
-            (wallets[2], BYSTANDER_DEPOSIT),
-            (wallets[3], BACKING),
-        ] {
-            send_raw_tx(
-                &mut env.svm,
-                &env.payer,
-                spl_token::instruction::mint_to(
-                    &spl_token::ID,
-                    &env.mint,
-                    &destination,
-                    &admin.pubkey(),
-                    &[],
-                    amount as u64,
-                )
-                .unwrap(),
-                &[&admin],
-            )
-            .unwrap();
-        }
+fn liened_world(winner_long: bool, asset: u16, peak: &mut [u64; 3]) -> LienedWorld {
+    let direction = if winner_long { 1 } else { -1 };
+    let winning_mark = if winner_long { 105 } else { 95 };
+    let adverse_mark = if winner_long { 95 } else { 105 };
+    let domain = 2 * asset + u16::from(winner_long);
+
+    let mut env = inv018_public_spl_market_with_params(
+        0,
+        V16CuMarketParams {
+            max_portfolio_assets: 2,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            ..V16CuMarketParams::default()
+        },
+    );
+    let admin = env.admin.insecure_clone();
+    let provider = Keypair::new();
+    let cold = Keypair::new();
+    let owners = [Keypair::new(), Keypair::new(), Keypair::new()];
+    let actors = [&owners[0], &owners[1], &owners[2], &provider, &admin, &cold];
+    for actor in actors {
+        env.ensure_signer_account(actor.pubkey());
+    }
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&provider),
+        asset,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        provider.pubkey().to_bytes(),
+    )
+    .expect("install independent backing provider before funding");
+
+    let wallets =
+        actors.map(|actor| create_ata_for_test(&mut env.svm, &env.payer, actor.pubkey(), env.mint));
+    for (destination, amount) in [
+        (wallets[0], WINNER_DEPOSIT),
+        (wallets[1], COUNTERPARTY_DEPOSIT),
+        (wallets[2], BYSTANDER_DEPOSIT),
+        (wallets[3], BACKING),
+    ] {
         send_raw_tx(
             &mut env.svm,
             &env.payer,
-            spl_token::instruction::set_authority(
+            spl_token::instruction::mint_to(
                 &spl_token::ID,
                 &env.mint,
-                None,
-                spl_token::instruction::AuthorityType::MintTokens,
+                &destination,
                 &admin.pubkey(),
                 &[],
+                amount as u64,
             )
             .unwrap(),
             &[&admin],
         )
         .unwrap();
+    }
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::set_authority(
+            &spl_token::ID,
+            &env.mint,
+            None,
+            spl_token::instruction::AuthorityType::MintTokens,
+            &admin.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .unwrap();
 
-        let portfolios: [Pubkey; 3] = owners.each_ref().map(|owner| {
-            let key = Keypair::new();
-            system_create_account_for_test(
-                &mut env.svm,
-                &env.payer,
-                &key,
-                env.portfolio_account_len,
-                env.program_id,
-            );
-            env.send(
-                ProgInstruction::InitPortfolio,
-                vec![
-                    AccountMeta::new(owner.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(key.pubkey(), false),
-                ],
-                &[owner],
-            )
-            .unwrap();
-            env.portfolios.push(key.pubkey());
-            key.pubkey()
-        });
-        for (index, amount) in [WINNER_DEPOSIT, COUNTERPARTY_DEPOSIT, BYSTANDER_DEPOSIT]
-            .into_iter()
-            .enumerate()
-        {
-            env.send(
-                env.deposit_ix(portfolios[index], amount),
-                vec![
-                    AccountMeta::new(owners[index].pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(portfolios[index], false),
-                    AccountMeta::new(wallets[index], false),
-                    AccountMeta::new(env.vault, false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
-                ],
-                &[&owners[index]],
-            )
-            .unwrap();
-        }
+    let portfolios: [Pubkey; 3] = owners.each_ref().map(|owner| {
+        let key = Keypair::new();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &key,
+            env.portfolio_account_len,
+            env.program_id,
+        );
         env.send(
-            ProgInstruction::TopUpBackingBucket {
-                domain,
-                market_id: env.asset_market_id(0),
-                authority_epoch: env.control_sequences(0).authority_epoch,
-                intent_id: next_control_sequence(env.control_sequences(0).backing_top_up),
-                amount: BACKING,
-                expiry_slot: EXPIRY,
-                backing_fee_bps: 0,
-                insurance_share_bps: 0,
-            },
+            ProgInstruction::InitPortfolio,
             vec![
-                AccountMeta::new(provider.pubkey(), true),
+                AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(env.market, false),
-                AccountMeta::new(wallets[3], false),
+                AccountMeta::new(key.pubkey(), false),
+            ],
+            &[owner],
+        )
+        .unwrap();
+        env.portfolios.push(key.pubkey());
+        key.pubkey()
+    });
+    for (index, amount) in [WINNER_DEPOSIT, COUNTERPARTY_DEPOSIT, BYSTANDER_DEPOSIT]
+        .into_iter()
+        .enumerate()
+    {
+        env.send(
+            env.deposit_ix(portfolios[index], amount),
+            vec![
+                AccountMeta::new(owners[index].pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolios[index], false),
+                AccountMeta::new(wallets[index], false),
                 AccountMeta::new(env.vault, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
             ],
-            &[&provider],
+            &[&owners[index]],
         )
         .unwrap();
+    }
+    env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain,
+            market_id: env.asset_market_id(asset),
+            authority_epoch: env.control_sequences(asset as usize).authority_epoch,
+            intent_id: next_control_sequence(env.control_sequences(asset as usize).backing_top_up),
+            amount: BACKING,
+            expiry_slot: EXPIRY,
+            backing_fee_bps: 0,
+            insurance_share_bps: 0,
+        },
+        vec![
+            AccountMeta::new(provider.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(wallets[3], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&provider],
+    )
+    .unwrap();
 
-        peak[0] = peak[0].max(env.trade_asset_with_cu(
-            0,
-            &owners[0],
-            portfolios[0],
-            &owners[1],
-            portfolios[1],
-            direction * WINNING_SIZE_Q,
-            PRICE,
-            0,
-        ));
-        peak[0] = peak[0].max(env.trade_asset_with_cu(
-            1,
-            &owners[0],
-            portfolios[0],
-            &owners[1],
-            portfolios[1],
-            direction * ADVERSE_SIZE_Q,
-            PRICE,
-            0,
-        ));
-        env.svm.warp_to_slot(2);
-        env.push_auth_mark_for_asset_as_admin(0, 2, winning_mark);
-        env.push_auth_mark_for_asset_as_admin(1, 2, adverse_mark);
-        for portfolio in [portfolios[1], portfolios[0]] {
-            for _ in 0..4 {
-                if let Some(cu) = env.crank_if_actionable(
-                    portfolio,
-                    ProgInstruction::PermissionlessCrank {
-                        now_slot: 2,
-                        observations: crank_observations_for_assets(&[0, 1]),
-                    },
-                ) {
-                    peak[0] = peak[0].max(cu);
-                } else {
-                    break;
-                }
+    peak[0] = peak[0].max(env.trade_asset_with_cu(
+        asset,
+        &owners[0],
+        portfolios[0],
+        &owners[1],
+        portfolios[1],
+        direction * WINNING_SIZE_Q,
+        PRICE,
+        0,
+    ));
+    peak[0] = peak[0].max(env.trade_asset_with_cu(
+        1 - asset,
+        &owners[0],
+        portfolios[0],
+        &owners[1],
+        portfolios[1],
+        direction * ADVERSE_SIZE_Q,
+        PRICE,
+        0,
+    ));
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(asset, 2, winning_mark);
+    env.push_auth_mark_for_asset_as_admin(1 - asset, 2, adverse_mark);
+    for portfolio in [portfolios[1], portfolios[0]] {
+        for _ in 0..4 {
+            if let Some(cu) = env.crank_if_actionable(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 2,
+                    observations: crank_observations_for_assets(&[0, 1]),
+                },
+            ) {
+                peak[0] = peak[0].max(cu);
+            } else {
+                break;
             }
         }
-        peak[0] = peak[0].max(env.trade_asset_with_cu(
-            1,
-            &owners[0],
-            portfolios[0],
-            &owners[1],
-            portfolios[1],
-            direction * RISK_INCREASE_Q,
-            adverse_mark,
-            0,
-        ));
-        let (_, liened) = env.market_state();
-        assert!(liened.source_credit[domain as usize].valid_liened_backing_num > 0);
-        assert!(
-            env.portfolio_state(portfolios[0])
-                .source_domains
-                .iter()
-                .any(|source| {
-                    source.is_occupied()
-                        && source.domain.get() == u32::from(domain)
-                        && source.source_claim_liened_num.get() > 0
-                        && source.source_lien_counterparty_backing_num.get() > 0
-                }),
-            "winner must hold a public source-backed lien before impairment"
-        );
-        assert_eq!(
-            liened.source_credit[domain as usize].impaired_liened_backing_num,
-            0
-        );
-        assert_eq!(
-            liened.source_backing_buckets[domain as usize].status,
-            BackingBucketStatusV16::Fresh
-        );
+    }
+    peak[0] = peak[0].max(env.trade_asset_with_cu(
+        1 - asset,
+        &owners[0],
+        portfolios[0],
+        &owners[1],
+        portfolios[1],
+        direction * RISK_INCREASE_Q,
+        adverse_mark,
+        0,
+    ));
+    let (_, liened) = env.market_state();
+    assert!(liened.source_credit[domain as usize].valid_liened_backing_num > 0);
+    assert!(
+        env.portfolio_state(portfolios[0])
+            .source_domains
+            .iter()
+            .any(|source| {
+                source.is_occupied()
+                    && source.domain.get() == u32::from(domain)
+                    && source.source_claim_liened_num.get() > 0
+                    && source.source_lien_counterparty_backing_num.get() > 0
+            }),
+        "winner must hold a public source-backed lien before impairment"
+    );
+    assert_eq!(
+        liened.source_credit[domain as usize].impaired_liened_backing_num,
+        0
+    );
+    assert_eq!(
+        liened.source_backing_buckets[domain as usize].status,
+        BackingBucketStatusV16::Fresh
+    );
 
-        env.svm.warp_to_slot(EXPIRY);
-        env.push_auth_mark_for_asset_as_admin(0, EXPIRY, expiry_winning_mark);
-        env.push_auth_mark_for_asset_as_admin(1, EXPIRY, adverse_mark);
-        for portfolio in [portfolios[0], portfolios[1]] {
-            for asset in [0, 1] {
-                if let Some(cu) = env.crank_if_actionable(
-                    portfolio,
-                    ProgInstruction::PermissionlessCrank {
-                        now_slot: EXPIRY,
-                        observations: crank_observations(asset),
-                    },
-                ) {
-                    peak[0] = peak[0].max(cu);
-                }
+    LienedWorld {
+        env,
+        provider,
+        cold,
+        owners,
+        wallets,
+        portfolios,
+    }
+}
+
+fn expire_lien(
+    env: &mut V16CuEnv,
+    portfolios: [Pubkey; 3],
+    winner_long: bool,
+    asset: u16,
+    oracle: &Keypair,
+    peak: &mut [u64; 3],
+) {
+    let expiry_winning_mark = if winner_long { 106 } else { 94 };
+    let adverse_mark = if winner_long { 95 } else { 105 };
+    env.svm.warp_to_slot(EXPIRY);
+    env.push_auth_mark_for_asset_with_authority(asset, oracle, EXPIRY, expiry_winning_mark);
+    env.push_auth_mark_for_asset_as_admin(1 - asset, EXPIRY, adverse_mark);
+    for portfolio in [portfolios[0], portfolios[1]] {
+        for asset in [0, 1] {
+            if let Some(cu) = env.crank_if_actionable(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: EXPIRY,
+                    observations: crank_observations(asset),
+                },
+            ) {
+                peak[0] = peak[0].max(cu);
             }
         }
+    }
+}
+
+#[test]
+fn v16_program_cold_admin_cannot_seize_impaired_backing_only_role() {
+    let mut peak = [0; 3]; // impairment setup, rollback rejection, consented management/reduction
+    for winner_long in [false, true] {
+        let LienedWorld {
+            mut env,
+            provider,
+            cold,
+            owners,
+            wallets,
+            portfolios,
+        } = liened_world(winner_long, 0, &mut peak);
+        let admin = env.admin.insecure_clone();
+        let actors = [&owners[0], &owners[1], &owners[2], &provider, &admin, &cold];
+        let direction = if winner_long { 1 } else { -1 };
+        let adverse_mark = if winner_long { 95 } else { 105 };
+        let domain = u16::from(winner_long);
+        expire_lien(&mut env, portfolios, winner_long, 0, &admin, &mut peak);
 
         let before = env.market_state();
         let bucket = before.1.source_backing_buckets[domain as usize];
