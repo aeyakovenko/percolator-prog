@@ -336,6 +336,17 @@ fn v16_program_out_of_order_induction_composition_is_source_complete() {
             obligations.insert(owner.obligation),
             "duplicate ordering obligation"
         );
+        assert!(
+            owner.path.starts_with("tests/invariants/") && owner.path.ends_with(".rs"),
+            "ordering owner points outside invariant tests: {}",
+            owner.path
+        );
+        assert!(
+            owner.test.starts_with("v16_"),
+            "ordering owner uses an unreviewed witness name: {}#{}",
+            owner.path,
+            owner.test
+        );
         let source = std::fs::read_to_string(root.join(owner.path))
             .unwrap_or_else(|error| panic!("read {}: {error}", owner.path));
         assert!(
