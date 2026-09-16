@@ -773,11 +773,11 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
     assert_eq!(rows, 166, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(
-        missing, 6,
+        missing, 5,
         "post-PR135 counterexamples remain missing generic invariant-owned discovery coverage"
     );
     assert_eq!(
-        independent, 143,
+        independent, 144,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
@@ -1127,6 +1127,7 @@ fn v16_dated_open_security_finding_benchmark_is_non_overclaiming() {
                     | "prospective-loss-in-lapsed-domain-must-have-bounded-terminal-continuation"
                     | "prospective-loss-must-not-create-backing-in-lapsed-domain"
                     | "asset-local-bankruptcy-cannot-lock-unrelated-backed-claim"
+                    | "terminal-insurance-payout-does-not-require-operator-or-beneficiary-signature"
                     | "unsigned-lp-cannot-inherit-preexisting-settlement-cohort"
                     | "fresh-counterparty-must-not-inherit-preexisting-settlement-cohort"
                     | "all-accrued-liabilities-precede-every-risk-increasing-admission"
@@ -2116,7 +2117,7 @@ fn v16_post_pr135_counterexamples_reopen_every_affected_invariant() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         independently_discovered_open_findings,
-        [411, 420, 423, 424, 433].into_iter().collect(),
+        [411, 420, 421, 423, 424, 433].into_iter().collect(),
         "only explicitly qualified discoveries retain broader OPEN obligations"
     );
     let expected_reopenings = missing_findings
