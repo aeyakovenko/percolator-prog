@@ -181,19 +181,47 @@ fn v16_program_delayed_control_matrix_is_source_complete() {
     assert!(restart.contains("restart_empty_asset_preserving_insurance_budget_not_atomic("));
 
     let authority_evidence = include_str!("../cu/inv_005_authority_incarnation_binding.rs");
-    assert!(inv014_source_defines_test(
-        authority_evidence,
-        "v16_program_configured_authority_route_dispositions_are_source_complete"
-    ));
-    assert!(inv014_source_defines_test(
-        authority_evidence,
-        "v16_program_authority_epoch_matrix_is_source_complete"
-    ));
     let market_evidence = include_str!("inv_007_no_aba_reuse.rs");
-    assert!(inv014_source_defines_test(
-        market_evidence,
-        "v16_wrapper_account_incarnation_census_is_source_complete"
-    ));
+    let mut composition_witnesses = BTreeSet::new();
+    for (path, source, witness) in [
+        (
+            "tests/invariants/cu/inv_005_authority_incarnation_binding.rs",
+            authority_evidence,
+            "v16_program_configured_authority_route_dispositions_are_source_complete",
+        ),
+        (
+            "tests/invariants/cu/inv_005_authority_incarnation_binding.rs",
+            authority_evidence,
+            "v16_program_authority_epoch_matrix_is_source_complete",
+        ),
+        (
+            "tests/invariants/public_sbf/inv_007_no_aba_reuse.rs",
+            market_evidence,
+            "v16_wrapper_account_incarnation_census_is_source_complete",
+        ),
+    ] {
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "INV-014 delayed-policy witness must resolve to an invariant source file: {path}"
+        );
+        assert!(
+            witness.starts_with("v16_"),
+            "INV-014 delayed-policy witness must be a reviewed v16 regression: {path}#{witness}"
+        );
+        assert!(
+            composition_witnesses.insert((path, witness)),
+            "duplicate INV-014 delayed-policy witness {path}#{witness}"
+        );
+        assert!(
+            inv014_source_defines_test(source, witness),
+            "INV-014 lost delayed-policy composition witness {path}#{witness}"
+        );
+    }
+    assert_eq!(
+        composition_witnesses.len(),
+        3,
+        "INV-014 delayed-policy witness roster drift"
+    );
 }
 
 #[test]
