@@ -55,6 +55,31 @@ mod deferred_claim_backing;
 #[path = "inv_028_single_slot_admission.rs"]
 mod single_slot_admission;
 
+fn inv028_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[test]
 fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
     const Q: i128 = 1_000 * POS_SCALE as i128;
@@ -1729,23 +1754,34 @@ fn v16_program_source_realizability_cap_composition_is_source_complete() {
     }
 
     let max_shape = include_str!("inv_077_bounded_work_and_maximum_shape_compute.rs");
-    assert!(max_shape.contains("fn v16_program_max_source_conversion_and_owner_exit_are_bounded"));
-    assert!(
-        max_shape.contains("fn v16_program_sequential_all_source_lien_mutation_shape_is_bounded")
-    );
+    assert!(inv028_source_defines_test(
+        max_shape,
+        "v16_program_max_source_conversion_and_owner_exit_are_bounded"
+    ));
+    assert!(inv028_source_defines_test(
+        max_shape,
+        "v16_program_sequential_all_source_lien_mutation_shape_is_bounded"
+    ));
 
     let lifecycle = include_str!("inv_032_exact_counterparty_lien_lifecycle.rs");
-    assert!(lifecycle
-        .contains("fn v16_program_counterparty_lien_lifecycle_composition_is_source_complete"));
+    assert!(inv028_source_defines_test(
+        lifecycle,
+        "v16_program_counterparty_lien_lifecycle_composition_is_source_complete"
+    ));
     let insurance = include_str!("inv_033_insurance_backed_lien_single_classification.rs");
-    assert!(insurance.contains(
-        "fn v16_program_public_source_lien_classification_never_double_counts_insurance"
+    assert!(inv028_source_defines_test(
+        insurance,
+        "v16_program_public_source_lien_classification_never_double_counts_insurance"
     ));
 
     let transitions = include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(transitions.contains(
-        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    assert!(inv028_source_defines_test(
+        transitions,
+        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
     ));
     let cycles = include_str!("../stateful/inv_028_source_domain_realizability_cap.rs");
-    assert!(cycles.contains("fn v16_program_reciprocal_cross_asset_cycle_cannot_mint_credit"));
+    assert!(inv028_source_defines_test(
+        cycles,
+        "v16_program_reciprocal_cross_asset_cycle_cannot_mint_credit"
+    ));
 }
