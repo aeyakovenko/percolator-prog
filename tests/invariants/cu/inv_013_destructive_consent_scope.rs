@@ -28,6 +28,31 @@
 
 use super::*;
 
+fn inv013_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[test]
 fn v16_program_close_consent_tracks_only_committed_funding_round_trips() {
     use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
@@ -336,24 +361,32 @@ fn v16_program_destructive_consent_composition_is_source_complete() {
     }
 
     let position_evidence = include_str!("inv_004_position_episode_binding.rs");
-    assert!(position_evidence.contains(
-        "fn v16_program_retained_position_binding_and_writer_rosters_are_source_complete("
+    assert!(inv013_source_defines_test(
+        position_evidence,
+        "v16_program_retained_position_binding_and_writer_rosters_are_source_complete"
     ));
     let asset_evidence = include_str!("inv_002_asset_generation_binding.rs");
-    assert!(asset_evidence
-        .contains("fn v16_program_asset_generation_field_and_guard_roster_is_source_complete("));
+    assert!(inv013_source_defines_test(
+        asset_evidence,
+        "v16_program_asset_generation_field_and_guard_roster_is_source_complete"
+    ));
     let authority_evidence = include_str!("inv_005_authority_incarnation_binding.rs");
-    assert!(authority_evidence
-        .contains("fn v16_program_configured_authority_route_dispositions_are_source_complete("));
+    assert!(inv013_source_defines_test(
+        authority_evidence,
+        "v16_program_configured_authority_route_dispositions_are_source_complete"
+    ));
     assert!(authority_evidence.contains("let expected_open = std::collections::BTreeSet::new();"));
     let transaction_domain_evidence =
         include_str!("../public_sbf/inv_006_program_chain_message_type_and_version_binding.rs");
-    assert!(transaction_domain_evidence
-        .contains("fn deployed_wrapper_has_no_detached_signature_interpreter("));
+    assert!(inv013_source_defines_test(
+        transaction_domain_evidence,
+        "deployed_wrapper_has_no_detached_signature_interpreter"
+    ));
     let account_evidence = include_str!("../public_sbf/inv_007_no_aba_reuse.rs");
-    assert!(
-        account_evidence.contains("fn v16_wrapper_account_incarnation_census_is_source_complete(")
-    );
+    assert!(inv013_source_defines_test(
+        account_evidence,
+        "v16_wrapper_account_incarnation_census_is_source_complete"
+    ));
 }
 
 #[test]
