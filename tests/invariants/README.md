@@ -44,9 +44,13 @@ that transition independently.
 [focused audit](row422_conformance_audit_20260916.md) records the public-account
 construction, exact existing selectors, validation and remaining oracle/sequence
 boundary. This is reward-provenance and public-route conformance coverage only.
-No new Rust, production change or discovery/status promotion is included. Nine
-scoped INV-045 checks passed in the isolated audit, and PR135's current metadata
-guards pass after the separate row421 reconciliation.
+The original audit added no Rust, production change or discovery/status promotion.
+Nine scoped INV-045 checks passed in the isolated audit, and PR135's current
+metadata guards pass after the separate row421 reconciliation. A follow-up
+INV-045 metadata check preserves row 422's effective-price-lineage obligation:
+a temporary freshness-only replacement passes the four existing metadata guards
+but fails the new check. All five pass with the original ledger restored. This
+adds metadata protection only; the independent eligibility oracle remains absent.
 
 ## Row 416 conformance evidence audit (2026-09-16)
 
