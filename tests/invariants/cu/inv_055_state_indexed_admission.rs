@@ -1755,6 +1755,32 @@ fn inv055_braced_body_after<'a>(source: &'a str, marker: &str) -> &'a str {
     panic!("unterminated body after {marker}");
 }
 
+fn inv055_instruction_enum_variants(source: &str) -> std::collections::BTreeSet<String> {
+    let block = inv055_braced_body_after(source, "pub enum Instruction");
+    let mut variants = std::collections::BTreeSet::new();
+    for line in block.lines() {
+        let line = line.trim_start();
+        if !line
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        {
+            continue;
+        }
+        let variant = line
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .collect::<String>();
+        if !variant.is_empty() {
+            assert!(
+                variants.insert(variant.clone()),
+                "duplicate production instruction variant {variant}"
+            );
+        }
+    }
+    variants
+}
+
 #[test]
 fn v16_program_every_public_instruction_has_a_state_admission_owner() {
     const REGISTRY: &str = include_str!("../public_instruction_coverage.tsv");
@@ -1770,7 +1796,10 @@ fn v16_program_every_public_instruction_has_a_state_admission_owner() {
         let fields = line.split('\t').collect::<Vec<_>>();
         assert_eq!(fields.len(), 5, "malformed public instruction row: {line}");
         let variant = fields[1];
-        assert!(variants.insert(variant), "duplicate public route {variant}");
+        assert!(
+            variants.insert(variant.to_owned()),
+            "duplicate public route {variant}"
+        );
         let evidence = inv055_public_route_admission(variant)
             .unwrap_or_else(|| panic!("{variant} has no state-admission owner"));
         *owners.entry(evidence.owner).or_default() += 1;
@@ -1786,6 +1815,11 @@ fn v16_program_every_public_instruction_has_a_state_admission_owner() {
         );
     }
     assert_eq!(variants.len(), 49, "public instruction roster drift");
+    assert_eq!(
+        variants,
+        inv055_instruction_enum_variants(include_str!("../../../src/v16_program.rs")),
+        "state-admission registry must match the production instruction enum"
+    );
     assert_eq!(
         owners.len(),
         15,
