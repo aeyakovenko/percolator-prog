@@ -14,6 +14,8 @@
 //!
 //! Guarantee boundary: this covers signed trade consent. Other retained asset-scoped controls are
 //! tracked independently by the public-SBF and stateful INV-002 operation matrix.
+//! The source roster also composes the three market-wide generation-frontier controls with
+//! their existing public witnesses; INV-012 owns the retained matcher-grant regression.
 
 use super::*;
 
@@ -98,6 +100,7 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
     let transaction_domain_evidence =
         include_str!("../public_sbf/inv_006_program_chain_message_type_and_version_binding.rs");
     let matcher_scope_evidence = include_str!("inv_012_capability_and_delegate_scope.rs");
+    let matcher_frontier_evidence = include_str!("inv_012_reused_asset_return_binding.rs");
     let generated_generation_evidence =
         include_str!("../stateful/inv_002_asset_generation_binding.rs");
     let lifecycle_composition =
@@ -107,8 +110,7 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
     let instruction_enum =
         source_between(source, "pub enum Instruction {", "\n    impl Instruction {");
 
-    // Seventeen direct instruction fields plus the two batch-leg fields are the currently encoded
-    // asset-generation surface. Any roster change requires an INV-002 classification.
+    // Per-asset IDs and market-wide frontiers are separate retained generation bindings.
     assert_eq!(instruction_enum.matches("market_id: u64").count(), 17);
     for variant in [
         "TradeNoCpi",
@@ -138,6 +140,22 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
         let body = source_between(source, leg, "\n    }");
         assert!(body.contains("market_id: u64"), "{leg} lost market_id");
     }
+    assert_eq!(
+        instruction_enum
+            .matches("asset_generation_frontier: u64")
+            .count(),
+        3
+    );
+    for variant in [
+        "ResolveMarket",
+        "ConfigurePermissionlessResolve",
+        "SetMatcherConfig",
+    ] {
+        assert!(
+            variant_body(instruction_enum, variant).contains("asset_generation_frontier: u64"),
+            "{variant} lost its retained generation-frontier binding"
+        );
+    }
 
     let mut test_witnesses = std::collections::BTreeSet::new();
     for (path, source, witness) in [
@@ -161,6 +179,16 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
             public_generation_evidence,
             "v16_program_retained_activation_binds_exact_next_generation_frontier",
         ),
+        (
+            "tests/invariants/public_sbf/inv_002_asset_generation_binding.rs",
+            public_generation_evidence,
+            "v16_program_pr311_pr312_marketwide_controls_reject_after_asset_slot_reuse",
+        ),
+        (
+            "tests/invariants/cu/inv_012_reused_asset_return_binding.rs",
+            matcher_frontier_evidence,
+            "v16_program_retained_matcher_grant_rejects_after_asset_generation_frontier_moves",
+        ),
     ] {
         assert!(
             path.starts_with("tests/invariants/") && path.ends_with(".rs"),
@@ -182,7 +210,7 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
     }
     assert_eq!(
         test_witnesses.len(),
-        4,
+        6,
         "INV-002 asset-generation test witness roster drift"
     );
     let mut proof_witnesses = std::collections::BTreeSet::new();
@@ -240,6 +268,56 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
         inv002_source_defines_test(matcher_scope_evidence, matcher_scope_witness),
         "INV-002 lost matcher-scope composition witness {matcher_scope_witness}"
     );
+    for (parent, mount) in [
+        (
+            include_str!("../../v16_cu.rs"),
+            "#[path = \"invariants/cu/inv_012_capability_and_delegate_scope.rs\"]\nmod inv_012_capability_and_delegate_scope;",
+        ),
+        (
+            matcher_scope_evidence,
+            "#[path = \"inv_012_joint_incarnation_binding.rs\"]\nmod joint_incarnation_binding;",
+        ),
+        (
+            include_str!("inv_012_joint_incarnation_binding.rs"),
+            "#[path = \"inv_012_reused_asset_return_binding.rs\"]\nmod reused_asset_return_binding;",
+        ),
+    ] {
+        assert!(parent.contains(mount), "retained matcher-frontier witness is not mounted: {mount}");
+    }
+
+    let matcher = source_between(
+        source,
+        "fn handle_set_matcher_config<'a>(",
+        "fn invoke_matcher_batch<'a>(",
+    );
+    let matcher_preflight = source_between(
+        matcher,
+        "let data = market_ai.try_borrow_data()?;",
+        "ensure_portfolio_storage_for_market_slots(",
+    );
+    assert!(matcher_preflight
+        .contains("state::read_asset_lifecycle_generation_preflight(&data, 0, true)?"));
+    assert!(matcher_preflight.contains("if next_market_id != asset_generation_frontier {\n                return Err(PercolatorError::EngineStale.into());\n            }"));
+
+    let frontier_guard = source_between(
+        source,
+        "fn require_asset_generation_frontier_view(",
+        "fn reset_empty_asset_oracle_anchor_view(",
+    );
+    assert!(frontier_guard.contains("if group.header.next_market_id.get() != expected_frontier {\n            return Err(PercolatorError::AssetGenerationMismatch.into());\n        }"));
+    for (handler, mutation) in [
+        ("fn handle_resolve_market<'a>(", "resolve_market_view("),
+        (
+            "fn handle_configure_permissionless_resolve<'a>(",
+            "advance_control_sequence_view(",
+        ),
+    ] {
+        let preflight = source_between(source, handler, mutation);
+        assert!(
+            preflight.contains("require_asset_generation_frontier_view(&group, expected_asset_generation_frontier)?;"),
+            "{handler} must reject a stale frontier before mutation"
+        );
+    }
     assert!(
         instruction_enum.contains("ClaimResolvedPayoutTopup,"),
         "resolved claims remain permissionless current-state transitions without retained asset consent"
