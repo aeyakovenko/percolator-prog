@@ -762,16 +762,27 @@ fn v16_program_single_use_lifecycle_composition_is_source_complete() {
 
     let stateful_source =
         include_str!("../stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs");
+    let mut stateful_witnesses = std::collections::BTreeSet::new();
     for witness in [
         "v16_program_live_source_lien_route_pairs_preserve_single_backing_ownership",
         "v16_program_two_accounts_cannot_reserve_the_same_source_backing_atoms",
         "v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing",
     ] {
+        assert!(witness.starts_with("v16_"));
+        assert!(
+            stateful_witnesses.insert(witness),
+            "duplicate INV-031 public ownership witness {witness}",
+        );
         assert!(
             inv031_source_defines_test(stateful_source, witness),
             "missing INV-031 public ownership witness {witness}",
         );
     }
+    assert_eq!(
+        stateful_witnesses.len(),
+        3,
+        "INV-031 public ownership witness roster drift"
+    );
 
     let lifecycle_source =
         include_str!("../stateful/inv_026_reservation_and_encumbrance_conservation.rs");
