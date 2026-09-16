@@ -100,15 +100,6 @@ fn inv005_braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
     panic!("unterminated source block after {marker}");
 }
 
-fn inv005_source_defines_function(source: &str, function: &str) -> bool {
-    let marker = format!("fn {function}");
-    source.lines().any(|line| {
-        line.trim()
-            .strip_prefix(&marker)
-            .is_some_and(|tail| tail.trim_start().starts_with('('))
-    })
-}
-
 fn inv005_epoch_bearing_instruction_variants(source: &str) -> std::collections::BTreeSet<String> {
     inv005_instruction_variant_bodies(source)
         .into_iter()
@@ -874,7 +865,7 @@ fn v16_program_funded_role_guard_and_oracle_handoff_are_source_complete() {
                 .unwrap_or_else(|error| panic!("read {path}: {error}"))
         });
         assert!(
-            inv005_source_defines_function(source, witness),
+            inv005_source_defines_test(source, witness),
             "row416 funded-role witness missing {path}#{witness}",
         );
     }
