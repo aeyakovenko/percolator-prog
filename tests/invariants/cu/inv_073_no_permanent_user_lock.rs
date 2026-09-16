@@ -6679,9 +6679,9 @@ fn v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free() {
 enum Inv073TerminalAuthority {
     PermissionlessEconomic,
     PermissionlessMechanical,
+    PermissionlessBoundAuthorityPayout,
     OwnerOrResolvedMarketAuthority,
     BackingAuthorityOrShutdownMarketAuthority,
-    InsuranceAuthorityOrShutdownMarketAuthority,
     MarketAuthority,
 }
 
@@ -6740,7 +6740,7 @@ fn inv073_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str
 
 #[test]
 fn v16_program_terminal_disposition_and_administrative_retirement_are_source_complete() {
-    const ENGINE_PIN: &str = "394fd0bf2cb7d73df425eb3754dc3be1a0c44336";
+    const ENGINE_PIN: &str = "daddfcf1afaaf675aa66191d7410271b338620ff";
     const PHASES: &[Inv073TerminalPhase] = &[
         Inv073TerminalPhase {
             rank_lane: "economic-work",
@@ -6806,10 +6806,10 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
             rank_lane: "insurance-cleanup",
             handler: "fn handle_withdraw_insurance_asset<'a>(",
             transition: "debit_market_insurance_budget_view(",
-            authority: Inv073TerminalAuthority::InsuranceAuthorityOrShutdownMarketAuthority,
+            authority: Inv073TerminalAuthority::PermissionlessBoundAuthorityPayout,
             witness_path:
-                "tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs",
-            witness: "v16_program_prior_insurance_frames_all_partial_receipt_orders",
+                "tests/invariants/cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs",
+            witness: "v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_close",
         },
         Inv073TerminalPhase {
             rank_lane: "asset-cleanup",
@@ -6923,7 +6923,7 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
     );
     assert!(
         insurance.contains(
-            "if mode != MarketModeV16::Resolved {\n                expect_signer(operator)?;"
+            "if mode == MarketModeV16::Live {\n                expect_signer(operator)?;"
         ),
         "terminal insurance payout must not depend on an operator/beneficiary signature",
     );
@@ -7006,6 +7006,26 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
     assert!(lifecycle.contains("expect_signer(authority)?;"));
     assert!(lifecycle.contains("if !live_authority_matches(&cfg_pre.marketauth, authority.key)"));
     assert!(lifecycle.contains("ASSET_ACTION_RETIRE =>"));
+
+    let insurance = inv073_braced_body_after(production, "fn handle_withdraw_insurance_asset<'a>(");
+    assert_eq!(insurance.matches("expect_signer(operator)?;").count(), 1);
+    assert!(insurance.contains("if mode == MarketModeV16::Live"));
+    assert!(insurance.contains("group.header.materialized_portfolio_count.get() != 0"));
+    assert!(insurance.contains("group.header.c_tot.get() != 0"));
+    assert!(insurance
+        .contains("live_authority_matches(&authorities.insurance_authority, operator.key)"));
+    assert!(
+        insurance.contains(
+            "let beneficiary = if mode == MarketModeV16::Live {\n                authorities.insurance_operator\n            } else {\n                authorities.insurance_authority\n            };"
+        ),
+        "live insurance must pay the operator while resolved insurance pays the configured beneficiary"
+    );
+    assert!(
+        insurance.contains(
+            "verify_withdrawable_token_accounts(\n                dest_token,\n                &Pubkey::new_from_array(beneficiary),"
+        ),
+        "insurance destination must be validated against the selected beneficiary"
+    );
 
     let close_slab = inv073_braced_body_after(production, "fn handle_close_slab<'a>(");
     for guard in [

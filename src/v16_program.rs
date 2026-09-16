@@ -10927,14 +10927,17 @@ pub mod processor {
             let market_data = market_ai.try_borrow_data()?;
             let (cfg, mode, _, market_id, _, _) =
                 state::read_market_trade_preflight(&market_data, asset_index)?;
-            if mode != MarketModeV16::Resolved {
-                expect_signer(operator)?;
-            }
             if market_id != expected_market_id {
                 return Err(PercolatorError::AssetGenerationMismatch.into());
             }
             if mode != MarketModeV16::Live && mode != MarketModeV16::Resolved {
                 return Err(PercolatorError::InvalidInstruction.into());
+            }
+            // Live insurance remains an operator-authorized withdrawal. Once every portfolio and
+            // capital claim is gone, the configured terminal authority is only a payout identity:
+            // anyone may deliver its exact remaining budget to a token account it owns.
+            if mode == MarketModeV16::Live {
+                expect_signer(operator)?;
             }
             let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;

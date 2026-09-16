@@ -184,10 +184,19 @@ classic, native, recredited, quote-rail and custody-recreation SVM witnesses, so
 a future wrapper drift that reintroduces an operator signature dependency or
 changes the terminal payout guards fails before metadata can stay green.
 
-This is retained as substantive INV-073 evidence, but row **421 remains missing**.
-`CloseSlab` is still a separate market-authority-signed mechanical close, so this
-does not prove full permissionless terminal market retirement, arbitrary insurance
-histories, every pending-claim composition, or maximum-shape terminal cleanup.
+`v16_attack_permissionless_asset_insurance_authority_cannot_withhold_terminal_close`
+now covers the withheld row421 blocker directly. It builds the terminal state
+from public instructions, leaves one funded insurance atom under a permissionless
+asset creator's authority, proves the market authority cannot seize it or rotate
+the funded owner away, and then proves an arbitrary cranker can pay the exact
+claim only to the configured beneficiary before `CloseSlab` succeeds. Row **421
+is now independently discovered and covered**.
+
+`CloseSlab` remains a separate market-authority-signed mechanical close, so this
+does not prove unrestricted permissionless market-account deletion, arbitrary
+insurance histories, every pending-claim composition, or maximum-shape terminal
+cleanup beyond the named terminal-insurance withholding trace and adjacent
+source/CU guards.
 
 Additional row421 holdout coverage in
 `successor_custody_retry::v16_program_successor_custody_repair_retries_after_stale_former_insurance_ledger`
@@ -195,9 +204,8 @@ composes beneficiary succession, missing successor SPL custody, a keeper-created
 ATA, and a stale former-beneficiary ledger in the same terminal transaction. The
 stale-ledger suffix proves exact rollback of the preceding custody creation and
 unsigned payout; omitting only the stale optional ledger lets the same fee-payer
-route complete the exact terminal reserve payment. This is net-new composition
-evidence for the row421 terminal payout family, but row **421 remains OPEN** for
-the broader permissionless retirement and arbitrary-history obligations above.
+route complete the exact terminal reserve payment. This remains supporting
+composition evidence for the row421 terminal payout family.
 
 ## Row 416 funded-role source composition (2026-09-14)
 
