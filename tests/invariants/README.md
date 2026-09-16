@@ -1,5 +1,30 @@
 # Invariant-owned test coverage
 
+## Row 417 alternating receipt rails across two expiries (2026-09-16)
+
+The [receipt rail history child](cu/inv_067_receipt_rail_history.rs) adds bounded
+coverage for cumulative receipt entitlement across two committed backing releases.
+Thirty-two public LiteSVM histories cross classic/native secondary custody,
+exact/late expiry, first payment rail, unequal claimant priority and eager/deferred
+peer top-ups. Retained `CloseResolved` and `ClaimResolvedPayoutTopup` requests
+alternate rails between releases; same-transaction and fresh-blockhash retries
+must pay each increase in entitlement at most once. Claim-only calls before and
+at expiry cannot revive already-paid value or normalize the pending backing.
+
+Independent floors are 116/154/198 and 217/286/368. Every aborted expiry/payment,
+source-claim payment, receipt clearing and terminal replay suffix checks complete
+Account images, including SPL data and native lamports, plus the exact payer fee.
+Classic/native economic checkpoints must agree. Cleared receipts remain empty
+through later clock advances with both vaults still funded.
+
+This combines repeated expiry with alternating rails and delayed partial claims;
+the older rail matrix has one expiry, and the repeated-stock selector pays both
+receipts on the primary rail at each release. Six portfolios reach economic
+terminal state; owner exits and slab retirement are outside this increment.
+**Row 417 remains OPEN/missing; INV-067 remains `REFUTED_CURRENT`.** See the
+[rail history report](row417_rail_receipt_20260916.md) for exact commands, results,
+artifact provenance and limits. This bounded coverage does not establish closure.
+
 ## Lane 25 source expiry before mixed-role settlement (2026-09-16)
 
 The [unsettled-expiry owner](cu/inv_039_mixed_role_unsettled_expiry.rs) adds 48

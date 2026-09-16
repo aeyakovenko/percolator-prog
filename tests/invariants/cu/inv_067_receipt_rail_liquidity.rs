@@ -7,6 +7,9 @@
 use super::{late_expiry::World, *};
 use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_067_receipt_rail_history.rs"]
+mod rail_history;
+
 const FACES: [u128; 5] = [700, 0, 1_000, 0, 1_300];
 const CAPITAL: [u128; 5] = [1_000, 0, 1_000, 0, 1_000];
 const INITIAL_RESIDUAL: u128 = 501;

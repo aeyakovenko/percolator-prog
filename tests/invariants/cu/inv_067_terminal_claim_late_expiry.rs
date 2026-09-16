@@ -90,6 +90,20 @@ impl World {
         Self::before_receipts_with_staggered_sources_and_owners([Keypair::new(), Keypair::new()])
     }
 
+    pub(super) fn before_receipts_with_staggered_quote_rails(
+        setup: fn(&mut V16CuEnv),
+        decimals: u8,
+    ) -> Self {
+        Self::build_before_receipts(
+            [Keypair::new(), Keypair::new()],
+            Some(setup),
+            BACKING,
+            SourceShape::Staggered(14),
+            0,
+            decimals,
+        )
+    }
+
     pub(super) fn before_receipts_with_staggered_sources_and_owners(owners: [Keypair; 2]) -> Self {
         Self::before_receipts_with_staggered_claimants(owners, 14)
     }
