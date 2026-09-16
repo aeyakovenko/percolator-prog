@@ -16,6 +16,31 @@
 
 use super::*;
 
+fn inv032_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[test]
 fn v16_attack_force_close_source_backed_accounts_does_not_grow_source_liens() {
     const INITIAL_PRICE: u64 = 100;
@@ -175,37 +200,54 @@ fn v16_program_counterparty_lien_lifecycle_composition_is_source_complete() {
 
     let lifecycle_source =
         include_str!("../stateful/inv_026_reservation_and_encumbrance_conservation.rs");
-    assert!(lifecycle_source.contains(
-        "fn v16_program_counterparty_encumbrance_lifecycle_is_exact_across_routes_sides_and_terminal_modes"
+    assert!(inv032_source_defines_test(
+        lifecycle_source,
+        "v16_program_counterparty_encumbrance_lifecycle_is_exact_across_routes_sides_and_terminal_modes"
     ));
     let impairment_source =
         include_str!("../stateful/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs");
-    assert!(impairment_source
-        .contains("fn v16_program_liened_backing_expiry_route_matrix_preserves_owner_reduction"));
+    assert!(inv032_source_defines_test(
+        impairment_source,
+        "v16_program_liened_backing_expiry_route_matrix_preserves_owner_reduction"
+    ));
     let expiry_source = include_str!("inv_028_source_domain_realizability_cap.rs");
-    assert!(expiry_source
-        .contains("fn v16_program_expired_source_lien_route_matrix_preserves_bounded_owner_exit"));
-    assert!(expiry_source
-        .contains("fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress"));
+    assert!(inv032_source_defines_test(
+        expiry_source,
+        "v16_program_expired_source_lien_route_matrix_preserves_bounded_owner_exit"
+    ));
+    assert!(inv032_source_defines_test(
+        expiry_source,
+        "v16_program_shared_expiry_progress_matrix_preserves_terminal_progress"
+    ));
     let retry_source =
         include_str!("../stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs");
-    assert!(retry_source
-        .contains("fn v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing"));
-    assert!(retry_source
-        .contains("fn v16_program_shared_lien_expiry_refill_preserves_owner_attribution"));
+    assert!(inv032_source_defines_test(
+        retry_source,
+        "v16_program_haircut_conversion_retries_cannot_reuse_claim_or_backing"
+    ));
+    assert!(inv032_source_defines_test(
+        retry_source,
+        "v16_program_shared_lien_expiry_refill_preserves_owner_attribution"
+    ));
 
     let insurance_source = include_str!("inv_033_insurance_backed_lien_single_classification.rs");
-    assert!(insurance_source.contains(
-        "fn v16_program_public_source_lien_classification_never_double_counts_insurance"
+    assert!(inv032_source_defines_test(
+        insurance_source,
+        "v16_program_public_source_lien_classification_never_double_counts_insurance"
     ));
     let rollback_source = include_str!("inv_080_error_propagation_and_exact_rollback.rs");
-    assert!(rollback_source
-        .contains("fn v16_program_explicit_engine_error_dispositions_are_source_complete"));
-    assert!(rollback_source
-        .contains("fn v16_program_dispatch_and_entrypoints_preserve_every_handler_error"));
+    assert!(inv032_source_defines_test(
+        rollback_source,
+        "v16_program_explicit_engine_error_dispositions_are_source_complete"
+    ));
+    assert!(inv032_source_defines_test(
+        rollback_source,
+        "v16_program_dispatch_and_entrypoints_preserve_every_handler_error"
+    ));
     let transition_source =
         include_str!("inv_088_global_summaries_are_not_account_local_proofs.rs");
-    assert!(transition_source.contains(
-        "fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
+    assert!(inv032_source_defines_test(
+        transition_source,
+        "v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_and_witness"
     ));
 }
