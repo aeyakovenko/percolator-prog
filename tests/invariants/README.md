@@ -26,6 +26,34 @@ was found. **Row 416 remains OPEN/missing; INV-005 remains `REFUTED_CURRENT`.**
 See the [restoration report](row416_disabled_role_restoration_20260916.md) for
 the reachable schedule, exact commands, artifacts and remaining limits.
 
+## Row 422 native reward custody and terminal replay (2026-09-16)
+
+The [native reward child](cu/inv_045_native_reward_terminal.rs) adds sixteen public
+LiteSVM histories crossing four recipient-presence schedules, live versus resolved
+native payout, and both five-portfolio redemption orders. Paid Hybrid discovery
+precedes two fresh-report liquidations while the effective mark lags. The keeper
+receives only the current call's earned share; catchup to 980,000, native ATA
+recreation and terminal retries cannot recover an omitted reward.
+
+Independent fee/source books distinguish the 1,540,072 discovery atoms from the
+5,987/8,287 liquidation penalties, 1,995/2,762 eligible rewards and 37 externally
+donated unsynced lamports. SPL amounts, native lamports, rent, exact signer fees
+and all five terminal payouts reconcile. Sync, liquidation, resolution, payout
+and unwrap prefixes are rolled back by failing suffixes with complete Account
+checks. Recreated custody cannot revive `CloseResolved` or bypass the top-up
+route's missing-snapshot precondition while the vault still holds ample funds.
+
+The selector checks 32 liquidations, 112 terminal progress calls and 392 exact
+rollbacks; peak measured transaction CU is 322,832. This combines native custody
+and omitted rewards with full cohort redemption, beyond the existing classic SPL
+live-route and always-rewarded terminal products. It is bounded to one Hybrid
+source, fixed policy, zero funding, a flat keeper and two downward episodes;
+portfolio deletion, slab closure and snapshot-backed top-up payouts are outside
+this increment. **Row 422 remains OPEN/missing; INV-045 remains `REFUTED_CURRENT`.**
+See the [local report](row422_native_terminal_reward_20260916.md) for the public
+trace, exact commands, results and remaining limits. No current behavior violation
+was found in this product.
+
 ## Row 417 alternating receipt rails across two expiries (2026-09-16)
 
 The [receipt rail history child](cu/inv_067_receipt_rail_history.rs) adds bounded

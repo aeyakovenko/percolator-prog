@@ -6,6 +6,9 @@
 
 use super::*;
 
+#[path = "inv_045_native_reward_terminal.rs"]
+mod native_reward_terminal;
+
 const SHARE: u128 = 3_333;
 const FINAL: u64 = 980_000;
 const ACTION_CU: u64 = 500_000;
