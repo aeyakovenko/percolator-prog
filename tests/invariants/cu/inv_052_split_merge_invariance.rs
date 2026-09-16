@@ -1158,13 +1158,29 @@ struct Inv052PartitionClass {
     witnesses: &'static [(&'static str, &'static str)],
 }
 
-fn inv052_source_defines_function(source: &str, function: &str) -> bool {
-    let marker = format!("fn {function}");
-    source.lines().any(|line| {
-        line.trim()
-            .strip_prefix(&marker)
-            .is_some_and(|tail| tail.trim_start().starts_with('('))
-    })
+fn inv052_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
 }
 
 #[test]
@@ -1365,7 +1381,7 @@ fn v16_program_split_merge_operation_family_composition_is_source_complete() {
                     .unwrap_or_else(|error| panic!("read {path}: {error}"))
             });
             assert!(
-                inv052_source_defines_function(source, witness),
+                inv052_source_defines_test(source, witness),
                 "partition class '{}' lacks executable witness {path}#{witness}",
                 row.class,
             );
