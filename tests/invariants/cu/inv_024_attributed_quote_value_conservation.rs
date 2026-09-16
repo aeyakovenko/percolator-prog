@@ -35,6 +35,31 @@ mod shutdown_operator_departure;
 #[path = "inv_024_pnl_reward_receipt_history.rs"]
 mod pnl_reward_receipt_history;
 
+fn inv024_source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with('#') {
+            test_attribute = false;
+        }
+    }
+
+    false
+}
+
 #[test]
 fn v16_program_mixed_rail_withdrawal_retry_preserves_each_owners_claim() {
     use super::inv_018_quote_mint_vault_token_program_and_authority_integrity::{
@@ -681,7 +706,7 @@ fn v16_program_entitlement_effect_roster_is_source_complete() {
         let source = std::fs::read_to_string(root.join(owner_path))
             .unwrap_or_else(|error| panic!("read entitlement owner {owner_path}: {error}"));
         assert!(
-            source.contains(&format!("fn {owner_test}(")),
+            inv024_source_defines_test(&source, owner_test),
             "missing executable entitlement owner {owner_path}#{owner_test}"
         );
         assert!(
