@@ -104,6 +104,32 @@ bounded INV-005/020/024 coverage beyond Lane 11's flat consumed-backing product.
 [Lane 14 report](lane14_funded_hybrid_open_rotation_20260915.md) for the role matrix,
 independent oracle, overlap review, exact commands and remaining gaps.
 
+## Lane 13 pending users across provider expiry (2026-09-15)
+
+The existing [public-reserve owner](cu/inv_073_terminal_public_reserves.rs)
+adds sixteen public LiteSVM worlds with earned provider fees and unpaid insurance.
+Backing reaches exact/late expiry before user settlement or after its first
+successful continuation, with both user and reserve payout orders. All worlds
+still have a positive source claim at that boundary. Reserve holders do not sign;
+the keeper recreates closed insurance custody after user settlement and deletion.
+Exact owner entitlements, source/stock censuses, ledger attribution, rollback,
+rent and final principal retirement remain checked throughout.
+
+The selector passes 68 ranked user continuations, 216 exact rollbacks, 32 unsigned
+reserve payouts and 16 slab/vault closures; peak observed CU is 437,497 under
+600,000. An older signed-expiry control fails identically on the untouched base
+because it expects an authority error before canonical destination validation.
+Three other adjacent controls and all 16 selected INV-079 guards pass.
+
+This adds expiry during unfinished claims to the post-user reserve matrices.
+Lane 10's paid beneficiary succession is not repeated. **Rows 420/421 remain
+OPEN**, row 421 remains `missing`, and machine statuses are unchanged. No current
+implementation LoF/DoS/CU violation or production fix is claimed. Native custody,
+bankruptcy residuals, maximum shapes, arbitrary histories, ledger disposal and
+absent cleanup signers remain outside this finite increment. See the
+[Lane 13 report](lane13_terminal_provider_expiry_20260915.md) for exact commands,
+baseline failure evidence, artifact provenance and the overlap review.
+
 ## Lane 9 mixed-role shutdown and pending debt (2026-09-15)
 
 The existing [INV-039 mixed-role owner](cu/inv_039_mixed_role_resolution.rs)
