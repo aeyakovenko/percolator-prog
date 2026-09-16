@@ -162,7 +162,7 @@ cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-thread
   inv_045_no_free_mark_movement::public_carry_order::funding_carry_entitlement::v16_program_funding_reversal_preserves_carry_and_unsettled_owner_entitlement \
   inv_045_no_free_mark_movement::public_carry_order::target_arrival_entitlement::v16_program_target_arrival_plateau_and_restart_preserve_interleaved_owner_entitlement \
   inv_045_no_free_mark_movement::public_carry_order::target_arrival_entitlement::moving_reset_routes::v16_program_repeated_moving_target_resets_preserve_carry_across_matcher_handoffs \
-  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::retained_penalty_handoff::paid_origin_routes::v16_program_paid_origin_routes_preserve_old_penalty_and_fresh_reward_through_missing_tails \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::retained_penalty_handoff::paid_origin_routes::v16_program_paid_origin_routes_preserve_old_penalty_and_block_trade_origin_rewards \
   inv_020_authenticated_clock_slot_and_oracle_provenance::staged_action_observations::active_keeper_observations::cpi_keeper_observations::generated_current_hybrid::v16_program_generated_current_hybrid_recipient_routes_match_full_health_and_rollback \
   inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::hybrid_recipient_provenance::v16_program_dual_hybrid_reward_lineage_survives_recipient_routes_and_payout
 cargo test --locked --offline --test v16_program_fuzz_regressions -- --exact --nocapture --test-threads=1 \

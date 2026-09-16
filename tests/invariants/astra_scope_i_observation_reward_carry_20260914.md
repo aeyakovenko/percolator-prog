@@ -191,7 +191,7 @@ export CARGO_TARGET_DIR="$PWD/target/host" TMPDIR="$PWD/target/host"
 export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 export PERCOLATOR_FUZZ_SBF=/run/percolator-pr135-scope-w-20260913/target/deploy/percolator_prog.so
 carry=inv_045_no_free_mark_movement::public_carry_order::generated_fractional_routes::fractional_reset_histories::v16_program_fractional_reset_histories_preserve_route_and_residue_adjusted_owner_value
-provenance=inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::retained_penalty_handoff::paid_origin_routes::v16_program_paid_origin_routes_preserve_old_penalty_and_fresh_reward_through_missing_tails
+provenance=inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::retained_penalty_handoff::paid_origin_routes::v16_program_paid_origin_routes_preserve_old_penalty_and_block_trade_origin_rewards
 cargo test --locked --offline --test v16_cu -- --exact --list "$carry" "$provenance"
 cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 "$carry" "$provenance"
 cargo test --locked --offline --test v16_cu "$provenance" -- --exact --nocapture --test-threads=1

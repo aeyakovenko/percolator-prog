@@ -423,17 +423,18 @@ fn run_retained_handoff_impl(
             );
             assert!(closed < before.assets[0].oi_eff_long_q);
             let penalty = fee(closed, price, 5);
-            let reward = if phase == 0 {
-                0
-            } else {
+            let penalty_reclaimable = phase != 0 && routes.is_none();
+            let reward = if penalty_reclaimable {
                 penalty * SHARE / 10_000
+            } else {
+                0
             };
             assert!(penalty > 0);
             if phase == 0 {
                 old_penalty += penalty;
                 assert_eq!(budgets, [0, 0]);
             } else {
-                assert!(old_penalty > 0 && reward > 0);
+                assert!(old_penalty > 0);
                 if phase == 1 {
                     assert!(
                         price > MARK && MARK > FRESH_TARGET,
@@ -445,10 +446,18 @@ fn run_retained_handoff_impl(
                 }
                 new_penalties += penalty;
                 rewards += reward;
-                let retained = penalty - reward;
-                budgets[0] += retained / 2;
-                budgets[1] += retained.div_ceil(2);
-                reward_rollbacks += 1;
+                if penalty_reclaimable {
+                    assert!(reward > 0);
+                    let retained = penalty - reward;
+                    budgets[0] += retained / 2;
+                    budgets[1] += retained.div_ceil(2);
+                    reward_rollbacks += 1;
+                } else {
+                    assert_eq!(
+                        reward, 0,
+                        "trade-origin liquidation penalties must not become cranker rewards"
+                    );
+                }
             }
             let mut expected = before_values;
             expected[0] -= penalty as i128;
@@ -468,8 +477,8 @@ fn run_retained_handoff_impl(
             );
             assert_eq!(
                 after.insurance - after.insurance_domain_budget_remaining_total,
-                discovery + old_penalty,
-                "old discovery and liquidation stock cannot become new domain entitlement"
+                discovery + old_penalty + new_penalties - rewards - budgets.iter().sum::<u128>(),
+                "trade-origin discovery and liquidation stock cannot become new domain entitlement"
             );
             assert_eq!(
                 after.assets[0].oi_eff_long_q,
@@ -559,7 +568,7 @@ fn run_retained_handoff_impl(
         ));
     }
     assert_eq!(liquidation_count, 2);
-    assert_eq!(reward_rollbacks, 1);
+    assert_eq!(reward_rollbacks, usize::from(routes.is_none()));
     assert!(
         late_rollbacks >= 2,
         "fresh publication and liquidation both roll back"
@@ -628,11 +637,11 @@ fn run_retained_handoff_impl(
         .all(|amount| *amount == 0));
     assert_eq!(
         group.insurance_domain_budget_remaining_total,
-        new_penalties - rewards
+        budgets.iter().sum::<u128>()
     );
     assert_eq!(
         group.insurance - group.insurance_domain_budget_remaining_total,
-        discovery + old_penalty
+        discovery + old_penalty + new_penalties - rewards - budgets.iter().sum::<u128>()
     );
     assert_cu_within("retained penalty trade", peak_trade, TRADE_CU_LIMIT);
     assert_cu_within("retained penalty crank", peak_crank, crank_limit);

@@ -1362,10 +1362,18 @@ pr	kind	severity	primary_invariant	affected_invariants	omitted_dimension	require
 # under retained_penalty_handoff. Four paid-discovery transports x two observation
 # orders carry old retained penalties into fresh liquidation and full catchup with
 # an exposed AuthMark recipient. Eight histories preserve 1540072 discovery atoms,
-# 5987 old penalty atoms, 2762 fresh reward atoms and distinct 9-atom recipient PnL.
-# Exact 3762-atom payouts include eight restored SPL prefixes. No new Hybrid-recipient
-# cell, production correction or generic provenance reclassification claim. OPEN.
+# 5987 old penalty atoms, zero trade-origin reward/domain-budget atoms and distinct
+# 9-atom recipient PnL. Exact own-principal exits include restored SPL prefixes.
+# No production correction or generic provenance reclassification claim. OPEN.
 # See astra_scope_i_observation_reward_carry_20260914.md for commands and limits.
+# Row 422 Hybrid-recipient route extension (2026-09-16): the bounded selector
+# cu/inv_045_paid_origin_hybrid_recipient.rs now crosses all four single/batch x
+# CPI/no-CPI discovery transports and both publish/liquidate orders while requiring
+# authenticated reports for both the liquidation source and reward-recipient assets.
+# This closes the previous finite CPI Hybrid-recipient transport omission and
+# asserts the same zero reward/domain-budget rule for the Hybrid-recipient route.
+# Funding/maintenance/policy products, terminal reward cohorts, maxima, arbitrary
+# histories and unbounded whole-route entitlement remain outside scope. OPEN.
 # Row422 source-composition hardening (2026-09-14): cu/inv_045_no_free_mark_movement.rs,
 # v16_program_mark_writer_and_trade_exit_composition_is_source_complete now pins
 # PermissionlessCrank reward/fee provenance. The gate requires complete-health

@@ -117,7 +117,7 @@ pub(super) fn refresh(
 }
 
 #[test]
-fn v16_program_paid_origin_routes_preserve_old_penalty_and_fresh_reward_through_missing_tails() {
+fn v16_program_paid_origin_routes_preserve_old_penalty_and_block_trade_origin_rewards() {
     let mut reference = None;
     let mut peak = 0;
     let mut worlds = 0;
