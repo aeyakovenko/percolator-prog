@@ -1,5 +1,32 @@
 # Invariant-owned test coverage
 
+## Row 422 Hybrid rewards through portfolio deletion and CloseSlab (2026-09-16)
+
+The [reward slab child](cu/inv_045_reward_slab_closure.rs) adds one bounded
+LiteSVM selector with four public histories: fresh liquidation reward present or
+omitted, crossed with keeper deletion first or last. Paid Hybrid discovery and
+one lagged-mark liquidation precede frozen-price redemption, all five portfolio
+deletions, unsigned payment to a distinct insurance beneficiary, and final slab
+closure. The last-keeper histories prove that both its funded and paid-but-still-
+allocated states block reserve withdrawal and final closure.
+
+Input-derived payouts separate the 1,995 earned reward from the 5,987 penalty.
+The beneficiary receives 3,992 or 5,987 atoms, final closure burns exactly
+1,540,072 unbudgeted discovery atoms, and the admin receives only 19 external
+surplus atoms plus exact vault/market/portfolio rent. Retained keeper requests
+roll back real payouts, deletion, insurance payment, burn, sweep and tombstone
+writes. The selector checks four liquidations, 28 terminal progress calls and
+136 complete Account rollbacks; measured peak is 318,538 CU.
+
+This adds final disposition to the existing destination-retry, CPI-switching
+and native-terminal products, which leave the market slab allocated. It is
+classic SPL, one provider, fixed policy, zero funding, a flat keeper, one
+downward episode and zero settlement dust; no snapshot-backed top-up, native
+closure or general-history guarantee is added. **Row 422 remains OPEN/missing;
+INV-045 remains `REFUTED_CURRENT`.** No current behavior violation was found.
+See the [report](row422_reward_slab_closure_20260916.md) for exact selectors,
+results, artifact provenance, rollback accounting and authority assumptions.
+
 ## Row 416 burned asset-admin restoration (2026-09-16)
 
 The [disabled-role child](cu/inv_005_disabled_role_restoration.rs) adds four
