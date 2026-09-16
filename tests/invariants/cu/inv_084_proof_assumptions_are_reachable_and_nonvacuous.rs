@@ -411,6 +411,12 @@ fn v16_program_every_mounted_explicit_kani_assumption_is_exactly_inventoried() {
 
         let owner_source = source_cache.get(columns[0]).unwrap();
         assert!(
+            columns[3].starts_with("kani_"),
+            "owning proof must be a reviewed Kani proof: {}#{}",
+            columns[0],
+            columns[3],
+        );
+        assert!(
             inv_084_source_defines_kani_proof(owner_source, columns[3]),
             "owning proof {} is absent from {} or is not a #[kani::proof]",
             columns[3],
@@ -420,6 +426,11 @@ fn v16_program_every_mounted_explicit_kani_assumption_is_exactly_inventoried() {
         let witness_source = source_cache
             .get("tests/invariants/kani/inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs")
             .unwrap();
+        assert!(
+            columns[5].starts_with("kani_"),
+            "proof witness must be a reviewed Kani proof: {}",
+            columns[5],
+        );
         assert!(
             inv_084_source_defines_kani_proof(witness_source, columns[5]),
             "proof witness {} is absent or is not a #[kani::proof]",
@@ -436,6 +447,10 @@ fn v16_program_every_mounted_explicit_kani_assumption_is_exactly_inventoried() {
         assert!(
             !evidence_function.is_empty(),
             "public evidence function is empty for {evidence_file}"
+        );
+        assert!(
+            evidence_function.starts_with("v16_") || evidence_function.starts_with("host_"),
+            "public evidence must be a reviewed v16 or host regression: {evidence_file}#{evidence_function}"
         );
         let evidence_source = source_cache
             .entry(evidence_file.to_owned())
@@ -568,6 +583,10 @@ fn v16_program_every_mounted_kani_harness_has_a_nonvacuity_disposition() {
                 assert!(
                     !evidence_function.is_empty(),
                     "concrete fixture evidence function is empty for {evidence_file}"
+                );
+                assert!(
+                    evidence_function.starts_with("v16_") || evidence_function.starts_with("host_"),
+                    "concrete fixture evidence must be a reviewed v16 or host regression: {evidence_file}#{evidence_function}"
                 );
                 let evidence_source = std::fs::read_to_string(manifest.join(evidence_file))
                     .unwrap_or_else(|error| panic!("read {evidence_file}: {error}"));
