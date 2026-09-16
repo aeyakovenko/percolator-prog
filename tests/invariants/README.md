@@ -1,5 +1,13 @@
 # Invariant-owned test coverage
 
+## INV-005 finding-blind coverage gap (2026-09-16)
+
+The [generator/oracle audit](inv_005_finding_blind_gap_20260916.md) finds no
+existing independent coverage of funded authority succession composed with
+malicious current-oracle economic effects. It identifies the next generic
+reference model and sequence coverage needed. **Row 416 remains OPEN/missing;
+INV-005 remains `REFUTED_CURRENT`.** No conformance test is duplicated.
+
 ## Row 417 independent coverage audit (2026-09-16)
 
 **Row 417 remains OPEN/missing; INV-067 remains `REFUTED_CURRENT`.** The
