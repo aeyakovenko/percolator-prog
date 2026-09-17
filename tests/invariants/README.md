@@ -183,6 +183,16 @@ Four worlds pass: 16 exact rollbacks, four live reductions and 20 owner exits;
 peak successful cost is 165,785 CU. Both exact selectors in the touched file
 pass on rebuilt SBF. Row 416 remains OPEN; production and status TSVs are unchanged.
 
+The [last-exposure follow-up](row416_last_resolved_exposure_20260917.md) tests
+cold-admin oracle containment after terminal settlement removes just one side's
+exposure. Both asset scopes and settlement orders retain the incumbent until the
+last exposed owner exits. Rejected management restores real terminal SPL payouts;
+empty-state management then preserves all five owners' exact principal. This is
+one new bounded public history: four worlds, eight exact payout rollbacks and
+twenty owner payouts pass, with peak successful CU 126,361 (paired release
+simulation: 126,572). All three exact selectors in the touched file pass on the
+private rebuilt SBF. Production and TSVs stay unchanged; row 416 remains OPEN.
+
 ## Row 427 regression health (2026-09-17)
 
 [The focused follow-up](row427_regression_health_20260917.md) adds three-pair

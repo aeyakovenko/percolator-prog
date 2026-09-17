@@ -185,70 +185,70 @@ fn v16_program_retained_empty_oracle_handoff_rechecks_exposure_before_payout() {
     eprintln!("row416 retained oracle exposure: worlds=4, funded_rejections=8, unauthorized_marks=4, prefix_retries=4, exact_owner_payouts=20, peak_success_cu={peak_cu}");
 }
 
+fn reject(
+    env: &mut V16Svm,
+    tx: Transaction,
+    index: u8,
+    reason: PercolatorError,
+    wrapper_prefixes: usize,
+    spl_prefixes: usize,
+) {
+    tx.verify().unwrap();
+    assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
+    let payer = tx.message.account_keys[0];
+    let budget = |index: usize| {
+        let ix = &tx.message.instructions[index];
+        assert_eq!(
+            tx.message.account_keys[ix.program_id_index as usize],
+            solana_sdk::compute_budget::id()
+        );
+        solana_program::borsh1::try_from_slice_unchecked::<ComputeBudgetInstruction>(&ix.data)
+            .unwrap()
+    };
+    let ComputeBudgetInstruction::SetComputeUnitLimit(limit) = budget(1) else {
+        panic!("CU limit")
+    };
+    let ComputeBudgetInstruction::SetComputeUnitPrice(price) = budget(2) else {
+        panic!("CU price")
+    };
+    let fee = u64::from(tx.message.header.num_required_signatures)
+        * FeeStructure::default().lamports_per_signature
+        + (u128::from(limit) * u128::from(price)).div_ceil(1_000_000) as u64;
+    let mut keys = tx.message.account_keys.clone();
+    keys.extend([env.market, env.foreign_market, env.mint, env.vault]);
+    for actor in &env.actors {
+        keys.extend([actor.portfolio, actor.source_token, actor.destination_token]);
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    let frame: Vec<_> = keys
+        .into_iter()
+        .map(|key| (key, env.svm.get_account(&key)))
+        .collect();
+    let error = env.land_retained(tx).expect_err("atomic rejection");
+    let expected =
+        TransactionError::InstructionError(index, InstructionError::Custom(reason as u32));
+    assert!(error.contains(&format!("{expected:?}")), "{error}");
+    for (program, count) in [
+        (env.program_id, wrapper_prefixes),
+        (spl_token::ID, spl_prefixes),
+    ] {
+        assert_eq!(
+            error.matches(&format!("Program {program} success")).count(),
+            count,
+            "executed prefixes: {error}"
+        );
+    }
+    for (key, mut before) in frame {
+        if key == payer {
+            before.as_mut().unwrap().lamports -= fee;
+        }
+        assert_eq!(env.svm.get_account(&key), before, "rollback account {key}");
+    }
+}
+
 #[test]
 fn v16_program_retained_oracle_handoff_after_cold_admin_return_preserves_drain_exit() {
-    fn reject(
-        env: &mut V16Svm,
-        tx: Transaction,
-        index: u8,
-        reason: PercolatorError,
-        wrapper_prefixes: usize,
-        spl_prefixes: usize,
-    ) {
-        tx.verify().unwrap();
-        assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
-        let payer = tx.message.account_keys[0];
-        let budget = |index: usize| {
-            let ix = &tx.message.instructions[index];
-            assert_eq!(
-                tx.message.account_keys[ix.program_id_index as usize],
-                solana_sdk::compute_budget::id()
-            );
-            solana_program::borsh1::try_from_slice_unchecked::<ComputeBudgetInstruction>(&ix.data)
-                .unwrap()
-        };
-        let ComputeBudgetInstruction::SetComputeUnitLimit(limit) = budget(1) else {
-            panic!("CU limit")
-        };
-        let ComputeBudgetInstruction::SetComputeUnitPrice(price) = budget(2) else {
-            panic!("CU price")
-        };
-        let fee = u64::from(tx.message.header.num_required_signatures)
-            * FeeStructure::default().lamports_per_signature
-            + (u128::from(limit) * u128::from(price)).div_ceil(1_000_000) as u64;
-        let mut keys = tx.message.account_keys.clone();
-        keys.extend([env.market, env.foreign_market, env.mint, env.vault]);
-        for actor in &env.actors {
-            keys.extend([actor.portfolio, actor.source_token, actor.destination_token]);
-        }
-        keys.sort_unstable();
-        keys.dedup();
-        let frame: Vec<_> = keys
-            .into_iter()
-            .map(|key| (key, env.svm.get_account(&key)))
-            .collect();
-        let error = env.land_retained(tx).expect_err("atomic rejection");
-        let expected =
-            TransactionError::InstructionError(index, InstructionError::Custom(reason as u32));
-        assert!(error.contains(&format!("{expected:?}")), "{error}");
-        for (program, count) in [
-            (env.program_id, wrapper_prefixes),
-            (spl_token::ID, spl_prefixes),
-        ] {
-            assert_eq!(
-                error.matches(&format!("Program {program} success")).count(),
-                count,
-                "executed prefixes: {error}"
-            );
-        }
-        for (key, mut before) in frame {
-            if key == payer {
-                before.as_mut().unwrap().lamports -= fee;
-            }
-            assert_eq!(env.svm.get_account(&key), before, "rollback account {key}");
-        }
-    }
-
     const COLD: usize = 2;
     const INTERIM: usize = 4;
     const SUCCESSOR: usize = 3;
@@ -440,4 +440,198 @@ fn v16_program_retained_oracle_handoff_after_cold_admin_return_preserves_drain_e
         }
     }
     eprintln!("row416 cold-admin return/drain exit: worlds=4, exact_rejections=16, handoff_rollbacks=4, SPL_rollbacks=8, live_reductions=4, exact_owner_exits=20, peak_success_cu={peak_cu}");
+}
+
+#[test]
+fn v16_program_cold_oracle_handoff_waits_for_last_resolved_exposure() {
+    fn close(env: &V16Svm, owner: usize) -> Transaction {
+        let actor = &env.actors[owner];
+        Transaction::new_signed_with_payer(
+            &[
+                ComputeBudgetInstruction::request_heap_frame(256 * 1024),
+                ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+                ComputeBudgetInstruction::set_compute_unit_price(0),
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: vec![
+                        AccountMeta::new_readonly(actor.signer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(actor.portfolio, false),
+                        AccountMeta::new(actor.destination_token, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    data: ProgInstruction::CloseResolved {
+                        fee_rate_per_slot: 0,
+                    }
+                    .encode(),
+                },
+            ],
+            Some(&actor.signer.pubkey()),
+            &[&actor.signer],
+            env.svm.latest_blockhash(),
+        )
+    }
+
+    const COLD: usize = 2;
+    const SUCCESSOR: usize = 3;
+    const BYSTANDER: usize = 4;
+    let mut peak_cu = 0;
+    let mut peak_release_cu = 0;
+    for asset in [0u16, 1] {
+        for first in [0usize, 1] {
+            let config = MarketConfig::default();
+            let deposits = config.actor_deposits;
+            let mut env = V16Svm::new([0x48; 32], config);
+            env.begin_public_trace();
+            env.update_asset_authority_from_admin(asset, processor::ASSET_AUTH_ADMIN, COLD)
+                .unwrap();
+            env.trade_no_cpi(
+                0,
+                1,
+                asset,
+                10 * percolator::POS_SCALE as i128,
+                INITIAL_PRICE,
+                0,
+            )
+            .unwrap();
+            let profile = env.primary_profile(asset as usize);
+            let sequences = env.primary_control_sequences(asset as usize);
+            let peer = (1 - asset) as usize;
+            let peer_profile = env.primary_profile(peer);
+            let peer_sequences = env.primary_control_sequences(peer);
+            assert_ne!(
+                profile.oracle_authority,
+                env.actors[COLD].signer.pubkey().to_bytes()
+            );
+            let takeover = env.build_retained_asset_authority_handoff_between_actors(
+                asset,
+                processor::ASSET_AUTH_ORACLE,
+                COLD,
+                SUCCESSOR,
+            );
+            env.resolve_market().unwrap();
+            assert_eq!(env.primary_market_state().1.mode, MarketModeV16::Resolved);
+            assert_eq!(env.primary_control_sequences(asset as usize), sequences);
+            assert_eq!(env.primary_profile(asset as usize), profile);
+
+            // The first real terminal payout must roll back if management would
+            // seize the oracle while the opposite side still has an owner.
+            let first_close = close(&env, first);
+            let bundle = env.bundle_retained_transactions(&[first_close.clone(), takeover.clone()]);
+            reject(&mut env, bundle, 4, PercolatorError::EngineLockActive, 1, 1);
+            env.land_retained(first_close)
+                .expect("identical owner settlement survives the rejected management suffix");
+            assert_eq!(
+                u128::from(env.token_amount(env.actors[first].destination_token)),
+                deposits[first]
+            );
+            let partial = env.primary_market_state().1;
+            let selected = partial.assets[asset as usize];
+            let size = 10 * percolator::POS_SCALE;
+            assert_eq!(
+                (selected.oi_eff_long_q, selected.oi_eff_short_q),
+                if first == 0 { (0, size) } else { (size, 0) },
+                "exercise each funded-oracle OI arm with its opposite side empty"
+            );
+            assert_eq!(
+                (
+                    selected.stored_pos_count_long,
+                    selected.stored_pos_count_short
+                ),
+                if first == 0 { (0, 1) } else { (1, 0) }
+            );
+            assert_eq!(
+                partial.c_tot,
+                deposits.iter().sum::<u128>() - deposits[first]
+            );
+            assert_eq!(partial.pnl_pos_tot, 0);
+            assert_eq!(partial.vault, partial.c_tot);
+            assert_eq!(env.primary_control_sequences(asset as usize), sequences);
+
+            // Closing an unrelated flat portfolio cannot release the incumbent's
+            // remaining funded authority. This rejection starts with only one side.
+            let bystander_close = close(&env, BYSTANDER);
+            let bundle =
+                env.bundle_retained_transactions(&[bystander_close.clone(), takeover.clone()]);
+            reject(&mut env, bundle, 4, PercolatorError::EngineLockActive, 1, 1);
+            assert_eq!(env.primary_profile(asset as usize), profile);
+            env.land_retained(bystander_close).unwrap();
+
+            let last = 1 - first;
+            let last_close = close(&env, last);
+            let release = env.bundle_retained_transactions(&[last_close.clone(), takeover.clone()]);
+            release.verify().unwrap();
+            assert!(bincode::serialized_size(&release).unwrap() <= 1_232);
+            let simulated = env.svm.simulate_transaction(release.into()).expect(
+                "the final exposed owner can exit before cold management in one transaction",
+            );
+            assert!(simulated.compute_units_consumed <= 1_400_000);
+            peak_release_cu = peak_release_cu.max(simulated.compute_units_consumed);
+            env.land_retained(last_close).unwrap();
+            let flat = env.primary_market_state();
+            let selected = flat.1.assets[asset as usize];
+            assert_eq!((selected.oi_eff_long_q, selected.oi_eff_short_q), (0, 0));
+            assert_eq!(
+                (
+                    selected.stored_pos_count_long,
+                    selected.stored_pos_count_short
+                ),
+                (0, 0)
+            );
+            assert_eq!(flat.1.c_tot, deposits[COLD] + deposits[SUCCESSOR]);
+            assert_eq!(flat.1.vault, flat.1.c_tot);
+            assert_eq!(env.primary_control_sequences(asset as usize), sequences);
+            env.land_retained(takeover)
+                .expect("retained cold consent becomes admissible after the last exposure exits");
+            assert_eq!(
+                env.primary_market_state(),
+                flat,
+                "management moves no owner value"
+            );
+            let mut expected_profile = profile;
+            expected_profile.oracle_authority = env.actors[SUCCESSOR].signer.pubkey().to_bytes();
+            assert_eq!(env.primary_profile(asset as usize), expected_profile);
+            let mut expected_sequences = sequences;
+            expected_sequences.authority_epoch += 1;
+            assert_eq!(
+                env.primary_control_sequences(asset as usize),
+                expected_sequences
+            );
+
+            for owner in [COLD, SUCCESSOR] {
+                env.close_resolved_primary_signed(owner).unwrap();
+            }
+            for (owner, deposited) in deposits.into_iter().enumerate() {
+                assert_eq!(
+                    u128::from(env.token_amount(env.actors[owner].destination_token)),
+                    deposited,
+                    "owner {owner} receives exactly their own principal"
+                );
+            }
+            let settled = env.primary_market_state().1;
+            assert_eq!(
+                (settled.c_tot, settled.pnl_pos_tot, settled.vault),
+                (0, 0, 0)
+            );
+            assert_eq!(env.token_amount(env.vault), 0);
+            assert_eq!(env.token_supply_observed(), env.initial_token_supply);
+            assert_eq!(env.mint_supply() as u128, env.initial_token_supply);
+            assert_eq!(env.primary_profile(peer), peer_profile);
+            assert_eq!(env.primary_control_sequences(peer), peer_sequences);
+            let trace = env.finish_public_trace();
+            trace.validate_public_execution().unwrap();
+            assert_eq!(trace.steps.iter().filter(|step| !step.succeeded).count(), 2);
+            peak_cu = peak_cu.max(
+                trace
+                    .steps
+                    .iter()
+                    .filter_map(|step| step.compute_units)
+                    .max()
+                    .unwrap(),
+            );
+        }
+    }
+    eprintln!("row416 last resolved exposure: worlds=4, exact_rejections=8, SPL_rollbacks=8, empty_management_controls=4, exact_owner_payouts=20, peak_success_cu={peak_cu}, peak_simulated_release_cu={peak_release_cu}");
 }
