@@ -100,6 +100,15 @@ All four worlds pass with twenty exact owner payouts; peak successful transactio
 cost is 142,495 CU. Production and status TSVs are unchanged; row 416 and broader
 loss/claim/lifecycle compositions remain OPEN.
 
+The [cold-admin return follow-up](row416_cold_admin_drain_exit_20260917.md)
+retains incumbent oracle consent over live exposure and admin A -> B -> A,
+then crosses Active -> DrainOnly without an epoch change. A rejected trade
+suffix restores an executed oracle handoff; the original signed handoff then
+succeeds, followed by authenticated observation, reduction and full principal exit.
+Four worlds pass: 16 exact rollbacks, four live reductions and 20 owner exits;
+peak successful cost is 165,785 CU. Both exact selectors in the touched file
+pass on rebuilt SBF. Row 416 remains OPEN; production and status TSVs are unchanged.
+
 ## Row 427 regression health (2026-09-17)
 
 [The focused follow-up](row427_regression_health_20260917.md) adds three-pair
