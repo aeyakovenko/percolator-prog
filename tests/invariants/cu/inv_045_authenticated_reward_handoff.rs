@@ -191,7 +191,7 @@ fn run_authenticated_handoff(
     assert_eq!(funding_per_lot, i128::from(max_funding != 0));
     let mut peak_cu = 0;
     let mut late_rejections = 0;
-    let mut rewarded_rollbacks = 0;
+    let mut liquidation_rollbacks = 0;
     let mut worlds = 0;
     for &fresh_price in fresh_prices {
         for &share in shares {
@@ -405,13 +405,29 @@ fn run_authenticated_handoff(
                             continue;
                         }
                         let penalty = fee(closed, ACCEPTED, 5);
-                        let reward = penalty * u128::from(share) / 10_000;
+                        // The fresh report has not replaced the paid effective price yet.
+                        let reward = 0;
+                        assert!(penalty * u128::from(share) / 10_000 > 0);
+                        assert_ne!(ACCEPTED, fresh_price);
+                        let provenance = state::read_asset_oracle_profile(
+                            &env.svm.get_account(&env.market).unwrap().data,
+                            0,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            provenance.effective_price_provenance,
+                            percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
+                        );
+                        assert!(after
+                            .insurance_domain_budget
+                            .iter()
+                            .all(|amount| *amount == 0));
                         assert!(before_cert.certified_liq_deficit > 0 && current[0]);
                         assert_eq!(
                             health_cert(&env.portfolio_state(target)).certified_liq_deficit,
                             0
                         );
-                        assert!(closed < 100 * POS_SCALE && reward > 0);
+                        assert!(closed < 100 * POS_SCALE && penalty > 0);
                         for wrong_price in [ENTRY, ACCEPTED_PRINT, raw_print, MARK, fresh_price] {
                             assert_ne!(penalty, fee(closed, wrong_price, 5));
                         }
@@ -420,12 +436,12 @@ fn run_authenticated_handoff(
                         after_values[4] += reward as i128;
                         assert_eq!(values(&env, portfolios), after_values);
                         assert_eq!(after.insurance - before.insurance, penalty - reward);
-                        rewarded_rollbacks += 1;
+                        liquidation_rollbacks += 1;
                         liquidation = Some((closed, penalty, reward));
                         break;
                     }
                     let (closed, penalty, reward) =
-                        liquidation.expect("bounded rewarded liquidation");
+                        liquidation.expect("bounded paid-origin liquidation");
 
                     peak_cu = peak_cu.max(submit(
                         &mut env,
@@ -487,7 +503,7 @@ fn run_authenticated_handoff(
                             ],
                             &[&owners[4]],
                         )
-                        .expect("keeper realizes only original principal and authenticated reward");
+                        .expect("keeper realizes only original principal during paid-origin lag");
                     assert_cu_within("authenticated keeper payout", withdraw_cu, CUSTODY_CU_LIMIT);
                     expected[4] = 0;
                     assert_eq!(values(&env, portfolios), expected);
@@ -533,8 +549,8 @@ fn run_authenticated_handoff(
         worlds,
         fresh_prices.len() * shares.len() * raw_prints.len() * 2
     );
-    assert_eq!(rewarded_rollbacks, worlds);
-    println!("authenticated handoff: max_funding={max_funding}, funding_per_lot={funding_per_lot}, worlds={worlds}, late_rollbacks={late_rejections}, reward_rollbacks={rewarded_rollbacks}, peak_transaction_cu={peak_cu}");
+    assert_eq!(liquidation_rollbacks, worlds);
+    println!("authenticated handoff: max_funding={max_funding}, funding_per_lot={funding_per_lot}, worlds={worlds}, late_rollbacks={late_rejections}, liquidation_rollbacks={liquidation_rollbacks}, peak_transaction_cu={peak_cu}");
 }
 
 #[test]

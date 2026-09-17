@@ -290,6 +290,16 @@ fn v16_program_caught_up_hybrid_reward_uses_selected_asset_provenance_in_both_hi
             assert_eq!(env.token_amount(env.vault), vault);
         }
 
+        // Catch-up can reuse the accepted target, but a health refresh needs
+        // authenticated evidence from the execution slot.
+        let before_refresh = frame(&env, &keys);
+        let error = crank(&mut env, target, hints.clone(), &[report], true)
+            .expect_err("prior-slot report cannot refresh current health");
+        assert!(is_engine_non_progress_error(&error), "{error}");
+        assert_eq!(frame(&env, &keys), before_refresh);
+        report = env.set_pyth_price_with_conf(&feed, REPORT as i64, -6, 0, 103);
+        keys.push(report);
+
         let fee_at = |quantity: u128, price: u64| {
             ((quantity * price as u128).div_ceil(POS_SCALE) * 5).div_ceil(10_000)
         };
@@ -301,6 +311,17 @@ fn v16_program_caught_up_hybrid_reward_uses_selected_asset_provenance_in_both_hi
             let before_peer = env.svm.get_account(&peer);
             max_cu = max_cu.max(crank(&mut env, target, hints.clone(), &[report], true).unwrap());
             let after = env.market_state().1;
+            let profile = state::read_asset_oracle_profile(
+                &env.svm.get_account(&env.market).unwrap().data,
+                1,
+            )
+            .unwrap();
+            assert_eq!(profile.oracle_target_publish_time, 103);
+            assert_eq!(profile.last_good_oracle_slot, 4);
+            assert_eq!(
+                profile.effective_price_provenance,
+                percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED
+            );
             assert_eq!(after.assets[1].effective_price, REPORT);
             assert_eq!(after.assets[0].effective_price, ENTRY);
             assert_eq!(

@@ -1,5 +1,17 @@
 # Invariant-owned test coverage
 
+## Row 422 regression health (2026-09-17)
+
+[The focused follow-up](row422_regression_health_20260917.md) reproduces both
+mark-movement audit failures at `8fc4787c` with a rebuilt current-engine SBF.
+Paid-origin handoff had a stale positive-reward expectation during price lag;
+selected-asset catch-up omitted current-slot evidence for health refresh. The
+test corrections preserve zero paid-origin rewards, assert the old-report
+rollback, and restore positive selected-asset rewards in both hint orders.
+The same two exact selectors now pass (16 handoff worlds and two hint orders).
+No production issue was confirmed; row 422 and all invariant statuses remain
+unchanged. The audit records commands, artifacts and kept-open composition gaps.
+
 ## Row 411 fee/policy regression health (2026-09-17)
 
 [The targeted follow-up](row411_regression_health_20260917.md) reproduces all three
