@@ -1,5 +1,15 @@
 # Invariant-owned test coverage
 
+## Row 427 regression health (2026-09-17)
+
+[The focused follow-up](row427_regression_health_20260917.md) adds three-pair
+cross-zero competition through all four trade routes: 16 histories, 32 direct
+flips, 16 bounded close/reopen reversals and 64 exact rollbacks. The new exact
+selector passes on rebuilt current-main SBF; peak CU is 309,383 and the largest
+bundle is 979 bytes. It distinguishes transient attach headroom from final OI
+and retries unchanged flip requests after competing-prefix rollback. No production
+issue is confirmed. Row 427 remains OPEN; status TSVs and production are unchanged.
+
 ## Rows 420/421/423/433 regression health (2026-09-17)
 
 [The focused follow-up](row420421423433_regression_health_20260917.md) updates the

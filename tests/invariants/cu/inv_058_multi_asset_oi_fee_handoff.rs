@@ -22,6 +22,9 @@ mod pnl_terminal_handoff;
 #[path = "inv_058_capacity_claim_composition.rs"]
 mod capacity_claim_composition;
 
+#[path = "inv_058_competing_cross_zero.rs"]
+mod competing_cross_zero;
+
 const ASSETS: usize = 2;
 const HANDOFF_FEE_BPS: u64 = 100;
 type Legs = Vec<(u16, i128)>;
