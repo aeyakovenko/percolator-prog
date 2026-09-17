@@ -16,6 +16,7 @@ use solana_sdk::{instruction::InstructionError, system_program};
 #[test]
 fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() {
     let lock = InstructionError::Custom(PercolatorError::EngineLockActive as u32);
+    let stale = InstructionError::Custom(PercolatorError::EngineStale as u32);
     let mut peak = 0;
     let mut commits = 0;
     let mut rollbacks = 0;
@@ -40,28 +41,32 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                     peak = peak.max(fixture_peak);
                     let recovered = CAPITAL[1].min(SPENT).min(backing);
                     let partial = recovered / 3;
-                    let close = wrap(
-                        &env,
-                        ProgInstruction::CloseSlab {
-                            authority_epoch: env.control_sequences(0).authority_epoch,
-                        },
-                        vec![
-                            AccountMeta::new(admin.pubkey(), true),
-                            AccountMeta::new(env.market, false),
-                            AccountMeta::new(env.vault, false),
-                            AccountMeta::new_readonly(env.vault_authority, false),
-                            AccountMeta::new(destination, false),
-                            AccountMeta::new_readonly(spl_token::ID, false),
-                            AccountMeta::new(env.mint, false),
-                        ],
-                    );
-                    let withdraw = |amount: u64| {
+                    let initial_sequences = env.control_sequences(0);
+                    let close_at = |authority_epoch| {
+                        wrap(
+                            &env,
+                            ProgInstruction::CloseSlab { authority_epoch },
+                            vec![
+                                AccountMeta::new(admin.pubkey(), true),
+                                AccountMeta::new(env.market, false),
+                                AccountMeta::new(env.vault, false),
+                                AccountMeta::new_readonly(env.vault_authority, false),
+                                AccountMeta::new(destination, false),
+                                AccountMeta::new_readonly(spl_token::ID, false),
+                                AccountMeta::new(env.mint, false),
+                            ],
+                        )
+                    };
+                    let close = close_at(initial_sequences.authority_epoch);
+                    let close_after_first = close_at(initial_sequences.authority_epoch + 1);
+                    let close_after_tail = close_at(initial_sequences.authority_epoch + 2);
+                    let withdraw = |amount: u64, authority_epoch| {
                         wrap(
                             &env,
                             ProgInstruction::WithdrawInsuranceAsset {
                                 asset_index: 0,
                                 market_id: env.asset_market_id(0),
-                                authority_epoch: env.control_sequences(0).authority_epoch,
+                                authority_epoch,
                                 amount: amount.into(),
                             },
                             vec![
@@ -74,8 +79,8 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                             ],
                         )
                     };
-                    let first = withdraw(partial);
-                    let tail = withdraw(recovered - partial);
+                    let first = withdraw(partial, initial_sequences.authority_epoch);
+                    let tail = withdraw(recovered - partial, initial_sequences.authority_epoch + 1);
                     let mut tracked = vec![
                         env.market,
                         env.vault,
@@ -116,6 +121,16 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                             ledger.snapshot_residual += u128::from(backing);
                         }
                         assert_eq!(env.market_state().1.resolved_payout_ledger, ledger);
+                        let mut sequences = initial_sequences;
+                        sequences.authority_epoch += if paid == 0 {
+                            0
+                        } else if paid == partial {
+                            1
+                        } else {
+                            assert_eq!(paid, recovered);
+                            2
+                        };
+                        assert_eq!(env.control_sequences(0), sequences);
                         assert_eq!(
                             env.token_amount(destination),
                             0,
@@ -156,6 +171,16 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                     send(
                         &mut env,
                         &[close.clone(), first.clone(), close.clone()],
+                        &[&admin],
+                        &[],
+                        Some((4, stale.clone())),
+                        (2, 1),
+                    );
+                    check(&env, false, 0, 0, 1);
+                    // A current-epoch suffix reaches the economic lock after the same paid prefix.
+                    send(
+                        &mut env,
+                        &[close.clone(), first.clone(), close_after_first.clone()],
                         &[&admin],
                         &[],
                         Some((4, lock.clone())),
@@ -208,15 +233,41 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                         &[first.clone(), close.clone()],
                         &[&admin],
                         &[],
+                        Some((3, stale.clone())),
+                        (1, 1),
+                    );
+                    check(&env, true, if scanner_first { recovered } else { 0 }, 0, 0);
+                    send(
+                        &mut env,
+                        &[first.clone(), close_after_first.clone()],
+                        &[&admin],
+                        &[],
                         Some((3, lock.clone())),
                         (1, 1),
                     );
                     check(&env, true, if scanner_first { recovered } else { 0 }, 0, 0);
-                    send(&mut env, &[first], &[], &payment, None, (1, 1));
+                    send(&mut env, &[first.clone()], &[], &payment, None, (1, 1));
                     check(&env, true, recovered, partial, 0);
                     send(
                         &mut env,
+                        &[first],
+                        &[],
+                        &[],
+                        Some((2, stale.clone())),
+                        (0, 0),
+                    );
+                    send(
+                        &mut env,
                         &[close.clone()],
+                        &[&admin],
+                        &[],
+                        Some((2, stale.clone())),
+                        (0, 0),
+                    );
+                    check(&env, true, recovered, partial, 0);
+                    send(
+                        &mut env,
+                        &[close_after_first],
                         &[&admin],
                         &[],
                         Some((2, lock.clone())),
@@ -239,7 +290,7 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                     };
                     send(
                         &mut env,
-                        &[close.clone(), bad_suffix],
+                        &[close_after_tail.clone(), bad_suffix],
                         &[&admin],
                         &[],
                         Some((3, InstructionError::InvalidInstructionData)),
@@ -249,7 +300,7 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
                     let closing = [env.market, env.vault, env.mint, admin.pubkey()];
                     send(
                         &mut env,
-                        &[close],
+                        &[close_after_tail],
                         &[&admin],
                         &closing,
                         None,
@@ -293,6 +344,6 @@ fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() 
         }
     }
     assert_eq!(outcomes.len(), 8);
-    assert_eq!((commits, rollbacks, rediscoveries), (88, 104, 8));
+    assert_eq!((commits, rollbacks, rediscoveries), (88, 168, 8));
     println!("INV-070 scan recredit: 16 public histories, 8 order comparisons, {commits} commits, {rollbacks} exact rollbacks, {rediscoveries} scanner rediscoveries, peak={peak} CU");
 }

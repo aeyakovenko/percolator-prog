@@ -149,7 +149,8 @@ fn v16_program_native_sync_after_terminal_prefix_reclassifies_only_external_surp
         let market_before = env.svm.get_account(&market_key).unwrap();
         let mint_before = env.svm.get_account(&env.mint);
         let beneficiary_before = env.svm.get_account(&beneficiary_key);
-        let close = Instruction {
+        let initial_sequences = env.control_sequences(0);
+        let mut close = Instruction {
             program_id: env.program_id,
             accounts: vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -326,11 +327,30 @@ fn v16_program_native_sync_after_terminal_prefix_reclassifies_only_external_surp
 
         // The unpaid local budget remains exactly 37 even if raw lamports were synchronized.
         // An absent beneficiary receives only that budget; the external 19 remain surplus.
+        peak = peak.max(inv_071_crank_progress::terminal_prefix_recredit::land(
+            &mut env,
+            &[withdrawal.clone(), close.clone()],
+            &[&admin],
+            &tracked,
+            &[],
+            Some((
+                3,
+                solana_sdk::instruction::InstructionError::Custom(
+                    PercolatorError::EngineStale as u32,
+                ),
+            )),
+            (1, 1),
+        ));
+        assert_eq!(env.control_sequences(0), initial_sequences);
+        check(&env, prefix, false, false, sync_at == SyncAt::BeforeScan);
         env.svm.expire_blockhash();
         let tx = transaction(&env, &[withdrawal], &[]);
         assert_eq!(tx.message.header.num_required_signatures, 1);
         peak = peak.max(commit(&mut env, tx, &[market_key, vault_key, recipient], 1));
         check(&env, prefix, true, false, sync_at == SyncAt::BeforeScan);
+        let mut paid_sequences = initial_sequences;
+        paid_sequences.authority_epoch += 1;
+        assert_eq!(env.control_sequences(0), paid_sequences);
 
         // Unexpired backing establishes the scan boundary, then leaves by its public
         // principal route. Nothing is expired or left for native-token burning.
@@ -343,7 +363,13 @@ fn v16_program_native_sync_after_terminal_prefix_reclassifies_only_external_surp
             1,
         ));
         check(&env, prefix, true, true, sync_at == SyncAt::BeforeScan);
+        assert_eq!(env.control_sequences(0), paid_sequences);
 
+        // Insurance consumed the old epoch; retain this new close across external SyncNative.
+        close.data = ProgInstruction::CloseSlab {
+            authority_epoch: paid_sequences.authority_epoch,
+        }
+        .encode();
         env.svm.expire_blockhash();
         let retained = transaction(&env, &[close], &[&admin]);
         let retained_bytes = bincode::serialize(&retained).unwrap();
