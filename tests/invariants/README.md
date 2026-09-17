@@ -139,6 +139,20 @@ existing stateful row-417 controls pass on a private rebuilt SBF, with CU peaks
 245,968 / 408,787 / 208,228. Production and TSVs are unchanged. Row 417 remains
 OPEN for arbitrary stock histories, recredit, custody recovery and Recovery.
 
+## Row 417 Recovery forfeit and partial receipts (2026-09-17)
+
+[The focused note](row417_recovery_receipt_20260917.md) adds one INV-067
+[public CU selector](cu/inv_067_receipt_recovery_forfeit.rs). Eight worlds combine
+a 50-atom unrefreshed Recovery gain forfeiture with older 700/1,300-atom claims,
+partial receipts, and late expiry of backing on the Recovery asset. Both forfeit
+orders and claimant orders, at exact/late expiry, preserve the 2,000-face ledger
+while residual rises from 501 to 901. Eight paying-prefix rollbacks and sixteen
+positive top-ups reconcile four owner payouts, 32 portfolio deletions and the one
+remaining rounding atom. Peak measured CU is 429,551 on rebuilt current-main SBF.
+This extends the existing live forfeit and resolved expiry witnesses at their
+composition; row 417 and invariant statuses remain unchanged. Native/dual custody,
+pending debt at receipt creation, insurance recredit and arbitrary histories remain open.
+
 ## Rows 420/433 native earned-fee custody (2026-09-17)
 
 [The focused audit](row420433_health_20260917.md) extends the existing dual-quote

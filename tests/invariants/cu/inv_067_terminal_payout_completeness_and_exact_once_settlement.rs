@@ -40,6 +40,9 @@
 
 use super::*;
 
+#[path = "inv_067_receipt_recovery_forfeit.rs"]
+mod receipt_recovery_forfeit;
+
 #[path = "inv_067_native_receipt_redemption.rs"]
 mod native_receipt_redemption;
 
