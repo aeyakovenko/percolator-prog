@@ -25,6 +25,9 @@ mod capacity_claim_composition;
 #[path = "inv_058_competing_cross_zero.rs"]
 mod competing_cross_zero;
 
+#[path = "inv_058_partial_side_oi_competition.rs"]
+mod partial_side_oi_competition;
+
 const ASSETS: usize = 2;
 const HANDOFF_FEE_BPS: u64 = 100;
 type Legs = Vec<(u16, i128)>;

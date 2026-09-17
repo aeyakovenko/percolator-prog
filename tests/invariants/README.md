@@ -439,6 +439,14 @@ selector passes 16 histories, 24 complete Account rollbacks and 96 payouts on
 private rebuilt SBF; peak CU 589,145, largest bundle 968 bytes. Nonunit ADL,
 PnL/funding, partial fills and larger graphs remain open. No production change.
 
+[The partial-fill follow-up](row427_partial_side_oi_20260917.md) adds actual
+matcher-fill accounting at the shared cap: a successful competing prefix leaves
+one atom too little headroom, rolls back exactly, and the retained partial then
+succeeds. Disjoint competition and release gate all four residual routes.
+Sixteen split/aggregate histories reconcile exact rounded fees, positions,
+OI/count/notional, epochs and 96 owner payouts; peak CU is 343,425. Row427 remains
+OPEN; nonunit ADL, elapsed rates and broader composition remain unproved.
+
 ## Rows 420/421/423/433 regression health (2026-09-17)
 
 [The focused follow-up](row420421423433_regression_health_20260917.md) updates the
