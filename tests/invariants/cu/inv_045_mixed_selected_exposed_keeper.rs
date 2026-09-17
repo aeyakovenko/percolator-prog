@@ -1,57 +1,23 @@
-//! Two exposed target legs disagree on reward provenance until Hybrid catchup.
-//! Persisted leg order selects the fee source; observation order must not select it.
+//! Row 422: mixed target provenance with a distinct, exposed Hybrid beneficiary.
+//! Keeper K settlement crosses reward credit; public instructions own all value.
 
 use super::*;
 
-#[path = "inv_045_mixed_selected_exposed_keeper.rs"]
-mod exposed_keeper;
-
-fn submit(
-    env: &mut V16CuEnv,
-    signer: &Keypair,
-    instructions: &[Instruction],
-    tracked: &[Pubkey],
-    rejection: Option<(u8, InstructionError)>,
-) -> u64 {
-    submit_with_cu_limit(env, signer, instructions, tracked, rejection, 500_000)
-}
-
-fn observation(
-    env: &V16CuEnv,
-    target: Pubkey,
-    signer: Pubkey,
-    report: Pubkey,
-    keeper: Option<Pubkey>,
-    reverse: bool,
-) -> Instruction {
-    let mut ix = observe(env, target, signer, Some(report), keeper);
-    ix.data = ProgInstruction::PermissionlessCrank {
-        now_slot: u64::MAX,
-        observations: (if reverse { [1, 0] } else { [0, 1] })
-            .map(|asset_index| CrankObservationHint {
-                asset_index,
-                oracle_accounts: u8::from(asset_index == 0),
-            })
-            .into(),
-    }
-    .encode();
-    ix
-}
+const DEPOSITS: [u64; 5] = [10_200_000, 100_000_000, 10_000_000, 10_000_000, 100_000];
+const SHARE: u128 = 3_333;
 
 #[test]
-fn v16_program_mixed_exposed_legs_bind_rewards_to_selected_price_lineage() {
-    const DEPOSITS: [u64; 5] = [10_200_000, 100_000_000, 10_000_000, 10_000_000, 1_000];
-    const SHARE: u128 = 3_333;
+fn v16_program_mixed_selected_rewards_commute_with_exposed_keeper_settlement() {
     let mut peak = 0;
     let mut worlds = 0;
     let mut rollbacks = 0;
     for elapsed in [1u64, 4] {
         let price = (ENTRY - elapsed * 2_400).max(MARK);
         for selected in [0usize, 1] {
-            let mut reference = None;
-            for reverse in [false, true] {
-                for (batch, cpi) in [(false, false), (true, false), (false, true), (true, true)] {
-                    let label = format!("elapsed={elapsed} selected={selected} reverse={reverse} batch={batch} cpi={cpi}");
+            for direction in [-1i128, 1] {
+                let mut reference = None;
+                for settle_first in [false, true] {
+                    let label = format!("elapsed={elapsed} selected={selected} direction={direction} settle_first={settle_first}");
                     let mut env = inv018_public_spl_market_with_params(
                         6,
                         V16CuMarketParams {
@@ -63,7 +29,7 @@ fn v16_program_mixed_exposed_legs_bind_rewards_to_selected_price_lineage() {
                     set_test_clock(&mut env, 1, 100);
                     env.configure_auth_mark_for_asset_as_admin(1, 1, ENTRY);
                     env.update_liquidation_fee_policy_with_cu(SHARE as u16);
-                    let feed = [0x72; 32];
+                    let feed = [0x73; 32];
                     let initial = env.set_pyth_price_with_conf(&feed, ENTRY as i64, -6, 0, 100);
                     env.try_configure_hybrid_asset_with_conf_filter_cu(
                         0,
@@ -79,19 +45,15 @@ fn v16_program_mixed_exposed_legs_bind_rewards_to_selected_price_lineage() {
                         0,
                     )
                     .unwrap();
-                    let coalition = Keypair::new();
-                    let owners: [Keypair; 5] = std::array::from_fn(|i| {
-                        if i < 2 {
-                            Keypair::new()
-                        } else {
-                            Keypair::from_bytes(&coalition.to_bytes()).unwrap()
-                        }
-                    });
+                    let owners: [Keypair; 5] = std::array::from_fn(|_| Keypair::new());
                     let funded =
                         std::array::from_fn::<_, 5, _>(|i| fund(&mut env, &owners[i], DEPOSITS[i]));
                     let portfolios = funded.map(|pair| pair.0);
                     let tokens = funded.map(|pair| pair.1);
                     let [target, peer, trader_a, trader_b, keeper] = portfolios;
+                    assert!(owners[..4]
+                        .iter()
+                        .all(|owner| owner.pubkey() != owners[4].pubkey()));
                     for asset in [selected, selected ^ 1] {
                         peak = peak.max(env.trade_asset_with_cu(
                             asset as u16,
@@ -104,6 +66,16 @@ fn v16_program_mixed_exposed_legs_bind_rewards_to_selected_price_lineage() {
                             0,
                         ));
                     }
+                    peak = peak.max(env.trade_asset_with_cu(
+                        0,
+                        &owners[4],
+                        keeper,
+                        &owners[1],
+                        peer,
+                        direction * POS_SCALE as i128,
+                        ENTRY,
+                        0,
+                    ));
                     let mut tracked =
                         vec![env.market, env.mint, env.vault, env.admin.pubkey(), initial];
                     tracked.extend(portfolios);
@@ -126,35 +98,32 @@ fn v16_program_mixed_exposed_legs_bind_rewards_to_selected_price_lineage() {
                     .unwrap();
                     let custody = [env.mint, env.vault].map(|key| env.svm.get_account(&key));
                     set_test_clock(&mut env, 5, 1_000);
-                    let clock_only =
-                        observation(&env, keeper, owners[4].pubkey(), initial, None, reverse);
-                    peak = peak.max(submit(&mut env, &owners[4], &[clock_only], &tracked, None));
-                    peak = peak.max(paid_origin_routes::discover(
-                        &mut env,
-                        &owners,
-                        portfolios,
-                        &mut tracked,
-                        batch,
-                        cpi,
+                    let advance =
+                        observation(&env, trader_a, owners[4].pubkey(), initial, None, false);
+                    peak = peak.max(submit(&mut env, &owners[4], &[advance], &tracked, None));
+                    let oi = env.market_state().1.assets[0].oi_eff_long_q / POS_SCALE;
+                    peak = peak.max(env.trade_asset_with_cu(
+                        0,
+                        &owners[2],
+                        trader_a,
+                        &owners[3],
+                        trader_b,
+                        POS_SCALE as i128,
+                        900_000,
+                        0,
                     ));
-                    let paid = env.market_state().1.insurance;
-                    assert!(paid > 0, "{label}");
+                    let required = (2 * oi * u128::from(ENTRY) * 77).div_ceil(10_000);
+                    let bps = (required * 10_000).div_ceil(2 * u128::from(ACCEPTED_PRINT));
+                    let paid = 2 * fee(POS_SCALE, ACCEPTED_PRINT, bps);
+                    assert_eq!(env.market_state().1.insurance, paid);
                     assert_eq!(env.market_state().1.assets[0].raw_oracle_target_price, MARK);
-                    let post_discovery = values(&env, portfolios);
-                    assert_eq!(post_discovery[0], DEPOSITS[0] as i128);
-                    assert_eq!(post_discovery[1], DEPOSITS[1] as i128);
-                    assert_eq!(post_discovery[4], DEPOSITS[4] as i128);
-                    assert_eq!(post_discovery[2], post_discovery[3]);
-                    assert_eq!(DEPOSITS[2] as i128 - post_discovery[2], (paid / 2) as i128);
-                    assert_eq!(paid % 2, 0);
                     peak = peak.max(env.push_auth_mark_for_asset_as_admin(1, 5, MARK));
 
-                    // Renew equal-price evidence on the flat keeper. Both target legs stay
-                    // exposed and unsettled, so either first leg must size against both losses.
-                    let mut report = initial;
+                    // Prior-slot publication settles the keeper only to the prior price.
+                    // The final K delta must therefore be nonzero in both order worlds.
                     for step in 0..elapsed {
                         set_test_clock(&mut env, 5 + step, 1_000 + step as i64);
-                        report = env.set_pyth_price_with_conf(
+                        let report = env.set_pyth_price_with_conf(
                             &feed,
                             MARK as i64,
                             -6,
@@ -163,30 +132,16 @@ fn v16_program_mixed_exposed_legs_bind_rewards_to_selected_price_lineage() {
                         );
                         tracked.push(report);
                         let publish =
-                            observation(&env, keeper, owners[4].pubkey(), report, None, reverse);
+                            observation(&env, keeper, owners[4].pubkey(), report, None, false);
                         peak = peak.max(submit(&mut env, &owners[4], &[publish], &tracked, None));
-                        assert_eq!(values(&env, portfolios), post_discovery);
+                        assert_eq!(
+                            values(&env, portfolios)[4],
+                            DEPOSITS[4] as i128 - direction * i128::from(step * 2_400)
+                        );
                     }
+                    let keeper_prior = env.portfolio_state(keeper);
+                    let prior_value = keeper_prior.capital.get() as i128 + keeper_prior.pnl.get();
                     set_test_clock(&mut env, 5 + elapsed, 1_000 + elapsed as i64);
-                    let stale = observation(
-                        &env,
-                        target,
-                        owners[4].pubkey(),
-                        report,
-                        Some(keeper),
-                        reverse,
-                    );
-                    peak = peak.max(submit(
-                        &mut env,
-                        &owners[4],
-                        &[stale],
-                        &tracked,
-                        Some((
-                            2,
-                            InstructionError::Custom(PercolatorError::EngineNonProgress as u32),
-                        )),
-                    ));
-                    rollbacks += 1;
                     let fresh = env.set_pyth_price_with_conf(
                         &feed,
                         MARK as i64,
@@ -194,35 +149,40 @@ fn v16_program_mixed_exposed_legs_bind_rewards_to_selected_price_lineage() {
                         0,
                         1_000 + elapsed as i64,
                     );
-                    let conflicting = env.set_pyth_price_with_conf(
+                    let conflict = env.set_pyth_price_with_conf(
                         &feed,
                         MARK as i64 + 1,
                         -6,
                         0,
                         1_000 + elapsed as i64,
                     );
-                    tracked.extend([fresh, conflicting]);
-                    let valid = observation(
-                        &env,
-                        target,
-                        owners[4].pubkey(),
-                        fresh,
-                        Some(keeper),
-                        reverse,
-                    );
+                    tracked.extend([fresh, conflict]);
+                    let settle = observation(&env, keeper, owners[4].pubkey(), fresh, None, false);
+                    if settle_first {
+                        peak = peak.max(submit(
+                            &mut env,
+                            &owners[4],
+                            &[settle.clone()],
+                            &tracked,
+                            None,
+                        ));
+                        assert_ne!(values(&env, portfolios)[4], prior_value);
+                    }
+                    let valid =
+                        observation(&env, target, owners[4].pubkey(), fresh, Some(keeper), false);
                     let invalid = observation(
                         &env,
                         target,
                         owners[4].pubkey(),
-                        conflicting,
+                        conflict,
                         Some(keeper),
-                        reverse,
+                        false,
                     );
-                    let budgets = env.market_state().1.insurance_domain_budget;
                     let foreign = [peer, trader_a, trader_b].map(|key| env.svm.get_account(&key));
                     let mut liquidation = None;
                     for _ in 0..6 {
                         let before = env.market_state().1;
+                        let recipient = env.portfolio_state(keeper);
                         peak = peak.max(submit(
                             &mut env,
                             &owners[4],
@@ -256,7 +216,6 @@ fn v16_program_mixed_exposed_legs_bind_rewards_to_selected_price_lineage() {
                         )
                         .unwrap();
                         assert_eq!(profile.last_good_oracle_slot, 5 + elapsed);
-                        assert_eq!(profile.oracle_target_publish_time, 1_000 + elapsed as i64);
                         assert_eq!(
                             profile.effective_price_provenance,
                             if elapsed == 4 {
@@ -264,6 +223,30 @@ fn v16_program_mixed_exposed_legs_bind_rewards_to_selected_price_lineage() {
                             } else {
                                 percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
                             }
+                        );
+                        let closed = before.assets[selected].oi_eff_long_q
+                            - after.assets[selected].oi_eff_long_q;
+                        assert_eq!(
+                            before.assets[selected ^ 1].oi_eff_long_q,
+                            after.assets[selected ^ 1].oi_eff_long_q
+                        );
+                        let penalty = fee(closed, price, 5);
+                        let eligible = selected == 1 || elapsed == 4;
+                        let reward = if eligible {
+                            penalty * SHARE / 10_000
+                        } else {
+                            0
+                        };
+                        let mut expected_recipient = recipient;
+                        expected_recipient.capital =
+                            percolator::V16PodU128::new(recipient.capital.get() + reward);
+                        if reward > 0 {
+                            expected_recipient.health_cert.valid = 0;
+                        }
+                        assert_eq!(
+                            env.portfolio_state(keeper),
+                            expected_recipient,
+                            "credit cannot settle or overwrite keeper K: {label}"
                         );
                         assert_eq!(
                             [peer, trader_a, trader_b].map(|key| env.svm.get_account(&key)),
@@ -273,73 +256,52 @@ fn v16_program_mixed_exposed_legs_bind_rewards_to_selected_price_lineage() {
                             [env.mint, env.vault].map(|key| env.svm.get_account(&key)),
                             custody
                         );
-                        let closed = before.assets[selected].oi_eff_long_q
-                            - after.assets[selected].oi_eff_long_q;
-                        assert_eq!(
-                            before.assets[selected ^ 1].oi_eff_long_q,
-                            after.assets[selected ^ 1].oi_eff_long_q
-                        );
-                        if closed == 0 {
-                            assert_eq!(after.insurance, paid);
-                            assert_eq!(after.insurance_domain_budget, budgets);
-                            continue;
-                        }
-                        let penalty = fee(closed, price, 5);
-                        assert!(closed < 100 * POS_SCALE && penalty > 0, "{label}");
-                        assert_ne!(penalty, fee(closed, ENTRY, 5));
-                        if elapsed == 1 {
-                            assert_ne!(penalty, fee(closed, MARK, 5));
-                        }
-                        let eligible = selected == 1 || elapsed == 4;
-                        let reward = if eligible {
-                            penalty * SHARE / 10_000
-                        } else {
-                            0
-                        };
-                        assert!(penalty * SHARE / 10_000 > 0);
-                        let retained = penalty - reward;
-                        assert_eq!(after.insurance, paid + retained, "{label}");
-                        let mut expected_budgets = budgets;
+                        assert_eq!(after.insurance, paid + penalty - reward);
+                        let mut budgets = before.insurance_domain_budget;
                         if eligible {
-                            expected_budgets[selected * 2] += retained / 2;
-                            expected_budgets[selected * 2 + 1] += retained.div_ceil(2);
+                            budgets[selected * 2] += (penalty - reward) / 2;
+                            budgets[selected * 2 + 1] += (penalty - reward).div_ceil(2);
                         }
-                        assert_eq!(after.insurance_domain_budget, expected_budgets, "{label}");
+                        assert_eq!(after.insurance_domain_budget, budgets);
                         assert_eq!(
                             after.insurance_domain_budget_remaining_total,
-                            expected_budgets.iter().sum::<u128>()
+                            budgets.iter().sum::<u128>()
                         );
-                        let current_values = values(&env, portfolios);
-                        assert_eq!(
-                            current_values[0],
-                            DEPOSITS[0] as i128 - 200 * i128::from(ENTRY - price) - penalty as i128
-                        );
-                        assert_eq!(current_values[4], DEPOSITS[4] as i128 + reward as i128);
-                        assert_eq!(
-                            health_cert(&env.portfolio_state(target)).certified_liq_deficit,
-                            0
-                        );
-                        assert!(census(&env, portfolios)[0], "current target certificate");
-                        liquidation = Some((closed, penalty, reward, expected_budgets));
-                        break;
+                        if closed != 0 {
+                            assert!(closed < 100 * POS_SCALE && penalty * SHARE / 10_000 > 0);
+                            assert_ne!(penalty, fee(closed, ENTRY, 5));
+                            if elapsed == 1 {
+                                assert_ne!(penalty, fee(closed, MARK, 5));
+                            }
+                            assert_eq!(
+                                health_cert(&env.portfolio_state(target)).certified_liq_deficit,
+                                0
+                            );
+                            assert!(census(&env, portfolios)[0]);
+                            liquidation = Some((closed, penalty, reward));
+                            break;
+                        }
                     }
-                    let (closed, penalty, reward, budgets) =
-                        liquidation.expect("bounded mixed-leg liquidation");
+                    let (closed, penalty, reward) =
+                        liquidation.expect("mixed target liquidation with an exposed beneficiary");
+                    if !settle_first {
+                        assert_eq!(env.portfolio_state(keeper).pnl, keeper_prior.pnl);
+                        peak = peak.max(submit(&mut env, &owners[4], &[settle], &tracked, None));
+                        assert_ne!(values(&env, portfolios)[4] - reward as i128, prior_value);
+                    }
                     for account in [peer, trader_a, trader_b] {
                         let refresh =
-                            observation(&env, account, owners[4].pubkey(), fresh, None, reverse);
+                            observation(&env, account, owners[4].pubkey(), fresh, None, false);
                         peak = peak.max(submit(&mut env, &owners[4], &[refresh], &tracked, None));
                     }
-                    let mut expected = post_discovery;
                     let loss = i128::from(ENTRY - price);
+                    let mut expected = DEPOSITS.map(i128::from);
                     expected[0] -= 200 * loss + penalty as i128;
-                    expected[1] += 200 * loss;
-                    expected[2] -= loss;
-                    expected[3] += loss;
-                    expected[4] += reward as i128;
+                    expected[1] += (200 + direction) * loss;
+                    expected[2] -= (paid / 2) as i128 + loss;
+                    expected[3] += loss - (paid / 2) as i128;
+                    expected[4] += reward as i128 - direction * loss;
                     assert_eq!(values(&env, portfolios), expected, "{label}");
-                    census(&env, portfolios);
-                    let payout = DEPOSITS[4] + reward as u64;
                     let withdraw = Instruction {
                         program_id: env.program_id,
                         accounts: vec![
@@ -351,54 +313,69 @@ fn v16_program_mixed_exposed_legs_bind_rewards_to_selected_price_lineage() {
                             AccountMeta::new_readonly(env.vault_authority, false),
                             AccountMeta::new_readonly(spl_token::ID, false),
                         ],
-                        data: env.withdraw_ix(keeper, payout as u128).encode(),
+                        data: env.withdraw_ix(keeper, reward.max(1)).encode(),
                     };
-                    peak = peak.max(submit(&mut env, &owners[4], &[withdraw], &tracked, None));
-                    expected[4] = 0;
-                    assert_eq!(values(&env, portfolios), expected);
-                    assert_eq!(env.token_amount(tokens[4]), payout);
+                    peak = peak.max(submit(
+                        &mut env,
+                        &owners[4],
+                        &[withdraw],
+                        &tracked,
+                        Some((
+                            2,
+                            InstructionError::Custom(PercolatorError::EngineStale as u32),
+                        )),
+                    ));
+                    rollbacks += 1;
+                    assert!(has_active_leg_for_asset(&env.portfolio_state(keeper), 0));
+                    assert!(tokens.iter().all(|key| env.token_amount(*key) == 0));
+                    assert_eq!(
+                        [env.mint, env.vault].map(|key| env.svm.get_account(&key)),
+                        custody
+                    );
                     let group = env.market_state().1;
+                    assert_eq!(group.vault, env.token_amount(env.vault) as u128);
                     assert_eq!(
                         group.vault,
-                        DEPOSITS.iter().sum::<u64>() as u128 - payout as u128
+                        DEPOSITS.iter().map(|value| *value as u128).sum::<u128>()
                     );
-                    assert_eq!(group.vault, env.token_amount(env.vault) as u128);
                     assert_eq!(
                         expected.iter().sum::<i128>() + group.insurance as i128,
                         group.vault as i128
                     );
-                    assert_eq!(env.svm.get_account(&env.mint), custody[0]);
-                    // The wash pair and reward recipient share one key, but pay the full
-                    // discovery cost. Their separate portfolios cannot reclaim that fee.
-                    assert_eq!(
-                        expected[2] + expected[3] + payout as i128,
-                        (DEPOSITS[2] + DEPOSITS[3] + DEPOSITS[4]) as i128 - paid as i128
-                            + reward as i128
-                    );
-                    assert!(reward < paid);
                     census(&env, portfolios);
+                    let accounts = portfolios.map(|key| {
+                        let p = env.portfolio_state(key);
+                        (p.capital.get(), p.pnl.get(), p.legs)
+                    });
                     let outcome = (
                         closed,
                         penalty,
                         reward,
                         expected,
-                        budgets,
+                        accounts,
                         group.insurance,
+                        group.insurance_domain_budget,
                         group.vault,
                     );
                     if let Some(reference) = &reference {
-                        assert_eq!(&outcome, reference, "{label}");
+                        assert_eq!(
+                            &outcome, reference,
+                            "settlement order preserves each portfolio: {label}"
+                        );
                     } else {
                         reference = Some(outcome);
                     }
                     worlds += 1;
                 }
+                let (_, penalty, reward, ..) = reference.unwrap();
+                eprintln!("exposed selected={selected} elapsed={elapsed} direction={direction} penalty={penalty} reward={reward}");
             }
-            let (closed, penalty, reward, ..) = reference.unwrap();
-            eprintln!("mixed provenance elapsed={elapsed} selected={selected} closed={closed} penalty={penalty} reward={reward}");
         }
     }
-    assert_eq!(worlds, 32);
-    assert_cu_within("mixed selected provenance", peak, 650_000);
-    eprintln!("mixed selected provenance: worlds={worlds} rollbacks={rollbacks} peak_cu={peak}");
+    assert_eq!(worlds, 16);
+    assert_eq!(rollbacks, 48);
+    assert_cu_within("mixed selected exposed keeper", peak, 650_000);
+    eprintln!(
+        "mixed selected exposed keeper: worlds={worlds} rollbacks={rollbacks} peak_cu={peak}"
+    );
 }

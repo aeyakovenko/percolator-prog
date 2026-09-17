@@ -260,6 +260,19 @@ rollback transactions now execute scan rediscovery and native reclassification
 through exact retirement. All three exact selectors pass. Production and status
 TSVs are unchanged; broader receipt/recredit/classification compositions stay open.
 
+## Row 422 mixed selection with an exposed keeper (2026-09-17)
+
+[The focused increment](row422_mixed_selected_exposed_keeper_20260917.md) adds
+[one public INV-045 child](cu/inv_045_mixed_selected_exposed_keeper.rs): 16 worlds
+cross selected Hybrid/AuthMark target legs, lag/catchup, long/short Hybrid keeper
+exposure, and keeper settlement before/after liquidation. The distinct keeper
+shares the target's Hybrid market. Reward credit preserves its unsettled K state;
+both settlement orders preserve each portfolio's capital, PnL and legs, selected
+fee budgets, and SPL custody. All 48 rollback checks pass; peak transaction CU is
+470,411. This fills the active-recipient/mixed-target composition explicitly left
+open below. Terminal payout, maintenance, funding and broader route products stay
+open; row 422 and invariant statuses are unchanged.
+
 ## Row 422 mixed exposed-leg reward provenance (2026-09-17)
 
 [The bounded public-route audit](row422_mixed_selected_provenance_20260917.md)
