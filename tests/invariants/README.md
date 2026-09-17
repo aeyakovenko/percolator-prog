@@ -1,5 +1,25 @@
 # Invariant-owned test coverage
 
+## INV-067 resolved source residual entitlement (2026-09-16)
+
+Owner: [cu/inv_067_resolved_source_residual.rs](cu/inv_067_resolved_source_residual.rs),
+mounted under INV-067. Twenty-four public LiteSVM worlds leave two solvent debtors
+unsettled until resolution and place their shared backing one atom below, at, or
+above the first debtor's remaining support need. Independent input arithmetic
+limits new source backing and assigns the excess to junior residual. An unrelated
+200-atom receipt then crosses another claimant's source conversion and exact/late
+backing expiry, with exact owner/SPL floors and classified terminal residue.
+
+The selector executes **252 ranked progress steps, 48 exact rollbacks and 144
+portfolio deletions**, with **323,721 peak CU** including rejected bundles. A private
+SBF mutation removing only the resolved source cap passes the existing stock and
+encumbrance censuses and both adjacent public controls, but fails this test at
+399 versus 250 fresh backing atoms. The deployed production source and pin are
+unchanged. Final exact checks pass all three public selectors and the invariant
+mount census. This adds INV-024/025/028/063/066/067/070/073 evidence without a status
+promotion or a claim to close the withheld finding.
+[Gap comparison, mutation, exact commands and limits](inv_067_source_residual_audit_20260916.md).
+
 ## INV-079 public evidence source census (2026-09-16)
 
 `public_sbf/inv_079_lifecycle_evidence_mounts.rs` now discovers public invariant
