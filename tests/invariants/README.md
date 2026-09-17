@@ -1,5 +1,17 @@
 # Invariant-owned test coverage
 
+## Liveness and source-capacity audit (2026-09-17)
+
+[The scoped audit](liveness_source_capacity_audit_20260917.md) maps INV-028/071/073/077
+and rows 190/203/212/213/214/217/228/246/252/266/268/270/298/300/306/357/359/364/
+368/371/376/379/420/421/423/433, plus all 17 listed nonqualifying controls, to
+existing mounted public-route witnesses. Exact execution yields 32 passes and two
+failures: row 298 and control 297 submit malformed Resolved crank hints before
+their intended payout assertions. The audit records exact commands, source
+diagnosis, signer/shape limits and current CU measurements. No uncovered public
+DoS was established or duplicate probe added. Rows 420/421/423/433 remain OPEN;
+all invariant statuses are unchanged.
+
 ## Fee, policy, destination and route-equivalence audit (2026-09-17)
 
 [The scoped audit](fee_policy_routes_audit_20260917.md) maps INV-011/014/024/036/040/
