@@ -1,5 +1,23 @@
 # Invariant-owned test coverage
 
+## Row 421 funded insurance ledger through loss and recredit (2026-09-17)
+
+[The focused note](row421_loss_recredit_ledger_20260917.md) documents one new
+selector in [the INV-073 child](cu/inv_073_insurance_loss_recredit_ledger.rs).
+A ledger initialized by a 117-atom public deposit survives bankruptcy and user
+cleanup. Keeper-only payments record a 100-atom loss before backing expiry and
+100 atoms of recovery afterward, preserving the first 17-atom payment through
+recredit/payment rollback and exact final settlement. Five complete-Account
+rollbacks protect active liabilities, pending portfolio deletion, unexpired
+backing, the administrative signer boundary, and the exhausted entitlement.
+The same ledger finishes with deposits/withdrawals 117/117, loss/profit 100/100
+and zero principal/observed stock. This extends the unspent native-ledger and
+ledger-free recredit witnesses; it does not repeat native identity or ATA repair.
+New/control exact selectors pass on rebuilt current-main SBF at **215,443 / 228,958 / 37,577 CU**.
+Row 421 remains OPEN for arbitrary histories, partial/repeated recredit, other
+assets/quote rails and unavailable-administrator normalization/retirement.
+Portfolio deletion, expiry normalization and final slab close retain their signers.
+
 ## Row 420 distinct-provider expiry (2026-09-17)
 
 [The focused note](row420_distinct_provider_expiry_20260917.md) adds one selector

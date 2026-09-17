@@ -83,6 +83,9 @@ mod mixed_backing_expiry_exit;
 #[path = "inv_073_native_insurance_ledger_progress.rs"]
 mod native_insurance_ledger_progress;
 
+#[path = "inv_073_insurance_loss_recredit_ledger.rs"]
+mod insurance_loss_recredit_ledger;
+
 #[path = "inv_073_dual_quote_reserve_progress.rs"]
 mod dual_quote_reserve_progress;
 
