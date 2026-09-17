@@ -1,5 +1,15 @@
 # Invariant-owned test coverage
 
+## INV-038/039 funding and loss-attribution audit (2026-09-17)
+
+[The funding/loss audit](funding_loss_audit_20260917.md) maps rows
+253/254/255/271/272/273/360/365/380/419/435 to existing mounted public witnesses.
+It distinguishes pending funding from close-residual credits, distinct-owner
+loss-weight retention from same-portfolio mixed debt, and independent attribution
+from order-comparison evidence. All eleven families have witnesses; no duplicate
+test is needed. The audit records exact commands, results and limits without
+changing production code or coverage statuses.
+
 ## INV-008 retained-intent audit (2026-09-17)
 
 [The retained-intent audit](inv_008_retained_intent_audit_20260917.md) maps only
