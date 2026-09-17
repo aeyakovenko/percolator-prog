@@ -1,5 +1,81 @@
 # Invariant-owned test coverage
 
+## INV-077 public native insurance completion at capacity (2026-09-17)
+
+Owner: [cu/inv_077_public_native_insurance_capacity.rs](cu/inv_077_public_native_insurance_capacity.rs),
+mounted under INV-077. Two public System/ATA/SPL/wrapper histories activate all
+**5,782 assets / 11,564 domains** in a **10,483,956-byte** market. Capacity plus one
+must exceed Solana's 10 MiB limit. An independent user deposits 1,009 native atoms;
+distinct front/last-asset insurers fund long/short budgets of 37/61 and 43/71 atoms.
+The tail ledger records the long deposit while the short deposit omits telemetry;
+the front ledger stays uninitialized until the keeper's first payment.
+LiteSVM's missing native-mint genesis account is supplied by the existing fixture;
+all program-owned state is constructed through public instructions.
+
+Both reserve orders reject payments while user capital remains and again after
+the keeper pays the user but before the empty portfolio is deleted. Each rejection
+preserves every tracked and transaction Account, apart from the exact payer fee.
+Administrative deletion is explicitly signer-gated, with its exact rent transfer;
+it is not described as permissionless economic progress.
+
+After deletion, six payer-only payments per world cover one atom, a long-to-short
+budget crossing, and final drains. Every payment strictly decreases insurance by
+its input amount and matches a predicted serialized market Account, including the
+local authority epoch and all unrelated assets/profiles/control lanes. Complete
+ledger images distinguish principal, omitted-deposit profit, withdrawals and
+remaining local observations; foreign insurance and 19 unsynced vault lamports
+never become the beneficiary's recorded value. Complete native SPL Account
+images bind token amounts, lamports, rent and authorities. Stock/encumbrance
+censuses, exact fees, framed mint/siblings, and exact final tombstone/refunds
+compose through administrative CloseSlab.
+
+**Net-new against current main `fee82870`:** older maximum-market partial-ledger
+tests in INV-077 inject the market shape and stop after one payment. INV-073's
+native ledger histories are asset-zero only. The public dense-claimant maximum
+test uses classic SPL and omits optional insurance ledgers; the public quote
+capacity matrix covers backing retirement, not partial insurance telemetry.
+This joins public maximum-market construction, native custody, two independent
+insurers, funded/lazy ledgers and complete ordered reserve disposal in one witness.
+It does not duplicate receipt custody, native CloseSlab aliases, the evidence
+census, or source-residual attribution.
+
+Scope remains a flat, zero-fee user and unspent insurance at maximum market/domain
+capacity. It does not claim maximum active legs/sources/hints, junior receipts,
+insurance losses/recredit, Recovery, arbitrary histories, absent-administrator
+retirement, an engine proof, or invariant-status promotion. Production code and
+dependency pins are unchanged.
+
+Validation uses a fresh private default-feature SBF, engine `94979ede`, SHA-256
+`87011b683219d59bd5e3f328569bc675b7198d503532491d8f3b31341d54f776`.
+The final exact new selector passes both worlds: 12 reserve payments, eight
+exact rejections, two user payouts and two slab closures; peak **214,752 CU**
+under the **300,000 CU** guard. Final route peaks are **35,069 CU** for reserve
+payments, **80,754 CU** for the user payout, **26,338 CU** for portfolio deletion,
+and **21,880 CU** for slab closure. The three exact LiteSVM selectors below pass
+together: **3 passed, 0 failed, 1,431 filtered** in 90.45 seconds. The mount census
+passes separately: **1 passed, 0 failed, 144 filtered**, finding 503 source files
+and 1,907 available tests. Scoped rustfmt, full-patch whitespace and the production
+comparison below all pass on base `fee82870`.
+
+Exact commands, from the isolated worktree:
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/percolator-terminal-workflow-20260917-d4b8/target
+export TMPDIR=$CARGO_TARGET_DIR/tmp
+export CARGO_BUILD_JOBS=2
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$CARGO_TARGET_DIR/deploy" -- --locked
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_077_bounded_work_and_maximum_shape_compute::public_native_insurance_capacity::v16_program_public_max_market_native_partial_insurance_ledgers_complete_in_both_orders \
+  inv_077_bounded_work_and_maximum_shape_compute::v16_bpf_terminal_insurance_partial_ledger_ignores_other_authority_budget_on_10m_market \
+  inv_073_no_permanent_user_lock::native_insurance_ledger_progress::v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::lifecycle_evidence_mounts::v16_every_public_invariant_source_and_declared_test_is_mounted -- --exact --nocapture
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs tests/invariants/cu/inv_077_public_native_insurance_capacity.rs
+git diff --check
+git diff --check fee82870
+git diff --exit-code fee82870 -- src Cargo.toml Cargo.lock
+```
+
 ## INV-067 resolved source residual entitlement (2026-09-16)
 
 Owner: [cu/inv_067_resolved_source_residual.rs](cu/inv_067_resolved_source_residual.rs),
