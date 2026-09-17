@@ -1,5 +1,22 @@
 # Invariant-owned test coverage
 
+## Row 428 native replenishment across resolution (2026-09-17)
+
+[The focused note](row428_native_replenishment_20260917.md) adds four histories
+under [INV-064](cu/inv_064_native_replenishment_epoch.rs). A 37-atom Live depletion
+and independent 83-atom native refill preserve consumed consent across resolution,
+native/secondary withdrawal rails and signed/keeper-only delivery. Two distinct
+owners retain separate ledgers and epochs; a stale suffix restores both owners'
+completed payouts before the same valid prefix commits. All 181 insurance atoms
+reach their owners, while 200 atoms of raw secondary liquidity add no entitlement.
+The new selector checks 24 exact rollbacks and 20 payouts at **79,739 CU** peak;
+Live-epoch and recent Row 428 health controls pass at **33,269 / 78,101 CU**.
+Remaining limits include unexecuted consent without an intervening debit, shared
+authority epochs, liabilities/recredit, custody repair, native redemption and
+retirement. This does not add an independent withdrawal sequence or change TSV
+classifications; reserved cooldown fields remain zero. Rows 417/421/424/433 are
+outside the increment.
+
 ## Row 424 native scanner rediscovery (2026-09-17)
 
 [The focused note](row424_native_scan_surplus_20260917.md) adds four public

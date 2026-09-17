@@ -13,6 +13,9 @@
 
 use super::*;
 
+#[path = "inv_064_native_replenishment_epoch.rs"]
+mod native_replenishment_epoch;
+
 // The asset-scoped route is intentionally usable under the healthy-live withdrawal policy, but after
 // resolution it must reject while c_tot != 0 (open capital still backed). Attacker goal: drain
 // insurance out from under accounts that still hold capital. We pre-fund domain-0's budget so the
