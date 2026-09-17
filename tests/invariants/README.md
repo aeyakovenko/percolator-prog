@@ -1,5 +1,19 @@
 # Invariant-owned test coverage
 
+## Row 423 mixed latent reclamation (2026-09-17)
+
+[The focused note](row423_mixed_latent_reclamation_20260917.md) adds four public
+LiteSVM worlds to [generation admission](cu/inv_028_generation_capacity_admission.rs).
+With 25 retained claims and three latent domains, closing a partially materialized
+leg cannot fund a two-domain replacement; closing its wholly latent sibling can.
+Both batch-leg orders preserve the surviving leg's reservation, materialize all
+28 claims, and finish exact 1,000,077 / 999,923 payouts without new funding.
+This adds mixed reclamation and competing admission to the existing pure-pair
+reuse and partial-reduction controls. Row 423 remains OPEN; simultaneous liens,
+native custody, Recovery/receipts and maximum feed composition remain outside it.
+Both exact selectors pass on rebuilt private SBF; merged-main new/control peaks
+are 1,007,827 / 1,152,584 CU. The new case checks 32 rollbacks and 116 terminal calls.
+
 ## Row 433 redeemed native earnings and absent provider (2026-09-17)
 
 [The focused conformance note](row433_redeemed_native_earnings_20260917.md) adds

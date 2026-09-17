@@ -243,7 +243,42 @@ fn resources(h: &History, expected: [u128; DOMAINS], generations: &[u64; ASSETS]
 fn terminal(h: &mut History, m: &mut Measurements, order: [usize; 2]) {
     assert_eq!(h.positions, [0; ASSETS]);
     let expected = h.claims.map(|c| c * BOUND_SCALE);
-    let gain = h.claims.iter().sum::<u128>();
+    terminal_with_claims(h, m, order, &expected);
+}
+
+fn domain_claims(h: &History, actor: usize, count: usize) -> Vec<u128> {
+    let mut claims = vec![0; count];
+    let account = h.env.portfolio_state(h.portfolios[actor]);
+    for source in account.source_domains.iter().filter(|s| s.is_occupied()) {
+        let domain = source.domain.get() as usize;
+        assert_eq!(claims[domain], 0, "unique source attribution");
+        claims[domain] = source.source_claim_bound_num.get();
+        assert!(claims[domain] > 0);
+        assert_eq!(source.source_claim_liened_num.get(), 0);
+        assert_eq!(source.source_lien_counterparty_backing_num.get(), 0);
+        assert_eq!(source.source_lien_insurance_backing_num.get(), 0);
+        assert_eq!(
+            source.source_claim_market_id.get(),
+            h.env.asset_market_id((domain / 2) as u16)
+        );
+    }
+    claims
+}
+
+fn terminal_with_claims(
+    h: &mut History,
+    m: &mut Measurements,
+    order: [usize; 2],
+    expected: &[u128],
+) {
+    for portfolio in h.portfolios {
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&h.env.portfolio_state(portfolio))),
+            0
+        );
+    }
+    assert_eq!(domain_claims(h, 0, expected.len()), expected);
+    let gain = expected.iter().sum::<u128>() / BOUND_SCALE;
     let entitlement = [CAPITAL + gain, CAPITAL - gain];
     let mint = h.env.svm.get_account(&h.env.mint);
     let portfolios = h.portfolios.map(|p| h.env.svm.get_account(&p));
@@ -256,7 +291,10 @@ fn terminal(h: &mut History, m: &mut Measurements, order: [usize; 2]) {
     h.env.svm.warp_to_slot(h.slot);
     for actor in order {
         let rank = |h: &History| {
-            h.source_claims(actor).iter().filter(|c| **c > 0).count()
+            domain_claims(h, actor, expected.len())
+                .iter()
+                .filter(|c| **c > 0)
+                .count()
                 + usize::from((h.env.token_amount(h.tokens[actor]) as u128) < entitlement[actor])
         };
         for step in 0..=DOMAINS {
@@ -311,8 +349,8 @@ fn terminal(h: &mut History, m: &mut Measurements, order: [usize; 2]) {
             assert_reservation_encumbrance_census("generation terminal", &group, &accounts)
                 .unwrap();
             assert_source_credit_rates("generation terminal", &group).unwrap();
-            let remaining = h.source_claims(0);
-            for domain in 0..DOMAINS {
+            let remaining = domain_claims(h, 0, expected.len());
+            for domain in 0..expected.len() {
                 assert!(remaining[domain] == 0 || remaining[domain] == expected[domain]);
                 assert_eq!(
                     group.source_credit[domain].positive_claim_bound_num,
@@ -605,5 +643,303 @@ fn v16_program_used_generation_admission_reserves_latent_capacity_through_exact_
     assert_eq!(m.terminal_calls, 24 * (DOMAINS + 1));
     assert!(m.restored_prefixes > 0);
     println!("INV-028 Scope W: worlds={worlds}, reused={reused}, capacity_prefix_retries={capacity_prefix_retries}, history_calls={history_calls}, checked_transactions={}, exact_rollbacks={}, restored_prefixes={}, terminal_calls={}, max_cu={}, max_packet={}",
+        m.transactions, m.rollbacks, m.restored_prefixes, m.terminal_calls, m.max_cu, m.max_packet);
+}
+
+fn competition_resources(h: &History, claims: &[u128], positions: &[i128]) -> usize {
+    let group = h.env.market_state().1;
+    let market = h.env.svm.get_account(&h.env.market).unwrap();
+    let accounts = h.portfolios.map(|p| h.env.portfolio_state(p));
+    assert_market_stock_census(
+        "mixed latent reclamation",
+        &group,
+        &market.data,
+        &accounts,
+        h.env.token_amount(h.env.vault) as u128,
+    )
+    .unwrap();
+    assert_reservation_encumbrance_census("mixed latent reclamation", &group, &accounts).unwrap();
+    assert_source_credit_rates("mixed latent reclamation", &group).unwrap();
+    assert_eq!(domain_claims(h, 0, claims.len()), claims);
+    assert_eq!(domain_claims(h, 1, claims.len()), vec![0; claims.len()]);
+    let gain = claims.iter().sum::<u128>() / BOUND_SCALE;
+    assert_eq!(accounts[0].capital.get(), CAPITAL);
+    assert_eq!(accounts[0].pnl.get(), gain as i128);
+    assert_eq!(accounts[1].capital.get(), CAPITAL - gain);
+    assert_eq!(accounts[1].pnl.get(), 0);
+    assert_eq!(
+        (group.vault, group.c_tot, group.insurance),
+        (2 * CAPITAL, 2 * CAPITAL - gain, 0)
+    );
+    assert_eq!(h.tokens.map(|t| h.env.token_amount(t)), [0; 2]);
+    assert_eq!(
+        Mint::unpack(&h.env.svm.get_account(&h.env.mint).unwrap().data)
+            .unwrap()
+            .supply as u128,
+        2 * CAPITAL
+    );
+    for (domain, &claim) in claims.iter().enumerate() {
+        assert_eq!(group.source_credit[domain].positive_claim_bound_num, claim);
+        assert_eq!(group.source_credit[domain].exact_positive_claim_num, claim);
+        assert_eq!(
+            group.source_backing_buckets[domain].fresh_unliened_backing_num,
+            claim
+        );
+    }
+    let mut reserved: BTreeSet<_> = claims
+        .iter()
+        .enumerate()
+        .filter_map(|(domain, &claim)| (claim > 0).then_some(domain))
+        .collect();
+    for (actor, account) in accounts.iter().enumerate() {
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(account)) as usize,
+            positions.iter().filter(|q| **q != 0).count()
+        );
+        for (asset, &q) in positions.iter().enumerate() {
+            assert_eq!(has_active_leg_for_asset(account, asset), q != 0);
+            if q != 0 {
+                assert_eq!(
+                    active_leg_for_asset(account, asset).basis_pos_q,
+                    if actor == 0 { q } else { -q }
+                );
+                reserved.extend([2 * asset, 2 * asset + 1]);
+            }
+            assert_eq!(group.assets[asset].oi_eff_long_q, q.unsigned_abs());
+            assert_eq!(group.assets[asset].oi_eff_short_q, q.unsigned_abs());
+        }
+    }
+    assert!(reserved.len() <= DOMAINS);
+    reserved.len()
+}
+
+fn competition_settle(
+    h: &mut History,
+    m: &mut Measurements,
+    claims: &mut [u128],
+    positions: &[i128],
+    moves: &[(u16, u64, u64)],
+    order: [usize; 2],
+) {
+    h.slot += 1;
+    h.env.svm.warp_to_slot(h.slot);
+    for &(asset, before, after) in moves {
+        assert_eq!(
+            h.env.market_state().1.assets[asset as usize].effective_price,
+            before
+        );
+        let q = positions[asset as usize];
+        let gain = q / POS_SCALE as i128 * (after as i128 - before as i128);
+        assert!(gain > 0);
+        claims[2 * asset as usize + usize::from(q > 0)] += gain as u128 * BOUND_SCALE;
+        let cu = h
+            .env
+            .push_auth_mark_for_asset_as_admin(asset, h.slot, after);
+        assert_cu_within("mixed latent reclamation mark", cu, CU_LIMIT);
+        m.max_cu = m.max_cu.max(cu);
+    }
+    let gain = claims.iter().sum::<u128>() / BOUND_SCALE;
+    for actor in order {
+        let rank = |h: &History| {
+            let group = h.env.market_state().1;
+            let account = h.env.portfolio_state(h.portfolios[actor]);
+            let pending = moves
+                .iter()
+                .map(|m| h.slot - group.assets[m.0 as usize].slot_last)
+                .sum::<u64>();
+            u128::from(pending)
+                + if actor == 0 {
+                    account.pnl.get().abs_diff(gain as i128)
+                } else {
+                    account.capital.get().abs_diff(CAPITAL - gain)
+                }
+        };
+        for _ in 0..4 {
+            let before = rank(h);
+            if before == 0 {
+                break;
+            }
+            let crank = instruction(
+                h,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: h.slot,
+                    observations: crank_observations_for_assets(
+                        &moves.iter().map(|m| m.0).collect::<Vec<_>>(),
+                    ),
+                },
+                vec![
+                    AccountMeta::new(h.env.payer.pubkey(), true),
+                    AccountMeta::new(h.env.market, false),
+                    AccountMeta::new(h.portfolios[actor], false),
+                ],
+            );
+            h.env.svm.expire_blockhash();
+            let tx = signed(h, &[crank], &[]);
+            m.submit(h, tx, None);
+            assert!(
+                rank(h) < before,
+                "accepted settlement decreases pending work or economic debt"
+            );
+        }
+        assert_eq!(rank(h), 0, "four public cranks suffice per owner");
+    }
+    assert_eq!(competition_resources(h, claims, positions), DOMAINS);
+}
+
+#[test]
+fn v16_program_mixed_materialized_latent_reclamation_admits_only_fitting_replacement() {
+    assert!(include_str!("../../../Cargo.lock").contains(
+        "git+https://github.com/aeyakovenko/percolator?rev=4db11a8cb0053815e23a35d3a7d3edc265d8d866#\
+         4db11a8cb0053815e23a35d3a7d3edc265d8d866"
+    ));
+    let mut m = Measurements::default();
+    let mut worlds = 0;
+    let partial = (ASSETS - 2) as u16;
+    let latent = (ASSETS - 1) as u16;
+    let replacement = ASSETS as u16;
+    for direction in [-1i128, 1] {
+        for reverse_batch in [false, true] {
+            let mut h = History::with_market_capacity(ASSETS + 1);
+            h.env.configure_permissionless_resolve_with_cu(1_000, 5);
+            h.slot += 1;
+            h.env.svm.warp_to_slot(h.slot);
+            h.env.activate_asset(replacement, h.slot, PRICE);
+            h.env
+                .configure_auth_mark_for_asset_as_admin(replacement, h.slot, PRICE);
+            let order = if direction > 0 { [0, 1] } else { [1, 0] };
+            let route = AccountResidualCounterTradePath::TradeNoCpi;
+            for asset in 0..partial {
+                let q = (1 + i128::from(asset % 3)) * POS_SCALE as i128;
+                h.trade(route, &[(asset, q, PRICE)]);
+                h.mark_and_settle(&[(asset, PRICE + 1)], order);
+                h.trade(route, &[(asset, -2 * q, PRICE + 1)]);
+                h.mark_and_settle(&[(asset, PRICE)], order);
+                h.trade(route, &[(asset, q, PRICE)]);
+            }
+            let partial_q = direction * 4 * POS_SCALE as i128;
+            let latent_q = -direction * 6 * POS_SCALE as i128;
+            let replacement_q = direction * 7 * POS_SCALE as i128;
+            let moved_price = (PRICE as i128 + direction) as u64;
+            h.trade(
+                route,
+                &[(partial, partial_q, PRICE), (latent, latent_q, PRICE)],
+            );
+            h.mark_and_settle(&[(partial, moved_price)], order);
+            let mut claims = vec![0; DOMAINS + 2];
+            claims[..DOMAINS].copy_from_slice(&h.claims.map(|c| c * BOUND_SCALE));
+            let mut positions = vec![0; ASSETS + 1];
+            positions[..ASSETS].copy_from_slice(&h.positions);
+            assert_eq!(claims.iter().filter(|c| **c > 0).count(), DOMAINS - 3);
+            assert_eq!(competition_resources(&h, &claims, &positions), DOMAINS);
+            let retained = h
+                .portfolios
+                .map(|p| h.env.portfolio_state(p).source_domains);
+            let ids = h.portfolios.map(|p| h.env.portfolio_id(p));
+            let custody = [h.env.vault, h.env.mint, h.tokens[0], h.tokens[1]]
+                .map(|key| h.env.svm.get_account(&key));
+            let projected_count = |closing: u16| {
+                let mut reserved: BTreeSet<_> = claims
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(domain, &claim)| (claim > 0).then_some(domain))
+                    .collect();
+                for (asset, &q) in positions.iter().enumerate() {
+                    if q != 0 && asset != closing as usize {
+                        reserved.extend([2 * asset, 2 * asset + 1]);
+                    }
+                }
+                reserved.extend([2 * replacement as usize, 2 * replacement as usize + 1]);
+                reserved.len()
+            };
+            assert_eq!(projected_count(partial), DOMAINS + 1);
+            assert_eq!(projected_count(latent), DOMAINS);
+            let batch = |h: &History, closing: u16, q: i128, price: u64| {
+                let mut legs = vec![(closing, -q, price), (replacement, replacement_q, PRICE)];
+                if reverse_batch {
+                    legs.reverse();
+                }
+                trade(h, &legs, true)
+            };
+
+            // Closing the partially materialized leg frees only its unused side:
+            // 25 retained claims + 2 surviving latent + 2 replacement = 29.
+            let rejected = batch(&h, partial, partial_q, moved_price);
+            h.env.svm.expire_blockhash();
+            let tx = signed(&h, &[rejected], &[0, 1]);
+            m.submit(&mut h, tx, Some((2, PercolatorError::InvalidInstruction)));
+            assert_eq!(competition_resources(&h, &claims, &positions), DOMAINS);
+
+            // Closing the wholly latent sibling instead leaves a 28-domain union,
+            // including the partially materialized survivor's still-unused side.
+            let accepted = batch(&h, latent, latent_q, PRICE);
+            rollback_retry(&mut h, &mut m, accepted, &[0, 1]);
+            positions[latent as usize] = 0;
+            positions[replacement as usize] = replacement_q;
+            assert_eq!(competition_resources(&h, &claims, &positions), DOMAINS);
+            assert_eq!(
+                h.portfolios
+                    .map(|p| h.env.portfolio_state(p).source_domains),
+                retained
+            );
+            assert_eq!(
+                [h.env.vault, h.env.mint, h.tokens[0], h.tokens[1]]
+                    .map(|key| h.env.svm.get_account(&key)),
+                custody
+            );
+
+            let flip = trade(&h, &[(partial, -2 * partial_q, moved_price)], false);
+            rollback_retry(&mut h, &mut m, flip, &[0, 1]);
+            positions[partial as usize] = -partial_q;
+            assert_eq!(competition_resources(&h, &claims, &positions), DOMAINS);
+            competition_settle(
+                &mut h,
+                &mut m,
+                &mut claims,
+                &positions,
+                &[
+                    (partial, moved_price, PRICE),
+                    (replacement, PRICE, moved_price),
+                ],
+                order,
+            );
+            let flip = trade(&h, &[(replacement, -3 * replacement_q, moved_price)], false);
+            rollback_retry(&mut h, &mut m, flip, &[0, 1]);
+            positions[replacement as usize] = -2 * replacement_q;
+            assert_eq!(competition_resources(&h, &claims, &positions), DOMAINS);
+            competition_settle(
+                &mut h,
+                &mut m,
+                &mut claims,
+                &positions,
+                &[(replacement, moved_price, PRICE)],
+                [order[1], order[0]],
+            );
+            assert_eq!(claims.iter().filter(|c| **c > 0).count(), DOMAINS);
+            assert_eq!(
+                &claims[2 * latent as usize..2 * latent as usize + 2],
+                &[0, 0]
+            );
+            let historical_gain = 2 * (0..partial).map(|a| 1 + u128::from(a % 3)).sum::<u128>();
+            assert_eq!(
+                claims.iter().sum::<u128>(),
+                (historical_gain + 8 + 21) * BOUND_SCALE
+            );
+            for asset in [partial, replacement] {
+                let close = trade(&h, &[(asset, -positions[asset as usize], PRICE)], false);
+                rollback_retry(&mut h, &mut m, close, &[0, 1]);
+                positions[asset as usize] = 0;
+                assert_eq!(competition_resources(&h, &claims, &positions), DOMAINS);
+            }
+            assert_eq!(h.portfolios.map(|p| h.env.portfolio_id(p)), ids);
+            terminal_with_claims(&mut h, &mut m, order, &claims);
+            m.max_cu = m.max_cu.max(h.max_trade).max(h.max_crank);
+            worlds += 1;
+        }
+    }
+    assert_eq!(worlds, 4);
+    assert_eq!(m.terminal_calls, worlds * (DOMAINS + 1));
+    assert_eq!(m.rollbacks, worlds * 8);
+    assert_eq!(m.restored_prefixes, worlds * 7);
+    println!("INV-028 mixed latent reclamation: worlds={worlds}, checked_transactions={}, exact_rollbacks={}, restored_prefixes={}, terminal_calls={}, max_cu={}, max_packet={}",
         m.transactions, m.rollbacks, m.restored_prefixes, m.terminal_calls, m.max_cu, m.max_packet);
 }
