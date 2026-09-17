@@ -1,5 +1,14 @@
 # Invariant-owned test coverage
 
+## Rows 410/429 regression health (2026-09-17)
+
+[The focused follow-up](row410429_regression_health_20260917.md) joins spent
+terminal payouts and ATA recreation with funded beneficiary merge/return for
+fees and insurance. The new exact selector passes four histories, 12 complete
+account rollbacks, 28 payouts and four slab closures on rebuilt current-main SBF;
+peak CU is 661,628. Production and statuses are unchanged. Live shutdown, expiry,
+missing wallets and broader reserve histories remain outside this increment.
+
 ## Row 428 regression health (2026-09-17)
 
 [The focused follow-up](row428_regression_health_20260917.md) adds retained

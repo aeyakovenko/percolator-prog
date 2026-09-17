@@ -6,6 +6,9 @@
 
 use super::*;
 
+#[path = "inv_024_recreated_beneficiary_handoff.rs"]
+mod recreated_beneficiary_handoff;
+
 #[path = "inv_024_generated_reserve_entitlement.rs"]
 mod generated_reserve_entitlement;
 
