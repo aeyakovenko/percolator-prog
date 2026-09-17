@@ -1,5 +1,17 @@
 # Invariant-owned test coverage
 
+## Row 424 rediscovered insurance with retired custody (2026-09-17)
+
+[The focused audit](row424_health_20260917.md) adds four public LiteSVM histories
+where the beneficiary closes its empty SPL wallet after cursor 1 persists. Later
+backing expiry resets the cursor and the scanner restores earlier insurance while
+that wallet is only System-owned, prefunded custody. Keeper-funded ATA recreation
+and unsigned payout retry through exact rollback, then permit burn and retirement.
+The new selector and existing scan-recredit control pass on rebuilt current-main
+SBF: 28 commits, 20 exact rollbacks and four rediscoveries in the new case, peak
+227,593 CU. Row 424 remains OPEN; native custody, multiple expiry waves, pending
+receipts and arbitrary environmental histories remain outside this increment.
+
 ## Row 423 loss-funded receipt completion (2026-09-17)
 
 [The focused audit](row423_health_20260917.md) extends the existing historical-backing
