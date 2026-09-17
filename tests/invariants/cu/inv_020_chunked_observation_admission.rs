@@ -10,6 +10,9 @@ use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 use crate::support::fuzz_model::assert_current_certificate_matches_independent;
 
+#[path = "inv_020_dual_hybrid_fee_carry.rs"]
+mod dual_hybrid_fee_carry;
+
 const PRICE: u64 = 100;
 const CAP_BPS: u64 = 24;
 const DEPOSIT: u128 = 1_000_000;
