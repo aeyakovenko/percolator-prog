@@ -1,5 +1,17 @@
 # Invariant-owned test coverage
 
+## Terminal payout, reserve and entitlement audit (2026-09-17)
+
+[The scoped audit](terminal_payout_entitlement_audit_20260917.md) maps INV-024/027/067/070
+and rows 237/283/287/288/330/372/373/377/410/413/417/418/424/429/434 to existing
+mounted public-route witnesses, with nonqualifying rows retained as controls.
+Exact execution yields 13 passes and seven failures: the known last-claimant receipt
+loss plus six reserve/scan/earnings witnesses with stale epoch expectations.
+The audit distinguishes their unexecuted suffixes from passing receipt, principal
+and generated-scan histories, and records exact selectors, commands and artifacts.
+No distinct missing public-interface LoF/DoS case was established; no duplicate test
+is added. Rows 417/424 stay OPEN and all invariant and benchmark statuses are unchanged.
+
 ## Liveness and source-capacity audit (2026-09-17)
 
 [The scoped audit](liveness_source_capacity_audit_20260917.md) maps INV-028/071/073/077
