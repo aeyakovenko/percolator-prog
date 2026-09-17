@@ -166,6 +166,17 @@ selectors pass on rebuilt current-main SBF; final-run peak CU is 201,926. Produc
 statuses are unchanged. Arbitrary funding/residual/receipt compositions and slab
 retirement remain outside this increment.
 
+## Row 411 funding accrual between retained reductions (2026-09-17)
+
+[The inter-reduction follow-up](row411_inter_reduction_funding_20260917.md) adds
+one selector to the existing funding runner. After a committed 57-unit reduction,
+a second funding interval accrues on the 38-unit residual before its retained
+close. Eight public worlds check 95 + 38 funding atoms, separate 36/22/15-atom
+trade fees, 40 exact rollbacks and 16 full SPL payouts across all four routes.
+The new selector passes on private rebuilt SBF at 471,788 peak CU; same-slot
+split/full controls pass at 464,054/455,883 CU. Earlier funding selectors have
+only one funding interval. Row 411 remains OPEN for the gaps listed in the note.
+
 ## Row 411 retained split close with funding (2026-09-17)
 
 [The split-close follow-up](row411_split_funding_routes_20260917.md) adds one

@@ -2,6 +2,7 @@
 //! fill, authority/policy return, maintenance collection and four closing routes
 //! share an input ledger and exact transaction rollback. Public construction only.
 //! A split close settles funding once and charges each retained fill's ceiling.
+//! Inter-reduction accrual charges only the surviving position on the next close.
 
 use super::*;
 
@@ -9,11 +10,18 @@ const MAINTENANCE: u64 = 307;
 const QUANTITY: i128 = 95 * POS_SCALE as i128;
 const FUNDING_RATE: u64 = 1_000;
 
-fn funding_quote() -> u64 {
+fn funding_quote(quantity: i128) -> u64 {
     // A negative premium floors the signed index, so the absolute per-unit
     // transfer is the ceiling. No observed balances seed this oracle.
     let per_unit = (u128::from(PRICE) * u128::from(FUNDING_RATE)).div_ceil(percolator::FUNDING_DEN);
-    u64::try_from(QUANTITY.unsigned_abs() / POS_SCALE * per_unit).unwrap()
+    u64::try_from(quantity.unsigned_abs() / POS_SCALE * per_unit).unwrap()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseHistory {
+    Full,
+    SplitSameSlot,
+    SplitWithAccrual,
 }
 
 struct Ledger {
@@ -22,6 +30,7 @@ struct Ledger {
     trade_fees: u128,
     fee_slots: [u64; 2],
     maintenance_domains: [u128; 2],
+    settled_funding: u64,
     converted: bool,
     paid: [u64; 2],
     custody: [Account; 3],
@@ -35,6 +44,7 @@ impl Ledger {
             trade_fees: fee(QUANTITY, OPEN_CAP),
             fee_slots: [0; 2],
             maintenance_domains: [0; 2],
+            settled_funding: 0,
             converted: false,
             paid: [0; 2],
             custody: [w.tokens[0], w.tokens[1], w.env.vault]
@@ -60,12 +70,11 @@ impl Ledger {
     }
 
     fn capital(&self, actor: usize) -> u64 {
-        let settled = self.remaining < QUANTITY;
         PRINCIPAL[actor] + u64::from(actor == 0) * DEPOSIT
             - self.trade_fees as u64
             - self.fee_slots[actor] * MAINTENANCE
-            - u64::from(settled && actor != self.winner()) * funding_quote()
-            + u64::from(self.converted && actor == self.winner()) * funding_quote()
+            - u64::from(actor != self.winner()) * self.settled_funding
+            + u64::from(self.converted && actor == self.winner()) * self.settled_funding
             - self.paid[actor]
     }
 
@@ -80,8 +89,8 @@ impl Ledger {
             );
             assert_eq!(
                 p.pnl.get(),
-                i128::from(self.remaining < QUANTITY && !self.converted && actor == self.winner())
-                    * i128::from(funding_quote()),
+                i128::from(!self.converted && actor == self.winner())
+                    * i128::from(self.settled_funding),
                 "funding PnL {actor}"
             );
             assert_eq!(p.fee_credits.get(), 0);
@@ -110,8 +119,7 @@ impl Ledger {
         let vault = PRINCIPAL.iter().sum::<u64>() + DEPOSIT - self.paid.iter().sum::<u64>();
         assert_eq!(group.vault, u128::from(vault));
         assert_eq!(group.c_tot, accounts.iter().map(|p| p.capital.get()).sum());
-        let residual =
-            u128::from(self.remaining < QUANTITY && !self.converted) * u128::from(funding_quote());
+        let residual = u128::from(!self.converted) * u128::from(self.settled_funding);
         assert_eq!(group.vault, group.c_tot + group.insurance + residual);
         let balances = [self.paid[0], self.paid[1], vault];
         for ((key, before), amount) in [w.tokens[0], w.tokens[1], w.env.vault]
@@ -152,17 +160,24 @@ fn collect(w: &World, actor: usize, slot: u64) -> Instruction {
     }
 }
 
-fn retained_funding_close_history(split_close: bool) {
+fn retained_funding_close_history(history: CloseHistory) {
+    let split_close = history != CloseHistory::Full;
+    let accrue_between = history == CloseHistory::SplitWithAccrual;
+    let close_slot = if accrue_between { 4 } else { 2 };
+    let payout_slot = close_slot + 1;
     let matcher = std::fs::read(hostile_matcher_program_path()).unwrap();
     let mut counts = Counts::default();
     assert_eq!(fee(QUANTITY, OPEN_CAP), 36);
-    assert_eq!(funding_quote(), 95);
-    assert!(u128::from(funding_quote()) > fee(QUANTITY, CLOSE_FRESH));
+    assert_eq!(funding_quote(QUANTITY), 95);
+    assert!(u128::from(funding_quote(QUANTITY)) > fee(QUANTITY, CLOSE_FRESH));
     assert!(u128::from(MAINTENANCE) > fee(QUANTITY, OPEN_CAP));
     let partial_quantity = if split_close { QUANTITY * 153 / 255 } else { 0 };
     let final_quantity = QUANTITY - partial_quantity;
     let close_budget = fee(partial_quantity, OPEN_CAP) + fee(final_quantity, OPEN_CAP);
     assert_eq!(close_budget, 36 + u128::from(split_close));
+    let total_funding =
+        funding_quote(QUANTITY) + u64::from(accrue_between) * funding_quote(final_quantity);
+    assert_eq!(total_funding, if accrue_between { 133 } else { 95 });
     for direction in [-1, 1] {
         let mut endpoint = None;
         for route in [
@@ -171,7 +186,9 @@ fn retained_funding_close_history(split_close: bool) {
             Route::SingleNoCpi,
             Route::BatchNoCpi,
         ] {
-            eprintln!("retained funding close: split={split_close}, direction={direction}, route={route:?}");
+            eprintln!(
+                "retained funding close: {history:?}, direction={direction}, route={route:?}"
+            );
             let mut w = World::with_params(
                 &matcher,
                 V16CuMarketParams {
@@ -394,6 +411,7 @@ fn retained_funding_close_history(split_close: bool) {
                     [1, 0, 1],
                 ));
                 counts.fills += 1;
+                book.settled_funding += funding_quote(book.remaining);
                 book.reduce(partial_quantity);
                 book.collect(0, 2);
                 book.collect(1, 2);
@@ -439,6 +457,41 @@ fn retained_funding_close_history(split_close: bool) {
                 counts.record(policy(&mut w, CLOSE_FRESH, 45));
                 book.check(&w);
             }
+            if accrue_between {
+                // Checkpoint the zero-rate interval, then leave a fresh negative
+                // interval pending against only the 38 surviving units. Neither
+                // the consumed partial nor the pre-signed residual is rewritten.
+                assert_eq!(book.remaining, 38 * POS_SCALE as i128);
+                w.env.svm.warp_to_slot(3);
+                counts.record(w.env.push_ewma_mark_with_cu(3, 98));
+                book.check(&w);
+                let crank = w.sign_with_nonce(
+                    &[Instruction {
+                        program_id: w.env.program_id,
+                        accounts: vec![
+                            AccountMeta::new_readonly(w.env.payer.pubkey(), true),
+                            AccountMeta::new(w.env.market, false),
+                            AccountMeta::new(w.portfolios[0], false),
+                        ],
+                        data: ProgInstruction::PermissionlessCrank {
+                            now_slot: 3,
+                            observations: crank_observations(0),
+                        }
+                        .encode(),
+                    }],
+                    46,
+                );
+                counts.record(w.deliver(crank, false, &[w.env.market, w.portfolios[0]], [1, 0, 0]));
+                book.collect(0, 3);
+                book.check(&w);
+                assert_eq!(w.env.market_state().1.assets[0].f_long_num, ADL_ONE as i128);
+                assert_eq!(w.env.market_state().1.funding_epoch, 1);
+                w.env.svm.warp_to_slot(close_slot);
+                counts.record(w.env.push_ewma_mark_with_cu(close_slot, 101));
+                book.check(&w);
+                assert_eq!(w.env.market_state().0.mark_ewma_e6, PRICE);
+                assert_eq!(book.settled_funding, 95);
+            }
             counts.record(w.deliver_with_error(
                 retained[0].clone(),
                 Some((
@@ -480,15 +533,26 @@ fn retained_funding_close_history(split_close: bool) {
                 [1, 0, usize::from(route.cpi())],
             ));
             counts.fills += 1;
+            if !split_close || accrue_between {
+                book.settled_funding += funding_quote(book.remaining);
+            }
             book.reduce(final_quantity);
-            book.collect(0, 2);
-            book.collect(1, 2);
+            book.collect(0, close_slot);
+            book.collect(1, close_slot);
             book.check(&w);
             assert_eq!(book.trade_fees, fee(QUANTITY, OPEN_CAP) + close_budget);
+            assert_eq!(book.settled_funding, total_funding);
             let (_, group) = w.env.market_state();
-            assert_eq!(group.assets[0].f_long_num, ADL_ONE as i128);
-            assert_eq!(group.assets[0].f_short_num, -(ADL_ONE as i128));
-            assert_eq!(group.funding_epoch, 1);
+            let intervals = 1 + u64::from(accrue_between);
+            assert_eq!(
+                group.assets[0].f_long_num,
+                ADL_ONE as i128 * i128::from(intervals)
+            );
+            assert_eq!(
+                group.assets[0].f_short_num,
+                -(ADL_ONE as i128) * i128::from(intervals)
+            );
+            assert_eq!(group.funding_epoch, intervals);
             assert_eq!(
                 w.portfolios.map(|key| w.env.portfolio_position_epoch(key)),
                 epochs.map(|e| e + 1 + u64::from(split_close))
@@ -531,16 +595,16 @@ fn retained_funding_close_history(split_close: bool) {
                     assert_eq!(bincode::serialize(tx).unwrap(), wire);
                 }
             }
-            w.env.svm.warp_to_slot(3);
+            w.env.svm.warp_to_slot(payout_slot);
             for actor in 0..2 {
-                let tx = w.sign_with_nonce(&[collect(&w, actor, 3)], 30 + actor as u32);
+                let tx = w.sign_with_nonce(&[collect(&w, actor, payout_slot)], 30 + actor as u32);
                 counts.record(w.deliver(
                     tx,
                     false,
                     &[w.env.market, w.portfolios[actor]],
                     [1, 0, 0],
                 ));
-                book.collect(actor, 3);
+                book.collect(actor, payout_slot);
                 book.check(&w);
             }
             let winner = book.winner();
@@ -553,7 +617,7 @@ fn retained_funding_close_history(split_close: bool) {
                         AccountMeta::new(w.portfolios[winner], false),
                     ],
                     data: ProgInstruction::PermissionlessCrank {
-                        now_slot: 3,
+                        now_slot: payout_slot,
                         observations: crank_observations(0),
                     }
                     .encode(),
@@ -577,7 +641,7 @@ fn retained_funding_close_history(split_close: bool) {
                     ],
                     data: w
                         .env
-                        .convert_released_pnl_ix(w.portfolios[winner], funding_quote().into())
+                        .convert_released_pnl_ix(w.portfolios[winner], total_funding.into())
                         .encode(),
                 }],
                 32,
@@ -622,7 +686,10 @@ fn retained_funding_close_history(split_close: bool) {
                 book.check(&w);
             }
             let outcome = (book.paid, w.env.token_amount(w.env.vault));
-            assert_eq!(outcome.1, 1_986 + 2 * u64::from(split_close));
+            assert_eq!(
+                outcome.1,
+                1_986 + 2 * u64::from(split_close) + 1_228 * u64::from(accrue_between)
+            );
             if let Some(expected) = endpoint {
                 assert_eq!(outcome, expected);
             } else {
@@ -641,15 +708,20 @@ fn retained_funding_close_history(split_close: bool) {
     );
     assert_eq!(counts.payouts, 16);
     assert_eq!(counts.permitted, 8);
-    eprintln!("INV-014 retained funding collection: split={split_close}, {counts:?}");
+    eprintln!("INV-014 retained funding collection: {history:?}, {counts:?}");
 }
 
 #[test]
 fn v16_retained_partial_close_separates_funding_and_maintenance_from_fee_consent() {
-    retained_funding_close_history(false);
+    retained_funding_close_history(CloseHistory::Full);
 }
 
 #[test]
 fn v16_retained_split_close_bounds_fees_and_collects_funding_once_across_routes() {
-    retained_funding_close_history(true);
+    retained_funding_close_history(CloseHistory::SplitSameSlot);
+}
+
+#[test]
+fn v16_retained_residual_bounds_fees_after_inter_reduction_funding_accrual() {
+    retained_funding_close_history(CloseHistory::SplitWithAccrual);
 }
