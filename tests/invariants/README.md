@@ -83,6 +83,15 @@ selectors pass on rebuilt current-main SBF; final-run peak CU is 201,926. Produc
 statuses are unchanged. Arbitrary funding/residual/receipt compositions and slab
 retirement remain outside this increment.
 
+## Row 411 retained close with funding collection (2026-09-17)
+
+[The funding follow-up](row411_funding_collection_audit_20260917.md) adds pending
+funding and automatic maintenance collection to a retained partial-fill close
+across authority/policy return and all four trade transports. Eight public worlds
+check gross fee consent, 24 exact rollbacks, funding conversion and 16 full SPL
+payouts; peak CU is 456,043. Production, row423 files and status TSVs are unchanged.
+Row 411 remains OPEN, including general funding, fee and route histories.
+
 ## Row 411 partial-fill authority return (2026-09-17)
 
 [The focused follow-up](row411_followup_health_20260917.md) joins a committed

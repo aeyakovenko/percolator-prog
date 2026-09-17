@@ -4,6 +4,9 @@
 
 use super::*;
 
+#[path = "inv_014_retained_funding_collection.rs"]
+mod retained_funding_collection;
+
 fn fee_control(w: &World, signer: Pubkey, rate: u64, sequence: u64, epoch: u64) -> Instruction {
     Instruction {
         program_id: w.env.program_id,
