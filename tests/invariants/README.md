@@ -1,5 +1,22 @@
 # Invariant-owned test coverage
 
+## INV-079 public evidence source census (2026-09-16)
+
+`public_sbf/inv_079_lifecycle_evidence_mounts.rs` now discovers public invariant
+Rust files from the filesystem independently of the evidence ledgers. Every file
+must remain mounted, and every direct, inline-module or `proptest!` test declaration
+must remain enabled and nonignored. The census includes new and nested audit files;
+it has no fixed file/test count to become stale. The current tree has 500 source
+files and 1,904 available declarations, including the two new host guards.
+
+A temporary unlisted file leaves four existing metadata gates green and fails the
+new census. The retained controls reject 35 unlisted/disabled mutations, including
+deleting, commenting or disabling the real INV-084 deposit-contract mount while
+the old lifecycle ledger guard stays green; 16 enabled controls pass.
+This checks availability, not behavioral assertion strength, public reachability,
+Kani nonvacuity or security-field enforcement. No invariant status is promoted.
+[Exact commands, comparison to current main and limits](public_evidence_source_census_audit_20260916.md).
+
 ## INV-017 valid resolved owner/destination alias (2026-09-16)
 
 Owner: [cu/inv_017_resolved_owner_destination_alias.rs](cu/inv_017_resolved_owner_destination_alias.rs).
