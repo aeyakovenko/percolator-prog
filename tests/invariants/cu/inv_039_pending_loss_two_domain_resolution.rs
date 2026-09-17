@@ -14,6 +14,9 @@ use close_preemption::{reject, terminal_instruction};
 #[path = "inv_039_pending_loss_insured_resolution.rs"]
 mod insured_resolution;
 
+#[path = "inv_039_pending_loss_funded_bankruptcy.rs"]
+mod funded_bankruptcy;
+
 const GAINS: [u128; 2] = [5 * 40_000, 2 * 5 * 28_000];
 const RESIDUALS: [u128; 2] = [
     GAINS[0] - ATTRIBUTION_DEPOSITS[1],
@@ -133,6 +136,19 @@ struct DebtModel {
 
 impl DebtModel {
     fn check(&self, world: &AttributionWorld) {
+        self.check_with_gains(world, GAINS);
+    }
+
+    fn check_with_gains(&self, world: &AttributionWorld, gains: [u128; 2]) {
+        let deposits = world.deposits;
+        let residuals = [gains[0] - deposits[1], gains[1] - deposits[3]];
+        let payouts = [
+            deposits[0] + deposits[1],
+            0,
+            deposits[2] + deposits[3],
+            0,
+            deposits[4],
+        ];
         world.check([0; 4], [!self.released[0], false, !self.released[1], false]);
         let group = world.env.market_state().1;
         assert_eq!(group.insurance, 0);
@@ -140,7 +156,7 @@ impl DebtModel {
             let mut expected_close = self.initial[pair];
             if self.booked[pair] {
                 expected_close.finalized = true;
-                expected_close.b_loss_booked = RESIDUALS[pair];
+                expected_close.b_loss_booked = residuals[pair];
                 expected_close.residual_remaining = 0;
             }
             assert_eq!(
@@ -152,7 +168,7 @@ impl DebtModel {
                 expected_close,
                 "domain {pair}: only its debtor can book this residual"
             );
-            assert_close_partition(expected_close, RESIDUALS[pair]);
+            assert_close_partition(expected_close, residuals[pair]);
             assert!(!self.released[pair] || self.booked[pair]);
         }
         for (actor, a) in world.actors.iter().enumerate() {
@@ -160,10 +176,7 @@ impl DebtModel {
             let receipt = resolved_receipt(&account);
             let due = if receipt.present {
                 assert!(actor == 0 || actor == 2);
-                assert_eq!(
-                    receipt.terminal_positive_claim_face,
-                    ATTRIBUTION_DEPOSITS[actor + 1]
-                );
+                assert_eq!(receipt.terminal_positive_claim_face, deposits[actor + 1]);
                 receipt
                     .terminal_positive_claim_face
                     .checked_sub(receipt.paid_effective)
@@ -172,16 +185,14 @@ impl DebtModel {
                 0
             };
             let expected = match actor {
-                0 | 2 if !self.released[actor / 2] => {
-                    ATTRIBUTION_DEPOSITS[actor] + GAINS[actor / 2]
-                }
+                0 | 2 if !self.released[actor / 2] => deposits[actor] + gains[actor / 2],
                 1 | 3 if !self.booked[actor / 2] => {
                     assert_eq!(account.capital.get(), 0);
-                    assert_eq!(account.pnl.get(), -(RESIDUALS[actor / 2] as i128));
+                    assert_eq!(account.pnl.get(), -(residuals[actor / 2] as i128));
                     assert_eq!(world.env.token_amount(a.token), 0);
                     continue;
                 }
-                _ => PAYOUTS[actor],
+                _ => payouts[actor],
             };
             assert_eq!(
                 account.capital.get() as i128
@@ -191,7 +202,7 @@ impl DebtModel {
                 expected as i128,
                 "actor {actor}: exact entitlement after its own debit"
             );
-            assert!(world.env.token_amount(a.token) as u128 <= PAYOUTS[actor]);
+            assert!(world.env.token_amount(a.token) as u128 <= payouts[actor]);
             if actor == 0 || actor == 2 {
                 if !self.released[actor / 2] || self.booked.contains(&false) {
                     assert_eq!(world.env.token_amount(a.token), 0);
