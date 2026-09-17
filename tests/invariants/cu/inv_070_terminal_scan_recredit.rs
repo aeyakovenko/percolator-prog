@@ -16,6 +16,9 @@ use solana_sdk::{instruction::InstructionError, system_program};
 #[path = "inv_070_terminal_scan_multiwave.rs"]
 mod multiwave;
 
+#[path = "inv_070_terminal_scan_native_surplus.rs"]
+mod native_surplus;
+
 #[test]
 fn v16_program_rediscovered_insurance_recreates_prefunded_beneficiary_before_retirement() {
     const PREFUND: u64 = 19;

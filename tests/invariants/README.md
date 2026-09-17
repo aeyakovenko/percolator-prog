@@ -1,5 +1,21 @@
 # Invariant-owned test coverage
 
+## Row 424 native scanner rediscovery (2026-09-17)
+
+[The focused note](row424_native_scan_surplus_20260917.md) adds four public
+LiteSVM histories in [the native scan child](cu/inv_070_terminal_scan_native_surplus.rs).
+After cursor 1 persists, a native vault receives 53 raw surplus lamports. Later
+backing expiry rewinds the scanner, which restores exactly 61 insurance atoms
+whether SyncNative runs before expiry or after rediscovery. Seven complete-Account
+rollbacks per history cover executed scanner/payment/closure prefixes and rejected
+replays; independent token, lamport, ledger and cursor checks continue through
+unsigned insurance payout, separate surplus transfer and exact rent closure.
+This extends the SPL multiwave/custody-repair cases and native reclassification
+without spent insurance. New and two control exact selectors pass on rebuilt
+current-main SBF at **218,682 / 224,593 / 33,758 CU**. Row 424 remains OPEN for pending receipts, Recovery,
+dual custody, repeated native recredit, maximum shapes and unavailable retirement
+resources. Production, fixtures, shared helpers, Cargo and TSVs are unchanged.
+
 ## Row 433 native-secondary earnings (2026-09-17)
 
 [The focused note](row433_native_secondary_earnings_20260917.md) adds one public
