@@ -71,6 +71,9 @@ mod retained_resolution_clock;
 #[path = "inv_020_fee_refresh_admission.rs"]
 mod fee_refresh_admission;
 
+#[path = "inv_020_equal_composite_provenance.rs"]
+mod equal_composite_provenance;
+
 #[test]
 fn v16_attack_recovery_oracle_push_cannot_extend_force_close_deadline() {
     const SHUTDOWN_SLOT: u64 = 2;

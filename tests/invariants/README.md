@@ -1,5 +1,30 @@
 # Invariant-owned test coverage
 
+## INV-020 equal composite provenance and fractional mark movement (2026-09-17)
+
+Owner: [cu/inv_020_equal_composite_provenance.rs](cu/inv_020_equal_composite_provenance.rs),
+mounted under INV-020. Six public LiteSVM worlds rotate Pyth, Switchboard and
+Chainlink across a three-component formula on the base or secondary asset.
+Different component vectors both compose to 120. Replacing components at an
+accepted timestamp rejects with exact Account rollback; a newer timestamp commits
+the new component vector without changing the engine asset or spending another
+slot's movement allowance. Replaying the unchanged report advances settlement
+without renewing observation provenance.
+
+With unit exposure, entry 100 and a 37-bps slot cap, independent elapsed-interval
+arithmetic requires effective prices 100/100/101 and remainders 3700/7400/1100.
+The short's target-lag margin remains exactly 120 through the first one-atom loss.
+All current certificate lanes and keys equal the existing independent model.
+The middle slot's already-current certificate yields exact `EngineNonProgress`.
+
+This adds the equal-output/different-components provenance boundary and its
+composition with fractional movement and certificate reuse. Existing composite
+matrices keep component prices fixed for coherent updates; the single-provider
+same-epoch test changes the output price; AuthMark carry tests have no provider
+component replacement. No retained-authority or terminal workflow is involved.
+Production code, dependency pins and invariant statuses are unchanged.
+[Scope, comparison, exact commands and results](inv_020_equal_composite_audit_20260917.md).
+
 ## INV-077 public native insurance completion at capacity (2026-09-17)
 
 Owner: [cu/inv_077_public_native_insurance_capacity.rs](cu/inv_077_public_native_insurance_capacity.rs),
@@ -92,7 +117,6 @@ This is production-source composition coverage, not a new economic finding or
 invariant-status promotion. Production code and dependency pins are unchanged;
 only the existing `syn` dev dependency gains parser comparison/visitor features.
 [Exact selectors, comparison controls, and limits](inv_012_retained_admission_source_audit_20260917.md).
-
 ## INV-067 resolved source residual entitlement (2026-09-16)
 
 Owner: [cu/inv_067_resolved_source_residual.rs](cu/inv_067_resolved_source_residual.rs),
