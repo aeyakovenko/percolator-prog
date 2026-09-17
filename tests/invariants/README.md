@@ -65,6 +65,18 @@ SBF: 8 exact rollbacks, 32 top-ups and 8 slab closures; peak measured CU 408,787
 Row 417 remains OPEN; INV-024/066/067/068 statuses are unchanged. Arbitrary stock,
 recredit, native and Recovery compositions remain outside this increment.
 
+## Row 417 full payment before late cleanup (2026-09-17)
+
+[The focused note](row417_full_payment_late_cleanup_20260917.md) adds one public
+LiteSVM history for full-rate receipt finalization while unrelated backing remains
+Fresh. Eight worlds pay unequal 525/975 faces, delete both portfolios before the
+last stock release, and preserve exact receipt mass and the capped payout rate
+through later slab expiry. Sixteen successful-prefix rollbacks cover expiry and
+burn/closure; only the 189 excess atoms are burned. The new selector and both
+existing stateful row-417 controls pass on a private rebuilt SBF, with CU peaks
+245,968 / 408,787 / 208,228. Production and TSVs are unchanged. Row 417 remains
+OPEN for arbitrary stock histories, recredit, custody recovery and Recovery.
+
 ## Rows 420/433 native earned-fee custody (2026-09-17)
 
 [The focused audit](row420433_health_20260917.md) extends the existing dual-quote

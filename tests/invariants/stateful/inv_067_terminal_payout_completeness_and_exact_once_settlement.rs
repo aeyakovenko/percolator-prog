@@ -288,6 +288,16 @@ fn v16_program_late_unrelated_backing_cannot_outlive_and_erase_resolved_receipt(
 
 #[test]
 fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
+    inv067_receipted_expiry_waves(false);
+}
+
+#[test]
+fn v16_program_fully_paid_receipts_exit_before_late_excess_backing_cleanup() {
+    // Unlike the haircut control, full face is terminal even with Fresh stock.
+    inv067_receipted_expiry_waves(true);
+}
+
+fn inv067_receipted_expiry_waves(full_rate: bool) {
     use percolator::{BackingBucketStatusV16, ResolvedPayoutReceiptV16, BOUND_SCALE};
     use percolator_prog::ix::Instruction as ProgInstruction;
     use solana_sdk::{
@@ -295,6 +305,7 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
         compute_budget::ComputeBudgetInstruction,
         fee::FeeStructure,
         instruction::{AccountMeta, Instruction, InstructionError},
+        message::Message,
         pubkey::Pubkey,
         signature::{Keypair, Signer},
         transaction::{Transaction, TransactionError},
@@ -302,14 +313,12 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
 
     const CLAIMANTS: [usize; 2] = [0, 4];
     // The debtor's 500 atoms realize pro rata before the receipt snapshot. Only
-    // the remaining faces share the later 350 atoms from unrelated backing.
+    // the remaining faces share later releases from unrelated backing.
     const GROSS: [u128; 2] = [14 * 50, 26 * 50];
     const REALIZED: [u128; 2] = [GROSS[0] * 500 / 2_000, GROSS[1] * 500 / 2_000];
     const FACES: [u128; 2] = [GROSS[0] - REALIZED[0], GROSS[1] - REALIZED[1]];
     const TOTAL_FACE: u128 = 2_000 - 500;
-    const BACKING: [u128; 2] = [161, 189];
     const INITIAL_RESIDUAL: u128 = 0;
-    const VAULT: u128 = 2_500 + 161 + 189;
 
     fn frame(env: &V16Svm) -> Vec<(Pubkey, Option<Account>)> {
         let mut keys: Vec<_> = env
@@ -318,6 +327,16 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
             .map(|(key, _)| key)
             .collect();
         keys.extend(env.actors.iter().map(|actor| actor.signer.pubkey()));
+        keys.extend([
+            env.vault_authority,
+            env.program_id,
+            spl_token::ID,
+            solana_sdk::system_program::ID,
+            solana_sdk::compute_budget::ID,
+            solana_sdk::sysvar::clock::ID,
+        ]);
+        keys.sort_unstable();
+        keys.dedup();
         keys.into_iter()
             .map(|key| (key, env.svm.get_account(&key)))
             .collect()
@@ -342,6 +361,40 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
             &[payer],
             env.svm.latest_blockhash(),
         );
+        land(env, tx, peak)
+    }
+
+    fn land(
+        env: &mut V16Svm,
+        tx: Transaction,
+        peak: &mut u64,
+    ) -> Result<litesvm::types::TransactionMetadata, litesvm::types::FailedTransactionMetadata>
+    {
+        let payer = tx.message.account_keys[0];
+        let mut price = 0u64;
+        for ix in &tx.message.instructions {
+            if tx.message.account_keys[ix.program_id_index as usize]
+                == solana_sdk::compute_budget::ID
+            {
+                let budget: ComputeBudgetInstruction =
+                    solana_sdk::borsh1::try_from_slice_unchecked(&ix.data).unwrap();
+                match budget {
+                    ComputeBudgetInstruction::SetComputeUnitPrice(value) => price = value,
+                    ComputeBudgetInstruction::SetComputeUnitLimit(value) => {
+                        assert_eq!(u64::from(value), TX_CU_LIMIT);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let fee = FeeStructure::default().lamports_per_signature * tx.signatures.len() as u64
+            + (TX_CU_LIMIT * price).div_ceil(1_000_000);
+        let before: Vec<_> = tx
+            .message
+            .account_keys
+            .iter()
+            .map(|&key| (key, env.svm.get_account(&key)))
+            .collect();
         let result = env.svm.send_transaction(tx);
         let meta = match &result {
             Ok(meta) => meta,
@@ -349,6 +402,18 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
         };
         *peak = (*peak).max(meta.compute_units_consumed);
         assert!(meta.compute_units_consumed < TX_CU_LIMIT);
+        if result.is_err() {
+            for (key, mut expected) in before {
+                if key == payer {
+                    expected.as_mut().unwrap().lamports -= fee;
+                }
+                assert_eq!(
+                    env.svm.get_account(&key),
+                    expected,
+                    "rollback Account {key}"
+                );
+            }
+        }
         result
     }
 
@@ -372,6 +437,7 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
         data: instruction.encode(),
     };
     let mut peak_cu = 0;
+    let mut rollbacks = 0;
     for early_side in 0..2 {
         for overdue in [false, true] {
             for order in [[0, 1], [1, 0]] {
@@ -396,12 +462,21 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
                 )
                 .unwrap();
                 let expiries = if early_side == 0 { [40, 60] } else { [60, 40] };
+                let first_side = if overdue { 0 } else { early_side };
+                let backing = if full_rate {
+                    let mut backing = [189; 2];
+                    backing[first_side] = TOTAL_FACE;
+                    backing
+                } else {
+                    [161, 189]
+                };
+                let backing_total = backing.iter().sum::<u128>();
                 let provider_before = env.token_amount(env.actors[2].source_token);
                 for side in 0..2 {
                     let topup = env.build_retained_backing_bucket_top_up_for_actor(
                         2,
                         2 + side as u16,
-                        BACKING[side],
+                        backing[side],
                         expiries[side],
                     );
                     env.land_retained(topup).unwrap();
@@ -489,9 +564,12 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
                         ledger.terminal_claim_exact_receipts_num,
                         TOTAL_FACE * BOUND_SCALE
                     );
-                    assert_eq!(ledger.current_payout_rate_num, residual * BOUND_SCALE);
+                    assert_eq!(
+                        ledger.current_payout_rate_num,
+                        residual.min(TOTAL_FACE) * BOUND_SCALE
+                    );
                     assert_eq!(ledger.current_payout_rate_den, TOTAL_FACE * BOUND_SCALE);
-                    assert!(!ledger.payout_halted);
+                    assert!(!ledger.payout_halted && !ledger.finalized);
                     for side in 0..2 {
                         let bucket = group.source_backing_buckets[2 + side];
                         assert_eq!(bucket.expiry_slot, expiries[side]);
@@ -508,7 +586,7 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
                             if released[side] {
                                 0
                             } else {
-                                BACKING[side] * BOUND_SCALE
+                                backing[side] * BOUND_SCALE
                             }
                         );
                         assert_eq!(bucket.consumed_liened_backing_num, 0);
@@ -519,13 +597,17 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
                         if observed.present {
                             let expected = ResolvedPayoutReceiptV16 {
                                 paid_effective: paid[index],
+                                finalized: paid[index] == FACES[index],
                                 ..original[index]
                             };
                             assert_eq!(observed, expected);
                             assert_eq!(observed.terminal_positive_claim_face, FACES[index]);
                         } else {
                             assert!(released.iter().all(|&done| done));
-                            assert_eq!(paid[index], FACES[index] * residual / TOTAL_FACE);
+                            assert_eq!(
+                                paid[index],
+                                FACES[index] * residual.min(TOTAL_FACE) / TOTAL_FACE
+                            );
                         }
                         assert_eq!(
                             (
@@ -551,11 +633,11 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
                             1_000 + REALIZED[index] + paid[index]
                         );
                     }
-                    assert_eq!(group.vault, VAULT - 2_500 - paid.iter().sum::<u128>());
+                    assert_eq!(group.vault, backing_total - paid.iter().sum::<u128>());
                     assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
                     assert_eq!(
                         env.token_amount(env.actors[2].source_token),
-                        provider_before - 350
+                        provider_before - backing_total as u64
                     );
                     assert_eq!(env.mint_supply(), supply);
                     assert_eq!(env.token_supply_observed(), u128::from(supply));
@@ -567,7 +649,7 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
                 // already have receipts, no source entries and no unreceipted bound.
                 let claims = CLAIMANTS
                     .map(|actor| payout(&env, actor, ProgInstruction::ClaimResolvedPayoutTopup));
-                for wave in 0..2 {
+                for wave in 0..if full_rate { 1 } else { 2 } {
                     // When both sides are overdue, one hinted crank discovers the
                     // lower domain first, regardless of their expiry ordering.
                     let side = if overdue {
@@ -597,17 +679,14 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
                     ];
                     if wave == 1 {
                         let before = frame(&env);
-                        let mut payer_before = env.svm.get_account(&payer.pubkey()).unwrap();
-                        payer_before.lamports -= FeeStructure::default().lamports_per_signature;
                         let mut aborted = bundle.to_vec();
                         aborted.push(Instruction {
                             program_id: solana_sdk::system_program::ID,
                             accounts: vec![],
                             data: vec![],
                         });
-                        let failure = send(&mut env, &payer, &aborted, &mut peak_cu).expect_err(
-                            "abort after second expiry and both positive receipt top-ups",
-                        );
+                        let failure = send(&mut env, &payer, &aborted, &mut peak_cu)
+                            .expect_err("abort after second expiry and receipt payout prefix");
                         assert_eq!(
                             failure.err,
                             TransactionError::InstructionError(
@@ -615,6 +694,7 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
                                 InstructionError::InvalidInstructionData
                             )
                         );
+                        rollbacks += 1;
                         for (program, count) in [(env.program_id, 3), (spl_token::ID, 2)] {
                             assert_eq!(
                                 failure
@@ -631,13 +711,12 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
                             before,
                             "restore first-wave paid identities, stock and full custody Accounts"
                         );
-                        assert_eq!(env.svm.get_account(&payer.pubkey()), Some(payer_before));
                         check(&env, paid, released, residual);
                     }
                     let before = CLAIMANTS.map(|actor| receipt(&env, actor));
                     send(&mut env, &payer, &bundle[..1], &mut peak_cu).unwrap();
                     released[side] = true;
-                    residual += BACKING[side];
+                    residual += backing[side];
                     assert_eq!(
                         CLAIMANTS.map(|actor| receipt(&env, actor)),
                         before,
@@ -645,6 +724,9 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
                     );
                     check(&env, paid, released, residual);
                     for index in [order[wave], order[1 - wave]] {
+                        let due =
+                            FACES[index] * residual.min(TOTAL_FACE) / TOTAL_FACE - paid[index];
+                        let before = frame(&env);
                         let meta =
                             send(&mut env, &payer, &[claims[index].clone()], &mut peak_cu).unwrap();
                         assert_eq!(
@@ -654,19 +736,35 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
                                     |line| **line == format!("Program {} success", spl_token::ID)
                                 )
                                 .count(),
-                            1
+                            usize::from(due != 0)
                         );
-                        paid[index] = FACES[index] * residual / TOTAL_FACE;
+                        paid[index] += due;
                         check(&env, paid, released, residual);
+                        if due == 0 {
+                            assert_eq!(frame(&env), before, "full face cannot be paid twice");
+                        }
                     }
                     if wave == 0 {
                         let before = frame(&env);
+                        if full_rate {
+                            assert_eq!(residual, TOTAL_FACE);
+                            assert!(CLAIMANTS
+                                .iter()
+                                .all(|&actor| receipt(&env, actor).finalized));
+                        }
                         send(&mut env, &payer, &claims, &mut peak_cu).unwrap();
-                        assert_eq!(frame(&env), before, "zero-due retries cannot erase either receipt while another bucket remains");
+                        assert_eq!(
+                            frame(&env),
+                            before,
+                            "zero-due retries preserve paid identity while another bucket remains"
+                        );
                     }
                 }
-                assert_eq!(paid, [122, 227]);
-                assert_eq!(env.token_amount(env.vault), 1);
+                let expected_paid = if full_rate { FACES } else { [122, 227] };
+                let residue = backing_total - expected_paid.iter().sum::<u128>();
+                assert_eq!(paid, expected_paid);
+                assert_eq!(residue, if full_rate { 189 } else { 1 });
+                assert_eq!(u128::from(env.token_amount(env.vault)), residue);
                 for actor in CLAIMANTS {
                     inv067_drain_resolved_actor(&mut env, actor, &mut peak_cu);
                 }
@@ -695,29 +793,160 @@ fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
                     );
                 }
                 for actor in CLAIMANTS {
-                    env.close_primary_portfolio(actor).unwrap();
+                    let rent = env.account_lamports(env.actors[actor].portfolio);
+                    let market_rent = env.account_lamports(env.market);
+                    peak_cu =
+                        peak_cu.max(env.close_primary_portfolio(actor).unwrap().compute_units);
+                    assert_eq!(env.account_lamports(env.market), market_rent + rent);
+                    assert!(env
+                        .svm
+                        .get_account(&env.actors[actor].portfolio)
+                        .is_none_or(|account| account.lamports == 0 && account.data.is_empty()));
                 }
+                if full_rate {
+                    let group = env.primary_market_state().1;
+                    assert_eq!(group.materialized_portfolio_count, 0);
+                    assert_eq!(
+                        group
+                            .source_credit
+                            .iter()
+                            .map(|source| source.fresh_reserved_backing_num)
+                            .sum::<u128>(),
+                        189 * BOUND_SCALE
+                    );
+                    assert_eq!(group.resolved_payout_ledger.snapshot_residual, TOTAL_FACE);
+                    assert_eq!(
+                        group
+                            .resolved_payout_ledger
+                            .terminal_claim_exact_receipts_num,
+                        TOTAL_FACE * BOUND_SCALE
+                    );
+                    // Full payment releases the portfolios before the remaining
+                    // bucket is normalized, but it cannot authorize premature burn.
+                    if !overdue {
+                        let mut locked = false;
+                        for _ in 0..4 {
+                            let tx = env.build_retained_close_primary_slab();
+                            let before = frame(&env);
+                            match land(&mut env, tx, &mut peak_cu) {
+                                Ok(_) => assert_ne!(frame(&env), before),
+                                Err(failure) => {
+                                    assert_eq!(failure.err, TransactionError::InstructionError(
+                                        3, InstructionError::Custom(
+                                            percolator_prog::error::PercolatorError::EngineLockActive as u32)));
+                                    assert_eq!(frame(&env), before);
+                                    locked = true;
+                                    break;
+                                }
+                            }
+                        }
+                        assert!(
+                            locked,
+                            "unexpired excess backing still prevents slab deletion"
+                        );
+                        assert_eq!(env.token_amount(env.vault), 189);
+                        assert_eq!(env.mint_supply(), supply);
+                    }
+                    env.warp_to_slot(if overdue {
+                        61
+                    } else {
+                        expiries[1 - first_side]
+                    });
+                }
+                let ledger_before_slab = env.primary_market_state().1.resolved_payout_ledger;
                 for _ in 0..8 {
                     if env.svm.get_account(&env.market).unwrap().data.len() == HEADER_LEN {
                         break;
                     }
-                    peak_cu = peak_cu.max(env.close_primary_slab().unwrap().compute_units);
+                    if full_rate {
+                        let close = env.build_retained_close_primary_slab();
+                        let suffix = Transaction::new_unsigned(Message::new(
+                            &[Instruction {
+                                program_id: solana_sdk::system_program::ID,
+                                accounts: vec![],
+                                data: vec![],
+                            }],
+                            None,
+                        ));
+                        let aborted = env.bundle_retained_transactions(&[close.clone(), suffix]);
+                        let before = frame(&env);
+                        let failure = land(&mut env, aborted, &mut peak_cu)
+                            .expect_err("rollback successful terminal scan or burn/close");
+                        assert_eq!(
+                            failure.err,
+                            TransactionError::InstructionError(
+                                4,
+                                InstructionError::InvalidInstructionData
+                            )
+                        );
+                        assert_eq!(
+                            failure
+                                .meta
+                                .logs
+                                .iter()
+                                .filter(
+                                    |line| **line == format!("Program {} success", env.program_id)
+                                )
+                                .count(),
+                            1
+                        );
+                        assert_eq!(frame(&env), before);
+                        rollbacks += 1;
+                        let success = land(&mut env, close, &mut peak_cu).unwrap();
+                        assert_ne!(frame(&env), before);
+                        let closed =
+                            env.svm.get_account(&env.market).unwrap().data.len() == HEADER_LEN;
+                        for logs in [&failure.meta.logs, &success.logs] {
+                            for instruction in ["Instruction: Burn", "Instruction: CloseAccount"] {
+                                assert_eq!(
+                                    logs.iter()
+                                        .filter(|line| line.contains(instruction))
+                                        .count(),
+                                    usize::from(closed),
+                                    "the aborted prefix reaches the same custody operations"
+                                );
+                            }
+                        }
+                        if !closed {
+                            let group = env.primary_market_state().1;
+                            let late_bucket = group.source_backing_buckets[2 + 1 - first_side];
+                            assert_eq!(late_bucket.status, BackingBucketStatusV16::Expired);
+                            assert_eq!(
+                                group.source_credit[2 + 1 - first_side].fresh_reserved_backing_num,
+                                0
+                            );
+                            let mut expected = ledger_before_slab;
+                            expected.snapshot_residual += 189;
+                            assert_eq!(group.resolved_payout_ledger, expected,
+                                "late stock preserves the completed exact face mass and capped rate");
+                            assert_eq!(group.vault, 189);
+                            assert_eq!(env.token_amount(env.vault), 189);
+                            assert_eq!(env.mint_supply(), supply);
+                        }
+                    } else {
+                        peak_cu = peak_cu.max(env.close_primary_slab().unwrap().compute_units);
+                    }
                 }
                 assert_closed_market_tombstone(&env.svm.get_account(&env.market).unwrap());
                 assert_eq!(
                     env.mint_supply(),
-                    supply - 1,
-                    "only the independently derived floor remainder is burned"
+                    supply - residue as u64,
+                    "only input-derived excess plus floor remainder is burned"
                 );
-                assert_eq!(env.token_supply_observed(), u128::from(supply - 1));
+                assert_eq!(env.token_supply_observed(), u128::from(supply) - residue);
                 assert_eq!(
                     CLAIMANTS.map(|actor| env.token_amount(env.actors[actor].destination_token)),
-                    [1_297, 1_552]
+                    if full_rate {
+                        [1_700, 2_300]
+                    } else {
+                        [1_297, 1_552]
+                    }
                 );
             }
         }
     }
-    eprintln!("INV-067 fully receipted expiry waves: 8 worlds, 8 paid-prefix rollbacks, 32 top-ups, 8 slab closures; peak_cu={peak_cu}");
+    let positive_topups = if full_rate { 16 } else { 32 };
+    eprintln!("INV-067 receipted expiry waves: full_rate={full_rate}, 8 worlds, {rollbacks} prefix rollbacks, {positive_topups} positive top-ups, 8 slab closures; peak_cu={peak_cu}");
 }
 
 proptest! {
