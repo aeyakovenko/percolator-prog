@@ -97,9 +97,9 @@ fn v16_program_pr223_unsigned_lp_backing_fee_requires_matcher_consent() {
         protection.provider_earnings,
         u128::from(protection.extracted_tokens)
     );
-    // The zero-cap close pays no backing fee. Its only capital delta is the
-    // exact four-slot maintenance charge collected before the value change.
-    assert_eq!(protection.attacker_capital_delta, -120);
+    // The increase/reduction pair pays no attacker backing fee. Maintenance
+    // advances the attacker's cursor from slot 1 through submission slot 6.
+    assert_eq!(protection.attacker_capital_delta, -30 * (6 - 1));
     assert!(protection.zero_cap_risk_reduction_landed);
     assert!(protection.max_route_cu < support::v16_svm::TX_CU_LIMIT);
     assert!(protection.token_supply_conserved);

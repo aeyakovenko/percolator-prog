@@ -1,5 +1,16 @@
 # Invariant-owned test coverage
 
+## Row 411 fee/policy regression health (2026-09-17)
+
+[The targeted follow-up](row411_regression_health_20260917.md) reproduces all three
+fee/policy audit failures on rebuilt current-main SBF and corrects stale test
+expectations: five-slot PR223 maintenance, one-atom directional insurance support,
+and insurance schedule equality after exact debit-epoch checks. The three repaired
+selectors and two existing row-411 consent controls pass. No production issue was
+confirmed or production code changed. Row 411 remains OPEN; invariant statuses
+and broader retained-history gaps are unchanged. Exact commands, artifacts and
+previously blocked suffix results are recorded in the note.
+
 ## INV-058 side-OI cap frontier audit (row 427, 2026-09-17)
 
 [The scoped audit](inv_058_side_oi_frontier_audit_20260917.md) maps all fourteen

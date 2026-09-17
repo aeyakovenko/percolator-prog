@@ -295,6 +295,11 @@ fn run_directional_fee_terminal_world(
         }
     }
     let terminal = env.market_state().1;
+    assert_eq!(
+        &terminal.insurance_domain_spent[..2],
+        &[long_budget, 0],
+        "the bankrupt short consumes only long-side support"
+    );
     assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
     DirectionalFeeTerminalOutcome {
         winner_payout,
@@ -317,8 +322,9 @@ fn v16_program_signed_direction_route_matrix_preserves_side_attribution_and_term
                 (1_000_000, 1)
             );
         } else {
-            assert_eq!(expected.winner_payout, 1_000_000);
-            assert_eq!(expected.terminal_vault, 2_000_001);
+            // The clipped long-side fee still supplies one atom of support.
+            assert_eq!(expected.winner_payout, 1_000_001);
+            assert_eq!(expected.terminal_vault, 2_000_000);
             assert_eq!(
                 (expected.long_budget, expected.short_budget),
                 (1, 1_000_000)

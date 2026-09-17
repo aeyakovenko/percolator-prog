@@ -22672,7 +22672,7 @@ pub fn verify_cpi_backing_fee_consent(
     const LOSING_SIZE_Q: i128 = 100 * POS_SCALE as i128;
     const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
     const WINNING_DOMAIN: u16 = 3;
-    const EXPECTED_ATTACKER_MAINTENANCE_FEE: i128 = 120;
+    const EXPECTED_ATTACKER_MAINTENANCE_FEE: i128 = 30 * (6 - 1);
 
     let mut env = V16Svm::new(
         seed,
@@ -22781,6 +22781,7 @@ pub fn verify_cpi_backing_fee_consent(
 
     let lp_before = env.primary_portfolio(2).capital.get();
     let attacker_before = env.primary_portfolio(0).capital.get();
+    let attacker_fee_slot_before = env.primary_portfolio(0).last_fee_slot.get();
     let provider_before = env.primary_market_state().1.source_backing_buckets
         [WINNING_DOMAIN as usize]
         .utilization_fee_earnings;
@@ -22850,15 +22851,18 @@ pub fn verify_cpi_backing_fee_consent(
         .utilization_fee_earnings
         == earnings_before_reduction;
     let attacker_after = env.primary_portfolio(0).capital.get();
+    let attacker_fee_slot_after = env.primary_portfolio(0).last_fee_slot.get();
     let attacker_capital_delta = i128::try_from(attacker_after)
         .and_then(|after| i128::try_from(attacker_before).map(|before| after - before))
         .map_err(|_| "attacker capital does not fit i128")?;
     if !zero_cap_risk_reduction_landed
+        || attacker_fee_slot_before != 1
+        || attacker_fee_slot_after != 6
         || attacker_capital_delta != -EXPECTED_ATTACKER_MAINTENANCE_FEE
         || observed_positions(&env.primary_portfolio(0))?[0] != 0
     {
         return Err(format!(
-            "zero-cap CPI risk reduction failed: landed {zero_cap_risk_reduction_landed}, capital delta {attacker_capital_delta}"
+            "zero-cap CPI risk reduction failed: landed {zero_cap_risk_reduction_landed}, capital delta {attacker_capital_delta}, fee slots {attacker_fee_slot_before}->{attacker_fee_slot_after}"
         ));
     }
 

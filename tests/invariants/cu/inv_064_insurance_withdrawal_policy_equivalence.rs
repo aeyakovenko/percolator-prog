@@ -482,6 +482,7 @@ fn v16_program_insurance_withdrawal_schedules_preserve_asset_allowance_and_exact
         env.payer.pubkey(),
     ];
     let seed = seed_keys.map(|key| env.svm.get_account(&key).unwrap());
+    let seed_epochs = [0, 1].map(|asset| env.control_sequences(asset).authority_epoch);
     let frame_keys = [
         env.market,
         env.vault,
@@ -542,6 +543,7 @@ fn v16_program_insurance_withdrawal_schedules_preserve_asset_allowance_and_exact
         );
         let mut budgets = BUDGETS;
         let mut paid_by_asset = [0u128; 2];
+        let mut debit_counts = [0u64; 2];
         let mut checkpoints = Vec::new();
         for (phase, amounts) in phases.into_iter().enumerate() {
             let mode = if phase == 0 {
@@ -566,6 +568,14 @@ fn v16_program_insurance_withdrawal_schedules_preserve_asset_allowance_and_exact
                 budgets[long] -= long_debit;
                 budgets[long + 1] -= amount - long_debit;
                 paid_by_asset[usize::from(asset)] += amount;
+                debit_counts[usize::from(asset)] += 1;
+                for asset in 0..2 {
+                    assert_eq!(
+                        env.control_sequences(asset).authority_epoch,
+                        seed_epochs[asset] + debit_counts[asset],
+                        "{schedule}: asset {asset} consumes one epoch per debit"
+                    );
+                }
                 let paid: u128 = paid_by_asset.iter().sum();
                 let remaining = u128::from(FUNDED) - paid;
                 let group = env.market_state().1;
@@ -592,7 +602,17 @@ fn v16_program_insurance_withdrawal_schedules_preserve_asset_allowance_and_exact
                 assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_before);
             }
             assert_eq!(paid_by_asset, if phase == 0 { [7, 5] } else { [24, 5] });
-            checkpoints.push(frame(&env));
+            // Equal economic schedules can consume different numbers of signed debit epochs.
+            // Normalize only those checked fields in a copy, retaining every other account byte.
+            let mut checkpoint = frame(&env);
+            let market = checkpoint[0].as_mut().unwrap();
+            for asset in 0..2 {
+                let mut sequences =
+                    state::read_asset_control_sequences(&market.data, asset).unwrap();
+                sequences.authority_epoch = seed_epochs[asset];
+                state::write_asset_control_sequences(&mut market.data, asset, &sequences).unwrap();
+            }
+            checkpoints.push(checkpoint);
         }
         assert_eq!(budgets, [0, 0, 12, 19]);
         assert_eq!(
@@ -603,7 +623,7 @@ fn v16_program_insurance_withdrawal_schedules_preserve_asset_allowance_and_exact
         if let Some(expected) = &reference {
             assert_eq!(
                 &checkpoints, expected,
-                "schedules converge on full non-payer account frames"
+                "schedules converge on full non-payer account frames except checked debit epochs"
             );
         } else {
             reference = Some(checkpoints);
