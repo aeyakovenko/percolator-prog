@@ -1,6 +1,7 @@
 //! Row 416: empty-asset oracle consent must be rechecked after public exposure.
 //! Rejection restores an SPL payout prefix; incumbent succession still permits
 //! authenticated settlement and exact principal exits for every fixture owner.
+//! Oracle A -> B -> A also cannot revive a retained mark over two funded assets.
 
 use super::*;
 use solana_sdk::{
@@ -245,6 +246,260 @@ fn reject(
         }
         assert_eq!(env.svm.get_account(&key), before, "rollback account {key}");
     }
+}
+
+#[test]
+fn v16_program_funded_oracle_return_rejects_retained_mark_and_preserves_value() {
+    const ORACLE_A: usize = 2;
+    const ORACLE_B: usize = 3;
+    const PREFIX_OWNER: usize = 4;
+    const PREFIX: u128 = 7;
+    const LOTS: i128 = 10;
+    const DELTA: u64 = INITIAL_PRICE / 10;
+    let mut peak_cu = 0;
+    let mut peak_preview_cu = 0;
+    for asset in [0u16, 1] {
+        for direction in [-1i128, 1] {
+            let config = MarketConfig::default();
+            let deposits = config.actor_deposits;
+            let mut env = V16Svm::new([0x49; 32], config);
+            env.begin_public_trace();
+            env.configure_permissionless_resolve(2, 1).unwrap();
+            for scope in [0u16, 1] {
+                env.update_asset_authority_from_admin(
+                    scope,
+                    processor::ASSET_AUTH_ORACLE,
+                    ORACLE_A,
+                )
+                .unwrap();
+            }
+            let peer = 1 - asset;
+            env.trade_no_cpi(
+                0,
+                1,
+                asset,
+                direction * LOTS * percolator::POS_SCALE as i128,
+                INITIAL_PRICE,
+                0,
+            )
+            .unwrap();
+            env.trade_no_cpi(
+                ORACLE_A,
+                ORACLE_B,
+                peer,
+                -direction * 6 * percolator::POS_SCALE as i128,
+                INITIAL_PRICE,
+                0,
+            )
+            .unwrap();
+            env.warp_to_slot(2);
+            let economy = env.primary_market_state();
+            let profiles = [0, 1].map(|i| env.primary_profile(i));
+            let sequences = [0, 1].map(|i| env.primary_control_sequences(i));
+            let portfolios: Vec<_> = (0..5).map(|i| env.primary_portfolio_data(i)).collect();
+            for scope in [0, 1] {
+                assert!(economy.1.assets[scope].oi_eff_long_q > 0);
+                assert!(economy.1.assets[scope].oi_eff_short_q > 0);
+                assert_ne!(
+                    profiles[scope].asset_admin,
+                    profiles[scope].oracle_authority
+                );
+            }
+            let epoch = sequences[asset as usize].authority_epoch;
+            let mark = (INITIAL_PRICE as i128 + direction * DELTA as i128) as u64;
+            let mark_instruction =
+                |scope: u16, authority_epoch, mark_e6| ProgInstruction::PushAuthMark {
+                    asset_index: scope,
+                    market_id: economy.1.assets[scope as usize].market_id,
+                    now_slot: 2,
+                    mark_e6,
+                    observation_sequence: sequences[scope as usize].oracle_observation + 1,
+                    authority_epoch,
+                };
+            let retained = env.build_retained_market_control_for_actor(
+                ORACLE_A,
+                mark_instruction(asset, epoch, mark),
+            );
+            let sibling = env.build_retained_market_control_for_actor(
+                ORACLE_A,
+                mark_instruction(
+                    peer,
+                    sequences[peer as usize].authority_epoch,
+                    INITIAL_PRICE,
+                ),
+            );
+            let withdrawal = env.build_retained_withdrawal(PREFIX_OWNER, PREFIX);
+            let bundle = env.bundle_retained_transactions(&[
+                withdrawal.clone(),
+                sibling.clone(),
+                retained.clone(),
+            ]);
+            bundle.verify().unwrap();
+            assert!(bincode::serialized_size(&bundle).unwrap() <= 1_232);
+            let preview = env
+                .svm
+                .simulate_transaction(bundle.clone().into())
+                .expect("the original mark, funded sibling observation and SPL payout are valid");
+            peak_preview_cu = peak_preview_cu.max(preview.compute_units_consumed);
+            assert_eq!(env.primary_market_state(), economy);
+
+            for (step, from, to) in [(1, ORACLE_A, ORACLE_B), (2, ORACLE_B, ORACLE_A)] {
+                env.update_asset_authority_between_actors(
+                    asset,
+                    processor::ASSET_AUTH_ORACLE,
+                    from,
+                    to,
+                )
+                .expect("the incumbent can transfer its oracle role over live exposure");
+                let mut expected_profile = profiles[asset as usize];
+                expected_profile.oracle_authority = env.actors[to].signer.pubkey().to_bytes();
+                let mut expected_sequences = sequences[asset as usize];
+                expected_sequences.authority_epoch += step;
+                assert_eq!(env.primary_profile(asset as usize), expected_profile);
+                assert_eq!(
+                    env.primary_control_sequences(asset as usize),
+                    expected_sequences
+                );
+                assert_eq!(env.primary_profile(peer as usize), profiles[peer as usize]);
+                assert_eq!(
+                    env.primary_control_sequences(peer as usize),
+                    sequences[peer as usize]
+                );
+                assert_eq!(env.primary_market_state(), economy);
+                assert_eq!(
+                    (0..5)
+                        .map(|i| env.primary_portfolio_data(i))
+                        .collect::<Vec<_>>(),
+                    portfolios
+                );
+            }
+            assert_eq!(
+                env.primary_profile(asset as usize),
+                profiles[asset as usize]
+            );
+            reject(&mut env, bundle, 5, PercolatorError::EngineStale, 2, 1);
+            reject(&mut env, retained, 3, PercolatorError::EngineStale, 0, 0);
+            let revoked = env.build_retained_market_control_for_actor(
+                ORACLE_B,
+                mark_instruction(asset, epoch + 2, mark),
+            );
+            reject(&mut env, revoked, 3, PercolatorError::Unauthorized, 0, 0);
+
+            env.land_retained(withdrawal)
+                .expect("the original SPL prefix survives the stale-mark rollback");
+            env.land_retained(sibling)
+                .expect("the original funded sibling observation survives the selected ABA");
+            let renewed = env.build_retained_market_control_for_actor(
+                ORACLE_A,
+                mark_instruction(asset, epoch + 2, mark),
+            );
+            env.land_retained(renewed)
+                .expect("changing only the instruction's authority epoch renews consent");
+            for scope in [0, 1] {
+                let mut expected_profile = profiles[scope];
+                expected_profile.last_good_oracle_slot = 2;
+                expected_profile.mark_ewma_e6 = if scope == asset as usize {
+                    mark
+                } else {
+                    INITIAL_PRICE
+                };
+                if scope == asset as usize {
+                    expected_profile.mark_ewma_last_slot = 2;
+                    expected_profile.oracle_target_price_e6 = mark;
+                    expected_profile.funding_mark_pending_e6 = mark;
+                    expected_profile.funding_mark_pending_slot = 2;
+                }
+                let mut expected_sequences = sequences[scope];
+                expected_sequences.oracle_observation += 1;
+                expected_sequences.authority_epoch += if scope == asset as usize { 2 } else { 0 };
+                assert_eq!(env.primary_profile(scope), expected_profile);
+                assert_eq!(env.primary_control_sequences(scope), expected_sequences);
+            }
+
+            let profit = (LOTS * DELTA as i128) as u128;
+            for owner in [0, 1] {
+                env.crank(owner, 2, crank_observations(asset)).unwrap();
+            }
+            assert_eq!(
+                env.primary_market_state().1.assets[asset as usize].effective_price,
+                mark
+            );
+            assert_eq!(
+                env.primary_market_state().1.assets[peer as usize],
+                economy.1.assets[peer as usize]
+            );
+            assert_eq!(env.primary_portfolio(0).pnl.get(), profit as i128);
+            assert_eq!(env.primary_portfolio(1).capital.get(), deposits[1] - profit);
+            assert_eq!(env.primary_portfolio(1).pnl.get(), 0);
+            for owner in [ORACLE_A, ORACLE_B] {
+                assert_eq!(env.primary_portfolio_data(owner), portfolios[owner]);
+            }
+
+            env.resolve_stale_permissionless(4).unwrap();
+            let expected = [
+                deposits[0] + profit,
+                deposits[1] - profit,
+                deposits[2],
+                deposits[3],
+                deposits[4],
+            ];
+            let mut remaining = deposits.iter().sum::<u128>() - PREFIX;
+            // Clear both assets' stored positions before the positive claim is payable.
+            for owner in [1, ORACLE_B, ORACLE_A, PREFIX_OWNER, 0] {
+                // A nonzero source claim needs bounded terminal normalization before payout.
+                for _ in 0..16 {
+                    if u128::from(env.token_amount(env.actors[owner].destination_token))
+                        == expected[owner]
+                    {
+                        break;
+                    }
+                    let before = (env.market_data(false), env.primary_portfolio_data(owner));
+                    env.close_resolved_primary_signed(owner).unwrap();
+                    assert_ne!(
+                        (env.market_data(false), env.primary_portfolio_data(owner)),
+                        before,
+                        "every accepted terminal step must make public progress"
+                    );
+                }
+                remaining -= expected[owner] - if owner == PREFIX_OWNER { PREFIX } else { 0 };
+                assert_eq!(
+                    u128::from(env.token_amount(env.actors[owner].destination_token)),
+                    expected[owner]
+                );
+                assert_eq!(env.primary_market_state().1.vault, remaining);
+                assert_eq!(u128::from(env.token_amount(env.vault)), remaining);
+                assert_eq!(env.token_supply_observed(), env.initial_token_supply);
+            }
+            let settled = env.primary_market_state().1;
+            assert_eq!(
+                (settled.c_tot, settled.pnl_pos_tot, settled.vault),
+                (0, 0, 0)
+            );
+            for scope in [0, 1] {
+                assert_eq!(
+                    (
+                        settled.assets[scope].oi_eff_long_q,
+                        settled.assets[scope].oi_eff_short_q
+                    ),
+                    (0, 0)
+                );
+            }
+            assert_eq!(remaining, 0);
+            assert_eq!(env.mint_supply() as u128, env.initial_token_supply);
+            let trace = env.finish_public_trace();
+            trace.validate_public_execution().unwrap();
+            assert_eq!(trace.steps.iter().filter(|step| !step.succeeded).count(), 3);
+            peak_cu = peak_cu.max(
+                trace
+                    .steps
+                    .iter()
+                    .filter_map(|step| step.compute_units)
+                    .max()
+                    .unwrap(),
+            );
+        }
+    }
+    eprintln!("row416 funded oracle return: worlds=4, stale_rejections=8, revoked_marks=4, SPL_rollbacks=4, sibling_retries=4, exact_owner_payouts=20, peak_success_cu={peak_cu}, peak_preview_cu={peak_preview_cu}");
 }
 
 #[test]

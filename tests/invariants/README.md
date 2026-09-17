@@ -249,6 +249,15 @@ twenty owner payouts pass, with peak successful CU 126,361 (paired release
 simulation: 126,572). All three exact selectors in the touched file pass on the
 private rebuilt SBF. Production and TSVs stay unchanged; row 416 remains OPEN.
 
+The [funded oracle return follow-up](row416_funded_oracle_return_20260917.md)
+retains a price-changing observation across oracle A -> B -> A with both assets
+exposed. Stale consent rolls back an executed sibling observation and SPL payout;
+renewing only the instruction's authority epoch permits the mark, its exact
+profit/loss and all five owners' payouts. Four worlds pass with twelve exact
+rejections and twenty payouts; peak successful CU is 213,880 (preview: 50,810).
+This differs from empty-asset oracle ABA and funded cold-admin ABA. Row 416
+remains OPEN, including Recovery and general policy/oracle histories.
+
 ## Row 427 regression health (2026-09-17)
 
 [The focused follow-up](row427_regression_health_20260917.md) adds three-pair
