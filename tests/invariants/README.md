@@ -1,5 +1,16 @@
 # Invariant-owned test coverage
 
+## Rows 419/435 regression health (2026-09-17)
+
+[The focused follow-up](row419435_regression_health_20260917.md) adds four solvent
+mixed-role funding worlds with input-derived owner entitlements at 66 checkpoints
+and 20 exact payouts/deletions. It also repairs the existing funding witness's
+stale immediate-deletion assumption: four retained last-claimant receipts survive
+until committed backing expiry and receive an exact one-atom top-up. Both exact
+selectors pass on rebuilt current-main SBF; final-run peak CU is 201,926. Production and
+statuses are unchanged. Arbitrary funding/residual/receipt compositions and slab
+retirement remain outside this increment.
+
 ## Row 411 partial-fill authority return (2026-09-17)
 
 [The focused follow-up](row411_followup_health_20260917.md) joins a committed
