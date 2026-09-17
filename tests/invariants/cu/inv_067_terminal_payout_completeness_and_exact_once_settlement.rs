@@ -40,6 +40,9 @@
 
 use super::*;
 
+#[path = "inv_067_resolved_source_residual.rs"]
+mod resolved_source_residual;
+
 #[path = "inv_067_receipt_custody_boundary.rs"]
 mod receipt_custody_boundary;
 
