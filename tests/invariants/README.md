@@ -1,5 +1,18 @@
 # Invariant-owned test coverage
 
+## Row 433 native-secondary earnings (2026-09-17)
+
+[The focused note](row433_native_secondary_earnings_20260917.md) adds one public
+history in [the native-secondary test](cu/inv_073_native_secondary_earnings.rs).
+After a 17-atom SPL fee payment, keeper-funded ATA repair pays 858 native atoms
+to an absent provider under the same ledger. A one-atom SPL overclaim rolls back
+the complete repair/payment prefix; retry and two-vault closure preserve exact
+custody, ledger and rent, including a separate 19-lamport unsynced donation.
+The new selector and two earnings controls pass: peak CU 450,839 / 249,389 /
+253,778 under the existing 1,200,000 ceiling. Row 433 remains OPEN for unavailable
+administrator cleanup, paid native-secondary redemption, recredit and arbitrary
+histories. Production, shared helpers, fixtures and TSVs are unchanged.
+
 ## Row 421 funded insurance ledger through loss and recredit (2026-09-17)
 
 [The focused note](row421_loss_recredit_ledger_20260917.md) documents one new

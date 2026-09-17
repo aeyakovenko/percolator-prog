@@ -15,6 +15,9 @@ use crate::support::fuzz_model::{
 };
 use terminal_reserve_destination_recovery::land;
 
+#[path = "inv_073_native_secondary_earnings.rs"]
+mod native_secondary_earnings;
+
 const PREFIX: u64 = 17;
 
 pub(crate) fn verify_dual_quote_earnings_progress() {
