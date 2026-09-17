@@ -1,5 +1,17 @@
 # Invariant-owned test coverage
 
+## Row 423 loss-funded receipt completion (2026-09-17)
+
+[The focused audit](row423_health_20260917.md) extends the existing historical-backing
+loss witness with junior-first terminal payout. A 250-atom claim receives 20 atoms,
+retains its receipt while historical sources settle, then receives exactly 230 more
+through a keeper-only top-up without new funding. A rejected withdrawal suffix
+restores the successful top-up completely; early and repeated top-ups are exact no-ops.
+Four histories pass with ten rollbacks and peak 1,003,202 CU. Historical-lien and
+used-generation admission controls pass separately. This covers at most 18 future
+domains; maximum composite shapes and the general exit-resource obligation remain
+open. Row 423 and invariant statuses are unchanged.
+
 ## Row 417 fully receipted expiry waves (2026-09-17)
 
 [The focused audit](row417_health_20260917.md) adds two unrelated backing
@@ -6246,7 +6258,9 @@ domains, one active asset, a long risk owner, integral marks, no fees/funding,
 fresh provider backing and cooperative flattening. Losses fit the 500-atom
 unpledged support; spending liened face itself is not claimed. Terminal payout
 order is historical owner first; reverse order requires receipt/top-up scheduling
-and is outside this witness. CPI, expiry, Recovery, fractional support, larger
+and was outside this initial witness. The [2026-09-17 extension](row423_health_20260917.md)
+now covers both payout orders and exact receipt top-up rollback. CPI, expiry,
+Recovery, fractional support, larger
 losses, maximum shapes and generic admission/resource/liveness closure remain open.
 Development corrected test expectations about liened face burns, residual versus
 new-source backing, and terminal receipt ordering; no production violation was proved.
