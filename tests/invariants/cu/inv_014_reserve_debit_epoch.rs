@@ -6,6 +6,9 @@ use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 use solana_sdk::fee::FeeStructure;
 
+#[path = "inv_008_resolved_debit_retry.rs"]
+mod resolved_debit_retry;
+
 fn check_reserve_debit_epoch(resolved: bool) {
     const BUDGETS: [u128; 4] = [19, 41, 23, 47];
     const DEBIT: u128 = 29;

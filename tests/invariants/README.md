@@ -1,5 +1,15 @@
 # Invariant-owned test coverage
 
+## Row 428 regression health (2026-09-17)
+
+[The focused follow-up](row428_regression_health_20260917.md) adds retained
+Resolved insurance debit retries across signed and permissionless delivery,
+including rollback of two successor epochs and optional ledger initialization.
+The new exact selector passes eight histories, 64 exact account rollbacks,
+48 restored SPL transfers and 40 payouts on rebuilt current-main SBF; peak
+CU is 94,096. Production and status TSVs are unchanged. Independent stock
+sequences, replenishment and native/secondary rails remain outside this increment.
+
 ## Rows 425/426 regression health (2026-09-17)
 
 [The focused follow-up](row425426_regression_health_20260917.md) repairs stale
