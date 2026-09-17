@@ -23,6 +23,9 @@ use solana_sdk::{
 };
 use std::collections::BTreeSet;
 
+#[path = "inv_080_custody_cpi_source_contract.rs"]
+mod custody_cpi_source_contract;
+
 fn assert_public_error_and_exact_rollback(
     env: &mut V16Svm,
     transaction: Transaction,
