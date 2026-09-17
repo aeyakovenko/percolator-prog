@@ -331,6 +331,16 @@ selectors pass on rebuilt current-main SBF; final-run peak CU is 201,926. Produc
 statuses are unchanged. Arbitrary funding/residual/receipt compositions and slab
 retirement remain outside this increment.
 
+## Row 411 retained two-asset funding consent (2026-09-17)
+
+[The focused note](row411_multi_asset_funding_conformance_20260917.md) adds one
+public selector comparing CPI and bilateral batches with two pending funding
+domains. Retained consent survives a fee-policy detour: the 57-atom pooled-notional
+cap rejects the independently rounded 58-atom fee even beside 152 funding atoms.
+Seven complete rollbacks and four full SPL payouts reconcile fees, funding and
+custody. The exact selector passes at **470,497 peak CU**. Existing funded Row 411
+histories have one asset. This tests/docs-only increment leaves Row 411 OPEN.
+
 ## Row 411 funded bilateral reduction and retained renewal (2026-09-17)
 
 [The focused note](row411_funding_route_renewal_20260917.md) adds one public
