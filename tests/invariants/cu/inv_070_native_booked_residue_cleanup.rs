@@ -6,6 +6,9 @@ use super::*;
 #[path = "inv_070_native_booked_prefunded_retry.rs"]
 mod prefunded_retry;
 
+#[path = "inv_070_native_fee_recredit_conformance.rs"]
+mod fee_recredit_conformance;
+
 fn checked_land(
     env: &mut V16CuEnv,
     ixs: &[Instruction],
