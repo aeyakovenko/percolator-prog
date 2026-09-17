@@ -1,5 +1,23 @@
 # Invariant-owned test coverage
 
+## Row 423 native source reservation and redemption (2026-09-17)
+
+[The focused note](row423_native_latent_exit_20260917.md) adds four public
+LiteSVM histories in [the INV-028 child](cu/inv_028_native_latent_exit.rs).
+Twenty-six retained claims and two latent domains exhaust the source budget
+while native custody contains uncredited SOL. A rejected spare-asset admission
+restores a successful `SyncNative` prefix. Both reserved sides then materialize,
+and 116 keeper-only terminal calls pay exactly 1,000,058 / 999,942 native atoms.
+Eight rejected payout suffixes restore native token amounts and backing lamports;
+pre-signed retries pay once, and owner redemption returns the payouts, token rent,
+and 19/23 unsynced wallet lamports. Twelve total complete-Account rollbacks frame
+peer custody, portfolios, mint and authority accounts, except exact payer fees.
+New/control exact selectors pass at **927,646 / 1,006,327 CU** measured peaks.
+This adds native custody at the historical/latent capacity boundary to the recent
+SPL reclamation and receipt notes. Row 423 remains OPEN for simultaneous liens,
+Recovery/receipts at capacity, maximum feed composition and arbitrary histories.
+The 17-lamport vault donation remains uncredited; slab retirement is outside scope.
+
 ## Row 412 partial reduction and hostile flip suffix (2026-09-17)
 
 [The focused note](row412_partial_flip_returns_20260917.md) adds four public

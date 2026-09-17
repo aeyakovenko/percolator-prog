@@ -55,6 +55,9 @@ mod deferred_claim_backing;
 #[path = "inv_028_single_slot_admission.rs"]
 mod single_slot_admission;
 
+#[path = "inv_028_native_latent_exit.rs"]
+mod native_latent_exit;
+
 fn inv028_source_defines_test(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
     let mut test_attribute = false;
