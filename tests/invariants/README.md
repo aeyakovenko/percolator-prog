@@ -1,5 +1,22 @@
 # Invariant-owned test coverage
 
+## INV-012 retained matcher admission source contract (2026-09-17)
+
+`cu/inv_012_retained_admission_source.rs` discovers the production references to
+matcher grant installation, consumption and CPI, and checks their public dispatch
+arguments. Parsed executable statements bind grant identity/expiry and both CPI
+consumers' episodes, capability and fee consent before the reviewed effects.
+It also preserves the grant's atomic epoch/expiry/fee-cap commit.
+
+At `cc9d747d`, separately disabling the grant generation-frontier check and the
+single-CPI taker fee check leaves all four existing INV-002/004/012/014 source
+rosters green. The new guard rejects each mutation. Its permanent controls reject
+26 mutations and accept the original and comment/unrelated-function controls.
+This is production-source composition coverage, not a new economic finding or
+invariant-status promotion. Production code and dependency pins are unchanged;
+only the existing `syn` dev dependency gains parser comparison/visitor features.
+[Exact selectors, comparison controls, and limits](inv_012_retained_admission_source_audit_20260917.md).
+
 ## INV-067 resolved source residual entitlement (2026-09-16)
 
 Owner: [cu/inv_067_resolved_source_residual.rs](cu/inv_067_resolved_source_residual.rs),
