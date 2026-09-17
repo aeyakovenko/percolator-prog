@@ -1,5 +1,17 @@
 # Invariant-owned test coverage
 
+## Identity and generation retained-intent audit (2026-09-17)
+
+[The scoped audit](identity_generation_audit_20260917.md) maps INV-001..005/007/012/013/016/089
+and rows 231/251/275/277/279/293/294/295/296/307/311/312/315/317/318/320/321/322/323/324/345/346/353/354/375/416
+to existing mounted public-route witnesses, assertion boundaries and limits.
+All 30 exact selectors pass, including 108 generated grant histories; no missing
+public-route case was established and no duplicate test is added. The audit
+distinguishes market tombstones, reusable identities, stateless delegate PDAs
+and funded-oracle containment. No current failure was observed in this selection;
+row 416 and broader invariant statuses remain unchanged. Exact commands, artifact
+provenance and source-only evidence are recorded in the audit.
+
 ## Mark/oracle movement and reward provenance audit (2026-09-17)
 
 [The scoped audit](mark_movement_audit_20260917.md) maps only INV-020/045/053/056/062
