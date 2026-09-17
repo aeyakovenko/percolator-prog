@@ -1,5 +1,22 @@
 # Invariant-owned test coverage
 
+## Row 412 partial reduction and hostile flip suffix (2026-09-17)
+
+[The focused note](row412_partial_flip_returns_20260917.md) adds four public
+LiteSVM histories in [the INV-012 child](cu/inv_012_partial_flip_return_rollback.rs).
+A flagged matcher partial preserves its LP grant while consuming episode consent;
+retained cross-zero suffixes independently bind the new episode and matcher return.
+Twenty-eight complete-Account rollbacks cover stale episodes, four hostile return
+classes and same-tuple renewal, followed by 16 fills and eight exact SPL payouts.
+The oracle derives signed positions, 12-atom owner fees, custody and grant fields,
+and frames an unrelated funded portfolio. Accepted/simulated peak: **358,593 CU**;
+rejection peak: **195,159 CU**. The retained-grant and partial-fill controls pass
+(grant-control peak **468,379 CU**; partial control does not emit CU).
+This extends the recent retained-grant-writer note with
+synchronized partials and hostile suffix composition. Arbitrary ratios, multi-leg
+batches, moving prices, authority/context lifecycle and non-Live episodes remain
+outside this bounded increment; no production, fixture, shared-helper or TSV edits.
+
 ## Row 428 native replenishment across resolution (2026-09-17)
 
 [The focused note](row428_native_replenishment_20260917.md) adds four histories

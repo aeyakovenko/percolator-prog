@@ -37,6 +37,9 @@
 
 use super::*;
 
+#[path = "inv_012_partial_flip_return_rollback.rs"]
+mod partial_flip_return_rollback;
+
 #[path = "inv_012_retained_admission_source.rs"]
 mod retained_admission_source;
 
