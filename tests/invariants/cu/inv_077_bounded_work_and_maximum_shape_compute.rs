@@ -78,6 +78,9 @@ mod terminal_destination_variants;
 #[path = "inv_077_short_side_b_budget.rs"]
 mod short_side_b_budget;
 
+#[path = "inv_077_public_native_insurance_capacity.rs"]
+mod public_native_insurance_capacity;
+
 #[test]
 fn v16_program_active_leg_cap_pending_auth_marks_refresh_with_bounded_public_crank() {
     const N: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
