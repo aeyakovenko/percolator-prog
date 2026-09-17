@@ -1,5 +1,13 @@
 # Invariant-owned test coverage
 
+## Row 411 partial-fill authority return (2026-09-17)
+
+[The focused follow-up](row411_followup_health_20260917.md) joins a committed
+partial fill, retained fee terms across authority A -> B -> A, and all four
+closing routes. The new exact selector passes eight worlds, forty delivery
+rollbacks and sixteen owner payouts; peak CU is 196,695. Production and status
+TSVs are unchanged. Row 411 and arbitrary fee/history composition remain OPEN.
+
 ## Row 416 regression health (2026-09-17)
 
 [The focused follow-up](row416_regression_health_20260917.md) adds retained

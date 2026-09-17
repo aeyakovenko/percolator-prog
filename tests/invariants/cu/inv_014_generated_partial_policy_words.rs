@@ -7,6 +7,9 @@
 
 use super::*;
 
+#[path = "inv_014_retained_partial_authority_routes.rs"]
+mod retained_partial_authority_routes;
+
 const OPEN_CAP: u64 = 37;
 const OPEN_FRESH: u64 = 53;
 const CLOSE_FRESH: u64 = 71;
