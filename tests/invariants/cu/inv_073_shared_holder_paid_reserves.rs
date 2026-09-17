@@ -1,6 +1,9 @@
 //! INV-073/024/080: a reserve holder's paid-and-spent stock is distinct from
 //! its outstanding portfolio entitlement and its unpaid reserve claims.
-//! Only portfolio disposition is permissionless in this bounded witness.
+//! Row 420 continuation: administrative deletion of the absent holders' empty
+//! portfolios enables keeper-only principal/earnings payouts and exact slab close.
+//! The last deletion and earnings payment roll back together on an overclaim;
+//! previously spent reserves and senior user payouts never become claimable again.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -62,7 +65,7 @@ fn land(
     let rejected = rejection.is_some();
     let result = env.svm.send_transaction(tx);
     let meta = if let Some((index, errors)) = rejection {
-        let failure = result.expect_err("the named reserve or portfolio signer remains required");
+        let failure = result.expect_err("the named signer or economic guard must reject");
         let accepted = match failure.err {
             TransactionError::InstructionError(actual, InstructionError::Custom(code))
                 if actual == index =>
@@ -117,6 +120,7 @@ fn v16_program_absent_shared_holders_keep_paid_reserves_separate_from_public_use
     let mut rollbacks = 0;
     let mut value_prefixes = 0;
     let mut calls = 0;
+    let mut continuation_peaks = [0; 4]; // Cleanup, rollback, unsigned payment, slab close.
     for winner_first in [false, true] {
         for crank_alias in [false, true] {
             let mut env = inv018_public_spl_market_with_params(
@@ -466,7 +470,6 @@ fn v16_program_absent_shared_holders_keep_paid_reserves_separate_from_public_use
             let wallet_frames = wallets.map(|key| env.svm.get_account(&key));
             drop(holders);
             drop(operator);
-            drop(admin);
             assert!(!wallets.contains(&env.payer.pubkey()));
 
             let check = |env: &V16CuEnv| {
@@ -751,8 +754,234 @@ fn v16_program_absent_shared_holders_keep_paid_reserves_separate_from_public_use
             }
             check(&env);
             eprintln!("shared holder paid reserves: winner_first={winner_first}, crank_alias={crank_alias}, public_calls={world_calls}, user_payouts={PAYOUTS:?}, surviving_reserves={}", terminal.vault);
+
+            // The provider is also the departed portfolio owner. The available
+            // market authority can clear that mechanical gate without either key.
+            let cleanup = portfolios.map(|portfolio| {
+                wrap(
+                    &env,
+                    env.close_portfolio_ix(portfolio),
+                    vec![
+                        AccountMeta::new(admin.pubkey(), true),
+                        AccountMeta::new(market, false),
+                        AccountMeta::new(portfolio, false),
+                    ],
+                )
+            });
+            let slab_lamports = env.svm.get_account(&market).unwrap().lamports;
+            let portfolio_rents = portfolios.map(|key| env.svm.get_account(&key).unwrap().lamports);
+            let first = order[0];
+            let last = order[1];
+            continuation_peaks[0] = continuation_peaks[0].max(
+                land(
+                    &mut env,
+                    &[cleanup[first].clone()],
+                    &[&admin],
+                    &tracked,
+                    &[market, portfolios[first]],
+                    None,
+                )
+                .0,
+            );
+            assert_eq!(env.market_state().1.materialized_portfolio_count, 1);
+            assert_eq!(
+                env.svm.get_account(&market).unwrap().lamports,
+                slab_lamports + portfolio_rents[first]
+            );
+            check(&env);
+
+            let remaining = [BACKING - PAID[0], EARNINGS - PAID[1], INSURANCE - PAID[2]];
+            let earnings = reserve(&env, 1, 0, remaining[1], false);
+            let overclaim = reserve(&env, 1, 0, 1, false);
+            let (cu, transfers) = land(
+                &mut env,
+                &[cleanup[last].clone(), earnings.clone(), overclaim],
+                &[&admin],
+                &tracked,
+                &[],
+                Some((4, &[PercolatorError::EngineLockActive])),
+            );
+            continuation_peaks[1] = continuation_peaks[1].max(cu);
+            assert_eq!(transfers, 1, "the earned-fee prefix must actually pay");
+            assert_eq!(env.market_state().1.materialized_portfolio_count, 1);
+            check(&env);
+            rollbacks += 1;
+
+            continuation_peaks[0] = continuation_peaks[0].max(
+                land(
+                    &mut env,
+                    &[cleanup[last].clone()],
+                    &[&admin],
+                    &tracked,
+                    &[market, portfolios[last]],
+                    None,
+                )
+                .0,
+            );
+            assert_eq!(env.market_state().1.materialized_portfolio_count, 0);
+            assert_eq!(
+                env.svm.get_account(&market).unwrap().lamports,
+                slab_lamports + portfolio_rents.iter().sum::<u64>()
+            );
+            for key in portfolios {
+                assert!(env
+                    .svm
+                    .get_account(&key)
+                    .is_none_or(|account| { account.lamports == 0 && account.data.is_empty() }));
+            }
+            check(&env);
+
+            let custody = [tokens[0], tokens[1], vault];
+            let custody_frames = custody.map(|key| env.svm.get_account(&key).unwrap());
+            let reserve_order = if winner_first { [1, 0, 2] } else { [0, 1, 2] };
+            let mut terminal_paid = [0; 3];
+            for kind in reserve_order {
+                let actor = usize::from(kind == 2);
+                let ix = if kind == 1 {
+                    earnings.clone()
+                } else {
+                    reserve(&env, kind, actor, remaining[kind], false)
+                };
+                let mut allowed = vec![market, vault, tokens[actor]];
+                if kind == 1 {
+                    allowed.push(ledger);
+                }
+                let (cu, transfers) = land(&mut env, &[ix], &[], &tracked, &allowed, None);
+                continuation_peaks[2] = continuation_peaks[2].max(cu);
+                assert_eq!(transfers, 1);
+                terminal_paid[kind] = remaining[kind];
+                let unpaid: [u64; 3] = std::array::from_fn(|i| remaining[i] - terminal_paid[i]);
+                let group = env.market_state().1;
+                assert_eq!(group.vault, u128::from(unpaid.iter().sum::<u64>()));
+                assert_eq!(group.c_tot, 0);
+                assert_eq!(group.pnl_pos_tot, 0);
+                assert_eq!(group.materialized_portfolio_count, 0);
+                assert_eq!(group.backing_provider_earnings_total, u128::from(unpaid[1]));
+                assert_eq!(
+                    group.source_backing_buckets[1].utilization_fee_earnings,
+                    u128::from(unpaid[1])
+                );
+                assert_eq!(
+                    group.source_backing_buckets[1].fresh_unliened_backing_num,
+                    u128::from(unpaid[0]) * BOUND_SCALE
+                );
+                assert_eq!(group.insurance, u128::from(unpaid[2]));
+                assert_eq!(group.insurance_domain_budget[0], u128::from(unpaid[2]));
+                let expected_amounts = [
+                    PAYOUTS[0] + terminal_paid[0] + terminal_paid[1],
+                    PAYOUTS[1] + terminal_paid[2],
+                    unpaid.iter().sum(),
+                ];
+                for ((key, frame), amount) in custody
+                    .into_iter()
+                    .zip(&custody_frames)
+                    .zip(expected_amounts)
+                {
+                    let mut expected = frame.clone();
+                    let mut token = TokenAccount::unpack(&expected.data).unwrap();
+                    token.amount = amount;
+                    TokenAccount::pack(token, &mut expected.data).unwrap();
+                    assert_eq!(env.svm.get_account(&key), Some(expected));
+                }
+                assert_eq!(
+                    expected_amounts.iter().sum::<u64>() + PAID.iter().sum::<u64>(),
+                    SUPPLY
+                );
+                assert_eq!(env.svm.get_account(&tokens[2]), operator_tokens);
+                assert_eq!(wallets.map(|key| env.svm.get_account(&key)), wallet_frames);
+                let record =
+                    state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data)
+                        .unwrap();
+                assert_eq!(record.authority, wallets[0].to_bytes());
+                assert_eq!(record.market_group, market.to_bytes());
+                assert_eq!(record.domain, 1);
+                assert_eq!(
+                    record.total_earnings_withdrawn_atoms,
+                    u128::from(PAID[1] + terminal_paid[1])
+                );
+                assert_eq!(
+                    record.last_observed_bucket_earnings_atoms,
+                    u128::from(unpaid[1])
+                );
+                let market_image = env.svm.get_account(&market).unwrap();
+                crate::support::fuzz_model::assert_market_stock_census(
+                    "row420 shared holder cleanup",
+                    &group,
+                    &market_image.data,
+                    &[],
+                    group.vault,
+                )
+                .unwrap();
+                crate::support::fuzz_model::assert_reservation_encumbrance_census(
+                    "row420 shared holder cleanup",
+                    &group,
+                    &[],
+                )
+                .unwrap();
+            }
+            assert_eq!(terminal_paid, remaining);
+            assert_eq!(env.svm.get_sysvar::<Clock>().slot, 11);
+            assert_eq!(env.token_amount(vault), 0);
+
+            let close = wrap(
+                &env,
+                ProgInstruction::CloseSlab {
+                    authority_epoch: env.control_sequences(0).authority_epoch,
+                },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(market, false),
+                    AccountMeta::new(vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new(tokens[3], false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(env.mint, false),
+                ],
+            );
+            let tombstone_rent = env
+                .svm
+                .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN);
+            let refund = env.svm.get_account(&market).unwrap().lamports
+                + env.svm.get_account(&vault).unwrap().lamports
+                - tombstone_rent;
+            let admin_lamports = env.svm.get_account(&admin.pubkey()).unwrap().lamports;
+            continuation_peaks[3] = continuation_peaks[3].max(
+                land(
+                    &mut env,
+                    &[close],
+                    &[&admin],
+                    &tracked,
+                    &[market, vault, admin.pubkey()],
+                    None,
+                )
+                .0,
+            );
+            assert_eq!(
+                env.svm.get_account(&admin.pubkey()).unwrap().lamports,
+                admin_lamports + refund
+            );
+            let tombstone = env.svm.get_account(&market).unwrap();
+            assert_closed_market_tombstone(&tombstone);
+            assert_eq!(tombstone.lamports, tombstone_rent);
+            assert!(env
+                .svm
+                .get_account(&vault)
+                .is_none_or(|account| account.lamports == 0 && account.data.is_empty()));
+            assert_eq!(env.svm.get_account(&env.mint), Some(mint_frame));
+            assert_eq!(
+                tokens.map(|key| env.token_amount(key)),
+                [
+                    PAYOUTS[0] + remaining[0] + remaining[1],
+                    PAYOUTS[1] + remaining[2],
+                    PAID.iter().sum(),
+                    0
+                ]
+            );
+            eprintln!("row420 shared holder cleanup: winner_first={winner_first}, crank_alias={crank_alias}, keeper_payments={terminal_paid:?}, exact_refund={refund}");
         }
     }
     assert_eq!(value_prefixes, 24);
+    assert_eq!(rollbacks, 70);
     eprintln!("shared holder paid reserves: worlds=4, public_calls={calls}, exact_rollbacks={rollbacks}, value_moving_rollback_prefixes={value_prefixes}, peak_cu={peak_cu}");
+    eprintln!("row420 shared holder cleanup: worlds=4, admin_deletions=8, keeper_payments=12, exact_rollbacks=4, slab_closes=4, peak_cu_by_phase={continuation_peaks:?}");
 }

@@ -1,5 +1,21 @@
 # Invariant-owned test coverage
 
+## Row 420 shared provider cleanup (2026-09-17)
+
+[The focused conformance note](row420_shared_provider_cleanup_20260917.md)
+extends the existing shared-holder selector past its empty-portfolio gate. The
+absent provider is also the paid-out user and has already spent its live reserve
+prefix. Administrative portfolio deletion permits keeper-only payment of the
+remaining 99,983 principal and 856 earned-fee atoms, preserving prior user payouts,
+spent custody and the cumulative earnings ledger. Last deletion plus fee payment
+rolls back exactly on a one-atom overclaim, then the same fee instruction succeeds
+without the provider signature. The four existing worlds finish 12 reserve
+payments and four rent-exact slab closures; peak CU is 549,045 / 600,000.
+One existing selector is extended; no new selector, production or TSV changes.
+Row 420 remains OPEN: mechanical cleanup still needs the market authority;
+missing custody, recredit/expiry, native quotes and arbitrary histories are outside
+this increment. Exact private-SBF validation and duplicate analysis are in the note.
+
 ## Row 421 closed native beneficiary identity (2026-09-17)
 
 [The focused conformance note](row421_closed_native_identity_20260917.md) adds
@@ -12412,6 +12428,9 @@ include 24 successful SPL payout prefixes followed by unsigned reserve rejection
 This adds bounded INV-018/021/024/027/064/067/071/073/080/081/082 evidence. Generic
 reserve disposition, mechanical retirement and reachability remain outside this
 increment; rows 420/421/433 remain OPEN and invariant verdicts are unchanged.
+The [2026-09-17 row 420 continuation](row420_shared_provider_cleanup_20260917.md)
+extends this same selector through administrative deletion, unsigned reserve
+payment and slab closure, retaining the original user-exit assertions.
 
 ## INV-014 retained fee prefix at grant expiry (rows 411/432, 2026-09-12)
 
