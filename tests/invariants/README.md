@@ -1,5 +1,16 @@
 # Invariant-owned test coverage
 
+## INV-058 side-OI cap frontier audit (row 427, 2026-09-17)
+
+[The scoped audit](inv_058_side_oi_frontier_audit_20260917.md) maps all fourteen
+existing side-OI roster witnesses, their assertion boundaries and remaining
+composition gaps. Ten selected behavioral witnesses, two INV-058 guards and the
+machine-status check pass; no current failure was observed in that selection.
+Four adjacent roster witnesses were source-reviewed only. The audit records exact
+selectors, current CU measurements, artifact provenance and historical failures.
+No new public-route LoF/DoS/CU issue was established, so no duplicate test is added.
+Row 427 remains **OPEN**, a withheld current gap; INV-058 remains `REFUTED_CURRENT`.
+
 ## Terminal payout, reserve and entitlement audit (2026-09-17)
 
 [The scoped audit](terminal_payout_entitlement_audit_20260917.md) maps INV-024/027/067/070
