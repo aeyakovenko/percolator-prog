@@ -111,6 +111,429 @@ fn native_image(empty: &Account, amount: u64, unsynced: u64) -> Account {
 }
 
 #[test]
+fn v16_program_closed_native_insurance_identity_preserves_unsigned_ata_continuation() {
+    use inv_081_success_state_validity_over_complete_public_routes::inv081_public_native_market;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = inv081_public_native_market();
+    let admin = env.admin.insecure_clone();
+    let beneficiary = Keypair::new();
+    let operator = Keypair::new();
+    let owner = beneficiary.pubkey();
+    let operator_key = operator.pubkey();
+    let rent = env
+        .svm
+        .minimum_balance_for_rent_exemption(TokenAccount::LEN);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::create_account(
+            &env.payer.pubkey(),
+            &owner,
+            rent,
+            TokenAccount::LEN as u64,
+            &spl_token::ID,
+        ),
+        &[&beneficiary],
+    )
+    .unwrap();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::initialize_account3(&spl_token::ID, &owner, &env.mint, &owner)
+            .unwrap(),
+        &[],
+    )
+    .unwrap();
+    let empty_owner = env.svm.get_account(&owner).unwrap();
+    assert_eq!(empty_owner.lamports, rent);
+    assert_eq!(
+        TokenAccount::unpack(&empty_owner.data).unwrap().owner,
+        owner
+    );
+    env.svm.airdrop(&operator_key, 1_000_000).unwrap();
+    for (kind, incoming) in [
+        (processor::ASSET_AUTH_INSURANCE, &beneficiary),
+        (processor::ASSET_AUTH_INSURANCE_OPERATOR, &operator),
+    ] {
+        env.try_update_per_asset_authority_with_cu(
+            &admin,
+            Some(incoming),
+            0,
+            kind,
+            incoming.pubkey().to_bytes(),
+        )
+        .unwrap();
+    }
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![
+            system_instruction::transfer(&env.payer.pubkey(), &owner, FUNDED),
+            spl_token::instruction::sync_native(&spl_token::ID, &owner).unwrap(),
+        ],
+        &[],
+    )
+    .unwrap();
+    for (domain, amount) in BUDGETS.into_iter().enumerate() {
+        env.send(
+            ProgInstruction::TopUpInsuranceDomain {
+                domain: domain as u16,
+                market_id: env.asset_market_id(0),
+                authority_epoch: env.control_sequences(0).authority_epoch,
+                intent_id: env.control_sequences(0).insurance_top_up + 1,
+                amount: amount.into(),
+            },
+            vec![
+                AccountMeta::new(owner, true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(owner, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&beneficiary],
+        )
+        .unwrap();
+    }
+    let ledger_key = Keypair::new();
+    let ledger = ledger_key.pubkey();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &ledger_key,
+        state::insurance_ledger_account_len(),
+        env.program_id,
+    );
+    env.send(
+        ProgInstruction::SyncInsuranceLedger,
+        vec![
+            AccountMeta::new(owner, true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&beneficiary],
+    )
+    .unwrap();
+    drop((operator, ledger_key));
+    env.resolve();
+    let admin_token = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
+    let replacement = canonical_vault_ata(owner, env.mint);
+    assert_ne!(replacement, owner);
+    assert!(env.svm.get_account(&replacement).is_none());
+    let initial = env.market_state();
+    let market_frame = env.svm.get_account(&env.market).unwrap();
+    let vault_frame = env.svm.get_account(&env.vault).unwrap();
+    let ledger_frame = env.svm.get_account(&ledger).unwrap();
+    let profile = state::read_asset_oracle_profile(&market_frame.data, 0).unwrap();
+    let sequences = env.control_sequences(0);
+    assert_eq!(profile.insurance_authority, owner.to_bytes());
+    assert_eq!(profile.insurance_operator, operator_key.to_bytes());
+    assert_eq!(initial.1.insurance, FUNDED.into());
+    assert_eq!(initial.1.mode, MarketModeV16::Resolved);
+    assert_eq!(initial.1.materialized_portfolio_count, 0);
+    let tracked = [
+        env.market,
+        env.vault,
+        env.mint,
+        ledger,
+        owner,
+        operator_key,
+        replacement,
+        admin.pubkey(),
+        admin_token,
+    ];
+    let payment = |env: &V16CuEnv, destination, amount: u64, epoch| Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(owner, false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        data: ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            market_id: env.asset_market_id(0),
+            authority_epoch: epoch,
+            amount: amount.into(),
+        }
+        .encode(),
+    };
+    let check = |env: &V16CuEnv, paid: u64, debits: u64| {
+        let remaining = FUNDED - paid;
+        let mut expected = initial.clone();
+        expected.1.vault = remaining.into();
+        expected.1.insurance = remaining.into();
+        expected.1.insurance_domain_budget_remaining_total = remaining.into();
+        expected.1.insurance_domain_budget[0] = BUDGETS[0].saturating_sub(paid).into();
+        expected.1.insurance_domain_budget[1] =
+            (BUDGETS[1] - paid.saturating_sub(BUDGETS[0])).into();
+        assert_eq!(env.market_state(), expected);
+        let market = env.svm.get_account(&env.market).unwrap();
+        assert_eq!(
+            state::read_asset_oracle_profile(&market.data, 0).unwrap(),
+            profile
+        );
+        let mut expected_sequences = sequences;
+        expected_sequences.authority_epoch += debits;
+        assert_eq!(env.control_sequences(0), expected_sequences);
+        let mut expected_vault = vault_frame.clone();
+        let mut token = TokenAccount::unpack(&expected_vault.data).unwrap();
+        token.amount = remaining;
+        TokenAccount::pack(token, &mut expected_vault.data).unwrap();
+        expected_vault.lamports -= paid;
+        assert_eq!(env.svm.get_account(&env.vault), Some(expected_vault));
+        let record = env.svm.get_account(&ledger).unwrap();
+        assert_eq!(
+            state::read_insurance_ledger(&record.data).unwrap(),
+            state::InsuranceLedgerAccountV16 {
+                market_group: env.market.to_bytes(),
+                authority: owner.to_bytes(),
+                total_principal_atoms: 0,
+                total_deposited_atoms: 0,
+                total_withdrawn_atoms: paid.into(),
+                cumulative_profit_atoms: 0,
+                cumulative_loss_atoms: 0,
+                last_observed_insurance_atoms: remaining.into(),
+            }
+        );
+        let mut metadata = record;
+        metadata.data.clone_from(&ledger_frame.data);
+        assert_eq!(metadata, ledger_frame);
+        assert_market_stock_census(
+            "closed insurance identity",
+            &expected.1,
+            &market.data,
+            &[],
+            remaining.into(),
+        )
+        .unwrap();
+        assert_reservation_encumbrance_census("closed insurance identity", &expected.1, &[])
+            .unwrap();
+        state::market_view_mut(&mut market.data.clone())
+            .unwrap()
+            .1
+            .validate_shape()
+            .unwrap();
+    };
+    let reject = |env: &mut V16CuEnv,
+                  ixs: &[Instruction],
+                  index: u8,
+                  error: InstructionError,
+                  successes: [usize; 2]| {
+        env.svm.expire_blockhash();
+        let instructions = [
+            heap_ix(),
+            ComputeBudgetInstruction::set_compute_unit_limit(CU_LIMIT as u32),
+        ]
+        .into_iter()
+        .chain(ixs.iter().cloned())
+        .collect::<Vec<_>>();
+        let tx = Transaction::new_signed_with_payer(
+            &instructions,
+            Some(&env.payer.pubkey()),
+            &[&env.payer],
+            env.svm.latest_blockhash(),
+        );
+        tx.verify().unwrap();
+        assert_eq!(tx.message.header.num_required_signatures, 1);
+        assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
+        let mut keys = tx.message.account_keys.clone();
+        keys.extend(tracked);
+        keys.sort_unstable();
+        keys.dedup();
+        let before = keys
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>();
+        let failure = env.svm.send_transaction(tx).unwrap_err();
+        assert_eq!(
+            failure.err,
+            TransactionError::InstructionError(index, error)
+        );
+        for (program, count) in [env.program_id, associated_token_program_id()]
+            .into_iter()
+            .zip(successes)
+        {
+            assert_eq!(
+                failure
+                    .meta
+                    .logs
+                    .iter()
+                    .filter(|line| **line == format!("Program {program} success"))
+                    .count(),
+                count
+            );
+        }
+        for (key, mut expected) in keys.into_iter().zip(before) {
+            if key == env.payer.pubkey() {
+                expected.as_mut().unwrap().lamports -=
+                    FeeStructure::default().lamports_per_signature;
+            }
+            assert_eq!(
+                env.svm.get_account(&key),
+                expected,
+                "rollback Account {key}"
+            );
+        }
+        assert_cu_within(
+            "closed insurance identity rollback",
+            failure.meta.compute_units_consumed,
+            CU_LIMIT,
+        );
+        failure.meta.compute_units_consumed
+    };
+    check(&env, 0, 0);
+    let first = payment(&env, owner, FIRST, sequences.authority_epoch);
+    let message = solana_sdk::message::Message::new(&[first.clone()], Some(&env.payer.pubkey()));
+    let roles = &message.instructions[0].accounts;
+    assert_eq!(
+        roles[0], roles[2],
+        "beneficiary and native destination share one compiled account"
+    );
+    assert!(message.is_writable(roles[0] as usize));
+    assert!(!message.is_signer(roles[0] as usize));
+    let mut peak = [0u64; 3];
+    let changes = [env.market, env.vault, owner, ledger];
+    peak[0] = execute(&mut env, &[first], &[], &tracked, &changes, 0);
+    check(&env, FIRST, 1);
+    assert_eq!(
+        initial.1.insurance - env.market_state().1.insurance,
+        FIRST.into()
+    );
+    assert_eq!(
+        env.svm.get_account(&owner),
+        Some(native_image(&empty_owner, FIRST, 0))
+    );
+    let retained = payment(&env, owner, FUNDED - FIRST, sequences.authority_epoch + 1);
+
+    // Closing this token account also removes the configured beneficiary Account.
+    // Its signed redemption disposes only the paid prefix; the role key is then unavailable.
+    let mut redeemed = env.svm.get_account(&admin.pubkey()).unwrap();
+    let redeem =
+        spl_token::instruction::close_account(&spl_token::ID, &owner, &admin.pubkey(), &owner, &[])
+            .unwrap();
+    peak[0] = peak[0].max(execute(
+        &mut env,
+        &[redeem],
+        &[&beneficiary],
+        &tracked,
+        &[owner, admin.pubkey()],
+        0,
+    ));
+    redeemed.lamports += rent + FIRST;
+    assert_eq!(env.svm.get_account(&admin.pubkey()), Some(redeemed));
+    drop(beneficiary);
+    let absent_owner = env.svm.get_account(&owner);
+    assert!(absent_owner
+        .as_ref()
+        .is_none_or(|a| a.lamports == 0 && a.data.is_empty()));
+    check(&env, FIRST, 1);
+    peak[1] = reject(
+        &mut env,
+        &[retained.clone()],
+        2,
+        InstructionError::Custom(PercolatorError::InvalidTokenAccount as u32),
+        [0, 0],
+    );
+
+    // Above-rent prefunding becomes native tokens on initialization, never insurance.
+    let prefund = rent + RECIPIENT_DONATION;
+    let donate = system_instruction::transfer(&env.payer.pubkey(), &replacement, prefund);
+    peak[0] = peak[0].max(execute(
+        &mut env,
+        &[donate],
+        &[],
+        &tracked,
+        &[replacement],
+        prefund,
+    ));
+    let prefunded = env.svm.get_account(&replacement).unwrap();
+    assert_eq!(prefunded.owner, solana_sdk::system_program::ID);
+    assert!(prefunded.data.is_empty());
+    assert_eq!(prefunded.lamports, prefund);
+    let repair = Instruction {
+        program_id: associated_token_program_id(),
+        accounts: vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(replacement, false),
+            AccountMeta::new_readonly(owner, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: vec![1],
+    };
+    let mut remainder = retained;
+    remainder.accounts[2].pubkey = replacement;
+    let prefix = [repair, remainder];
+    let mut failed = prefix.to_vec();
+    failed.push(payment(&env, replacement, 1, sequences.authority_epoch + 2));
+    peak[1] = peak[1].max(reject(
+        &mut env,
+        &failed,
+        4,
+        InstructionError::Custom(PercolatorError::InvalidTokenAccount as u32),
+        [1, 1],
+    ));
+    check(&env, FIRST, 1);
+    let changes = [env.market, env.vault, ledger, replacement];
+    let remaining = env.market_state().1.insurance;
+    peak[0] = peak[0].max(execute(&mut env, &prefix, &[], &tracked, &changes, 0));
+    check(&env, FUNDED, 2);
+    assert_eq!(
+        remaining - env.market_state().1.insurance,
+        (FUNDED - FIRST).into()
+    );
+    assert_eq!(env.svm.get_account(&owner), absent_owner);
+    let paid_custody = env.svm.get_account(&replacement).unwrap();
+    let expected_custody = native_image(&empty_owner, FUNDED - FIRST + RECIPIENT_DONATION, 0);
+    assert_eq!(paid_custody, expected_custody);
+    assert_eq!(
+        FIRST + env.token_amount(replacement) - RECIPIENT_DONATION,
+        FUNDED
+    );
+
+    let paid_ledger = env.svm.get_account(&ledger);
+    let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();
+    let tombstone_rent = env
+        .svm
+        .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN);
+    expected_admin.lamports += market_frame.lamports + rent - tombstone_rent;
+    let close = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(admin_token, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::CloseSlab {
+            authority_epoch: sequences.authority_epoch + 2,
+        }
+        .encode(),
+    };
+    let changes = [env.market, env.vault, admin.pubkey()];
+    peak[2] = execute(&mut env, &[close], &[&admin], &tracked, &changes, 0);
+    let tombstone = env.svm.get_account(&env.market).unwrap();
+    assert_closed_market_tombstone(&tombstone);
+    assert_eq!(tombstone.lamports, tombstone_rent);
+    assert!(env
+        .svm
+        .get_account(&env.vault)
+        .is_none_or(|a| a.lamports == 0 && a.data.is_empty()));
+    assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
+    assert_eq!(env.svm.get_account(&replacement), Some(paid_custody));
+    assert_eq!(env.svm.get_account(&ledger), paid_ledger);
+    assert_eq!(env.svm.get_account(&owner), absent_owner);
+    println!("INV-073 closed native insurance identity: histories=1, payments=2, rollbacks=2, repairs=1, closes=1, continuation_transactions=2, peak_CU(success,rejection,close)={peak:?}");
+}
+
+#[test]
 fn v16_program_unsigned_native_insurance_ledger_excludes_donations_through_close() {
     use inv_081_success_state_validity_over_complete_public_routes::inv081_public_native_market;
 

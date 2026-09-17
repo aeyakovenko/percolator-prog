@@ -1,5 +1,19 @@
 # Invariant-owned test coverage
 
+## Row 421 closed native beneficiary identity (2026-09-17)
+
+[The focused conformance note](row421_closed_native_identity_20260917.md) adds
+one public LiteSVM history where the insurance beneficiary is its own native-token
+destination. After an unsigned 41-atom payment, signed SPL redemption removes that
+beneficiary Account itself. Both role keys are then unavailable; keeper prefunding,
+ATA creation and an unsigned 57-atom payment complete the claim in two successful
+transactions. Exact rollback preserves the prefunded System account, prior SOL
+redemption, ledger and unpaid claim before identical-prefix retry. Administrative
+slab closure preserves the paid custody and ledger. The new selector and two native
+controls pass on a private rebuilt SBF; peak CU is 59,153. Production and status
+TSVs are unchanged. Row 421 remains OPEN, including arbitrary histories, active
+liabilities, recredit and unavailable-administrator retirement.
+
 ## Row 424 rediscovered insurance with retired custody (2026-09-17)
 
 [The focused audit](row424_health_20260917.md) adds four public LiteSVM histories
