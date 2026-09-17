@@ -96,6 +96,19 @@ rollback transactions now execute scan rediscovery and native reclassification
 through exact retirement. All three exact selectors pass. Production and status
 TSVs are unchanged; broader receipt/recredit/classification compositions stay open.
 
+## Row 422 mixed exposed-leg reward provenance (2026-09-17)
+
+[The bounded public-route audit](row422_mixed_selected_provenance_20260917.md)
+adds one [INV-045 child](cu/inv_045_mixed_selected_provenance.rs): 32 worlds cross
+selected Hybrid/AuthMark target legs, lag/catchup, both observation orders, and
+all four paid-discovery transports. Both target legs remain exposed; the wash
+pair and keeper share one owner. Before catchup, the selected Hybrid pays zero
+reward while AuthMark pays 3,990; after catchup either pays 4,239. Exact selected
+domain budgets, owner PnL, keeper SPL payouts and 96 rollback transactions pass;
+peak measured transaction CU is 438,515. This adds the mixed-target selection
+composition missing from the one-exposed-leg and separate-recipient witnesses.
+Row 422 remains OPEN; production, dependencies and status TSVs are unchanged.
+
 ## Row 422 regression health (2026-09-17)
 
 [The focused follow-up](row422_regression_health_20260917.md) reproduces both

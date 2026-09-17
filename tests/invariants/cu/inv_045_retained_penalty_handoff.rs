@@ -10,6 +10,9 @@ mod paid_origin_routes;
 #[path = "inv_045_paid_origin_hybrid_recipient.rs"]
 mod paid_origin_hybrid_recipient;
 
+#[path = "inv_045_mixed_selected_provenance.rs"]
+mod mixed_selected_provenance;
+
 fn observe_with_optional_recipient_report(
     env: &V16CuEnv,
     target: Pubkey,
