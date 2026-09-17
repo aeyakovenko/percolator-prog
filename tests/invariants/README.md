@@ -1,5 +1,17 @@
 # Invariant-owned test coverage
 
+## Fee, policy, destination and route-equivalence audit (2026-09-17)
+
+[The scoped audit](fee_policy_routes_audit_20260917.md) maps INV-011/014/024/036/040/
+047/052/059/064 and rows 223/224/256/259/284/310/313/314/325/326/334/335/336/337/
+338/339/340/347/349/411/432 to existing mounted selectors, assertions and limits.
+Exact execution yields 29 distinct passes and three reproducible failures:
+PR223's maintenance-debit expectation, the negative-direction terminal payout,
+and insurance schedules requiring byte equality despite different debit counts.
+No new public-route LoF/DoS gap was established, so no duplicate test was added.
+Row 411 remains OPEN, row 432 remains COVERED, and invariant statuses are unchanged.
+The audit records exact commands, artifact provenance and unexecuted suffixes.
+
 ## Identity and generation retained-intent audit (2026-09-17)
 
 [The scoped audit](identity_generation_audit_20260917.md) maps INV-001..005/007/012/013/016/089
