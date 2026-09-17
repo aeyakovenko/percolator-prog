@@ -1,5 +1,14 @@
 # Invariant-owned test coverage
 
+## Row 412 regression health (2026-09-17)
+
+[The focused follow-up](row412_regression_health_20260917.md) adds grant admission
+retained before partial reduction or direct cross-zero on both bilateral routes.
+The new exact selector passes eight worlds, 72 exact rollbacks, eight unchanged
+signed grant deliveries after rollback and 16 owner payouts on rebuilt current-main
+SBF; peak measured CU is 466,880. Production and status TSVs are unchanged.
+Arbitrary revocation histories and hostile matcher-return compositions remain open.
+
 ## Rows 410/429 regression health (2026-09-17)
 
 [The focused follow-up](row410429_regression_health_20260917.md) joins spent
