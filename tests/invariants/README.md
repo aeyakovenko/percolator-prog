@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## INV-051 dual-ADL matched reduction partitions (2026-09-17)
+
+Owner: [cu/inv_051_dual_adl_matched_partitions.rs](cu/inv_051_dual_adl_matched_partitions.rs),
+mounted under INV-051. Forty-eight public LiteSVM histories compare aggregate,
+split and reversed matched reductions with both owners at distinct nonunit ADL
+indices. Independent input-derived inverse conversions, a complete active-leg
+census, per-owner rounded fees and exact Live payouts join INV-047/048/051/052.
+All four transports occur in mixed-route histories. The new selector passes
+128 fills, 96 side finalizations and 96 payouts, at **164,792 peak CU**.
+
+Existing unilateral partitions change the passive index on each reduction;
+the asymmetric matched-trade witness has only one scaled participant. This adds
+simultaneous conversion of two different retained bases at fixed indices, with
+exact position endpoints and conservative fee differences across partitions.
+Two adjacent exact controls and the source/mount census also pass. Production,
+dependency pins and invariant statuses are unchanged. This is finite fixed-price
+conformance evidence; it does not extend observation/freshness or liquidation
+sizing coverage. [Comparison, commands and limits](inv_051_dual_adl_matched_partitions_audit_20260917.md).
+
 ## INV-020 equal composite provenance and fractional mark movement (2026-09-17)
 
 Owner: [cu/inv_020_equal_composite_provenance.rs](cu/inv_020_equal_composite_provenance.rs),
