@@ -1,5 +1,20 @@
 # Invariant-owned test coverage
 
+## INV-028/031/063 source-accounting benchmark audit (2026-09-17)
+
+[The source-accounting audit](source_accounting_conformance_audit_20260917.md)
+maps benchmark rows 213, 214, 270, 300, 306, 364, 379, 423, 267, 291, 361,
+363 and 367 to exact existing harness selectors, their nonzero public setups,
+assertion boundaries and remaining gaps. All thirteen named families already
+have mounted witnesses; this audit adds no duplicate tests or production changes.
+
+For row 291, the already-funded resolved-close expiry matrix is a direct witness
+alongside the retained-top-up matrix currently named in the discovery ledger.
+For row 423, the used-generation latent-capacity witness remains distinct from
+the older full-table admission test, and the broader exit-resource obligation
+remains OPEN. This is source/mount validation, not a new behavioral result or
+status promotion; exact commands and validation results are in the audit.
+
 ## INV-067 native receipt redemption and rounding beneficiary (2026-09-17)
 
 Owner: [cu/inv_067_native_receipt_redemption.rs](cu/inv_067_native_receipt_redemption.rs),
