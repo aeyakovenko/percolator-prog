@@ -6,6 +6,9 @@
 
 use super::*;
 
+#[path = "inv_014_retained_funding_route_renewal.rs"]
+mod retained_funding_route_renewal;
+
 const MAINTENANCE: u64 = 307;
 const QUANTITY: i128 = 95 * POS_SCALE as i128;
 const FUNDING_RATE: u64 = 1_000;

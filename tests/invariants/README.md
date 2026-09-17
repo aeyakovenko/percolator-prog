@@ -277,6 +277,20 @@ selectors pass on rebuilt current-main SBF; final-run peak CU is 201,926. Produc
 statuses are unchanged. Arbitrary funding/residual/receipt compositions and slab
 retirement remain outside this increment.
 
+## Row 411 funded bilateral reduction and retained renewal (2026-09-17)
+
+[The focused note](row411_funding_route_renewal_20260917.md) adds one public
+selector in [the funding renewal child](cu/inv_014_retained_funding_route_renewal.rs).
+A bilateral reduction collects 95 funding atoms and revokes the LP grant. A
+pre-signed renewal plus batch-CPI residual then faces 38 fresh funding atoms:
+the 14-atom cap rejects, the exact 15-atom cap succeeds, and a stale policy suffix
+rolls back the executed renewal, funding and close. Four worlds check 28 complete
+rollbacks, 73 trade-fee atoms per owner, 133 funding atoms and eight full SPL
+payouts. This adds atomic grant renewal to the funded histories; the earlier
+mixed-route renewal has zero funding. New/funding/mixed-route exact selectors
+pass at **461,554 / 470,288 / 226,720 CU**. Row 411 remains OPEN for multi-asset
+aggregation, positive funding, clipping, other fee sources and arbitrary histories.
+
 ## Row 411 funding accrual between retained reductions (2026-09-17)
 
 [The inter-reduction follow-up](row411_inter_reduction_funding_20260917.md) adds
