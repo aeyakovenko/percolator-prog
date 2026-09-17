@@ -1,5 +1,15 @@
 # Invariant-owned test coverage
 
+## INV-008 retained-intent audit (2026-09-17)
+
+[The retained-intent audit](inv_008_retained_intent_audit_20260917.md) maps only
+rows 343/344/350/351/355/362/415/428 to existing mounted public witnesses and
+their assertion boundaries. All eight families have witnesses; no duplicate
+test is needed. Row 415 uses generated replacement-stock histories, while row
+428's direct Resolved epoch-consumption witness is mounted under INV-014.
+The audit distinguishes current `SUPPORTED`/`COVERED` ledger entries from older
+`OPEN` commentary and records exact verification without changing statuses.
+
 ## INV-070/073/078 terminal-reserve evidence audit (2026-09-17)
 
 [The terminal-reserve audit](terminal_reserve_evidence_audit_20260917.md) maps
