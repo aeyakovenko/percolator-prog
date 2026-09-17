@@ -140,6 +140,14 @@ bundle is 979 bytes. It distinguishes transient attach headroom from final OI
 and retries unchanged flip requests after competing-prefix rollback. No production
 issue is confirmed. Row 427 remains OPEN; status TSVs and production are unchanged.
 
+[The shared-maker follow-up](row427_shared_maker_audit_20260917.md) adds connected
+pair edges to two capped assets with unequal rounded fees. Packed/split bilateral
+and CPI batches advance the common maker's position epoch, roll back a late cap
+failure, retry retained requests, then close and pay every owner. The exact new
+selector passes 16 histories, 24 complete Account rollbacks and 96 payouts on
+private rebuilt SBF; peak CU 589,145, largest bundle 968 bytes. Nonunit ADL,
+PnL/funding, partial fills and larger graphs remain open. No production change.
+
 ## Rows 420/421/423/433 regression health (2026-09-17)
 
 [The focused follow-up](row420421423433_regression_health_20260917.md) updates the

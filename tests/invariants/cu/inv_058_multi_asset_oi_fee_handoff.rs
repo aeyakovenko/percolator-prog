@@ -696,3 +696,318 @@ fn v16_program_two_asset_oi_fee_handoff_is_atomic_across_clear_resize_and_route_
     }
     println!("two-asset OI/fee handoff: 16 worlds, 32 rollbacks, 96 payouts; peak CU [reject, trade, custody]={peaks:?}");
 }
+
+#[test]
+fn v16_program_shared_maker_two_asset_cap_handoff_preserves_fees_and_retry() {
+    // Edges (0,3) and (2,3) share a maker while (4,5) remains independent.
+    // Predicting the second public instruction's epochs is not state mutation.
+    fn request(
+        w: &World,
+        taker: usize,
+        cpi: bool,
+        legs: &[(u16, i128)],
+        fee_bps: u64,
+        maker_prefixes: u64,
+    ) -> Instruction {
+        let (a, b) = (w.portfolios[taker], w.portfolios[3]);
+        let mut accounts = vec![AccountMeta::new(w.owners[taker].pubkey(), true)];
+        if !cpi {
+            accounts.push(AccountMeta::new(w.owners[3].pubkey(), true));
+        }
+        accounts.extend([
+            AccountMeta::new(w.env.market, false),
+            AccountMeta::new(a, false),
+            AccountMeta::new(b, false),
+        ]);
+        let mut ix = if cpi {
+            let (program, context, delegate) = w.matchers[1];
+            accounts.extend([
+                AccountMeta::new_readonly(program, false),
+                AccountMeta::new(context, false),
+                AccountMeta::new_readonly(delegate, false),
+            ]);
+            w.env.batch_trade_cpi_ix_with_caps(
+                a,
+                b,
+                legs.iter()
+                    .map(|&(asset_index, size_q)| BatchTradeCpiLeg {
+                        asset_index,
+                        market_id: w.env.asset_market_id(asset_index),
+                        size_q,
+                        limit_price: PRICE,
+                        fee_bps,
+                    })
+                    .collect(),
+                0,
+                legs.iter()
+                    .map(|&(_, q)| ceil_ratio(notional(q) * u128::from(fee_bps), 10_000))
+                    .sum(),
+            )
+        } else {
+            w.env.batch_trade_no_cpi_ix(
+                a,
+                b,
+                legs.iter()
+                    .map(|&(asset_index, size_q)| BatchTradeLeg {
+                        asset_index,
+                        market_id: w.env.asset_market_id(asset_index),
+                        size_q,
+                        exec_price: PRICE,
+                        fee_bps,
+                    })
+                    .collect(),
+            )
+        };
+        match &mut ix {
+            ProgInstruction::BatchTradeCpi {
+                account_b_position_epoch,
+                ..
+            }
+            | ProgInstruction::BatchTradeNoCpi {
+                account_b_position_epoch,
+                ..
+            } => *account_b_position_epoch += maker_prefixes,
+            _ => unreachable!(),
+        }
+        Instruction {
+            program_id: w.env.program_id,
+            accounts,
+            data: ix.encode(),
+        }
+    }
+
+    fn record(w: &mut World, taker: usize, legs: &[(u16, i128)], bps: u64) {
+        for &(asset, q) in legs {
+            let fee = ceil_ratio(notional(q) * u128::from(bps), 10_000);
+            for (actor, delta) in [(taker, q), (3, -q)] {
+                w.positions[actor][asset as usize] += delta;
+                w.fees[actor] += fee;
+            }
+            for side in 0..2 {
+                w.domains[2 * asset as usize + side] += fee;
+            }
+        }
+        for actor in [taker, 3] {
+            w.epochs[actor] += 1;
+        }
+    }
+
+    fn accept(w: &mut World, ixs: &[Instruction], takers: &[usize], cpi: bool) {
+        let tx = w.transaction(ixs);
+        let before = frame(&w.env, &tx, &w.keys());
+        let fee = FeeStructure::default().lamports_per_signature
+            * u64::from(tx.message.header.num_required_signatures);
+        let meta = w.env.svm.send_transaction(tx).unwrap();
+        let mut changed = vec![w.env.market, w.portfolios[3]];
+        changed.extend(takers.iter().map(|&actor| w.portfolios[actor]));
+        if cpi {
+            changed.push(w.matchers[1].1);
+        }
+        check_frame(&w.env, before, fee, &changed);
+        assert_cu_within(
+            "shared-maker batch",
+            meta.compute_units_consumed,
+            ixs.len() as u64 * TRADE_CU_LIMIT,
+        );
+        w.peak[1] = w.peak[1].max(meta.compute_units_consumed);
+    }
+
+    fn packet(w: &mut World, ixs: &[Instruction]) -> u64 {
+        let bytes = bincode::serialized_size(&w.transaction(ixs)).unwrap();
+        assert!(bytes <= solana_sdk::packet::PACKET_DATA_SIZE as u64);
+        bytes
+    }
+
+    let max = i128::try_from(percolator::MAX_OI_SIDE_Q).unwrap();
+    let initial = [max / 4, max / 3, max - max / 4 - max / 3];
+    let amounts = [RELEASE_Q as i128, RELEASE_Q as i128 - 2];
+    assert_eq!(
+        amounts.map(|q| ceil_ratio(notional(q) * u128::from(FEE_BPS), 10_000)),
+        [2, 1]
+    );
+    let mut peaks = [0; 3];
+    let mut max_bytes = 0;
+    let mut worlds = 0;
+    let mut rollbacks = 0;
+    for direction in [-1i128, 1] {
+        for order in [[0u16, 1], [1, 0]] {
+            for cpi in [false, true] {
+                for packed in [false, true] {
+                    let mut w = World::new();
+                    for (pair, amount) in initial.into_iter().enumerate() {
+                        let legs = [(0, direction * amount), (1, -direction * amount)];
+                        let ixs = w.instructions(pair * 2, TradeRoute::BatchNoCpi, &legs, 0);
+                        w.accept(&ixs, &[pair * 2]);
+                        w.record(pair * 2, &legs, 0, 1);
+                        w.check();
+                    }
+                    if cpi {
+                        let (program, context, delegate) = w.matchers[1];
+                        w.env.set_matcher_config(
+                            program,
+                            &w.owners[3],
+                            w.portfolios[3],
+                            context,
+                            delegate,
+                            1,
+                        );
+                    }
+                    w.env.update_trade_fee_policy_with_cu(FEE_BPS);
+                    let release: Legs = order
+                        .map(|a| {
+                            (
+                                a,
+                                -direction * if a == 0 { amounts[0] } else { -amounts[1] },
+                            )
+                        })
+                        .to_vec();
+                    let refill: Legs = release.iter().map(|&(a, q)| (a, -q)).collect();
+                    let mut excess = refill.clone();
+                    excess.last_mut().unwrap().1 += refill.last().unwrap().1.signum();
+                    // Account-local caps and collateral are slack even for the rejected proposal.
+                    for (actor, legs, sign) in [(0, &release, 1), (2, &excess, 1), (3, &excess, -1)]
+                    {
+                        let mut proposed = w.positions[actor];
+                        if actor == 3 {
+                            for &(a, q) in &release {
+                                proposed[a as usize] -= q;
+                            }
+                        }
+                        for &(a, q) in legs {
+                            assert!(q.unsigned_abs() < percolator::MAX_TRADE_SIZE_Q);
+                            proposed[a as usize] += sign * q;
+                        }
+                        assert!(proposed
+                            .iter()
+                            .all(|q| q.unsigned_abs() < percolator::MAX_POSITION_ABS_Q));
+                        let risk: u128 = proposed.into_iter().map(notional).sum();
+                        assert!(risk < percolator::MAX_ACCOUNT_NOTIONAL && risk + 12 < CAPITAL);
+                    }
+                    let reduce = request(&w, 0, cpi, &release, FEE_BPS, 0);
+                    let retained = request(&w, 2, cpi, &refill, FEE_BPS, 1);
+                    let over = request(&w, 2, cpi, &excess, FEE_BPS, 1);
+                    let bad = [reduce.clone(), over.clone()];
+                    max_bytes = max_bytes.max(packet(&mut w, &bad));
+                    w.reject(
+                        &bad,
+                        PercolatorError::EngineInvalidLeg as u32,
+                        1,
+                        if cpi { 2 } else { 0 },
+                    );
+                    rollbacks += 1;
+                    assert_eq!(w.fees, [0; ACTORS]);
+
+                    if packed {
+                        let good = [reduce, retained];
+                        max_bytes = max_bytes.max(packet(&mut w, &good));
+                        accept(&mut w, &good, &[0, 2], cpi);
+                        record(&mut w, 0, &release, FEE_BPS);
+                        record(&mut w, 2, &refill, FEE_BPS);
+                    } else {
+                        accept(&mut w, &[reduce], &[0], cpi);
+                        record(&mut w, 0, &release, FEE_BPS);
+                        w.check();
+                        for (a, amount) in amounts.into_iter().enumerate() {
+                            let asset = w.env.market_state().1.assets[a];
+                            assert_eq!(
+                                [asset.oi_eff_long_q, asset.oi_eff_short_q],
+                                [(max - amount) as u128; 2]
+                            );
+                        }
+                        // The first edge committed, but the unchanged over-cap second edge
+                        // still rejects and preserves its predecessor's fees and headroom.
+                        w.reject(
+                            &[over],
+                            PercolatorError::EngineInvalidLeg as u32,
+                            0,
+                            usize::from(cpi),
+                        );
+                        rollbacks += 1;
+                        accept(&mut w, &[retained], &[2], cpi);
+                        record(&mut w, 2, &refill, FEE_BPS);
+                    }
+                    w.check();
+                    assert_eq!(w.fees, [3, 0, 3, 6, 0, 0]);
+                    assert_eq!(w.domains, [4, 4, 2, 2]);
+                    for asset in w.env.market_state().1.assets.iter().take(ASSETS) {
+                        assert_eq!(
+                            [asset.oi_eff_long_q, asset.oi_eff_short_q],
+                            [max as u128; 2]
+                        );
+                        assert_eq!(
+                            [asset.stored_pos_count_long, asset.stored_pos_count_short],
+                            [3; 2]
+                        );
+                    }
+
+                    // Reverse the graph handoff through public trades, then close every pair.
+                    w.env.update_trade_fee_policy_with_cu(0);
+                    for (taker, legs) in [(2, &release), (0, &refill)] {
+                        let ix = request(&w, taker, false, legs, 0, 0);
+                        accept(&mut w, &[ix], &[taker], false);
+                        record(&mut w, taker, legs, 0);
+                        w.check();
+                    }
+                    for pair in [0, 2, 4] {
+                        let close: Legs = (0..ASSETS)
+                            .map(|a| (a as u16, -w.positions[pair][a]))
+                            .collect();
+                        let ixs = w.instructions(pair, TradeRoute::BatchNoCpi, &close, 0);
+                        w.accept(&ixs, &[pair]);
+                        w.record(pair, &close, 0, 1);
+                        w.check();
+                    }
+                    assert_eq!(w.positions, [[0; ASSETS]; ACTORS]);
+                    for actor in 0..ACTORS {
+                        let amount = CAPITAL - w.fees[actor];
+                        let ix = Instruction {
+                            program_id: w.env.program_id,
+                            accounts: vec![
+                                AccountMeta::new(w.owners[actor].pubkey(), true),
+                                AccountMeta::new(w.env.market, false),
+                                AccountMeta::new(w.portfolios[actor], false),
+                                AccountMeta::new(w.tokens[actor], false),
+                                AccountMeta::new(w.env.vault, false),
+                                AccountMeta::new_readonly(w.env.vault_authority, false),
+                                AccountMeta::new_readonly(spl_token::ID, false),
+                            ],
+                            data: w.env.withdraw_ix(w.portfolios[actor], amount).encode(),
+                        };
+                        let tx = w.transaction(&[ix]);
+                        let before = frame(&w.env, &tx, &w.keys());
+                        let fee = FeeStructure::default().lamports_per_signature
+                            * u64::from(tx.message.header.num_required_signatures);
+                        let meta = w.env.svm.send_transaction(tx).unwrap();
+                        check_frame(
+                            &w.env,
+                            before,
+                            fee,
+                            &[
+                                w.env.market,
+                                w.portfolios[actor],
+                                w.tokens[actor],
+                                w.env.vault,
+                            ],
+                        );
+                        w.paid[actor] = amount;
+                        w.check();
+                        assert_cu_within(
+                            "shared-maker payout",
+                            meta.compute_units_consumed,
+                            CUSTODY_CU_LIMIT,
+                        );
+                        w.peak[2] = w.peak[2].max(meta.compute_units_consumed);
+                    }
+                    assert_eq!(w.env.market_state().1.c_tot, 0);
+                    assert_eq!(w.env.market_state().1.vault, 12);
+                    for (peak, observed) in peaks.iter_mut().zip(w.peak) {
+                        *peak = (*peak).max(observed);
+                    }
+                    worlds += 1;
+                }
+            }
+        }
+    }
+    assert_eq!((worlds, rollbacks), (16, 24));
+    println!("INV-058 shared-maker two-asset cap: {worlds} worlds, {rollbacks} exact rollbacks, 96 payouts; peak CU [reject, trade, custody]={peaks:?}; max bundle bytes={max_bytes}");
+}
