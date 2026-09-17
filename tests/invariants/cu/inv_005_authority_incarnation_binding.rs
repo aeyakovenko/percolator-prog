@@ -55,6 +55,9 @@ mod backing_role_refunding;
 #[path = "inv_005_retained_insurance_management.rs"]
 mod retained_insurance_management;
 
+#[path = "inv_005_retained_oracle_exposure.rs"]
+mod retained_oracle_exposure;
+
 #[path = "inv_005_funded_backing_succession.rs"]
 mod funded_backing_succession;
 

@@ -1,5 +1,14 @@
 # Invariant-owned test coverage
 
+## Row 416 regression health (2026-09-17)
+
+[The focused follow-up](row416_regression_health_20260917.md) adds retained
+empty-asset oracle handoffs across public exposure creation, including exact
+rollback of an SPL withdrawal prefix, incumbent succession and full owner payouts.
+All four worlds pass with twenty exact owner payouts; peak successful transaction
+cost is 142,495 CU. Production and status TSVs are unchanged; row 416 and broader
+loss/claim/lifecycle compositions remain OPEN.
+
 ## Row 427 regression health (2026-09-17)
 
 [The focused follow-up](row427_regression_health_20260917.md) adds three-pair
