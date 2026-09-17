@@ -192,6 +192,17 @@ test is needed. Row 415 uses generated replacement-stock histories, while row
 The audit distinguishes current `SUPPORTED`/`COVERED` ledger entries from older
 `OPEN` commentary and records exact verification without changing statuses.
 
+## Row 418 native booked-residue regression health (2026-09-17)
+
+[The row 418 health report](row418_regression_health_20260917.md) adds two public
+native retirement histories with a prefunded canonical insurance ATA, below and
+above token-account rent. The exact selector passes six rollback checks and two
+retirements, separating 37 previously redeemed insurance atoms, 101 booked atoms,
+0/23 externally wrapped atoms and 19 vault-surplus atoms; peak 68,491 CU.
+The existing Scope O native/classic selectors fail earlier in shared fee/loss
+settlement on current main (`EngineNonProgress`), so their recredit/retirement
+suffixes remain an explicit health gap. Production and statuses are unchanged.
+
 ## INV-070/073/078 terminal-reserve evidence audit (2026-09-17)
 
 [The terminal-reserve audit](terminal_reserve_evidence_audit_20260917.md) maps
