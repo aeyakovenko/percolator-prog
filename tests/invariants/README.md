@@ -180,6 +180,18 @@ controls pass on rebuilt private SBF; merged-main peaks are 258,278 / 264,323 /
 Production and TSVs are unchanged. Row 433 remains OPEN for arbitrary histories,
 Recovery/recredit, native-secondary earnings and unavailable-administrator cleanup.
 
+## Row 420 multi-asset provider ledgers (2026-09-18)
+
+[The focused note](row420_multi_asset_provider_20260918.md) adds one public
+LiteSVM selector for one absent provider whose two asset domains share SPL custody
+but require separate earnings ledgers. Both payment orders reject a sibling ledger
+after a real fee payment, restore complete Accounts, and retry with the correct
+ledger. Principal overclaim and final-fee/close rollback preserve domain claims.
+Both histories finish with 200,000 principal and 2,624 fee atoms in common custody,
+separate 875/1,749 ledger withdrawals, and exact rent closure without burning.
+New/control peaks are 443,596 / 255,765 CU. Row 420 remains OPEN; this is bounded
+INV-024/073 conformance, with no production, fixture, Cargo or TSV changes.
+
 ## Row 420 shared provider cleanup (2026-09-17)
 
 [The focused conformance note](row420_shared_provider_cleanup_20260917.md)

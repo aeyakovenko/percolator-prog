@@ -5,6 +5,7 @@
 //! Mixed-expiry histories additionally retire only one provider's principal while
 //! preserving both earned-fee claims and the other provider's fresh principal.
 //! Inverse-expiry histories pay the earlier fresh principal to unblock the scan.
+//! A shared-authority variant binds separate asset ledgers despite common custody.
 //! One SPL rail, two domains and available cleanup owners only.
 
 use super::*;
@@ -28,7 +29,16 @@ fn v16_program_distinct_absent_provider_inverse_expiry_unblocks_scan_without_los
     verify_distinct_provider_histories(Some(1));
 }
 
+#[test]
+fn v16_program_absent_multi_asset_provider_rejects_cross_domain_earnings_ledger_and_retries() {
+    verify_provider_histories(None, true);
+}
+
 fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
+    verify_provider_histories(expired_asset, false);
+}
+
+fn verify_provider_histories(expired_asset: Option<usize>, shared_provider: bool) {
     const RATES: [u16; 2] = [3_333, 6_666];
     const FEES: [u64; 2] = [875, 1_749];
     const TOTAL_SUPPLY: u64 = 2 * (CAPITAL[0] + CAPITAL[1] + BACKING);
@@ -37,6 +47,7 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
     let mut user_calls = 0;
     let mut expiry_peaks = [0; 3];
     let mut inverse_gate_peak = 0;
+    let mut shared_peaks = [0; 3];
     let expiries = [0, 1].map(|asset| {
         if expired_asset.is_some_and(|expired| expired != asset) {
             200
@@ -56,11 +67,20 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
             },
         );
         let admin = env.admin.insecure_clone();
-        let providers = [Keypair::new(), Keypair::new()];
+        let provider = Keypair::new();
+        let providers = if shared_provider {
+            [provider.insecure_clone(), provider]
+        } else {
+            [provider, Keypair::new()]
+        };
         let users = std::array::from_fn::<_, 4, _>(|_| Keypair::new());
         let provider_keys = providers.each_ref().map(Signer::pubkey);
         let user_keys = users.each_ref().map(Signer::pubkey);
-        for key in provider_keys.into_iter().chain(user_keys) {
+        for key in provider_keys
+            .into_iter()
+            .chain(user_keys)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
             env.svm.airdrop(&key, 1_000_000_000).unwrap();
         }
         env.svm.warp_to_slot(1);
@@ -83,14 +103,36 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
         env.configure_permissionless_resolve_with_cu(100, 5);
         let user_tokens =
             user_keys.map(|key| create_ata_for_test(&mut env.svm, &env.payer, key, env.mint));
-        let provider_tokens =
-            provider_keys.map(|key| create_ata_for_test(&mut env.svm, &env.payer, key, env.mint));
+        let first_token = create_ata_for_test(&mut env.svm, &env.payer, provider_keys[0], env.mint);
+        let provider_tokens = [
+            first_token,
+            if shared_provider {
+                first_token
+            } else {
+                create_ata_for_test(&mut env.svm, &env.payer, provider_keys[1], env.mint)
+            },
+        ];
+        let provider_custody_count = if shared_provider { 1 } else { 2 };
         let admin_token = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
         for (token, amount) in user_tokens
             .into_iter()
             .enumerate()
             .map(|(i, key)| (key, CAPITAL[i % 2]))
-            .chain(provider_tokens.map(|key| (key, BACKING)))
+            .chain(
+                provider_tokens
+                    .into_iter()
+                    .take(provider_custody_count)
+                    .map(|key| {
+                        (
+                            key,
+                            if shared_provider {
+                                2 * BACKING
+                            } else {
+                                BACKING
+                            },
+                        )
+                    }),
+            )
         {
             send_raw_tx(
                 &mut env.svm,
@@ -188,7 +230,8 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
         // No provider key survives funding, including during fee generation and user exit.
         assert!(!provider_keys.contains(&admin.pubkey()));
         assert!(!provider_keys.contains(&env.payer.pubkey()));
-        assert_ne!(provider_keys[0], provider_keys[1]);
+        assert_eq!(provider_keys[0] == provider_keys[1], shared_provider);
+        assert_eq!(provider_tokens[0] == provider_tokens[1], shared_provider);
         drop(providers);
         for asset in 0..2 {
             let a = 2 * asset;
@@ -301,7 +344,7 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
                 assert_eq!(
                     user_tokens
                         .into_iter()
-                        .chain(provider_tokens)
+                        .chain(provider_tokens.into_iter().take(provider_custody_count))
                         .chain([env.vault])
                         .map(|key| env.token_amount(key))
                         .sum::<u64>(),
@@ -338,7 +381,7 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
         let empty_ledgers = ledgers.map(|key| env.svm.get_account(&key).unwrap());
         let custody_keys = user_tokens
             .into_iter()
-            .chain(provider_tokens)
+            .chain(provider_tokens.into_iter().take(provider_custody_count))
             .chain([env.vault, admin_token])
             .collect::<Vec<_>>();
         let custody_frames = custody_keys
@@ -405,16 +448,19 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
                 group.backing_provider_earnings_total,
                 u128::from(FEES.iter().sum::<u64>() - fees_paid.iter().sum::<u64>())
             );
-            let amounts = [
+            let mut amounts = vec![
                 CAPITAL[0] + PROFIT - FEES[0],
                 CAPITAL[1] - PROFIT,
                 CAPITAL[0] + PROFIT - FEES[1],
                 CAPITAL[1] - PROFIT,
                 principal_paid[0] + fees_paid[0],
-                principal_paid[1] + fees_paid[1],
-                remaining,
-                0,
             ];
+            if shared_provider {
+                amounts[4] += principal_paid[1] + fees_paid[1];
+            } else {
+                amounts.push(principal_paid[1] + fees_paid[1]);
+            }
+            amounts.extend([remaining, 0]);
             assert_eq!(amounts.iter().sum::<u64>(), TOTAL_SUPPLY);
             for ((key, frame), amount) in custody_keys.iter().zip(&custody_frames).zip(amounts) {
                 let mut expected = frame.clone();
@@ -437,6 +483,20 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
                 assert_eq!(env.control_sequences(asset), sequences[asset]);
                 let domain = 2 * asset + 1;
                 let bucket = group.source_backing_buckets[domain];
+                if shared_provider {
+                    let source = group.source_credit[domain];
+                    assert_eq!(
+                        bucket.consumed_liened_backing_num,
+                        u128::from(PROFIT) * BOUND_SCALE
+                    );
+                    assert_eq!(
+                        source.provider_receivable_num,
+                        u128::from(PROFIT) * BOUND_SCALE
+                    );
+                    assert_eq!(source.spent_backing_num, u128::from(PROFIT) * BOUND_SCALE);
+                    assert_eq!(bucket.valid_liened_backing_num, 0);
+                    assert_eq!(bucket.impaired_liened_backing_num, 0);
+                }
                 let expired = normalized && expired_asset == Some(asset);
                 assert_eq!(bucket.expiry_slot, expiries[asset]);
                 assert_eq!(
@@ -485,6 +545,23 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
                         record.last_observed_bucket_earnings_atoms,
                         u128::from(FEES[asset] - fees_paid[asset])
                     );
+                    if shared_provider {
+                        let expected_record = state::BackingDomainLedgerAccountV16 {
+                            market_group: env.market.to_bytes(),
+                            authority: provider_keys[asset].to_bytes(),
+                            domain: domain as u16,
+                            total_earnings_withdrawn_atoms: fees_paid[asset].into(),
+                            last_observed_bucket_earnings_atoms: (FEES[asset] - fees_paid[asset])
+                                .into(),
+                            last_observed_unavailable_principal_atoms: PROFIT.into(),
+                            ..Default::default()
+                        };
+                        assert_eq!(record, expected_record);
+                        let mut expected = empty_ledgers[asset].clone();
+                        state::init_backing_domain_ledger(&mut expected.data, &expected_record)
+                            .unwrap();
+                        assert_eq!(env.svm.get_account(&ledgers[asset]), Some(expected));
+                    }
                 }
             }
             state::market_view_mut(&mut image.data)
@@ -523,6 +600,66 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
         let mut fees_paid = [0; 2];
         let mut normalized = false;
         check(&env, [principal_paid, fees_paid], normalized);
+        let shared_principal_retry = if shared_provider {
+            let [first, second] = order;
+            // Authority and destination match in both domains. Only the bound
+            // domain distinguishes this ledger from the valid sibling ledger.
+            for (round, prefix_amount) in [17, 23].into_iter().enumerate() {
+                let prefix = payout(&env, first, true, prefix_amount);
+                let sibling = payout(&env, second, true, 19);
+                let mut wrong_ledger = sibling.clone();
+                wrong_ledger.accounts[2].pubkey = ledgers[first];
+                shared_peaks[round] = shared_peaks[round].max(land(
+                    &mut env,
+                    &[prefix.clone(), wrong_ledger],
+                    &[],
+                    &tracked,
+                    &[],
+                    0,
+                    None,
+                    Some((3, PercolatorError::Unauthorized)),
+                ));
+                check(&env, [principal_paid, fees_paid], normalized);
+                let allowed = [
+                    env.market,
+                    env.vault,
+                    provider_tokens[0],
+                    ledgers[0],
+                    ledgers[1],
+                ];
+                peak = peak.max(land(
+                    &mut env,
+                    &[prefix, sibling],
+                    &[],
+                    &tracked,
+                    &allowed,
+                    0,
+                    None,
+                    None,
+                ));
+                fees_paid[first] += prefix_amount;
+                fees_paid[second] += 19;
+                check(&env, [principal_paid, fees_paid], normalized);
+            }
+            // Common custody still holds the sibling principal and both fee
+            // tails; exhausting one principal cannot spend those other claims.
+            let principal = payout(&env, first, false, BACKING);
+            let overclaim = payout(&env, first, false, 1);
+            shared_peaks[2] = shared_peaks[2].max(land(
+                &mut env,
+                &[principal.clone(), overclaim],
+                &[],
+                &tracked,
+                &[],
+                0,
+                None,
+                Some((3, PercolatorError::EngineLockActive)),
+            ));
+            check(&env, [principal_paid, fees_paid], normalized);
+            Some((first, principal))
+        } else {
+            None
+        };
         let expiry_retry = expired_asset.map(|expired| {
             let fresh = 1 - expired;
             let fresh_domain = 2 * fresh + 1;
@@ -641,10 +778,18 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
             if expired_asset == Some(asset) || principal_paid[asset] == BACKING {
                 continue;
             }
-            let ix = payout(&env, asset, false, BACKING);
+            let mut ix = payout(&env, asset, false, BACKING);
+            if let Some((first, retry)) = &shared_principal_retry {
+                if asset == *first {
+                    assert_eq!(&ix, retry);
+                    ix = retry.clone();
+                }
+            }
             if let Some((_, retry)) = &expiry_retry {
                 assert_eq!(&ix, retry);
             }
+            let sibling_domain = 2 * (1 - asset) + 1;
+            let before = env.market_state().1;
             let allowed = [env.market, env.vault, provider_tokens[asset]];
             peak = peak.max(land(
                 &mut env,
@@ -658,10 +803,21 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
             ));
             principal_paid[asset] = BACKING;
             check(&env, [principal_paid, fees_paid], normalized);
+            if shared_provider {
+                let after = env.market_state().1;
+                assert_eq!(
+                    after.source_backing_buckets[sibling_domain],
+                    before.source_backing_buckets[sibling_domain]
+                );
+                assert_eq!(
+                    after.source_credit[sibling_domain],
+                    before.source_credit[sibling_domain]
+                );
+            }
         }
         let first = order[0];
         let second = order[1];
-        let pay_first = payout(&env, first, true, FEES[first]);
+        let pay_first = payout(&env, first, true, FEES[first] - fees_paid[first]);
         if let Some((retry, _)) = &expiry_retry {
             assert_eq!(&pay_first, retry);
         }
@@ -684,7 +840,7 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
         fees_paid[first] = FEES[first];
         check(&env, [principal_paid, fees_paid], normalized);
         // One fully paid domain cannot release the other provider's last fee atom.
-        let partial = payout(&env, second, true, FEES[second] - 1);
+        let partial = payout(&env, second, true, FEES[second] - fees_paid[second] - 1);
         peak = peak.max(land(
             &mut env,
             &[partial.clone(), close.clone()],
@@ -764,17 +920,26 @@ fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
         assert_eq!(env.svm.get_account(&env.mint), Some(expected_mint));
         assert_eq!(
             provider_tokens.map(|key| env.token_amount(key)),
-            [0, 1].map(|asset| principal_paid[asset] + FEES[asset])
+            if shared_provider {
+                [2 * BACKING + FEES.iter().sum::<u64>(); 2]
+            } else {
+                [0, 1].map(|asset| principal_paid[asset] + FEES[asset])
+            }
         );
     }
     peak = peak
         .max(*expiry_peaks.iter().max().unwrap())
-        .max(inverse_gate_peak);
+        .max(inverse_gate_peak)
+        .max(*shared_peaks.iter().max().unwrap());
     assert_cu_within("distinct absent providers", peak, LIMIT);
     let (payments, rollbacks) = match expired_asset {
         Some(1) => (8, 8),
         Some(_) => (8, 6),
         None => (10, 2),
     };
+    if shared_provider {
+        println!("row420 absent multi-asset provider: worlds=2, user_calls={user_calls}, reserve_payments={}, exact_rollbacks={}, slab_closes=2, shared_ledger_and_principal_rollback_CU={shared_peaks:?}, close_CU={}, peak_CU={peak}, limit={LIMIT}", payments + 8, rollbacks + 6, expiry_peaks[2]);
+        return;
+    }
     println!("row420 distinct absent providers: expired_asset={expired_asset:?}, worlds=2, user_calls={user_calls}, reserve_payments={payments}, exact_rollbacks={rollbacks}, slab_closes=2, inverse_gate_CU={inverse_gate_peak}, expiry_bundle_normalization_close_CU={expiry_peaks:?}, peak_CU={peak}, limit={LIMIT}");
 }
