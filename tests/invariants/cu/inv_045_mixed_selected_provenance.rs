@@ -6,6 +6,9 @@ use super::*;
 #[path = "inv_045_mixed_selected_exposed_keeper.rs"]
 mod exposed_keeper;
 
+#[path = "inv_045_mixed_selected_maintenance_policy.rs"]
+mod maintenance_policy;
+
 fn submit(
     env: &mut V16CuEnv,
     signer: &Keypair,
