@@ -1,7 +1,8 @@
 //! INV-027/044/053/060/081: generated flat fee histories before public admission.
 //! Explicit sync and implicit withdrawal collection must produce the same owner
 //! entitlement, rounded fee destination and exact margin boundary on four routes.
-//! Standalone admission with deferred fees and junior claim support are outside scope.
+//! The standalone reopen sibling also carries an earlier payout across deferred
+//! fee crystallization, margin rollback and opposite-route closure. No junior claims.
 
 use super::*;
 use crate::support::fuzz_model::{
@@ -9,6 +10,7 @@ use crate::support::fuzz_model::{
 };
 use rand::{Rng, SeedableRng};
 use rand_xorshift::XorShiftRng;
+use solana_sdk::fee::FeeStructure;
 
 #[derive(Clone, Copy, Debug)]
 struct FeeCase {
@@ -94,6 +96,36 @@ fn v16_program_generated_flat_fee_collection_preserves_first_admission_entitleme
             prior_episode: rng.gen(),
         });
     }
+    run_flat_fee_cases(cases, false);
+}
+
+#[test]
+fn v16_program_standalone_flat_reopen_crystallizes_fees_and_preserves_owner_exit() {
+    let cases = vec![
+        FeeCase {
+            rate: 7,
+            elapsed: 4,
+            quantity: POS_SCALE as i128 + 1,
+            bps: 100,
+            partial: 13,
+            thin: 0,
+            prior_episode: true,
+        },
+        FeeCase {
+            rate: 9,
+            elapsed: 6,
+            quantity: 2 * POS_SCALE as i128 - 1,
+            bps: 137,
+            partial: 17,
+            thin: 1,
+            prior_episode: true,
+        },
+    ];
+    run_flat_fee_cases(cases, true);
+}
+
+fn run_flat_fee_cases(cases: Vec<FeeCase>, standalone_reopen: bool) {
+    let expected_worlds = cases.len() * 8;
     let routes = [
         TradeRoute::NoCpi,
         TradeRoute::Cpi,
@@ -102,6 +134,7 @@ fn v16_program_generated_flat_fee_collection_preserves_first_admission_entitleme
     ];
     let mut worlds = 0;
     let mut transactions = 0;
+    let mut sync_noops = 0;
     let mut peak_cu = 0;
     for case in cases {
         let admission = START + case.elapsed;
@@ -134,7 +167,10 @@ fn v16_program_generated_flat_fee_collection_preserves_first_admission_entitleme
         let mut reference = None;
         for (route_index, route) in routes.into_iter().enumerate() {
             for explicit in [false, true] {
-                let label = format!("generated flat fees/{case:?}/{route:?}/sync={explicit}");
+                let deferred = standalone_reopen && !explicit;
+                let label = format!(
+                    "generated flat fees/{case:?}/{route:?}/sync={explicit}/standalone_reopen={standalone_reopen}"
+                );
                 let mut env = inv018_public_spl_market_with_params(
                     0,
                     V16CuMarketParams {
@@ -430,8 +466,32 @@ fn v16_program_generated_flat_fee_collection_preserves_first_admission_entitleme
                         &signers,
                         env.svm.latest_blockhash(),
                     );
+                    tx.verify().unwrap();
                     assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
+                    let mut keys = tracked.to_vec();
+                    keys.extend(immutable);
+                    keys.extend(tx.message.account_keys.iter().copied());
+                    keys.sort_unstable();
+                    keys.dedup();
+                    let mut before: Vec<_> =
+                        keys.iter().map(|key| env.svm.get_account(key)).collect();
+                    let network_fee = u64::from(tx.message.header.num_required_signatures)
+                        * FeeStructure::default().lamports_per_signature;
                     let result = env.svm.send_transaction(tx);
+                    if result.is_err() {
+                        let payer = keys
+                            .iter()
+                            .position(|key| *key == env.payer.pubkey())
+                            .unwrap();
+                        before[payer].as_mut().unwrap().lamports -= network_fee;
+                        assert_eq!(
+                            keys.iter()
+                                .map(|key| env.svm.get_account(key))
+                                .collect::<Vec<_>>(),
+                            before,
+                            "{label}: full rollback including matcher and exact runtime fee"
+                        );
+                    }
                     let cu = match &result {
                         Ok(meta) => meta.compute_units_consumed,
                         Err(err) => err.meta.compute_units_consumed,
@@ -458,6 +518,16 @@ fn v16_program_generated_flat_fee_collection_preserves_first_admission_entitleme
                     book.trade(fee(prior_quantity), 0);
                     check(&env, book);
                 }
+                if standalone_reopen {
+                    assert!(case.prior_episode);
+                    // Pay part of the first episode before aging the flat accounts.
+                    for i in [case.thin, 1 - case.thin] {
+                        let ix = withdraw(&env, i, case.partial);
+                        submit(&mut env, ix).unwrap();
+                        book.paid[i] += case.partial;
+                        check(&env, book);
+                    }
+                }
                 let flat = portfolios.map(|key| env.svm.get_account(&key));
                 let next_slot = START + 1 + u64::from(case.prior_episode);
                 for slot in next_slot..=admission {
@@ -475,17 +545,24 @@ fn v16_program_generated_flat_fee_collection_preserves_first_admission_entitleme
                 book.paid[2] = funds[2] - elapsed_fee;
                 check(&env, book);
                 for i in [case.thin, 1 - case.thin] {
+                    if deferred {
+                        assert_eq!(book.cursors[i], START + 1);
+                        assert!(book.cursors[i] < admission);
+                        continue;
+                    }
                     if explicit {
                         let ix = sync(&env, i);
                         submit(&mut env, ix).unwrap();
                         book.collect(case, i, admission);
                         check(&env, book);
                     }
-                    let ix = withdraw(&env, i, case.partial);
-                    submit(&mut env, ix).unwrap();
-                    book.collect(case, i, admission);
-                    book.paid[i] += case.partial;
-                    check(&env, book);
+                    if !standalone_reopen {
+                        let ix = withdraw(&env, i, case.partial);
+                        submit(&mut env, ix).unwrap();
+                        book.collect(case, i, admission);
+                        book.paid[i] += case.partial;
+                        check(&env, book);
+                    }
                     let ix = refresh(&env, portfolios[i], admission);
                     submit(&mut env, ix).unwrap();
                     check(&env, book);
@@ -501,6 +578,7 @@ fn v16_program_generated_flat_fee_collection_preserves_first_admission_entitleme
                     let before = snapshot(&env);
                     let ix = sync(&env, i);
                     submit(&mut env, ix).unwrap();
+                    sync_noops += 1;
                     assert_eq!(
                         snapshot(&env),
                         before,
@@ -536,6 +614,11 @@ fn v16_program_generated_flat_fee_collection_preserves_first_admission_entitleme
                 check(&env, book);
                 let ix = trade(&env, route, case.quantity);
                 submit(&mut env, ix).unwrap_or_else(|e| panic!("{label}: exact admission: {e:?}"));
+                if deferred {
+                    for i in 0..2 {
+                        book.collect(case, i, admission);
+                    }
+                }
                 book.trade(opening_fee, case.quantity);
                 check(&env, book);
                 let certs = [0, 1].map(|i| {
@@ -556,6 +639,16 @@ fn v16_program_generated_flat_fee_collection_preserves_first_admission_entitleme
                     assert_eq!(certs, expected, "{label}: route/collection equivalence");
                 } else {
                     reference = Some(certs);
+                }
+                if deferred {
+                    for i in 0..2 {
+                        let before = snapshot(&env);
+                        let ix = sync(&env, i);
+                        submit(&mut env, ix).unwrap();
+                        sync_noops += 1;
+                        assert_eq!(snapshot(&env), before, "{label}: admission collected once");
+                        check(&env, book);
+                    }
                 }
                 let close_route = routes[3 - route_index];
                 if matches!(close_route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
@@ -591,7 +684,8 @@ fn v16_program_generated_flat_fee_collection_preserves_first_admission_entitleme
             }
         }
     }
-    assert_eq!(worlds, 64);
+    assert_eq!(worlds, expected_worlds);
+    assert_eq!(sync_noops, 2 * worlds);
     assert_cu_within("generated flat fee admission", peak_cu, 400_000);
-    eprintln!("INV-027 generated flat fee entitlement: {worlds} worlds, {transactions} checked attempts, 64 margin rollbacks, 128 same-slot sync no-ops, 192 complete owner payouts; peak CU={peak_cu}");
+    eprintln!("INV-027 generated flat fee entitlement: standalone_reopen={standalone_reopen}, {worlds} worlds, {transactions} checked attempts, {worlds} margin rollbacks, {sync_noops} same-slot sync no-ops, {} complete owner payouts; peak CU={peak_cu}", 3 * worlds);
 }

@@ -2083,6 +2083,29 @@ INV-024/036/041, with principal-preservation evidence for INV-027. Rows
 change or Scope A/B/C closure is claimed. The [Scope D audit](pr135_scope_d_audit_20260913.md)
 records the row mapping, non-vacuity, limits, exact selectors and build provenance.
 
+## INV-027 standalone flat reopen fee crystallization (row 434, 2026-09-17)
+
+[cu/inv_027_generated_flat_fee_entitlement.rs](cu/inv_027_generated_flat_fee_entitlement.rs)
+adds `v16_program_standalone_flat_reopen_crystallizes_fees_and_preserves_owner_exit`.
+Sixteen public LiteSVM histories cross two prior close/partial-payout episodes,
+four transports, and standalone versus explicitly settled reopening. After flat
+aging, admission must collect the remaining maintenance before margin: the
+oversized reopen rolls back every tracked/compiled Account, while the exact
+boundary succeeds in one wrapper instruction. An input ledger checks full health
+certificate equivalence, separately rounded maintenance/trading fees, earlier
+payouts, insurance domains, custody and owner entitlement through opposite-route
+closure and final withdrawals. An unrelated senior owner exits before settlement;
+same-slot sync after standalone admission cannot collect the fees again.
+
+The new selector passes 16 worlds / 304 checked attempts / 16 exact rollbacks /
+48 complete owner payouts; the shared runner's existing selector passes 64 worlds.
+Peak measured CU is **310,239** for each selector on rebuilt private SBF. This
+extends the previously excluded standalone reopening path; row/invariant statuses
+are unchanged. Fixed-price, single-asset, single-leg batches and collectible fees
+only: junior claims, funding/lag, clipped debt, policy changes, arbitrary histories,
+portfolio deletion and maxima remain open. See the
+[audit and exact commands](row434_standalone_reopen_audit_20260917.md).
+
 ## Scope F generated flat fee entitlement (rows 413/434, 2026-09-13)
 
 Owner: [cu/inv_027_generated_flat_fee_entitlement.rs](cu/inv_027_generated_flat_fee_entitlement.rs),
