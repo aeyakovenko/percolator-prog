@@ -1,5 +1,15 @@
 # Invariant-owned test coverage
 
+## Rows 425/426 regression health (2026-09-17)
+
+[The focused follow-up](row425426_regression_health_20260917.md) repairs stale
+Hybrid evidence in the mounted chunked-refresh/interleaved-trade witness and adds
+rollback after committed partial progress and the next whole price atom. Its one
+exact selector passes 16 histories, 32 stale rollbacks, 16 omission rollbacks,
+32 carry-only steps and 128 independent certificates on rebuilt current-main SBF.
+Production, fixtures and status TSVs are unchanged; broader reward, identity and
+funding compositions remain open. Exact commands and limits are in the note.
+
 ## Rows 419/435 regression health (2026-09-17)
 
 [The focused follow-up](row419435_regression_health_20260917.md) adds four solvent

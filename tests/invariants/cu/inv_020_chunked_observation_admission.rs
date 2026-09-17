@@ -3,9 +3,12 @@
 //! must preserve the next fractional price atom and its original owners' claims.
 //! System/SPL/ATA/wrapper instructions construct all protocol and custody accounts;
 //! only authenticated Clock and external Pyth fixtures are supplied by the harness.
+//! Prior-slot reports can advance carry-only work, but cannot finish stale health
+//! after a committed prefix or an interleaved reduction crosses the next price atom.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+use crate::support::fuzz_model::assert_current_certificate_matches_independent;
 
 const PRICE: u64 = 100;
 const CAP_BPS: u64 = 24;
@@ -161,6 +164,10 @@ fn v16_program_chunked_mixed_observations_gate_full_refresh_and_preserve_claims(
     let mut worlds = 0;
     let mut max_crank_cu = 0;
     let mut max_trade_cu = 0;
+    let mut stale_rollbacks = 0;
+    let mut omitted_rollbacks = 0;
+    let mut carry_only = 0;
+    let mut certificates = 0;
     for direction in [-1i64, 1] {
         for reverse in [false, true] {
             for rotation in 0..routes.len() {
@@ -240,7 +247,10 @@ fn v16_program_chunked_mixed_observations_gate_full_refresh_and_preserve_claims(
                     assert!(cert.valid);
                     assert!(cert.cert_oracle_epoch < env.market_state().1.oracle_epoch);
                 }
-                let tracked = [
+                let current_reports = [102, 103, 104, 105, 122].map(|time| {
+                    env.set_pyth_price_with_conf(&feed, targets[0] as i64, -6, 0, time)
+                });
+                let mut tracked = vec![
                     env.market,
                     portfolios[0],
                     portfolios[1],
@@ -254,24 +264,27 @@ fn v16_program_chunked_mixed_observations_gate_full_refresh_and_preserve_claims(
                     owners[1].pubkey(),
                     env.admin.pubkey(),
                 ];
+                tracked.extend(current_reports);
                 // Exclude only the network fee payer and runtime/program accounts.
-                let immutable_keys = [
+                let mut immutable_keys = vec![
                     initial,
                     report,
                     owners[0].pubkey(),
                     owners[1].pubkey(),
                     env.admin.pubkey(),
                 ];
+                immutable_keys.extend(current_reports);
                 let immutable = frame(&env, &immutable_keys);
                 let before_omission = frame(&env, &tracked);
-                let error = refresh(&mut env, portfolios[0], report, reverse, false)
-                    .expect_err("finishing Hybrid alone cannot certify the pending AuthMark leg");
+                let error = refresh(&mut env, portfolios[0], current_reports[0], reverse, false)
+                    .expect_err("current Hybrid evidence cannot certify the pending AuthMark leg");
                 assert!(is_engine_non_progress_error(&error), "{label}: {error}");
                 assert_eq!(
                     frame(&env, &tracked),
                     before_omission,
                     "the omitted observation must undo the real second Hybrid prefix"
                 );
+                omitted_rollbacks += 1;
 
                 let mut profit = i128::from(direction) * 15 * (400 + 700);
                 let mut remaining_units = 400i128;
@@ -280,9 +293,43 @@ fn v16_program_chunked_mixed_observations_gate_full_refresh_and_preserve_claims(
                     if elapsed > 64 {
                         set_test_clock(&mut env, elapsed, 102 + (elapsed - 64) as i64);
                     }
+                    let prior_report = if elapsed == 64 {
+                        report
+                    } else {
+                        current_reports[(elapsed - 65) as usize]
+                    };
+                    let before = frame(&env, &tracked);
+                    let before_accounts = portfolios.map(|key| env.svm.get_account(&key));
+                    let before_profiles = profiles(&env);
+                    let replay = refresh(&mut env, portfolios[0], prior_report, reverse, true);
+                    if [64, 67].contains(&elapsed) {
+                        let error =
+                            replay.expect_err("prior-slot evidence cannot finish stale health");
+                        assert!(is_engine_non_progress_error(&error), "{label}: {error}");
+                        assert_eq!(frame(&env, &tracked), before,
+                            "{label}, slot {elapsed}: rollback must retain committed carry, reductions and claims");
+                        assert_prefix(&env, if elapsed == 64 { 32 } else { 66 }, direction);
+                        stale_rollbacks += 1;
+                    } else {
+                        let cu = replay.expect("sub-atom market progress needs no account refresh");
+                        max_crank_cu = max_crank_cu.max(cu);
+                        assert_cu_within(&label, cu, 1_375_000);
+                        assert_prefix(&env, elapsed, direction);
+                        assert_eq!(
+                            portfolios.map(|key| env.svm.get_account(&key)),
+                            before_accounts
+                        );
+                        assert_eq!(
+                            profiles(&env)[0].last_good_oracle_slot,
+                            before_profiles[0].last_good_oracle_slot
+                        );
+                        assert!(profiles(&env)[0].last_good_oracle_slot < elapsed);
+                        carry_only += 1;
+                    }
+                    let current_report = current_reports[(elapsed - 64) as usize];
                     for portfolio in portfolios {
                         let before = frame(&env, &tracked);
-                        match refresh(&mut env, portfolio, report, reverse, true) {
+                        match refresh(&mut env, portfolio, current_report, reverse, true) {
                             Ok(cu) => {
                                 max_crank_cu = max_crank_cu.max(cu);
                                 assert_cu_within(&label, cu, 1_375_000);
@@ -293,7 +340,7 @@ fn v16_program_chunked_mixed_observations_gate_full_refresh_and_preserve_claims(
                                 );
                             }
                             Err(error) => {
-                                assert_eq!(portfolio, portfolios[1]);
+                                assert_eq!(portfolio, portfolios[1], "{label}: {error}");
                                 assert!([65, 66].contains(&elapsed), "{label}: {error}");
                                 assert!(is_engine_non_progress_error(&error), "{label}: {error}");
                                 assert_eq!(
@@ -303,7 +350,19 @@ fn v16_program_chunked_mixed_observations_gate_full_refresh_and_preserve_claims(
                                 );
                             }
                         }
+                        assert!(assert_current_certificate_matches_independent(
+                            &label,
+                            &env.market_state().1,
+                            &env.portfolio_state(portfolio),
+                        )
+                        .unwrap());
+                        certificates += 1;
                     }
+                    assert_eq!(profiles(&env)[0].last_good_oracle_slot, elapsed);
+                    assert_eq!(
+                        profiles(&env)[0].oracle_target_publish_time,
+                        102 + (elapsed - 64) as i64
+                    );
                     let accepted = assert_prefix(&env, elapsed, direction);
                     if elapsed > 64 {
                         profit += remaining_units * (accepted[0] as i128 - previous[0] as i128)
@@ -369,7 +428,7 @@ fn v16_program_chunked_mixed_observations_gate_full_refresh_and_preserve_claims(
                 // Catch the remaining AuthMark exposure all the way up before closing it.
                 set_test_clock(&mut env, 84, 122);
                 for portfolio in portfolios {
-                    let cu = refresh(&mut env, portfolio, report, reverse, true)
+                    let cu = refresh(&mut env, portfolio, current_reports[4], reverse, true)
                         .expect("bounded final target catchup");
                     max_crank_cu = max_crank_cu.max(cu);
                     assert_cu_within(&label, cu, 1_375_000);
@@ -436,5 +495,9 @@ fn v16_program_chunked_mixed_observations_gate_full_refresh_and_preserve_claims(
         }
     }
     assert_eq!(worlds, 16);
-    println!("chunked mixed-oracle carry: {worlds} worlds, max crank {max_crank_cu} CU, max trade {max_trade_cu} CU");
+    assert_eq!(
+        (stale_rollbacks, omitted_rollbacks, carry_only, certificates),
+        (32, 16, 32, 128)
+    );
+    println!("chunked mixed-oracle carry: {worlds} worlds, {stale_rollbacks} stale rollbacks, {omitted_rollbacks} omission rollbacks, {carry_only} carry-only steps, {certificates} independent certificates, max crank {max_crank_cu} CU, max trade {max_trade_cu} CU");
 }
