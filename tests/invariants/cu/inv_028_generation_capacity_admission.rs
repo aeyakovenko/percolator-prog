@@ -19,6 +19,7 @@ struct Measurements {
 }
 
 impl Measurements {
+    #[track_caller]
     fn submit(
         &mut self,
         h: &mut History,
@@ -366,11 +367,16 @@ fn terminal(h: &mut History, m: &mut Measurements, order: [usize; 2]) {
 
 #[test]
 fn v16_program_used_generation_admission_reserves_latent_capacity_through_exact_exit() {
-    assert_certified_engine_pin("INV-028 used-generation capacity admission");
+    // This witness is revalidated separately from the older global certification roster.
+    assert!(include_str!("../../../Cargo.lock").contains(
+        "git+https://github.com/aeyakovenko/percolator?rev=4db11a8cb0053815e23a35d3a7d3edc265d8d866#\
+         4db11a8cb0053815e23a35d3a7d3edc265d8d866"
+    ));
     let mut m = Measurements::default();
     let mut worlds = 0;
     let mut history_calls = 0;
     let mut reused = 0;
+    let mut capacity_prefix_retries = 0;
     for historical_assets in [ASSETS - 3, ASSETS - 2, ASSETS - 1] {
         for direction in [-1i128, 1] {
             for reuse in [false, true] {
@@ -474,7 +480,7 @@ fn v16_program_used_generation_admission_reserves_latent_capacity_through_exact_
                         );
                     }
                     assert_eq!(h.source_claims(0), historical);
-                    let opening: Vec<_> = (historical_assets..ASSETS)
+                    let mut opening: Vec<_> = (historical_assets..ASSETS)
                         .map(|a| {
                             let units = direction * (4 + 2 * (a - historical_assets) as i128);
                             (a as u16, units * POS_SCALE as i128, PRICE)
@@ -495,6 +501,47 @@ fn v16_program_used_generation_admission_reserves_latent_capacity_through_exact_
                     let tx = signed(&h, &[overflow.clone()], &[0, 1]);
                     m.submit(&mut h, tx, Some((2, PercolatorError::InvalidInstruction)));
                     resources(&h, historical, &generations);
+
+                    // Partial reduction retains both latent domains. A later capacity
+                    // rejection must restore that real prefix without blocking its retry.
+                    let (reducing_asset, q, price) = opening[0];
+                    let reduction = trade(&h, &[(reducing_asset, -q / 2, price)], batch);
+                    let mut overflow = overflow;
+                    let mut request = ProgInstruction::decode(&overflow.data).unwrap();
+                    match &mut request {
+                        ProgInstruction::TradeNoCpi {
+                            account_a_position_epoch,
+                            account_b_position_epoch,
+                            ..
+                        }
+                        | ProgInstruction::BatchTradeNoCpi {
+                            account_a_position_epoch,
+                            account_b_position_epoch,
+                            ..
+                        } => {
+                            *account_a_position_epoch += 1;
+                            *account_b_position_epoch += 1;
+                        }
+                        _ => unreachable!(),
+                    }
+                    overflow.data = request.encode();
+                    h.env.svm.expire_blockhash();
+                    let retry = signed(&h, &[reduction.clone()], &[0, 1]);
+                    let retry_bytes = bincode::serialize(&retry).unwrap();
+                    let rejected = signed(&h, &[reduction, overflow], &[0, 1]);
+                    m.submit(
+                        &mut h,
+                        rejected,
+                        Some((3, PercolatorError::InvalidInstruction)),
+                    );
+                    resources(&h, historical, &generations);
+                    assert_eq!(bincode::serialize(&retry).unwrap(), retry_bytes);
+                    m.submit(&mut h, retry, None);
+                    h.positions[reducing_asset as usize] -= q / 2;
+                    opening[0].1 -= q / 2;
+                    resources(&h, historical, &generations);
+                    capacity_prefix_retries += 1;
+
                     let marks: Vec<_> = opening
                         .iter()
                         .map(|&(a, _, _)| (a, (PRICE as i128 + direction) as u64))
@@ -554,8 +601,9 @@ fn v16_program_used_generation_admission_reserves_latent_capacity_through_exact_
         }
     }
     assert_eq!((worlds, reused), (24, 12));
+    assert_eq!(capacity_prefix_retries, worlds);
     assert_eq!(m.terminal_calls, 24 * (DOMAINS + 1));
     assert!(m.restored_prefixes > 0);
-    println!("INV-028 Scope W: worlds={worlds}, reused={reused}, history_calls={history_calls}, checked_transactions={}, exact_rollbacks={}, restored_prefixes={}, terminal_calls={}, max_cu={}, max_packet={}",
+    println!("INV-028 Scope W: worlds={worlds}, reused={reused}, capacity_prefix_retries={capacity_prefix_retries}, history_calls={history_calls}, checked_transactions={}, exact_rollbacks={}, restored_prefixes={}, terminal_calls={}, max_cu={}, max_packet={}",
         m.transactions, m.rollbacks, m.restored_prefixes, m.terminal_calls, m.max_cu, m.max_packet);
 }

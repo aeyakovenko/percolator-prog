@@ -1,5 +1,16 @@
 # Invariant-owned test coverage
 
+## Rows 420/421/423/433 regression health (2026-09-17)
+
+[The focused follow-up](row420421423433_regression_health_20260917.md) updates the
+row-423 witness's local engine-pin check and adds capacity-failure rollback after
+real risk reduction, followed by exact retained retry and full payout/deletion.
+All 24 histories pass, including 216 rollbacks and 696 terminal calls. Five
+existing reserve controls also pass on rebuilt current-main SBF; two terminal
+loss/recredit products fail in their shared user-settlement setup before reserve
+assertions. No production change or new production issue is claimed. All four
+rows remain OPEN; exact commands, artifacts and remaining gaps are in the note.
+
 ## Rows 417/424 regression health (2026-09-17)
 
 [The focused follow-up](row417424_regression_health_20260917.md) confirms the existing
