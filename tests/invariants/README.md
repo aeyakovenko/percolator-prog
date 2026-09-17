@@ -81,6 +81,24 @@ Row 421 remains OPEN for arbitrary histories, partial/repeated recredit, other
 assets/quote rails and unavailable-administrator normalization/retirement.
 Portfolio deletion, expiry normalization and final slab close retain their signers.
 
+## Row 420 inverse provider expiry (2026-09-17)
+
+[The focused note](row420_inverse_provider_expiry_20260917.md) adds one selector
+to [the existing two-provider test](cu/inv_073_distinct_provider_disposition.rs).
+The earlier domain stays fresh until slot 200 while the later domain expires at
+100. Paying either provider's fees cannot bypass the earlier principal's scanner
+gate. Keeper-only principal payment unblocks administrative expiry normalization;
+both fee orders then finish with provider custody of 100,875 / 1,749 atoms and
+exact separate earnings ledgers. Eight complete-Account rollbacks protect payment,
+normalization and lazy ledger prefixes; two final closures burn only the 100,000
+expired principal atoms and refund exact rent. Senior payouts and unrelated
+custody remain unchanged. New/in-order-expiry/fresh exact selectors pass on rebuilt
+current-main SBF at **476,178 / 498,627 / 252,765 CU**, below the 600,000 ceiling.
+This covers the inverse ordering explicitly left open by the prior note. Row 420
+remains OPEN for missing custody, recredit/Recovery, native quotes, maximum shapes
+and arbitrary histories. Portfolio deletion and normalization/retirement retain
+their existing signers; no production or TSV changes.
+
 ## Row 420 distinct-provider expiry (2026-09-17)
 
 [The focused note](row420_distinct_provider_expiry_20260917.md) adds one selector
@@ -94,9 +112,10 @@ and two rent-exact slab closures. New/control exact selectors pass on rebuilt
 private SBF at 449,127 / 255,765 CU, below the unchanged 600,000 ceiling.
 This adds mixed expiry across distinct fee claimants to the existing fresh-domain
 control; it does not repeat shared-provider cleanup or paid reserve prefixes.
-Row 420 remains OPEN for inverse scanner ordering, missing custody, recredit,
-native quotes, maximum shapes and arbitrary histories. Owner deletion and
-administrative normalization/retirement retain their signers; no TSV changes.
+The inverse scanner continuation is documented above. Row 420 remains OPEN for
+missing custody, recredit, native quotes, maximum shapes and arbitrary histories.
+Owner deletion and administrative normalization/retirement retain their signers;
+no TSV changes.
 
 ## Row 424 repeated scanner rediscovery (2026-09-17)
 

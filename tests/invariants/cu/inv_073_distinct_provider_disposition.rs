@@ -4,6 +4,7 @@
 //! rollback of a successful payment prefix followed by premature slab closure.
 //! Mixed-expiry histories additionally retire only one provider's principal while
 //! preserving both earned-fee claims and the other provider's fresh principal.
+//! Inverse-expiry histories pay the earlier fresh principal to unblock the scan.
 //! One SPL rail, two domains and available cleanup owners only.
 
 use super::*;
@@ -14,15 +15,20 @@ use crate::support::fuzz_model::{
 use terminal_reserve_destination_recovery::land;
 
 pub(crate) fn verify_distinct_provider_disposition() {
-    verify_distinct_provider_histories(false);
+    verify_distinct_provider_histories(None);
 }
 
 #[test]
 fn v16_program_distinct_absent_provider_expiry_preserves_sibling_principal_and_both_fees() {
-    verify_distinct_provider_histories(true);
+    verify_distinct_provider_histories(Some(0));
 }
 
-fn verify_distinct_provider_histories(expire_first_provider: bool) {
+#[test]
+fn v16_program_distinct_absent_provider_inverse_expiry_unblocks_scan_without_losing_fees() {
+    verify_distinct_provider_histories(Some(1));
+}
+
+fn verify_distinct_provider_histories(expired_asset: Option<usize>) {
     const RATES: [u16; 2] = [3_333, 6_666];
     const FEES: [u64; 2] = [875, 1_749];
     const TOTAL_SUPPLY: u64 = 2 * (CAPITAL[0] + CAPITAL[1] + BACKING);
@@ -30,7 +36,7 @@ fn verify_distinct_provider_histories(expire_first_provider: bool) {
     let mut peak = 0;
     let mut user_calls = 0;
     let mut expiry_peaks = [0; 3];
-    let expired_asset = expire_first_provider.then_some(0);
+    let mut inverse_gate_peak = 0;
     let expiries = [0, 1].map(|asset| {
         if expired_asset.is_some_and(|expired| expired != asset) {
             200
@@ -525,6 +531,57 @@ fn verify_distinct_provider_histories(expire_first_provider: bool) {
             let principal = payout(&env, fresh, false, BACKING);
             let stale = payout(&env, expired, false, 1);
             env.svm.warp_to_slot(100);
+            if expired == 1 {
+                // Paying either fee cannot bypass the earlier fresh principal.
+                inverse_gate_peak = inverse_gate_peak.max(land(
+                    &mut env,
+                    &[fee.clone(), close.clone()],
+                    &[&admin],
+                    &tracked,
+                    &[],
+                    0,
+                    None,
+                    Some((3, PercolatorError::EngineLockActive)),
+                ));
+                check(&env, [principal_paid, fees_paid], normalized);
+                // Principal payout unlocks the later expiry in the same transaction;
+                // the stale suffix must restore both that SPL transfer and expiry.
+                inverse_gate_peak = inverse_gate_peak.max(land(
+                    &mut env,
+                    &[principal.clone(), close.clone(), stale.clone()],
+                    &[&admin],
+                    &tracked,
+                    &[],
+                    0,
+                    None,
+                    Some((4, PercolatorError::EngineStale)),
+                ));
+                check(&env, [principal_paid, fees_paid], normalized);
+                let allowed = [env.market, env.vault, provider_tokens[fresh]];
+                peak = peak.max(land(
+                    &mut env,
+                    &[principal.clone()],
+                    &[],
+                    &tracked,
+                    &allowed,
+                    0,
+                    None,
+                    None,
+                ));
+                principal_paid[fresh] = BACKING;
+                check(&env, [principal_paid, fees_paid], normalized);
+                let after = env.market_state().1;
+                let expired_domain = 2 * expired + 1;
+                assert_eq!(
+                    after.source_backing_buckets[expired_domain],
+                    before.source_backing_buckets[expired_domain]
+                );
+                assert_eq!(
+                    after.source_credit[expired_domain],
+                    before.source_credit[expired_domain]
+                );
+            }
+            let before = env.market_state().1;
             // An expired-principal suffix restores normalization, an earned-fee
             // payment and lazy telemetry; fresh principal retries separately.
             expiry_peaks[0] = expiry_peaks[0].max(land(
@@ -551,6 +608,7 @@ fn verify_distinct_provider_histories(expire_first_provider: bool) {
             ));
             normalized = true;
             check(&env, [principal_paid, fees_paid], normalized);
+            assert_eq!(env.market_state().0.terminal_slab_scan_progress, 0);
             let after = env.market_state().1;
             assert_eq!(
                 after.source_backing_buckets[fresh_domain],
@@ -564,21 +622,23 @@ fn verify_distinct_provider_histories(expire_first_provider: bool) {
                 after.backing_provider_earnings_total,
                 before.backing_provider_earnings_total
             );
-            expiry_peaks[0] = expiry_peaks[0].max(land(
-                &mut env,
-                &[principal.clone(), stale],
-                &[],
-                &tracked,
-                &[],
-                0,
-                None,
-                Some((3, PercolatorError::EngineStale)),
-            ));
-            check(&env, [principal_paid, fees_paid], normalized);
+            if principal_paid[fresh] == 0 {
+                expiry_peaks[0] = expiry_peaks[0].max(land(
+                    &mut env,
+                    &[principal.clone(), stale],
+                    &[],
+                    &tracked,
+                    &[],
+                    0,
+                    None,
+                    Some((3, PercolatorError::EngineStale)),
+                ));
+                check(&env, [principal_paid, fees_paid], normalized);
+            }
             (fee, principal)
         });
         for asset in order {
-            if expired_asset == Some(asset) {
+            if expired_asset == Some(asset) || principal_paid[asset] == BACKING {
                 continue;
             }
             let ix = payout(&env, asset, false, BACKING);
@@ -707,12 +767,14 @@ fn verify_distinct_provider_histories(expire_first_provider: bool) {
             [0, 1].map(|asset| principal_paid[asset] + FEES[asset])
         );
     }
-    peak = peak.max(*expiry_peaks.iter().max().unwrap());
+    peak = peak
+        .max(*expiry_peaks.iter().max().unwrap())
+        .max(inverse_gate_peak);
     assert_cu_within("distinct absent providers", peak, LIMIT);
-    let (payments, rollbacks) = if expired_asset.is_some() {
-        (8, 6)
-    } else {
-        (10, 2)
+    let (payments, rollbacks) = match expired_asset {
+        Some(1) => (8, 8),
+        Some(_) => (8, 6),
+        None => (10, 2),
     };
-    println!("row420 distinct absent providers: expired_asset={expired_asset:?}, worlds=2, user_calls={user_calls}, reserve_payments={payments}, exact_rollbacks={rollbacks}, slab_closes=2, expiry_bundle_normalization_close_CU={expiry_peaks:?}, peak_CU={peak}, limit={LIMIT}");
+    println!("row420 distinct absent providers: expired_asset={expired_asset:?}, worlds=2, user_calls={user_calls}, reserve_payments={payments}, exact_rollbacks={rollbacks}, slab_closes=2, inverse_gate_CU={inverse_gate_peak}, expiry_bundle_normalization_close_CU={expiry_peaks:?}, peak_CU={peak}, limit={LIMIT}");
 }
