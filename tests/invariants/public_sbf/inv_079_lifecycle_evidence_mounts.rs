@@ -1,4 +1,5 @@
-//! INV-079: module reachability of evidence claimed for INV-063 through INV-089.
+//! INV-079: module reachability of evidence claimed for INV-063 through INV-089,
+//! plus a ledger-independent census of every public invariant Rust source.
 //!
 //! Require both a mounted file and an unconditional, nonignored test item.
 //! Text in comments, strings or nested functions cannot supply test evidence.
@@ -38,6 +39,7 @@ fn unconditional_test_mount(attrs: &[syn::Attribute]) -> bool {
 #[derive(Clone)]
 struct MountedSource {
     source: String,
+    declared_tests: BTreeSet<String>,
     available_tests: BTreeSet<String>,
 }
 
@@ -47,7 +49,10 @@ fn available_test(attrs: &[syn::Attribute]) -> bool {
         && !attrs.iter().any(|attr| attr.path().is_ident("ignore"))
 }
 
-struct PropertyTests(BTreeSet<String>);
+struct PropertyTests {
+    declared: BTreeSet<String>,
+    available: BTreeSet<String>,
+}
 
 impl syn::parse::Parse for PropertyTests {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
@@ -58,7 +63,10 @@ impl syn::parse::Parse for PropertyTests {
         {
             return Err(input.error("unreviewed proptest configuration attribute"));
         }
-        let mut tests = BTreeSet::new();
+        let mut tests = Self {
+            declared: BTreeSet::new(),
+            available: BTreeSet::new(),
+        };
         while !input.is_empty() {
             let attrs = input.call(syn::Attribute::parse_outer)?;
             input.parse::<syn::Token![fn]>()?;
@@ -76,41 +84,215 @@ impl syn::parse::Parse for PropertyTests {
                 })?;
             }
             input.parse::<syn::Block>()?;
+            tests.declared.insert(name.to_string());
             if available_test(&attrs) {
-                tests.insert(name.to_string());
+                tests.available.insert(name.to_string());
             }
         }
-        Ok(Self(tests))
+        Ok(tests)
     }
 }
 
 impl MountedSource {
     fn from_parsed(source: String, file: &syn::File) -> Self {
-        let mut available_tests = BTreeSet::new();
-        if unconditional_test_mount(&file.attrs) {
-            for item in &file.items {
-                match item {
-                    syn::Item::Fn(function) if available_test(&function.attrs) => {
-                        available_tests.insert(function.sig.ident.to_string());
+        let mut indexed = Self {
+            source,
+            declared_tests: BTreeSet::new(),
+            available_tests: BTreeSet::new(),
+        };
+        indexed.index_items(&file.items, "", unconditional_test_mount(&file.attrs));
+        indexed
+    }
+
+    fn index_items(&mut self, items: &[syn::Item], prefix: &str, enabled: bool) {
+        for item in items {
+            match item {
+                syn::Item::Fn(function)
+                    if function
+                        .attrs
+                        .iter()
+                        .any(|attr| attr.path().is_ident("test")) =>
+                {
+                    let name = format!("{prefix}{}", function.sig.ident);
+                    self.declared_tests.insert(name.clone());
+                    if enabled && available_test(&function.attrs) {
+                        self.available_tests.insert(name);
                     }
-                    syn::Item::Macro(item)
-                        if item.mac.path.is_ident("proptest")
-                            && unconditional_test_mount(&item.attrs) =>
-                    {
-                        // Unsupported macro forms supply no evidence until reviewed.
-                        if let Ok(tests) = item.mac.parse_body::<PropertyTests>() {
-                            available_tests.extend(tests.0);
-                        }
+                }
+                syn::Item::Macro(item) if item.mac.path.is_ident("proptest") => {
+                    let tests = item
+                        .mac
+                        .parse_body::<PropertyTests>()
+                        .expect("unreviewed proptest evidence declaration");
+                    self.declared_tests
+                        .extend(tests.declared.iter().map(|name| format!("{prefix}{name}")));
+                    if enabled && unconditional_test_mount(&item.attrs) {
+                        self.available_tests
+                            .extend(tests.available.iter().map(|name| format!("{prefix}{name}")));
                     }
-                    _ => {}
+                }
+                syn::Item::Mod(module) => {
+                    if let Some((_, items)) = &module.content {
+                        self.index_items(
+                            items,
+                            &format!("{prefix}{}::", module.ident),
+                            enabled && unconditional_test_mount(&module.attrs),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn public_invariant_sources() -> BTreeSet<PathBuf> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut pending = vec![PathBuf::from("tests/invariants")];
+    let mut sources = BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        // Kani has a separate compiler/configuration and INV-084 census. This
+        // guard covers the three public host harnesses, including audit files.
+        if path == PathBuf::from("tests/invariants/kani") {
+            continue;
+        }
+        for entry in std::fs::read_dir(root.join(&path)).expect("read invariant directory") {
+            let entry = entry.expect("read invariant entry");
+            let child = path.join(entry.file_name());
+            let kind = entry.file_type().expect("read invariant file type");
+            assert!(
+                !kind.is_symlink(),
+                "unreviewed evidence symlink: {}",
+                child.display()
+            );
+            if kind.is_dir() {
+                pending.push(child);
+            } else if child.extension().is_some_and(|extension| extension == "rs") {
+                sources.insert(child);
+            }
+        }
+    }
+    assert!(
+        !sources.is_empty(),
+        "public invariant source census is empty"
+    );
+    sources
+}
+
+fn public_source_gaps(
+    sources: &BTreeSet<PathBuf>,
+    mounted: &BTreeMap<PathBuf, MountedSource>,
+) -> Vec<String> {
+    let mut gaps = Vec::new();
+    for path in sources {
+        match mounted.get(path) {
+            None => gaps.push(format!(
+                "unmounted public invariant source: {}",
+                path.display()
+            )),
+            Some(source) => {
+                for test in source.declared_tests.difference(&source.available_tests) {
+                    gaps.push(format!(
+                        "unavailable declared test: {}#{test}",
+                        path.display()
+                    ));
                 }
             }
         }
-        Self {
-            source,
-            available_tests,
+    }
+    gaps
+}
+
+#[test]
+fn v16_every_public_invariant_source_and_declared_test_is_mounted() {
+    let sources = public_invariant_sources();
+    let mounted = mounted_sources(None);
+    let gaps = public_source_gaps(&sources, &mounted);
+    assert!(gaps.is_empty(), "{}", gaps.join("\n"));
+    let tests: usize = sources
+        .iter()
+        .map(|path| mounted[path].available_tests.len())
+        .sum();
+    assert!(tests > 0, "public invariant test census is empty");
+    eprintln!(
+        "INV-079 reverse census: {} source files, {tests} available tests",
+        sources.len()
+    );
+}
+
+#[test]
+fn v16_public_source_census_rejects_unlisted_and_disabled_evidence() {
+    let sources = public_invariant_sources();
+    let baseline = mounted_sources(None);
+    assert!(public_source_gaps(&sources, &baseline).is_empty());
+    assert!(evidence_gaps(&baseline).1.is_empty());
+
+    let declaration = "#[test]\nfn newly_added_evidence() { assert_eq!(2 + 2, 4); }";
+    let mut rejected = 0;
+    for directory in ["cu", "public_sbf", "stateful", "cu/nested_audit"] {
+        let path = PathBuf::from(format!(
+            "tests/invariants/{directory}/inv_079_new_evidence.rs"
+        ));
+        let mut discovered = sources.clone();
+        assert!(discovered.insert(path.clone()));
+        let gaps = public_source_gaps(&discovered, &baseline);
+        assert_eq!(gaps.len(), 1);
+        assert!(gaps[0].contains(path.to_str().unwrap()));
+        rejected += 1;
+
+        let substitute = |source: String| {
+            let parsed = syn::parse_file(&source).unwrap();
+            let mut mounted = baseline.clone();
+            mounted.insert(path.clone(), MountedSource::from_parsed(source, &parsed));
+            // These declarations have no ledger entry, so the old gate is blind
+            // to every disabling mutation below.
+            assert!(evidence_gaps(&mounted).1.is_empty());
+            public_source_gaps(&discovered, &mounted)
+        };
+        assert!(substitute(declaration.to_owned()).is_empty());
+        assert!(substitute(format!("#[cfg(test)]\n{declaration}")).is_empty());
+        assert!(substitute(format!("mod nested {{ {declaration} }}")).is_empty());
+        assert!(substitute(format!("proptest! {{ {declaration} }}")).is_empty());
+        for source in [
+            format!("#![cfg(any())]\n{declaration}"),
+            format!("#[ignore]\n{declaration}"),
+            format!("#[cfg(any())]\n{declaration}"),
+            format!("#[cfg_attr(test, ignore)]\n{declaration}"),
+            format!("#[cfg(any())]\nmod nested {{ {declaration} }}"),
+            format!("#[cfg(any())]\nproptest! {{ {declaration} }}"),
+            format!("proptest! {{ #[ignore]\n{declaration} }}"),
+        ] {
+            let gaps = substitute(source);
+            assert_eq!(gaps.len(), 1, "{gaps:?}");
+            assert!(gaps[0].contains("newly_added_evidence"), "{gaps:?}");
+            rejected += 1;
         }
     }
+    assert_eq!(rejected, 32);
+
+    let parent = "tests/invariants/cu/inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs";
+    let child = "inv_084_deposit_assumption_contract.rs";
+    let source = &baseline[&PathBuf::from(parent)].source;
+    let mount = format!("#[path = \"{child}\"]\nmod deposit_assumption_contract;");
+    assert_eq!(source.matches(&mount).count(), 1);
+    for replacement in [
+        String::new(),
+        format!("/* {mount} */"),
+        format!("#[cfg(any())]\n{mount}"),
+    ] {
+        let mutated = source.replacen(&mount, &replacement, 1);
+        let mounted = mounted_sources(Some((parent, &mutated)));
+        assert!(
+            evidence_gaps(&mounted).1.is_empty(),
+            "old ledger census must miss this mount"
+        );
+        let gaps = public_source_gaps(&sources, &mounted);
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert!(gaps[0].contains(child), "{gaps:?}");
+        rejected += 1;
+    }
+    assert_eq!(rejected, 35);
+    eprintln!("INV-079 reverse census: {rejected} unlisted/disabled mutations rejected, 16 enabled controls accepted");
 }
 
 fn mounted_sources(replacement: Option<(&str, &str)>) -> BTreeMap<PathBuf, MountedSource> {

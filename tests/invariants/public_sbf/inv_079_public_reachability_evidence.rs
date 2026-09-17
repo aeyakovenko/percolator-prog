@@ -2788,7 +2788,7 @@ fn v16_traceability_gap_ledger_points_to_executable_evidence() {
 
     assert!(saw_header, "traceability gap header is missing");
     assert_eq!(
-        rows, 25,
+        rows, 26,
         "traceability gap ledger size changed; update this guard deliberately"
     );
 }
