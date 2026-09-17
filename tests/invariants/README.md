@@ -1,5 +1,16 @@
 # Invariant-owned test coverage
 
+## Row 417 fully receipted expiry waves (2026-09-17)
+
+[The focused audit](row417_health_20260917.md) adds two unrelated backing
+releases after all claims have become receipts and the unreceipted bound is zero.
+Eight public LiteSVM histories vary expiry-side order, exact/overdue discovery
+and claimant priority, preserving first-wave payments across second-wave rollback.
+The new selector and existing single-expiry control pass on rebuilt current-main
+SBF: 8 exact rollbacks, 32 top-ups and 8 slab closures; peak measured CU 408,787.
+Row 417 remains OPEN; INV-024/066/067/068 statuses are unchanged. Arbitrary stock,
+recredit, native and Recovery compositions remain outside this increment.
+
 ## Rows 420/433 native earned-fee custody (2026-09-17)
 
 [The focused audit](row420433_health_20260917.md) extends the existing dual-quote

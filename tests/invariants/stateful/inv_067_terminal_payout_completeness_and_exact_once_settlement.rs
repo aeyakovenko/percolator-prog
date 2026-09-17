@@ -286,6 +286,440 @@ fn v16_program_late_unrelated_backing_cannot_outlive_and_erase_resolved_receipt(
     );
 }
 
+#[test]
+fn v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves() {
+    use percolator::{BackingBucketStatusV16, ResolvedPayoutReceiptV16, BOUND_SCALE};
+    use percolator_prog::ix::Instruction as ProgInstruction;
+    use solana_sdk::{
+        account::Account,
+        compute_budget::ComputeBudgetInstruction,
+        fee::FeeStructure,
+        instruction::{AccountMeta, Instruction, InstructionError},
+        pubkey::Pubkey,
+        signature::{Keypair, Signer},
+        transaction::{Transaction, TransactionError},
+    };
+
+    const CLAIMANTS: [usize; 2] = [0, 4];
+    // The debtor's 500 atoms realize pro rata before the receipt snapshot. Only
+    // the remaining faces share the later 350 atoms from unrelated backing.
+    const GROSS: [u128; 2] = [14 * 50, 26 * 50];
+    const REALIZED: [u128; 2] = [GROSS[0] * 500 / 2_000, GROSS[1] * 500 / 2_000];
+    const FACES: [u128; 2] = [GROSS[0] - REALIZED[0], GROSS[1] - REALIZED[1]];
+    const TOTAL_FACE: u128 = 2_000 - 500;
+    const BACKING: [u128; 2] = [161, 189];
+    const INITIAL_RESIDUAL: u128 = 0;
+    const VAULT: u128 = 2_500 + 161 + 189;
+
+    fn frame(env: &V16Svm) -> Vec<(Pubkey, Option<Account>)> {
+        let mut keys: Vec<_> = env
+            .all_economic_account_lamports()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        keys.extend(env.actors.iter().map(|actor| actor.signer.pubkey()));
+        keys.into_iter()
+            .map(|key| (key, env.svm.get_account(&key)))
+            .collect()
+    }
+
+    fn send(
+        env: &mut V16Svm,
+        payer: &Keypair,
+        instructions: &[Instruction],
+        peak: &mut u64,
+    ) -> Result<litesvm::types::TransactionMetadata, litesvm::types::FailedTransactionMetadata>
+    {
+        env.expire_blockhash();
+        let mut all = vec![
+            ComputeBudgetInstruction::request_heap_frame(256 * 1024),
+            ComputeBudgetInstruction::set_compute_unit_limit(TX_CU_LIMIT as u32),
+        ];
+        all.extend_from_slice(instructions);
+        let tx = Transaction::new_signed_with_payer(
+            &all,
+            Some(&payer.pubkey()),
+            &[payer],
+            env.svm.latest_blockhash(),
+        );
+        let result = env.svm.send_transaction(tx);
+        let meta = match &result {
+            Ok(meta) => meta,
+            Err(error) => &error.meta,
+        };
+        *peak = (*peak).max(meta.compute_units_consumed);
+        assert!(meta.compute_units_consumed < TX_CU_LIMIT);
+        result
+    }
+
+    let receipt = |env: &V16Svm, actor: usize| {
+        env.primary_portfolio(actor)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .unwrap()
+    };
+    let payout = |env: &V16Svm, actor: usize, instruction: ProgInstruction| Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(env.actors[actor].signer.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.actors[actor].portfolio, false),
+            AccountMeta::new(env.actors[actor].destination_token, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: instruction.encode(),
+    };
+    let mut peak_cu = 0;
+    for early_side in 0..2 {
+        for overdue in [false, true] {
+            for order in [[0, 1], [1, 0]] {
+                let mut env = V16Svm::new(
+                    [0x74; 32],
+                    MarketConfig {
+                        initial_price: 100,
+                        maintenance_margin_bps: 1_000,
+                        initial_margin_bps: 1_000,
+                        max_price_move_bps_per_slot: 500,
+                        max_accrual_dt_slots: 1,
+                        min_funding_lifetime_slots: 1,
+                        actor_deposits: [1_000, 500, 0, 0, 1_000],
+                        ..MarketConfig::default()
+                    },
+                );
+                env.configure_permissionless_resolve(100, 1).unwrap();
+                env.update_asset_authority_from_admin(
+                    1,
+                    percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+                    2,
+                )
+                .unwrap();
+                let expiries = if early_side == 0 { [40, 60] } else { [60, 40] };
+                let provider_before = env.token_amount(env.actors[2].source_token);
+                for side in 0..2 {
+                    let topup = env.build_retained_backing_bucket_top_up_for_actor(
+                        2,
+                        2 + side as u16,
+                        BACKING[side],
+                        expiries[side],
+                    );
+                    env.land_retained(topup).unwrap();
+                }
+                for (actor, size) in [(0, 14), (4, 26)] {
+                    env.trade_no_cpi(actor, 1, 0, size * POS_SCALE as i128, 100, 0)
+                        .unwrap();
+                }
+                for (offset, mark) in (105..=150).step_by(5).enumerate() {
+                    let slot = 2 + offset as u64;
+                    env.warp_to_slot(slot);
+                    env.push_auth_mark(0, slot, mark).unwrap();
+                    for actor in [1, 0, 4] {
+                        let oracle_accounts = env.primary_profile(0).oracle_leg_count;
+                        let success = env
+                            .crank(
+                                actor,
+                                slot,
+                                vec![CrankObservationHint {
+                                    asset_index: 0,
+                                    oracle_accounts,
+                                }],
+                            )
+                            .unwrap();
+                        peak_cu = peak_cu.max(success.compute_units);
+                    }
+                }
+                for (actor, size) in [(0, 14), (4, 26)] {
+                    env.trade_no_cpi(actor, 1, 0, -size * POS_SCALE as i128, 150, 0)
+                        .unwrap();
+                }
+                env.warp_to_slot(12);
+                env.resolve_market().unwrap();
+                for actor in [1, 2, 3] {
+                    inv067_drain_resolved_actor(&mut env, actor, &mut peak_cu);
+                    env.close_primary_portfolio(actor).unwrap();
+                }
+                env.warp_to_slot(14);
+                for index in order {
+                    let actor = CLAIMANTS[index];
+                    for _ in 0..8 {
+                        if receipt(&env, actor).present {
+                            break;
+                        }
+                        peak_cu =
+                            peak_cu.max(env.close_resolved_primary(actor).unwrap().compute_units);
+                    }
+                    assert!(receipt(&env, actor).present);
+                }
+                let original = CLAIMANTS.map(|actor| receipt(&env, actor));
+                for index in 0..2 {
+                    assert_eq!(
+                        original[index],
+                        ResolvedPayoutReceiptV16 {
+                            present: true,
+                            prior_bound_contribution_num: FACES[index] * BOUND_SCALE,
+                            live_released_face_at_receipt: 0,
+                            terminal_positive_claim_face: FACES[index],
+                            paid_effective: 0,
+                            finalized: false,
+                        }
+                    );
+                }
+                let identities = CLAIMANTS.map(|actor| {
+                    (
+                        env.primary_portfolio_id(actor),
+                        env.primary_portfolio_position_epoch(actor),
+                    )
+                });
+                let supply = env.mint_supply();
+                let mut paid = [0; 2];
+                let mut released = [false; 2];
+                let mut residual = INITIAL_RESIDUAL;
+                let check = |env: &V16Svm, paid: [u128; 2], released: [bool; 2], residual: u128| {
+                    let group = env.primary_market_state().1;
+                    let ledger = group.resolved_payout_ledger;
+                    assert_eq!(group.c_tot, 0);
+                    assert_eq!(group.insurance, 0);
+                    assert_eq!(group.source_claim_bound_total_num, 0);
+                    assert_eq!(group.materialized_portfolio_count, 2);
+                    assert_eq!(ledger.snapshot_slot, 14);
+                    assert_eq!(ledger.snapshot_residual, residual);
+                    assert_eq!(ledger.terminal_claim_bound_unreceipted_num, 0);
+                    assert_eq!(
+                        ledger.terminal_claim_exact_receipts_num,
+                        TOTAL_FACE * BOUND_SCALE
+                    );
+                    assert_eq!(ledger.current_payout_rate_num, residual * BOUND_SCALE);
+                    assert_eq!(ledger.current_payout_rate_den, TOTAL_FACE * BOUND_SCALE);
+                    assert!(!ledger.payout_halted);
+                    for side in 0..2 {
+                        let bucket = group.source_backing_buckets[2 + side];
+                        assert_eq!(bucket.expiry_slot, expiries[side]);
+                        assert_eq!(
+                            bucket.status,
+                            if released[side] {
+                                BackingBucketStatusV16::Expired
+                            } else {
+                                BackingBucketStatusV16::Fresh
+                            }
+                        );
+                        assert_eq!(
+                            group.source_credit[2 + side].fresh_reserved_backing_num,
+                            if released[side] {
+                                0
+                            } else {
+                                BACKING[side] * BOUND_SCALE
+                            }
+                        );
+                        assert_eq!(bucket.consumed_liened_backing_num, 0);
+                    }
+                    for index in 0..2 {
+                        let actor = CLAIMANTS[index];
+                        let observed = receipt(env, actor);
+                        if observed.present {
+                            let expected = ResolvedPayoutReceiptV16 {
+                                paid_effective: paid[index],
+                                ..original[index]
+                            };
+                            assert_eq!(observed, expected);
+                            assert_eq!(observed.terminal_positive_claim_face, FACES[index]);
+                        } else {
+                            assert!(released.iter().all(|&done| done));
+                            assert_eq!(paid[index], FACES[index] * residual / TOTAL_FACE);
+                        }
+                        assert_eq!(
+                            (
+                                env.primary_portfolio_id(actor),
+                                env.primary_portfolio_position_epoch(actor)
+                            ),
+                            identities[index]
+                        );
+                        assert_eq!(
+                            env.primary_portfolio(actor).owner,
+                            env.actors[actor].signer.pubkey().to_bytes()
+                        );
+                        assert!(env
+                            .primary_portfolio(actor)
+                            .source_domains
+                            .iter()
+                            .all(|source| !source.is_occupied()));
+                        assert!(active_bitmap_is_empty(state::portfolio_active_bitmap(
+                            &env.primary_portfolio(actor)
+                        )));
+                        assert_eq!(
+                            u128::from(env.token_amount(env.actors[actor].destination_token)),
+                            1_000 + REALIZED[index] + paid[index]
+                        );
+                    }
+                    assert_eq!(group.vault, VAULT - 2_500 - paid.iter().sum::<u128>());
+                    assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+                    assert_eq!(
+                        env.token_amount(env.actors[2].source_token),
+                        provider_before - 350
+                    );
+                    assert_eq!(env.mint_supply(), supply);
+                    assert_eq!(env.token_supply_observed(), u128::from(supply));
+                };
+                check(&env, paid, released, residual);
+                let payer = Keypair::new();
+                env.svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
+                // Retain the exact payout bytes before either release. Both portfolios
+                // already have receipts, no source entries and no unreceipted bound.
+                let claims = CLAIMANTS
+                    .map(|actor| payout(&env, actor, ProgInstruction::ClaimResolvedPayoutTopup));
+                for wave in 0..2 {
+                    // When both sides are overdue, one hinted crank discovers the
+                    // lower domain first, regardless of their expiry ordering.
+                    let side = if overdue {
+                        wave
+                    } else if wave == 0 {
+                        early_side
+                    } else {
+                        1 - early_side
+                    };
+                    let slot = if overdue { 61 } else { expiries[side] };
+                    env.warp_to_slot(slot);
+                    let crank = payout(
+                        &env,
+                        CLAIMANTS[order[wave]],
+                        ProgInstruction::PermissionlessCrank {
+                            now_slot: slot,
+                            observations: vec![CrankObservationHint {
+                                asset_index: 1,
+                                oracle_accounts: 0,
+                            }],
+                        },
+                    );
+                    let bundle = [
+                        crank,
+                        claims[order[wave]].clone(),
+                        claims[order[1 - wave]].clone(),
+                    ];
+                    if wave == 1 {
+                        let before = frame(&env);
+                        let mut payer_before = env.svm.get_account(&payer.pubkey()).unwrap();
+                        payer_before.lamports -= FeeStructure::default().lamports_per_signature;
+                        let mut aborted = bundle.to_vec();
+                        aborted.push(Instruction {
+                            program_id: solana_sdk::system_program::ID,
+                            accounts: vec![],
+                            data: vec![],
+                        });
+                        let failure = send(&mut env, &payer, &aborted, &mut peak_cu).expect_err(
+                            "abort after second expiry and both positive receipt top-ups",
+                        );
+                        assert_eq!(
+                            failure.err,
+                            TransactionError::InstructionError(
+                                5,
+                                InstructionError::InvalidInstructionData
+                            )
+                        );
+                        for (program, count) in [(env.program_id, 3), (spl_token::ID, 2)] {
+                            assert_eq!(
+                                failure
+                                    .meta
+                                    .logs
+                                    .iter()
+                                    .filter(|line| **line == format!("Program {program} success"))
+                                    .count(),
+                                count
+                            );
+                        }
+                        assert_eq!(
+                            frame(&env),
+                            before,
+                            "restore first-wave paid identities, stock and full custody Accounts"
+                        );
+                        assert_eq!(env.svm.get_account(&payer.pubkey()), Some(payer_before));
+                        check(&env, paid, released, residual);
+                    }
+                    let before = CLAIMANTS.map(|actor| receipt(&env, actor));
+                    send(&mut env, &payer, &bundle[..1], &mut peak_cu).unwrap();
+                    released[side] = true;
+                    residual += BACKING[side];
+                    assert_eq!(
+                        CLAIMANTS.map(|actor| receipt(&env, actor)),
+                        before,
+                        "stock discovery alone must preserve receipt identity and paid counters"
+                    );
+                    check(&env, paid, released, residual);
+                    for index in [order[wave], order[1 - wave]] {
+                        let meta =
+                            send(&mut env, &payer, &[claims[index].clone()], &mut peak_cu).unwrap();
+                        assert_eq!(
+                            meta.logs
+                                .iter()
+                                .filter(
+                                    |line| **line == format!("Program {} success", spl_token::ID)
+                                )
+                                .count(),
+                            1
+                        );
+                        paid[index] = FACES[index] * residual / TOTAL_FACE;
+                        check(&env, paid, released, residual);
+                    }
+                    if wave == 0 {
+                        let before = frame(&env);
+                        send(&mut env, &payer, &claims, &mut peak_cu).unwrap();
+                        assert_eq!(frame(&env), before, "zero-due retries cannot erase either receipt while another bucket remains");
+                    }
+                }
+                assert_eq!(paid, [122, 227]);
+                assert_eq!(env.token_amount(env.vault), 1);
+                for actor in CLAIMANTS {
+                    inv067_drain_resolved_actor(&mut env, actor, &mut peak_cu);
+                }
+                for claim in &claims {
+                    let before = frame(&env);
+                    match send(&mut env, &payer, std::slice::from_ref(claim), &mut peak_cu) {
+                        Ok(meta) => assert!(!meta
+                            .logs
+                            .iter()
+                            .any(|line| *line == format!("Program {} success", spl_token::ID))),
+                        Err(failure) => assert_eq!(
+                            failure.err,
+                            TransactionError::InstructionError(
+                                2,
+                                InstructionError::Custom(
+                                    percolator_prog::error::PercolatorError::EngineNonProgress
+                                        as u32
+                                )
+                            )
+                        ),
+                    }
+                    assert_eq!(
+                        frame(&env),
+                        before,
+                        "terminal replay cannot repay or rewrite a retired receipt"
+                    );
+                }
+                for actor in CLAIMANTS {
+                    env.close_primary_portfolio(actor).unwrap();
+                }
+                for _ in 0..8 {
+                    if env.svm.get_account(&env.market).unwrap().data.len() == HEADER_LEN {
+                        break;
+                    }
+                    peak_cu = peak_cu.max(env.close_primary_slab().unwrap().compute_units);
+                }
+                assert_closed_market_tombstone(&env.svm.get_account(&env.market).unwrap());
+                assert_eq!(
+                    env.mint_supply(),
+                    supply - 1,
+                    "only the independently derived floor remainder is burned"
+                );
+                assert_eq!(env.token_supply_observed(), u128::from(supply - 1));
+                assert_eq!(
+                    CLAIMANTS.map(|actor| env.token_amount(env.actors[actor].destination_token)),
+                    [1_297, 1_552]
+                );
+            }
+        }
+    }
+    eprintln!("INV-067 fully receipted expiry waves: 8 worlds, 8 paid-prefix rollbacks, 32 top-ups, 8 slab closures; peak_cu={peak_cu}");
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
