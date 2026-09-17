@@ -13,6 +13,9 @@ use inv_071_crank_progress::terminal_prefix_recredit::{
 };
 use solana_sdk::{instruction::InstructionError, system_program};
 
+#[path = "inv_070_terminal_scan_multiwave.rs"]
+mod multiwave;
+
 #[test]
 fn v16_program_rediscovered_insurance_recreates_prefunded_beneficiary_before_retirement() {
     const PREFUND: u64 = 19;

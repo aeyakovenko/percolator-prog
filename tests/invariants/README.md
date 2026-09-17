@@ -1,5 +1,21 @@
 # Invariant-owned test coverage
 
+## Row 424 repeated scanner rediscovery (2026-09-17)
+
+[The focused note](row424_multiwave_scan_20260917.md) adds four public LiteSVM
+histories in [the multiwave child](cu/inv_070_terminal_scan_multiwave.rs).
+After the scanner restores and an unsigned payment consumes 37 insurance atoms,
+a second persisted prefix must rewind at a later sibling expiry. The scanner
+itself restores another 41/63 atoms before payment; exact rollback preserves the
+first payment and final closure burns 0/44 atoms with exact rent reconciliation.
+This extends single-wave rediscovery and withdrawal-first repeated recredit;
+it does not repeat missing-custody repair. New/control exact selectors pass on
+rebuilt private SBF, peak 222,937 / 227,593 CU under 400,000. The new selector checks
+36 commits, 28 complete-Account rollbacks and eight scanner rediscoveries.
+Row 424 remains OPEN for pending receipts during scanning, native/dual custody,
+unavailable rent/retirement authority, Recovery, maximum shapes and arbitrary
+environmental schedules. Production, fixtures, Cargo and TSVs are unchanged.
+
 ## Row 423 mixed latent reclamation (2026-09-17)
 
 [The focused note](row423_mixed_latent_reclamation_20260917.md) adds four public
