@@ -1,5 +1,20 @@
 # Invariant-owned test coverage
 
+## Row 433 redeemed native earnings and absent provider (2026-09-17)
+
+[The focused conformance note](row433_redeemed_native_earnings_20260917.md) adds
+one public LiteSVM history after prior user payout: a provider redeems a 17-atom
+native earned-fee prefix, drains its wallet and becomes unavailable. Keeper-only
+SPL payment completes the shared 875-atom earnings ledger; native ATA repair pays
+100,000 principal atoms without resetting that ledger. Three exact rollbacks cover
+the fee suffix, repaired principal payment and full two-vault/slab closure before
+unchanged-instruction retries. Prior payouts, redeemed SOL, 31 insurance atoms,
+cross-rail surplus and exact rent remain attributed. The new selector and two
+controls pass on rebuilt private SBF; merged-main peaks are 258,278 / 264,323 /
+48,868 CU.
+Production and TSVs are unchanged. Row 433 remains OPEN for arbitrary histories,
+Recovery/recredit, native-secondary earnings and unavailable-administrator cleanup.
+
 ## Row 420 shared provider cleanup (2026-09-17)
 
 [The focused conformance note](row420_shared_provider_cleanup_20260917.md)
