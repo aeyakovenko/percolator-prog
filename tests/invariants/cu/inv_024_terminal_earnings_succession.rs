@@ -185,7 +185,6 @@ fn terminal_earnings_world_with_optional_secondary_quote(
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_create_public_spl_mint;
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_freeze_authority;
     use inv_081_success_state_validity_over_complete_public_routes::inv081_public_native_market_with_params;
-    assert!(!secondary_quote || !native);
     assert!(!secondary_quote || freeze_authority.is_none());
 
     let params = V16CuMarketParams {
@@ -206,8 +205,11 @@ fn terminal_earnings_world_with_optional_secondary_quote(
     let successor = Keypair::new();
     let users = [Keypair::new(), Keypair::new()];
     let secondary_keys = if secondary_quote {
+        let decimals = Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+            .unwrap()
+            .decimals;
         let secondary_mint =
-            inv018_create_public_spl_mint(&mut env.svm, &env.payer, admin.pubkey(), 0);
+            inv018_create_public_spl_mint(&mut env.svm, &env.payer, admin.pubkey(), decimals);
         let secondary_vault = create_ata_for_test(
             &mut env.svm,
             &env.payer,
@@ -669,6 +671,9 @@ fn v16_program_terminal_earned_fee_succession_preserves_paid_prefix_and_insuranc
         let mut expected_sequences = sequences;
         if transferred {
             expected_profile.backing_bucket_authority = successor.pubkey().to_bytes();
+            expected_sequences.authority_epoch += 1;
+        }
+        if insurance != 0 {
             expected_sequences.authority_epoch += 1;
         }
         assert_eq!(

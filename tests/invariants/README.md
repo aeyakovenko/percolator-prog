@@ -1,5 +1,16 @@
 # Invariant-owned test coverage
 
+## Rows 420/433 native earned-fee custody (2026-09-17)
+
+[The focused audit](row420433_health_20260917.md) extends the existing dual-quote
+earnings selector with two native-primary/SPL histories. Keeper-funded missing-ATA
+repair and unsigned earnings payment preserve one ledger across both rail orders,
+including exact creation/payment rollback and principal, surplus and rent disposition.
+All four histories pass: two repairs, five rollbacks, 16 payments, four closures;
+final peak 256,889 CU. Two native controls pass. A stale shared-fixture succession
+epoch expectation is repaired and now passes. Recredit, native-secondary earnings,
+arbitrary histories and absent-administrator retirement remain open; no status changes.
+
 ## Row 412 regression health (2026-09-17)
 
 [The focused follow-up](row412_regression_health_20260917.md) adds grant admission

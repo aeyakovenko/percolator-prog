@@ -3,8 +3,9 @@
 //! one rail, a rejected suffix+close bundle rolls back the suffix and ledger
 //! initialization state, and the suffix then retries on the other rail. Principal
 //! and insurance stay separate until their own unsigned terminal withdrawals.
-//! This is a bounded conformance probe; arbitrary histories and native rail
-//! placement remain open.
+//! Native-primary worlds additionally restore an absent ATA inside the unsigned
+//! fee payment and roll back both creation and payment at a premature close.
+//! Arbitrary histories, recredit and native-secondary placement remain open.
 
 use super::*;
 use crate::support::fuzz_model::{
@@ -17,7 +18,7 @@ const PREFIX: u64 = 17;
 pub(crate) fn verify_dual_quote_earnings_progress() {
     let mut worlds = 0;
     let mut peak = [0u64; 3];
-    for first_rail in [0usize, 1] {
+    for (native, first_rail) in [(false, 0usize), (false, 1), (true, 0), (true, 1)] {
         let (
             TerminalEarningsWorld {
                 mut env,
@@ -31,14 +32,19 @@ pub(crate) fn verify_dual_quote_earnings_progress() {
             },
             users,
             secondary,
-        ) = terminal_earnings_world_with_dual_spl_quote(true);
+        ) = if native {
+            let (world, users, secondary) =
+                terminal_earnings_world_with_optional_secondary_quote(true, None, 0, true, true);
+            (world, users, secondary.unwrap())
+        } else {
+            terminal_earnings_world_with_dual_spl_quote(true)
+        };
         let provider_key = provider.pubkey();
         assert_eq!(provider_key, wallets[2]);
         assert_eq!(env.token_amount(tokens[2]), 0);
         assert_eq!(env.token_amount(secondary.provider_token), 0);
         assert_eq!(env.token_amount(env.vault), BACKING + EARNINGS + INSURANCE);
         assert_eq!(env.token_amount(secondary.vault), EARNINGS);
-        drop((provider, successor, users));
 
         let ledger = Keypair::new();
         system_create_account_for_test(
@@ -60,6 +66,9 @@ pub(crate) fn verify_dual_quote_earnings_progress() {
         let secondary_vault_frame = env.svm.get_account(&secondary.vault).unwrap();
         let secondary_provider_frame = env.svm.get_account(&secondary.provider_token).unwrap();
         let secondary_admin_frame = env.svm.get_account(&secondary.admin_token).unwrap();
+        let primary_provider_frame = env.svm.get_account(&tokens[2]).unwrap();
+        let primary_admin_frame = env.svm.get_account(&tokens[4]).unwrap();
+        let admin_frame = env.svm.get_account(&admin.pubkey()).unwrap();
         let tracked = [
             env.market,
             env.vault,
@@ -77,6 +86,66 @@ pub(crate) fn verify_dual_quote_earnings_progress() {
         .chain(tokens)
         .chain(portfolios)
         .collect::<Vec<_>>();
+        let rent = env
+            .svm
+            .minimum_balance_for_rent_exemption(TokenAccount::LEN);
+        if native {
+            let remove = spl_token::instruction::close_account(
+                &spl_token::ID,
+                &tokens[2],
+                &provider_key,
+                &provider_key,
+                &[],
+            )
+            .unwrap();
+            peak[0] = peak[0].max(land(
+                &mut env,
+                &[remove],
+                &[&provider],
+                &tracked,
+                &[tokens[2]],
+                0,
+                Some((provider_key, rent)),
+                None,
+            ));
+        }
+        drop((provider, successor, users));
+        let repair = Instruction {
+            program_id: associated_token_program_id(),
+            accounts: vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(tokens[2], false),
+                AccountMeta::new_readonly(provider_key, false),
+                AccountMeta::new_readonly(env.mint, false),
+                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: vec![1],
+        };
+        let payer_key = env.payer.pubkey();
+        let payment_bundle = |ix: Instruction, rail: usize| {
+            let mut ixs = Vec::new();
+            if native && rail == 0 {
+                ixs.push(repair.clone());
+            }
+            ixs.push(ix);
+            assert!(ixs
+                .iter()
+                .flat_map(|ix| &ix.accounts)
+                .all(|meta| { !meta.is_signer || meta.pubkey == payer_key }));
+            ixs
+        };
+        // Expected images only: never installed into LiteSVM.
+        let token_image = |initial: &solana_sdk::account::Account, amount: u64| {
+            let mut expected = initial.clone();
+            let mut token = TokenAccount::unpack(&expected.data).unwrap();
+            if token.is_native.is_some() {
+                expected.lamports = expected.lamports - token.amount + amount;
+            }
+            token.amount = amount;
+            TokenAccount::pack(token, &mut expected.data).unwrap();
+            expected
+        };
 
         let payout = |env: &V16CuEnv, rail: usize, amount: u64| -> Instruction {
             let (dest, vault) = if rail == 0 {
@@ -168,14 +237,34 @@ pub(crate) fn verify_dual_quote_earnings_progress() {
                 Some(secondary.mint_frame.clone())
             );
             if closed {
-                assert_closed_market_tombstone(&env.svm.get_account(&env.market).unwrap());
-                assert_eq!(env.token_amount(tokens[2]), BACKING + fees[0]);
-                assert_eq!(env.token_amount(secondary.provider_token), fees[1]);
+                let tombstone = env.svm.get_account(&env.market).unwrap();
+                assert_closed_market_tombstone(&tombstone);
                 assert_eq!(
-                    env.token_amount(tokens[4]),
-                    INSURANCE + (EARNINGS - fees[0])
+                    env.svm.get_account(&tokens[2]),
+                    Some(token_image(&primary_provider_frame, BACKING + fees[0]))
                 );
-                assert_eq!(env.token_amount(secondary.admin_token), EARNINGS - fees[1]);
+                assert_eq!(
+                    env.svm.get_account(&secondary.provider_token),
+                    Some(token_image(&secondary_provider_frame, fees[1]))
+                );
+                assert_eq!(
+                    env.svm.get_account(&tokens[4]),
+                    Some(token_image(&primary_admin_frame, INSURANCE + fees[1]))
+                );
+                assert_eq!(
+                    env.svm.get_account(&secondary.admin_token),
+                    Some(token_image(&secondary_admin_frame, EARNINGS - fees[1]))
+                );
+                let mut expected_admin = admin_frame.clone();
+                expected_admin.lamports += market_frame.lamports - tombstone.lamports + 2 * rent;
+                assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
+                for vault in [env.vault, secondary.vault] {
+                    assert!(env.svm.get_account(&vault).is_none_or(|a| {
+                        a.lamports == 0
+                            && a.data.is_empty()
+                            && a.owner == solana_sdk::system_program::ID
+                    }));
+                }
                 return;
             }
             assert_eq!(env.market_state().0, config);
@@ -225,7 +314,21 @@ pub(crate) fn verify_dual_quote_earnings_progress() {
                 .all(|amount| *amount == 0));
             assert_eq!(env.token_amount(tokens[0]), PAYOUTS[0]);
             assert_eq!(env.token_amount(tokens[1]), PAYOUTS[1]);
-            assert_eq!(env.token_amount(tokens[2]), principal_paid + fees[0]);
+            if native && fees[0] == 0 {
+                assert_eq!(principal_paid, 0);
+                assert!(env
+                    .svm
+                    .get_account(&tokens[2])
+                    .is_none_or(|a| a.lamports == 0 && a.data.is_empty()));
+            } else {
+                assert_eq!(
+                    env.svm.get_account(&tokens[2]),
+                    Some(token_image(
+                        &primary_provider_frame,
+                        principal_paid + fees[0]
+                    ))
+                );
+            }
             assert_eq!(env.token_amount(secondary.provider_token), fees[1]);
             assert_eq!(env.token_amount(tokens[4]), insurance_paid);
             assert_eq!(env.token_amount(secondary.admin_token), 0);
@@ -248,8 +351,12 @@ pub(crate) fn verify_dual_quote_earnings_progress() {
                 market_frame.lamports
             );
             assert_eq!(
-                env.svm.get_account(&env.vault).unwrap().lamports,
-                primary_vault_frame.lamports
+                env.svm.get_account(&env.vault),
+                Some(token_image(&primary_vault_frame, remaining + fees[1]))
+            );
+            assert_eq!(
+                env.svm.get_account(&tokens[4]),
+                Some(token_image(&primary_admin_frame, insurance_paid))
             );
             assert_eq!(
                 env.svm.get_account(&secondary.vault).unwrap().lamports,
@@ -312,13 +419,29 @@ pub(crate) fn verify_dual_quote_earnings_progress() {
             [env.vault, secondary.vault][first_rail],
             [tokens[2], secondary.provider_token][first_rail],
         ];
+        let first = payment_bundle(first, first_rail);
+        if native && first_rail == 0 {
+            let mut rejected = first.clone();
+            rejected.push(close(&env));
+            peak[1] = peak[1].max(land(
+                &mut env,
+                &rejected,
+                &[],
+                &tracked,
+                &[],
+                0,
+                None,
+                Some((4, PercolatorError::EngineLockActive)),
+            ));
+            check(&env, [0, 0], 0, 0, false);
+        }
         peak[0] = peak[0].max(land(
             &mut env,
-            &[first],
+            &first,
             &[],
             &tracked,
             &first_allowed,
-            0,
+            if native && first_rail == 0 { rent } else { 0 },
             None,
             None,
         ));
@@ -328,15 +451,18 @@ pub(crate) fn verify_dual_quote_earnings_progress() {
 
         let suffix = payout(&env, second_rail, EARNINGS - PREFIX);
         let premature_close = close(&env);
+        let suffix = payment_bundle(suffix, second_rail);
+        let mut rejected = suffix.clone();
+        rejected.push(premature_close);
         peak[1] = peak[1].max(land(
             &mut env,
-            &[suffix.clone(), premature_close],
+            &rejected,
             &[],
             &tracked,
             &[],
             0,
             None,
-            Some((3, PercolatorError::EngineLockActive)),
+            Some((2 + suffix.len() as u8, PercolatorError::EngineLockActive)),
         ));
         check(&env, fees, 0, 0, false);
 
@@ -348,11 +474,11 @@ pub(crate) fn verify_dual_quote_earnings_progress() {
         ];
         peak[0] = peak[0].max(land(
             &mut env,
-            &[suffix],
+            &suffix,
             &[],
             &tracked,
             &suffix_allowed,
-            0,
+            if native && second_rail == 0 { rent } else { 0 },
             None,
             None,
         ));
@@ -407,8 +533,8 @@ pub(crate) fn verify_dual_quote_earnings_progress() {
         check(&env, fees, BACKING, INSURANCE, true);
         worlds += 1;
     }
-    assert_eq!(worlds, 2);
+    assert_eq!(worlds, 4);
     eprintln!(
-        "INV-073 dual quote earnings progress: worlds={worlds}, fee={EARNINGS}, prefix={PREFIX}, peak_cu={peak:?}"
+        "INV-073 dual quote earnings progress: worlds={worlds}, fee={EARNINGS}, prefix={PREFIX}, native_repairs=2, rollbacks=5, payments=16, closures=4, peak_cu={peak:?}"
     );
 }
