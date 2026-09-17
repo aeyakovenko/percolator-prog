@@ -1,6 +1,7 @@
 //! INV-014: pending funding is not a retained trade-fee allowance. A real partial
 //! fill, authority/policy return, maintenance collection and four closing routes
 //! share an input ledger and exact transaction rollback. Public construction only.
+//! A split close settles funding once and charges each retained fill's ceiling.
 
 use super::*;
 
@@ -17,7 +18,8 @@ fn funding_quote() -> u64 {
 
 struct Ledger {
     direction: i128,
-    closed: bool,
+    remaining: i128,
+    trade_fees: u128,
     fee_slots: [u64; 2],
     maintenance_domains: [u128; 2],
     converted: bool,
@@ -29,7 +31,8 @@ impl Ledger {
     fn new(w: &World, direction: i128) -> Self {
         Self {
             direction,
-            closed: false,
+            remaining: QUANTITY,
+            trade_fees: fee(QUANTITY, OPEN_CAP),
             fee_slots: [0; 2],
             maintenance_domains: [0; 2],
             converted: false,
@@ -43,6 +46,12 @@ impl Ledger {
         usize::from(self.direction < 0)
     }
 
+    fn reduce(&mut self, quantity: i128) {
+        assert!(quantity > 0 && quantity <= self.remaining);
+        self.remaining -= quantity;
+        self.trade_fees += fee(quantity, OPEN_CAP);
+    }
+
     fn collect(&mut self, actor: usize, slot: u64) {
         let amount = u128::from((slot - self.fee_slots[actor]) * MAINTENANCE);
         self.maintenance_domains[0] += amount / 2;
@@ -51,11 +60,11 @@ impl Ledger {
     }
 
     fn capital(&self, actor: usize) -> u64 {
-        let fees = fee(QUANTITY, OPEN_CAP) as u64 * (1 + u64::from(self.closed));
+        let settled = self.remaining < QUANTITY;
         PRINCIPAL[actor] + u64::from(actor == 0) * DEPOSIT
-            - fees
+            - self.trade_fees as u64
             - self.fee_slots[actor] * MAINTENANCE
-            - u64::from(self.closed && actor != self.winner()) * funding_quote()
+            - u64::from(settled && actor != self.winner()) * funding_quote()
             + u64::from(self.converted && actor == self.winner()) * funding_quote()
             - self.paid[actor]
     }
@@ -71,36 +80,38 @@ impl Ledger {
             );
             assert_eq!(
                 p.pnl.get(),
-                i128::from(self.closed && !self.converted && actor == self.winner())
+                i128::from(self.remaining < QUANTITY && !self.converted && actor == self.winner())
                     * i128::from(funding_quote()),
                 "funding PnL {actor}"
             );
             assert_eq!(p.fee_credits.get(), 0);
             assert_eq!(p.last_fee_slot.get(), self.fee_slots[actor]);
-            if self.closed {
+            if self.remaining == 0 {
                 assert!(!has_active_leg_for_asset(p, 0));
             } else {
                 assert_eq!(
                     active_leg_for_asset(p, 0).basis_pos_q,
-                    self.direction * QUANTITY * if actor == 0 { 1 } else { -1 }
+                    self.direction * self.remaining * if actor == 0 { 1 } else { -1 }
                 );
             }
         }
         let (cfg, group) = w.env.market_state();
-        let fees = fee(QUANTITY, OPEN_CAP) * (1 + u128::from(self.closed));
-        let domains = self.maintenance_domains.map(|amount| amount + fees);
+        let domains = self
+            .maintenance_domains
+            .map(|amount| amount + self.trade_fees);
         assert_eq!(&group.insurance_domain_budget[..2], &domains);
         assert!(group.insurance_domain_budget[2..].iter().all(|v| *v == 0));
         assert_eq!(group.insurance, domains.iter().sum());
         assert_eq!(cfg.fee_redirect_to_market_0_bps, 0);
         assert_eq!(group.assets[0].effective_price, PRICE);
-        let oi = if self.closed { 0 } else { QUANTITY as u128 };
+        let oi = self.remaining as u128;
         assert_eq!(group.assets[0].oi_eff_long_q, oi);
         assert_eq!(group.assets[0].oi_eff_short_q, oi);
         let vault = PRINCIPAL.iter().sum::<u64>() + DEPOSIT - self.paid.iter().sum::<u64>();
         assert_eq!(group.vault, u128::from(vault));
         assert_eq!(group.c_tot, accounts.iter().map(|p| p.capital.get()).sum());
-        let residual = u128::from(self.closed && !self.converted) * u128::from(funding_quote());
+        let residual =
+            u128::from(self.remaining < QUANTITY && !self.converted) * u128::from(funding_quote());
         assert_eq!(group.vault, group.c_tot + group.insurance + residual);
         let balances = [self.paid[0], self.paid[1], vault];
         for ((key, before), amount) in [w.tokens[0], w.tokens[1], w.env.vault]
@@ -141,14 +152,17 @@ fn collect(w: &World, actor: usize, slot: u64) -> Instruction {
     }
 }
 
-#[test]
-fn v16_retained_partial_close_separates_funding_and_maintenance_from_fee_consent() {
+fn retained_funding_close_history(split_close: bool) {
     let matcher = std::fs::read(hostile_matcher_program_path()).unwrap();
     let mut counts = Counts::default();
     assert_eq!(fee(QUANTITY, OPEN_CAP), 36);
     assert_eq!(funding_quote(), 95);
     assert!(u128::from(funding_quote()) > fee(QUANTITY, CLOSE_FRESH));
     assert!(u128::from(MAINTENANCE) > fee(QUANTITY, OPEN_CAP));
+    let partial_quantity = if split_close { QUANTITY * 153 / 255 } else { 0 };
+    let final_quantity = QUANTITY - partial_quantity;
+    let close_budget = fee(partial_quantity, OPEN_CAP) + fee(final_quantity, OPEN_CAP);
+    assert_eq!(close_budget, 36 + u128::from(split_close));
     for direction in [-1, 1] {
         let mut endpoint = None;
         for route in [
@@ -157,7 +171,7 @@ fn v16_retained_partial_close_separates_funding_and_maintenance_from_fee_consent
             Route::SingleNoCpi,
             Route::BatchNoCpi,
         ] {
-            eprintln!("retained funding close: direction={direction}, route={route:?}");
+            eprintln!("retained funding close: split={split_close}, direction={direction}, route={route:?}");
             let mut w = World::with_params(
                 &matcher,
                 V16CuMarketParams {
@@ -208,20 +222,68 @@ fn v16_retained_partial_close_separates_funding_and_maintenance_from_fee_consent
                         AccountMeta::new_readonly(w.owners[1].pubkey(), true),
                         AccountMeta::new(w.context, false),
                     ],
-                    data: vec![11, 9, 0],
+                    data: if split_close {
+                        vec![11, 19, 153]
+                    } else {
+                        vec![11, 9, 0]
+                    },
                 }],
                 2,
             );
             counts.record(w.deliver(tx, false, &[w.context], [0, 0, 1]));
             book.check(&w);
 
-            let close = w.bundle_instructions(
+            let mut close = w.bundle_instructions(
                 route,
-                -direction * QUANTITY,
-                -direction * QUANTITY,
+                -direction * final_quantity,
+                -direction * final_quantity,
                 OPEN_CAP,
             )[1]
             .clone();
+            if split_close {
+                // Future epochs are signed request fields, never account writes.
+                let mut request = ProgInstruction::decode(&close.data).unwrap();
+                match &mut request {
+                    ProgInstruction::TradeCpi {
+                        account_a_position_epoch,
+                        account_b_position_epoch,
+                        ..
+                    }
+                    | ProgInstruction::BatchTradeCpi {
+                        account_a_position_epoch,
+                        account_b_position_epoch,
+                        ..
+                    }
+                    | ProgInstruction::TradeNoCpi {
+                        account_a_position_epoch,
+                        account_b_position_epoch,
+                        ..
+                    }
+                    | ProgInstruction::BatchTradeNoCpi {
+                        account_a_position_epoch,
+                        account_b_position_epoch,
+                        ..
+                    } => {
+                        *account_a_position_epoch += 1;
+                        *account_b_position_epoch += 1;
+                    }
+                    _ => unreachable!(),
+                }
+                close.data = request.encode();
+            }
+            let partial = split_close.then(|| {
+                let ix = w.bundle_instructions(
+                    Route::PartialCpi,
+                    -direction * QUANTITY,
+                    -direction * partial_quantity,
+                    OPEN_CAP,
+                )[1]
+                .clone();
+                [40, 41, 42].map(|nonce| w.sign_with_nonce(&[ix.clone()], nonce))
+            });
+            let partial_wires = partial
+                .as_ref()
+                .map(|txs| txs.each_ref().map(|tx| bincode::serialize(tx).unwrap()));
             let ixs = [close];
             let initial = w.env.control_sequences(0);
             let stale = fee_control(
@@ -248,7 +310,13 @@ fn v16_retained_partial_close_separates_funding_and_maintenance_from_fee_consent
                     (if route.cpi() { 2 } else { 3 }) + u8::from(index == 1)
                 );
             }
-            probe(&mut w, &retained[2], true, 2, &mut counts);
+            probe(
+                &mut w,
+                partial.as_ref().map_or(&retained[2], |txs| &txs[1]),
+                true,
+                2,
+                &mut counts,
+            );
             book.check(&w);
             let epochs = w.portfolios.map(|key| w.env.portfolio_position_epoch(key));
             let grant = w.env.portfolio_matcher_sequence(w.portfolios[1]);
@@ -305,6 +373,72 @@ fn v16_retained_partial_close_separates_funding_and_maintenance_from_fee_consent
             counts.record(w.env.push_ewma_mark_with_cu(2, 101));
             book.check(&w);
             assert_eq!(w.env.market_state().0.mark_ewma_e6, PRICE);
+            if let Some(partial) = &partial {
+                counts.record(w.deliver_with_error(
+                    partial[0].clone(),
+                    Some((
+                        2,
+                        InstructionError::Custom(PercolatorError::InvalidInstruction as u32),
+                    )),
+                    &[],
+                    [0, 0, 0],
+                ));
+                counts.rollbacks += 1;
+                book.check(&w);
+                counts.record(policy(&mut w, OPEN_CAP, 43));
+                book.check(&w);
+                counts.record(w.deliver(
+                    partial[1].clone(),
+                    false,
+                    &[w.env.market, w.portfolios[0], w.portfolios[1], w.context],
+                    [1, 0, 1],
+                ));
+                counts.fills += 1;
+                book.reduce(partial_quantity);
+                book.collect(0, 2);
+                book.collect(1, 2);
+                book.check(&w);
+                assert_eq!(book.trade_fees, 36 + 22);
+                let fill =
+                    read_matcher_return(&w.env.svm.get_account(&w.context).unwrap().data).unwrap();
+                assert_eq!(
+                    (fill.exec_size, fill.exec_price_e6),
+                    (-direction * partial_quantity, PRICE)
+                );
+                assert_ne!(fill.flags & FLAG_PARTIAL_OK, 0);
+                assert_eq!(w.env.market_state().1.funding_epoch, 1);
+                assert_eq!(
+                    w.portfolios.map(|key| w.env.portfolio_position_epoch(key)),
+                    epochs.map(|e| e + 1)
+                );
+                counts.record(w.deliver_with_error(
+                    partial[2].clone(),
+                    Some((
+                        2,
+                        InstructionError::Custom(PercolatorError::EngineStale as u32),
+                    )),
+                    &[],
+                    [0, 0, 0],
+                ));
+                counts.rollbacks += 1;
+                book.check(&w);
+                // Only the matcher mode changes; the retained residual stays byte-identical.
+                let reset = w.sign_with_nonce(
+                    &[Instruction {
+                        program_id: w.matcher,
+                        accounts: vec![
+                            AccountMeta::new_readonly(w.owners[1].pubkey(), true),
+                            AccountMeta::new(w.context, false),
+                        ],
+                        data: vec![11, 9, 0],
+                    }],
+                    44,
+                );
+                counts.record(w.deliver(reset, false, &[w.context], [0, 0, 1]));
+                book.check(&w);
+                counts.record(policy(&mut w, CLOSE_FRESH, 45));
+                book.check(&w);
+            }
             counts.record(w.deliver_with_error(
                 retained[0].clone(),
                 Some((
@@ -318,9 +452,12 @@ fn v16_retained_partial_close_separates_funding_and_maintenance_from_fee_consent
             book.check(&w);
             counts.record(policy(&mut w, OPEN_CAP, 24));
             book.check(&w);
-            assert_eq!(w.env.control_sequences(0).trade_fee, initial.trade_fee + 2);
-            // A successful close settles funding and pays the signed fee;
-            // the obsolete policy suffix must roll all of it back.
+            assert_eq!(
+                w.env.control_sequences(0).trade_fee,
+                initial.trade_fee + 2 + 2 * u64::from(split_close)
+            );
+            // The close pays its own signed fee; the obsolete policy suffix
+            // rolls back this transaction while preserving any committed partial.
             counts.record(w.deliver_with_error(
                 retained[1].clone(),
                 Some((
@@ -343,21 +480,22 @@ fn v16_retained_partial_close_separates_funding_and_maintenance_from_fee_consent
                 [1, 0, usize::from(route.cpi())],
             ));
             counts.fills += 1;
-            book.closed = true;
+            book.reduce(final_quantity);
             book.collect(0, 2);
             book.collect(1, 2);
             book.check(&w);
+            assert_eq!(book.trade_fees, fee(QUANTITY, OPEN_CAP) + close_budget);
             let (_, group) = w.env.market_state();
             assert_eq!(group.assets[0].f_long_num, ADL_ONE as i128);
             assert_eq!(group.assets[0].f_short_num, -(ADL_ONE as i128));
             assert_eq!(group.funding_epoch, 1);
             assert_eq!(
                 w.portfolios.map(|key| w.env.portfolio_position_epoch(key)),
-                epochs.map(|e| e + 1)
+                epochs.map(|e| e + 1 + u64::from(split_close))
             );
             assert_eq!(
                 w.env.market_state().0.matcher_req_seq,
-                requests + u64::from(route.cpi())
+                requests + u64::from(route.cpi()) + u64::from(split_close)
             );
             assert_eq!(w.env.portfolio_matcher_sequence(w.portfolios[1]), grant);
             assert_eq!(
@@ -369,7 +507,7 @@ fn v16_retained_partial_close_separates_funding_and_maintenance_from_fee_consent
                     read_matcher_return(&w.env.svm.get_account(&w.context).unwrap().data).unwrap();
                 assert_eq!(
                     (fill.exec_size, fill.exec_price_e6),
-                    (-direction * QUANTITY, PRICE)
+                    (-direction * final_quantity, PRICE)
                 );
             }
             counts.record(w.deliver_with_error(
@@ -386,6 +524,12 @@ fn v16_retained_partial_close_separates_funding_and_maintenance_from_fee_consent
             for (tx, wire) in retained.iter().zip(wires) {
                 tx.verify().unwrap();
                 assert_eq!(bincode::serialize(tx).unwrap(), wire);
+            }
+            if let Some(partial) = &partial {
+                for (tx, wire) in partial.iter().zip(partial_wires.unwrap()) {
+                    tx.verify().unwrap();
+                    assert_eq!(bincode::serialize(tx).unwrap(), wire);
+                }
             }
             w.env.svm.warp_to_slot(3);
             for actor in 0..2 {
@@ -478,7 +622,7 @@ fn v16_retained_partial_close_separates_funding_and_maintenance_from_fee_consent
                 book.check(&w);
             }
             let outcome = (book.paid, w.env.token_amount(w.env.vault));
-            assert_eq!(outcome.1, 1_986);
+            assert_eq!(outcome.1, 1_986 + 2 * u64::from(split_close));
             if let Some(expected) = endpoint {
                 assert_eq!(outcome, expected);
             } else {
@@ -487,8 +631,25 @@ fn v16_retained_partial_close_separates_funding_and_maintenance_from_fee_consent
             counts.worlds += 1;
         }
     }
-    assert_eq!((counts.worlds, counts.rollbacks, counts.fills), (8, 24, 16));
+    assert_eq!(
+        (counts.worlds, counts.rollbacks, counts.fills),
+        (
+            8,
+            24 + 16 * usize::from(split_close),
+            16 + 8 * usize::from(split_close)
+        )
+    );
     assert_eq!(counts.payouts, 16);
     assert_eq!(counts.permitted, 8);
-    eprintln!("INV-014 retained funding collection: {counts:?}");
+    eprintln!("INV-014 retained funding collection: split={split_close}, {counts:?}");
+}
+
+#[test]
+fn v16_retained_partial_close_separates_funding_and_maintenance_from_fee_consent() {
+    retained_funding_close_history(false);
+}
+
+#[test]
+fn v16_retained_split_close_bounds_fees_and_collects_funding_once_across_routes() {
+    retained_funding_close_history(true);
 }

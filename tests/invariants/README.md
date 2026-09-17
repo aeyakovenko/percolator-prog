@@ -109,6 +109,17 @@ selectors pass on rebuilt current-main SBF; final-run peak CU is 201,926. Produc
 statuses are unchanged. Arbitrary funding/residual/receipt compositions and slab
 retirement remain outside this increment.
 
+## Row 411 retained split close with funding (2026-09-17)
+
+[The split-close follow-up](row411_split_funding_routes_20260917.md) adds one
+history to the existing funding test file: a retained matcher partial close
+settles funding, then a separately retained residual crosses policy changes and
+all four closing transports. Eight worlds check 36/22/15-atom trade fees per
+owner, once-only funding, 40 exact rollbacks and 16 full SPL payouts. The new
+selector passes at 460,904 peak CU; the shared-ledger full-close control passes
+at 457,383 CU. Production, row421 tests and status TSVs are unchanged. Row 411
+remains OPEN for arbitrary fee, funding and route compositions.
+
 ## Row 411 retained close with funding collection (2026-09-17)
 
 [The funding follow-up](row411_funding_collection_audit_20260917.md) adds pending
