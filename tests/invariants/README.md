@@ -1,5 +1,19 @@
 # Invariant-owned test coverage
 
+## INV-070/073/078 terminal-reserve evidence audit (2026-09-17)
+
+[The terminal-reserve audit](terminal_reserve_evidence_audit_20260917.md) maps
+rows 418/420/421/433 to existing mounted selectors, shared fixture owners,
+nonzero economic assertions and signer prerequisites. It distinguishes native
+residue cleanup from earlier signed insurance payments, shared unsigned reserve
+payout evidence from mechanical deletion, and INV-078's keeper-only completion
+suffix from its owner-forfeit prefix. No duplicate test was needed.
+
+The exact mount census passes: 508 source files and 1,914 available tests.
+Economic selectors were source-reviewed, not rerun. Row 418 stays COVERED;
+420/421/433 stay OPEN and invariant statuses are unchanged. The audit records
+exact selectors, validation commands and remaining reachability limits.
+
 ## INV-028/031/063 source-accounting benchmark audit (2026-09-17)
 
 [The source-accounting audit](source_accounting_conformance_audit_20260917.md)
