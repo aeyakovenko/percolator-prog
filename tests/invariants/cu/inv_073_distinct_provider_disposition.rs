@@ -2,7 +2,9 @@
 //! coupling their signatures or erasing the other domain's unpaid earnings.
 //! Two public asset cohorts earn unequal fees; both payout orders include exact
 //! rollback of a successful payment prefix followed by premature slab closure.
-//! One SPL rail, fresh backing, two domains and available cleanup owners only.
+//! Mixed-expiry histories additionally retire only one provider's principal while
+//! preserving both earned-fee claims and the other provider's fresh principal.
+//! One SPL rail, two domains and available cleanup owners only.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -12,12 +14,30 @@ use crate::support::fuzz_model::{
 use terminal_reserve_destination_recovery::land;
 
 pub(crate) fn verify_distinct_provider_disposition() {
+    verify_distinct_provider_histories(false);
+}
+
+#[test]
+fn v16_program_distinct_absent_provider_expiry_preserves_sibling_principal_and_both_fees() {
+    verify_distinct_provider_histories(true);
+}
+
+fn verify_distinct_provider_histories(expire_first_provider: bool) {
     const RATES: [u16; 2] = [3_333, 6_666];
     const FEES: [u64; 2] = [875, 1_749];
     const TOTAL_SUPPLY: u64 = 2 * (CAPITAL[0] + CAPITAL[1] + BACKING);
     const LIMIT: u64 = 600_000;
     let mut peak = 0;
     let mut user_calls = 0;
+    let mut expiry_peaks = [0; 3];
+    let expired_asset = expire_first_provider.then_some(0);
+    let expiries = [0, 1].map(|asset| {
+        if expired_asset.is_some_and(|expired| expired != asset) {
+            200
+        } else {
+            100
+        }
+    });
     for order in [[0usize, 1], [1, 0]] {
         let mut env = inv018_public_spl_market_with_params(
             0,
@@ -146,7 +166,7 @@ pub(crate) fn verify_distinct_provider_disposition() {
                     backing_fee_bps: RATES[asset],
                     insurance_share_bps: 0,
                     amount: BACKING.into(),
-                    expiry_slot: 100,
+                    expiry_slot: expiries[asset],
                 },
                 vec![
                     AccountMeta::new(provider_keys[asset], true),
@@ -357,7 +377,8 @@ pub(crate) fn verify_distinct_provider_disposition() {
                 data: data.encode(),
             }
         };
-        let check = |env: &V16CuEnv, principal_paid: [u64; 2], fees_paid: [u64; 2]| {
+        let check = |env: &V16CuEnv, paid: [[u64; 2]; 2], normalized: bool| {
+            let [principal_paid, fees_paid] = paid;
             let group = env.market_state().1;
             let remaining = 2 * BACKING + FEES.iter().sum::<u64>()
                 - principal_paid.iter().sum::<u64>()
@@ -410,9 +431,11 @@ pub(crate) fn verify_distinct_provider_disposition() {
                 assert_eq!(env.control_sequences(asset), sequences[asset]);
                 let domain = 2 * asset + 1;
                 let bucket = group.source_backing_buckets[domain];
+                let expired = normalized && expired_asset == Some(asset);
+                assert_eq!(bucket.expiry_slot, expiries[asset]);
                 assert_eq!(
                     bucket.status,
-                    if principal_paid[asset] == BACKING {
+                    if expired || principal_paid[asset] == BACKING {
                         BackingBucketStatusV16::Expired
                     } else {
                         BackingBucketStatusV16::Fresh
@@ -421,7 +444,11 @@ pub(crate) fn verify_distinct_provider_disposition() {
                 );
                 assert_eq!(
                     bucket.fresh_unliened_backing_num,
-                    u128::from(BACKING - principal_paid[asset]) * BOUND_SCALE
+                    if expired {
+                        0
+                    } else {
+                        u128::from(BACKING - principal_paid[asset]) * BOUND_SCALE
+                    }
                 );
                 assert_eq!(
                     group.source_credit[domain].fresh_reserved_backing_num,
@@ -488,9 +515,76 @@ pub(crate) fn verify_distinct_provider_disposition() {
         };
         let mut principal_paid = [0; 2];
         let mut fees_paid = [0; 2];
-        check(&env, principal_paid, fees_paid);
+        let mut normalized = false;
+        check(&env, [principal_paid, fees_paid], normalized);
+        let expiry_retry = expired_asset.map(|expired| {
+            let fresh = 1 - expired;
+            let fresh_domain = 2 * fresh + 1;
+            let before = env.market_state().1;
+            let fee = payout(&env, order[0], true, FEES[order[0]]);
+            let principal = payout(&env, fresh, false, BACKING);
+            let stale = payout(&env, expired, false, 1);
+            env.svm.warp_to_slot(100);
+            // An expired-principal suffix restores normalization, an earned-fee
+            // payment and lazy telemetry; fresh principal retries separately.
+            expiry_peaks[0] = expiry_peaks[0].max(land(
+                &mut env,
+                &[close.clone(), fee.clone(), stale.clone()],
+                &[&admin],
+                &tracked,
+                &[],
+                0,
+                None,
+                Some((4, PercolatorError::EngineStale)),
+            ));
+            check(&env, [principal_paid, fees_paid], normalized);
+            let allowed = [env.market];
+            expiry_peaks[1] = expiry_peaks[1].max(land(
+                &mut env,
+                &[close.clone()],
+                &[&admin],
+                &tracked,
+                &allowed,
+                0,
+                None,
+                None,
+            ));
+            normalized = true;
+            check(&env, [principal_paid, fees_paid], normalized);
+            let after = env.market_state().1;
+            assert_eq!(
+                after.source_backing_buckets[fresh_domain],
+                before.source_backing_buckets[fresh_domain]
+            );
+            assert_eq!(
+                after.source_credit[fresh_domain],
+                before.source_credit[fresh_domain]
+            );
+            assert_eq!(
+                after.backing_provider_earnings_total,
+                before.backing_provider_earnings_total
+            );
+            expiry_peaks[0] = expiry_peaks[0].max(land(
+                &mut env,
+                &[principal.clone(), stale],
+                &[],
+                &tracked,
+                &[],
+                0,
+                None,
+                Some((3, PercolatorError::EngineStale)),
+            ));
+            check(&env, [principal_paid, fees_paid], normalized);
+            (fee, principal)
+        });
         for asset in order {
+            if expired_asset == Some(asset) {
+                continue;
+            }
             let ix = payout(&env, asset, false, BACKING);
+            if let Some((_, retry)) = &expiry_retry {
+                assert_eq!(&ix, retry);
+            }
             let allowed = [env.market, env.vault, provider_tokens[asset]];
             peak = peak.max(land(
                 &mut env,
@@ -503,11 +597,14 @@ pub(crate) fn verify_distinct_provider_disposition() {
                 None,
             ));
             principal_paid[asset] = BACKING;
-            check(&env, principal_paid, fees_paid);
+            check(&env, [principal_paid, fees_paid], normalized);
         }
         let first = order[0];
         let second = order[1];
         let pay_first = payout(&env, first, true, FEES[first]);
+        if let Some((retry, _)) = &expiry_retry {
+            assert_eq!(&pay_first, retry);
+        }
         let allowed = [
             env.market,
             env.vault,
@@ -525,7 +622,7 @@ pub(crate) fn verify_distinct_provider_disposition() {
             None,
         ));
         fees_paid[first] = FEES[first];
-        check(&env, principal_paid, fees_paid);
+        check(&env, [principal_paid, fees_paid], normalized);
         // One fully paid domain cannot release the other provider's last fee atom.
         let partial = payout(&env, second, true, FEES[second] - 1);
         peak = peak.max(land(
@@ -538,7 +635,7 @@ pub(crate) fn verify_distinct_provider_disposition() {
             None,
             Some((3, PercolatorError::EngineLockActive)),
         ));
-        check(&env, principal_paid, fees_paid);
+        check(&env, [principal_paid, fees_paid], normalized);
         let allowed = [
             env.market,
             env.vault,
@@ -556,7 +653,7 @@ pub(crate) fn verify_distinct_provider_disposition() {
             None,
         ));
         fees_paid[second] = FEES[second] - 1;
-        check(&env, principal_paid, fees_paid);
+        check(&env, [principal_paid, fees_paid], normalized);
         let last = payout(&env, second, true, 1);
         peak = peak.max(land(
             &mut env,
@@ -569,7 +666,13 @@ pub(crate) fn verify_distinct_provider_disposition() {
             None,
         ));
         fees_paid[second] += 1;
-        check(&env, principal_paid, fees_paid);
+        check(&env, [principal_paid, fees_paid], normalized);
+        let burned = if normalized { BACKING } else { 0 };
+        assert_eq!(env.token_amount(env.vault), burned);
+        let mut expected_mint = mint_frame.clone();
+        let mut mint = Mint::unpack(&expected_mint.data).unwrap();
+        mint.supply -= burned;
+        Mint::pack(mint, &mut expected_mint.data).unwrap();
         let ledger_frames = ledgers.map(|key| env.svm.get_account(&key));
         let rent = env
             .svm
@@ -577,8 +680,8 @@ pub(crate) fn verify_distinct_provider_disposition() {
         let refund = env.svm.get_account(&env.market).unwrap().lamports
             + env.svm.get_account(&env.vault).unwrap().lamports
             - rent;
-        let allowed = [env.market, env.vault];
-        peak = peak.max(land(
+        let allowed = [env.market, env.vault, env.mint];
+        let close_cu = land(
             &mut env,
             &[close],
             &[&admin],
@@ -587,7 +690,9 @@ pub(crate) fn verify_distinct_provider_disposition() {
             0,
             Some((admin.pubkey(), refund)),
             None,
-        ));
+        );
+        expiry_peaks[2] = expiry_peaks[2].max(close_cu);
+        peak = peak.max(close_cu);
         let tombstone = env.svm.get_account(&env.market).unwrap();
         assert_closed_market_tombstone(&tombstone);
         assert_eq!(tombstone.lamports, rent);
@@ -596,12 +701,18 @@ pub(crate) fn verify_distinct_provider_disposition() {
             .get_account(&env.vault)
             .is_none_or(|account| account.lamports == 0 && account.data.is_empty()));
         assert_eq!(ledgers.map(|key| env.svm.get_account(&key)), ledger_frames);
-        assert_eq!(env.svm.get_account(&env.mint), Some(mint_frame));
+        assert_eq!(env.svm.get_account(&env.mint), Some(expected_mint));
         assert_eq!(
             provider_tokens.map(|key| env.token_amount(key)),
-            FEES.map(|fees| BACKING + fees)
+            [0, 1].map(|asset| principal_paid[asset] + FEES[asset])
         );
     }
+    peak = peak.max(*expiry_peaks.iter().max().unwrap());
     assert_cu_within("distinct absent providers", peak, LIMIT);
-    println!("row420 distinct absent providers: worlds=2, user_calls={user_calls}, reserve_payments=10, exact_rollbacks=2, slab_closes=2, peak_CU={peak}, limit={LIMIT}");
+    let (payments, rollbacks) = if expired_asset.is_some() {
+        (8, 6)
+    } else {
+        (10, 2)
+    };
+    println!("row420 distinct absent providers: expired_asset={expired_asset:?}, worlds=2, user_calls={user_calls}, reserve_payments={payments}, exact_rollbacks={rollbacks}, slab_closes=2, expiry_bundle_normalization_close_CU={expiry_peaks:?}, peak_CU={peak}, limit={LIMIT}");
 }

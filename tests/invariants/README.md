@@ -1,5 +1,22 @@
 # Invariant-owned test coverage
 
+## Row 420 distinct-provider expiry (2026-09-17)
+
+[The focused note](row420_distinct_provider_expiry_20260917.md) adds one selector
+in [the existing provider test](cu/inv_073_distinct_provider_disposition.rs).
+At exact expiry, administrative normalization retires the first absent provider's
+100,000 principal atoms while preserving the second provider's fresh principal
+and both 875/1,749-atom earned-fee claims. Both fee payment orders complete through
+keeper-only payouts, exact rollback/retry and a 100,000-atom terminal burn.
+The two histories check eight reserve payments, six complete-Account rollbacks
+and two rent-exact slab closures. New/control exact selectors pass on rebuilt
+private SBF at 449,127 / 255,765 CU, below the unchanged 600,000 ceiling.
+This adds mixed expiry across distinct fee claimants to the existing fresh-domain
+control; it does not repeat shared-provider cleanup or paid reserve prefixes.
+Row 420 remains OPEN for inverse scanner ordering, missing custody, recredit,
+native quotes, maximum shapes and arbitrary histories. Owner deletion and
+administrative normalization/retirement retain their signers; no TSV changes.
+
 ## Row 424 repeated scanner rediscovery (2026-09-17)
 
 [The focused note](row424_multiwave_scan_20260917.md) adds four public LiteSVM
