@@ -101,6 +101,35 @@ impl World {
         source_shape: SourceShape,
         maintenance_fee_per_slot: u128,
     ) -> Self {
+        Self::build_with_quote(
+            claimant_owners,
+            setup,
+            backing,
+            source_shape,
+            maintenance_fee_per_slot,
+            false,
+        )
+    }
+
+    pub(super) fn before_native_receipts() -> Self {
+        Self::build_with_quote(
+            [Keypair::new(), Keypair::new()],
+            None,
+            BACKING,
+            SourceShape::Single,
+            0,
+            true,
+        )
+    }
+
+    fn build_with_quote(
+        claimant_owners: [Keypair; 2],
+        setup: Option<fn(&mut V16CuEnv)>,
+        backing: u128,
+        source_shape: SourceShape,
+        maintenance_fee_per_slot: u128,
+        native: bool,
+    ) -> Self {
         // Allocate and initialize through System/SPL/wrapper instructions, including the
         // initial collateral endowment. LiteSVM only supplies programs, clock and signer SOL.
         let staggered_sources = matches!(source_shape, SourceShape::Staggered);
@@ -133,78 +162,86 @@ impl World {
             max_price_move_bps_per_slot: 500,
             ..V16CuMarketParams::default()
         };
-        let mut svm = LiteSVM::new();
-        let program_id = percolator_prog::id();
-        for (id, path) in [
-            (program_id, program_path()),
-            (spl_token::ID, spl_token_program_path()),
-            (
-                associated_token_program_id(),
-                associated_token_program_path(),
-            ),
-        ] {
-            svm.add_program(id, &std::fs::read(path).unwrap());
-        }
-        let payer = Keypair::new();
-        let admin = Keypair::new();
-        svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
-        svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
-        let mint = Keypair::new();
-        system_create_account_for_test(&mut svm, &payer, &mint, Mint::LEN, spl_token::ID);
-        send_raw_tx(
-            &mut svm,
-            &payer,
-            spl_token::instruction::initialize_mint2(
-                &spl_token::ID,
-                &mint.pubkey(),
-                &admin.pubkey(),
-                None,
-                0,
+        let mut env = if native {
+            let mut env = inv_081_success_state_validity_over_complete_public_routes::inv081_public_native_market_with_params(asset_count as usize, params);
+            env.portfolio_account_len =
+                state::portfolio_account_len_for_market_slots(asset_count as usize).unwrap();
+            env
+        } else {
+            let mut svm = LiteSVM::new();
+            let program_id = percolator_prog::id();
+            for (id, path) in [
+                (program_id, program_path()),
+                (spl_token::ID, spl_token_program_path()),
+                (
+                    associated_token_program_id(),
+                    associated_token_program_path(),
+                ),
+            ] {
+                svm.add_program(id, &std::fs::read(path).unwrap());
+            }
+            let payer = Keypair::new();
+            let admin = Keypair::new();
+            svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+            svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
+            let mint = Keypair::new();
+            system_create_account_for_test(&mut svm, &payer, &mint, Mint::LEN, spl_token::ID);
+            send_raw_tx(
+                &mut svm,
+                &payer,
+                spl_token::instruction::initialize_mint2(
+                    &spl_token::ID,
+                    &mint.pubkey(),
+                    &admin.pubkey(),
+                    None,
+                    0,
+                )
+                .unwrap(),
+                &[],
             )
-            .unwrap(),
-            &[],
-        )
-        .unwrap();
-        let market = Keypair::new();
-        system_create_account_for_test(
-            &mut svm,
-            &payer,
-            &market,
-            state::market_account_len_for_capacity(asset_count as usize).unwrap(),
-            program_id,
-        );
-        let vault_authority =
-            Pubkey::find_program_address(&[b"vault", market.pubkey().as_ref()], &program_id).0;
-        let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint.pubkey());
-        let init_market_cu = send_tx(
-            &mut svm,
-            program_id,
-            &payer,
-            init_market_instruction(&params),
-            vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(market.pubkey(), false),
-                AccountMeta::new_readonly(mint.pubkey(), false),
-            ],
-            &[&admin],
-        )
-        .unwrap();
-        let mut env = V16CuEnv {
-            svm,
-            program_id,
-            payer,
-            admin,
-            init_market_cu,
-            market: market.pubkey(),
-            mint: mint.pubkey(),
-            vault,
-            vault_authority,
-            portfolio_account_len: state::portfolio_account_len_for_market_slots(
-                asset_count as usize,
+            .unwrap();
+            let market = Keypair::new();
+            system_create_account_for_test(
+                &mut svm,
+                &payer,
+                &market,
+                state::market_account_len_for_capacity(asset_count as usize).unwrap(),
+                program_id,
+            );
+            let vault_authority =
+                Pubkey::find_program_address(&[b"vault", market.pubkey().as_ref()], &program_id).0;
+            let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint.pubkey());
+            let init_market_cu = send_tx(
+                &mut svm,
+                program_id,
+                &payer,
+                init_market_instruction(&params),
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(market.pubkey(), false),
+                    AccountMeta::new_readonly(mint.pubkey(), false),
+                ],
+                &[&admin],
             )
-            .unwrap(),
-            portfolios: Vec::new(),
+            .unwrap();
+            V16CuEnv {
+                svm,
+                program_id,
+                payer,
+                admin,
+                init_market_cu,
+                market: market.pubkey(),
+                mint: mint.pubkey(),
+                vault,
+                vault_authority,
+                portfolio_account_len: state::portfolio_account_len_for_market_slots(
+                    asset_count as usize,
+                )
+                .unwrap(),
+                portfolios: Vec::new(),
+            }
         };
+        let program_id = env.program_id;
         if let Some(setup) = setup {
             setup(&mut env);
         }
@@ -424,6 +461,23 @@ impl World {
     }
 
     fn mint(env: &mut V16CuEnv, token: Pubkey, amount: u128) {
+        if env.mint == spl_token::native_mint::ID {
+            send_raw_ixs(
+                &mut env.svm,
+                &env.payer,
+                vec![
+                    system_instruction::transfer(
+                        &env.admin.pubkey(),
+                        &token,
+                        amount.try_into().unwrap(),
+                    ),
+                    spl_token::instruction::sync_native(&spl_token::ID, &token).unwrap(),
+                ],
+                &[&env.admin],
+            )
+            .unwrap();
+            return;
+        }
         send_raw_tx(
             &mut env.svm,
             &env.payer,
@@ -557,7 +611,11 @@ impl World {
             Mint::unpack(&self.env.svm.get_account(&self.env.mint).unwrap().data)
                 .unwrap()
                 .supply as u128,
-            supply
+            if self.env.mint == spl_token::native_mint::ID {
+                0
+            } else {
+                supply
+            }
         );
     }
 

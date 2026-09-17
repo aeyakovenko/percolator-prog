@@ -1,5 +1,29 @@
 # Invariant-owned test coverage
 
+## INV-067 native receipt redemption and rounding beneficiary (2026-09-17)
+
+Owner: [cu/inv_067_native_receipt_redemption.rs](cu/inv_067_native_receipt_redemption.rs),
+mounted under INV-067. Four public LiteSVM histories redeem a funded native SPL
+destination while its embedded receipt remains underfunded, then recreate the same
+ATA and pay the retained receipt after backing expiry. Both unequal claimants and
+both synced/unsynced vault donations preserve exact cumulative owner entitlements
+of 1,198 / 1,283 / 1,368 atoms. Previously redeemed SOL, a seven-lamport wallet
+donation, current token balances and receipt paid counters remain separate.
+
+Receipt floors leave exactly two booked atoms. Full terminal cleanup transfers
+those atoms to a distinct insurance beneficiary; the administrator receives only
+the 19-lamport vault donation and exact rent refunds. Native mint state stays
+unchanged. Missing custody rejects with complete tracked Account rollback and the
+exact payer fee. User economic disposition is unsigned; portfolio deletion and
+slab closure retain their named signers.
+
+Existing ordinary-SPL destination recreation requires first spending its tokens,
+and ordinary-SPL receipt retirement burns rounding. Existing native PnL and reserve
+retirement do not compose funded wallet redemption with a still-pending receipt.
+This adds bounded INV-024/027/066/067/068/070/073 conformance evidence. It adds no
+active matched-book work, production change, dependency change or status promotion.
+[Non-duplication, exact commands, results and limits](inv_067_native_receipt_audit_20260917.md).
+
 ## INV-051 dual-ADL matched reduction partitions (2026-09-17)
 
 Owner: [cu/inv_051_dual_adl_matched_partitions.rs](cu/inv_051_dual_adl_matched_partitions.rs),

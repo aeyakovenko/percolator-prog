@@ -40,6 +40,9 @@
 
 use super::*;
 
+#[path = "inv_067_native_receipt_redemption.rs"]
+mod native_receipt_redemption;
+
 #[path = "inv_067_resolved_source_residual.rs"]
 mod resolved_source_residual;
 
