@@ -1,5 +1,17 @@
 # Invariant-owned test coverage
 
+## Mark/oracle movement and reward provenance audit (2026-09-17)
+
+[The scoped audit](mark_movement_audit_20260917.md) maps only INV-020/045/053/056/062
+rows 225/260/264/265/280/282/331/332/333/356/365/369/422/425/426 to existing mounted
+witnesses, including delegated INV-038/071/056 owners. No duplicate test is added.
+Exact execution yields 24 distinct passing checks and two failing historical
+reward witnesses: paid-origin handoff expects a reward during lag, and the
+selected-asset catch-up control stops at `EngineNonProgress`. The audit records
+exact selectors, assertion boundaries, artifact provenance and remaining limits.
+The mount census passes (508 sources / 1,914 tests); availability does not imply
+behavioral success. Row 422 stays OPEN; 425/426 stay COVERED; statuses are unchanged.
+
 ## INV-038/039 funding and loss-attribution audit (2026-09-17)
 
 [The funding/loss audit](funding_loss_audit_20260917.md) maps rows
