@@ -20,6 +20,312 @@ mod multiwave;
 mod native_surplus;
 
 #[test]
+fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
+    use inv_071_crank_progress::terminal_prefix_recredit::{fixture_with_competing_asset, GAIN};
+
+    let spent = [SPENT, GAIN - CAPITAL[2]];
+    let user_payouts = [CAPITAL[0] + 2 * GAIN, 0, 0];
+    let mut peak = 0;
+    let mut commits = 0;
+    let mut rollbacks = 0;
+    for side in 0..2 {
+        for backing in [137u64, 207] {
+            for later_first in [false, true] {
+                let RecreditFixture {
+                    mut env,
+                    admin,
+                    beneficiary,
+                    owners,
+                    portfolios,
+                    tokens,
+                    reserve,
+                    destination,
+                    peak: fixture_peak,
+                } = fixture_with_competing_asset(side, backing, true);
+                peak = peak.max(fixture_peak);
+                let initial_epochs = [0, 1].map(|asset| env.control_sequences(asset));
+                let ledger = env.market_state().1.resolved_payout_ledger;
+                let recipients = [reserve, destination];
+                let beneficiaries = [beneficiary.pubkey(), admin.pubkey()];
+                let total_recovery = backing.min(spent.iter().sum());
+                let recovery = if later_first {
+                    [total_recovery - spent[1], spent[1]]
+                } else {
+                    [spent[0], total_recovery - spent[0]]
+                };
+                assert!(recovery.into_iter().all(|amount| amount > 0));
+                let mut tracked = vec![
+                    env.market,
+                    env.vault,
+                    env.mint,
+                    reserve,
+                    destination,
+                    admin.pubkey(),
+                    beneficiary.pubkey(),
+                    solana_sdk::sysvar::clock::ID,
+                ];
+                tracked.extend(tokens);
+                tracked.extend(portfolios);
+                tracked.extend(owners.each_ref().map(Signer::pubkey));
+                let close = |env: &V16CuEnv| {
+                    wrap(
+                        env,
+                        ProgInstruction::CloseSlab {
+                            authority_epoch: env.control_sequences(0).authority_epoch,
+                        },
+                        vec![
+                            AccountMeta::new(admin.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(env.vault, false),
+                            AccountMeta::new_readonly(env.vault_authority, false),
+                            AccountMeta::new(destination, false),
+                            AccountMeta::new_readonly(spl_token::ID, false),
+                            AccountMeta::new(env.mint, false),
+                        ],
+                    )
+                };
+                let withdraw = |env: &V16CuEnv, asset: usize, amount: u64| {
+                    wrap(
+                        env,
+                        ProgInstruction::WithdrawInsuranceAsset {
+                            asset_index: asset as u16,
+                            market_id: env.asset_market_id(asset as u16),
+                            authority_epoch: env.control_sequences(asset).authority_epoch,
+                            amount: amount.into(),
+                        },
+                        vec![
+                            AccountMeta::new_readonly(beneficiaries[asset], false),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(recipients[asset], false),
+                            AccountMeta::new(env.vault, false),
+                            AccountMeta::new_readonly(env.vault_authority, false),
+                            AccountMeta::new_readonly(spl_token::ID, false),
+                        ],
+                    )
+                };
+                let bad_suffix = Instruction {
+                    program_id: system_program::ID,
+                    accounts: vec![],
+                    data: vec![255],
+                };
+                let mut send = |env: &mut V16CuEnv,
+                                ix: Instruction,
+                                signers: &[&Keypair],
+                                changed: &[Pubkey],
+                                token_calls| {
+                    peak = peak.max(land(
+                        env,
+                        &[ix.clone(), bad_suffix.clone()],
+                        signers,
+                        &tracked,
+                        &[],
+                        Some((3, InstructionError::InvalidInstructionData)),
+                        (1, token_calls),
+                    ));
+                    rollbacks += 1;
+                    peak = peak.max(land(
+                        env,
+                        &[ix],
+                        signers,
+                        &tracked,
+                        changed,
+                        None,
+                        (1, token_calls),
+                    ));
+                    commits += 1;
+                };
+                let check = |env: &V16CuEnv,
+                             normalized: bool,
+                             restored: [u64; 2],
+                             paid: [u64; 2],
+                             cursor: u128| {
+                    let (cfg, group) = env.market_state();
+                    let market = env.svm.get_account(&env.market).unwrap();
+                    assert_eq!(cfg.terminal_slab_scan_progress, cursor);
+                    assert_eq!(
+                        (
+                            group.c_tot,
+                            group.pnl_pos_tot,
+                            group.materialized_portfolio_count
+                        ),
+                        (0, 0, 0)
+                    );
+                    assert_eq!(group.vault, u128::from(backing - paid.iter().sum::<u64>()));
+                    assert_eq!(
+                        group.insurance,
+                        u128::from(restored.iter().sum::<u64>() - paid.iter().sum::<u64>())
+                    );
+                    assert!(restored.iter().sum::<u64>() <= backing);
+                    for asset in 0..2 {
+                        for local_side in 0..2 {
+                            let domain = 2 * asset + local_side;
+                            assert_eq!(
+                                group.insurance_domain_budget[domain],
+                                if local_side == side {
+                                    u128::from(spent[asset] - paid[asset])
+                                } else {
+                                    0
+                                }
+                            );
+                            assert_eq!(
+                                group.insurance_domain_spent[domain],
+                                if local_side == side {
+                                    u128::from(spent[asset] - restored[asset])
+                                } else {
+                                    0
+                                }
+                            );
+                            assert_eq!(
+                                group.source_credit[domain].provider_receivable_num,
+                                if local_side == 1 - side {
+                                    u128::from(CAPITAL[asset + 1]) * BOUND_SCALE
+                                } else {
+                                    0
+                                }
+                            );
+                        }
+                        let mut expected = initial_epochs[asset];
+                        expected.authority_epoch += u64::from(paid[asset] != 0);
+                        assert_eq!(env.control_sequences(asset), expected);
+                    }
+                    for domain in 0..6 {
+                        let fresh = if !normalized && domain == 4 + side {
+                            u128::from(backing) * BOUND_SCALE
+                        } else {
+                            0
+                        };
+                        assert_eq!(
+                            group.source_backing_buckets[domain].fresh_unliened_backing_num,
+                            fresh
+                        );
+                        assert_eq!(
+                            group.source_credit[domain].fresh_reserved_backing_num,
+                            fresh
+                        );
+                    }
+                    let mut expected_ledger = ledger;
+                    expected_ledger.snapshot_residual +=
+                        if normalized { u128::from(backing) } else { 0 };
+                    assert_eq!(group.resolved_payout_ledger, expected_ledger);
+                    assert_eq!(tokens.map(|token| env.token_amount(token)), user_payouts);
+                    assert_eq!(recipients.map(|token| env.token_amount(token)), paid);
+                    assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+                    assert_eq!(
+                        Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+                            .unwrap()
+                            .supply,
+                        user_payouts[0] + backing
+                    );
+                    crate::support::fuzz_model::assert_market_stock_census(
+                        "competing terminal recredit",
+                        &group,
+                        &market.data,
+                        &[],
+                        group.vault,
+                    )
+                    .unwrap();
+                    crate::support::fuzz_model::assert_reservation_encumbrance_census(
+                        "competing terminal recredit",
+                        &group,
+                        &[],
+                    )
+                    .unwrap();
+                };
+                let market_only = [env.market];
+                let ix = close(&env);
+                send(&mut env, ix, &[&admin], &market_only, 0);
+                check(&env, false, [0; 2], [0; 2], 2);
+                let before_expiry = env.svm.get_account(&env.market).unwrap();
+                env.svm.warp_to_slot(EXPIRY);
+                assert_eq!(
+                    env.svm.get_account(&env.market),
+                    Some(before_expiry.clone())
+                );
+                let ix = close(&env);
+                send(&mut env, ix, &[&admin], &market_only, 0);
+                check(&env, true, [0; 2], [0; 2], 0);
+                let start = MARKET_GROUP_OFF
+                    + std::mem::size_of::<percolator::MarketGroupV16HeaderAccount>();
+                let end = start
+                    + 2 * std::mem::size_of::<percolator::Market<state::AssetOracleStorageV16>>();
+                assert_eq!(
+                    &env.svm.get_account(&env.market).unwrap().data[start..end],
+                    &before_expiry.data[start..end]
+                );
+
+                let mut restored = [0; 2];
+                let mut paid = [0; 2];
+                for asset in if later_first { [1, 0] } else { [0, 1] } {
+                    // A local withdrawal may claim residual first; the scanner must use only
+                    // what remains when it rediscovers the competing earlier entitlement.
+                    if !later_first || asset == 0 {
+                        let ix = close(&env);
+                        send(&mut env, ix, &[&admin], &market_only, 0);
+                        restored[asset] = recovery[asset];
+                        check(&env, true, restored, paid, asset as u128);
+                    }
+                    let ix = withdraw(&env, asset, recovery[asset]);
+                    let payment = [env.market, env.vault, recipients[asset]];
+                    send(&mut env, ix, &[], &payment, 1);
+                    restored[asset] = recovery[asset];
+                    paid[asset] = recovery[asset];
+                    check(
+                        &env,
+                        true,
+                        restored,
+                        paid,
+                        if later_first { 0 } else { asset as u128 },
+                    );
+                }
+                drop(send);
+                let market = env.svm.get_account(&env.market).unwrap();
+                let vault = env.svm.get_account(&env.vault).unwrap();
+                let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();
+                let retired = backing - total_recovery;
+                let ix = close(&env);
+                peak = peak.max(land(
+                    &mut env,
+                    &[ix.clone(), bad_suffix],
+                    &[&admin],
+                    &tracked,
+                    &[],
+                    Some((3, InstructionError::InvalidInstructionData)),
+                    (1, 1 + usize::from(retired != 0)),
+                ));
+                rollbacks += 1;
+                let closing = [env.market, env.vault, env.mint, admin.pubkey()];
+                peak = peak.max(land(
+                    &mut env,
+                    &[ix],
+                    &[&admin],
+                    &tracked,
+                    &closing,
+                    None,
+                    (1, 1 + usize::from(retired != 0)),
+                ));
+                commits += 1;
+                let tombstone = env.svm.get_account(&env.market).unwrap();
+                assert_closed_market_tombstone(&tombstone);
+                expected_admin.lamports += market.lamports - tombstone.lamports + vault.lamports;
+                assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
+                assert!(env
+                    .svm
+                    .get_account(&env.vault)
+                    .is_none_or(|a| a.lamports == 0));
+                assert_eq!(recipients.map(|token| env.token_amount(token)), recovery);
+                assert_eq!(
+                    Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+                        .unwrap()
+                        .supply,
+                    user_payouts[0] + total_recovery
+                );
+            }
+        }
+    }
+    println!("INV-070 competing residual: 8 public histories, {commits} commits, {rollbacks} complete-Account rollbacks, peak={peak} CU");
+}
+
+#[test]
 fn v16_program_rediscovered_insurance_recreates_prefunded_beneficiary_before_retirement() {
     const PREFUND: u64 = 19;
     let mut peak = 0;

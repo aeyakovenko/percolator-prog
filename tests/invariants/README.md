@@ -1,5 +1,64 @@
 # Invariant-owned test coverage
 
+## Row 424 competing insurance after backing expiry (2026-09-18)
+
+One selector in [the scan-recredit owner](cu/inv_070_terminal_scan_recredit.rs)
+extends [the existing public fixture](cu/inv_071_terminal_prefix_recredit.rs)
+with a second spent-insurance asset and a third asset holding fresh backing.
+Existing single-/multiwave witnesses have only one recreditable asset; they do
+not test two beneficiaries consuming the same newly claim-free residual.
+
+Eight public LiteSVM histories cross both source sides, 137/207 backing atoms,
+and scanner-first versus later-asset-withdrawal-first order. Public trades and
+liquidation spend 100/63 insurance atoms, and user cleanup pays exactly 1,400.
+The scanner parks at asset 2; backing expiry must rewind it to zero while both
+earlier asset records remain byte-exact. With 137 released atoms, recovery is
+100/37 in scan order or 74/63 when asset 1 withdraws first. With 207, both orders
+recover 100/63 and retire exactly 44. Every successful campaign instruction is
+first executed before a rejected suffix, with complete-Account rollback and
+exact payer fees, then retried. Stock/reservation censuses, beneficiary balances,
+authority epochs, payout ledger, mint supply and rent refunds frame completion.
+
+This is bounded INV-070/031/063/071 evidence for competing residual allocation,
+not an order-independent entitlement theorem. Row 424 remains OPEN for arbitrary
+histories, maximum shapes and environmental compositions. Row 423 and all machine
+statuses remain unchanged; no production or engine-pin edits are involved.
+
+Validation base: `a657d195b3bd982e5800daddbfe235f22acc19a6`. Private worktree
+`/dev/shm/percolator-inv-agent-source-20260918151208`, host target
+`/dev/shm/percolator-inv-source-host-20260918151208`, SBF target
+`/dev/shm/percolator-inv-source-sbf-20260918151208`. Locked/offline wrapper and
+auth-matcher builds use platform-tools v1.52 and engine
+`4db11a8cb0053815e23a35d3a7d3edc265d8d866`. Artifact SHA-256:
+wrapper `a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`,
+matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+New and scanner-control selectors pass **1/1** each, with peaks **215,290 /
+225,937 CU**. The new selector checks **52 commits and 52 complete-Account
+rollbacks**. Scoped formatting, whitespace and protected-path checks pass; no
+broad suite or engine proofs ran.
+
+The adjacent INV-071 withdrawal control fails at its unchanged line 68: its
+payment advances the authority epoch, so the old-epoch close suffix returns
+`EngineStale` (19), not the expected `EngineLockActive` (21). The identical exact
+selector fails identically at untouched base `a657d195`, in detached worktree
+`/dev/shm/percolator-inv-source-baseline-20260918151208` using a separate host
+target and the same SBF. This existing control is not repaired in this increment.
+
+```bash
+export TMPDIR=/dev/shm CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv-source-host-20260918151208
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv-source-sbf-20260918151208/deploy/percolator_prog.so
+CARGO_TARGET_DIR=/dev/shm/percolator-inv-source-sbf-20260918151208 RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/percolator-inv-source-sbf-20260918151208/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_scan_recredit::v16_program_terminal_scan_competing_assets_share_expired_residual_once -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_scan_recredit::v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry -- --exact --nocapture --test-threads=1
+# Existing failure, also reproduced at the untouched base:
+cargo test --locked --offline --test v16_cu inv_071_crank_progress::terminal_prefix_recredit::v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement -- --exact --nocapture --test-threads=1
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_070_terminal_scan_recredit.rs tests/invariants/cu/inv_071_terminal_prefix_recredit.rs
+git diff --check
+```
+
 ## Row 429 missing fee-successor wallet (2026-09-18)
 
 [The focused note](row429_missing_successor_wallet_20260918.md) adds one selector

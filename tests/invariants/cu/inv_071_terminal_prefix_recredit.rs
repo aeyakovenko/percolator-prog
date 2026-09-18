@@ -320,13 +320,28 @@ pub(crate) struct RecreditFixture {
 }
 
 pub(crate) fn fixture(side: usize, backing: u64) -> RecreditFixture {
+    fixture_with_competing_asset(side, backing, false)
+}
+
+pub(crate) fn fixture_with_competing_asset(
+    side: usize,
+    backing: u64,
+    competing: bool,
+) -> RecreditFixture {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 
+    let assets = if competing { 3 } else { 2 };
+    let second_spend = if competing { GAIN - CAPITAL[2] } else { 0 };
+    let payouts = if competing {
+        [CAPITAL[0] + 2 * GAIN, 0, 0]
+    } else {
+        PAYOUTS
+    };
     let mut peak = 0;
     let mut env = inv018_public_spl_market_with_params(
         0,
         V16CuMarketParams {
-            max_portfolio_assets: 2,
+            max_portfolio_assets: assets,
             maintenance_margin_bps: 1_000,
             initial_margin_bps: 1_000,
             max_price_move_bps_per_slot: 500,
@@ -347,7 +362,7 @@ pub(crate) fn fixture(side: usize, backing: u64) -> RecreditFixture {
     )
     .unwrap();
     env.svm.warp_to_slot(1);
-    for asset in [0, 1] {
+    for asset in 0..assets as u16 {
         env.configure_auth_mark_for_asset_as_admin(asset, 1, 100);
     }
     let owners: [Keypair; 3] = std::array::from_fn(|_| Keypair::new());
@@ -382,7 +397,7 @@ pub(crate) fn fixture(side: usize, backing: u64) -> RecreditFixture {
     for (token, amount) in tokens
         .into_iter()
         .zip(CAPITAL)
-        .chain([(reserve, SPENT), (destination, backing)])
+        .chain([(reserve, SPENT), (destination, backing + second_spend)])
     {
         send_raw_tx(
             &mut env.svm,
@@ -450,10 +465,40 @@ pub(crate) fn fixture(side: usize, backing: u64) -> RecreditFixture {
     .unwrap();
     env.top_up_backing_bucket_from_admin_token_with_cu(
         destination,
-        (2 + side) as u16,
+        (2 * (assets as usize - 1) + side) as u16,
         backing.into(),
         EXPIRY,
     );
+    if competing {
+        env.send(
+            ProgInstruction::TopUpInsuranceDomain {
+                domain: (2 + side) as u16,
+                market_id: env.asset_market_id(1),
+                authority_epoch: env.control_sequences(1).authority_epoch,
+                intent_id: 0,
+                amount: second_spend.into(),
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .unwrap();
+        env.trade_asset_with_cu(
+            1,
+            &owners[0],
+            portfolios[0],
+            &owners[2],
+            portfolios[2],
+            (10 * POS_SCALE) as i128 * if side == 0 { 1 } else { -1 },
+            100,
+            0,
+        );
+    }
     env.trade_asset_with_cu(
         0,
         &owners[0],
@@ -473,26 +518,52 @@ pub(crate) fn fixture(side: usize, backing: u64) -> RecreditFixture {
         };
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_for_asset_as_admin(0, slot, mark);
+        if competing {
+            env.push_auth_mark_for_asset_as_admin(1, slot, mark);
+        }
         env.crank(
             portfolios[2],
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                observations: crank_observations(0),
+                observations: if competing {
+                    crank_observations_for_assets(&[0, 1])
+                } else {
+                    crank_observations(0)
+                },
             },
         );
     }
-    for actor in [0, 1] {
-        env.crank(
-            portfolios[actor],
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 6,
-                observations: crank_observations(0),
-            },
-        );
+    if competing {
+        for actor in [0, 1, 2] {
+            for _ in 0..8 {
+                if env
+                    .crank_if_actionable(
+                        portfolios[actor],
+                        ProgInstruction::PermissionlessCrank {
+                            now_slot: 6,
+                            observations: crank_observations_for_assets(&[0, 1]),
+                        },
+                    )
+                    .is_none()
+                {
+                    break;
+                }
+            }
+        }
+    } else {
+        for actor in [0, 1] {
+            env.crank(
+                portfolios[actor],
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 6,
+                    observations: crank_observations(0),
+                },
+            );
+        }
     }
     assert_eq!(
         env.portfolio_state(portfolios[0]).pnl.get(),
-        i128::from(GAIN)
+        i128::from(GAIN) * if competing { 2 } else { 1 }
     );
     assert_eq!(
         env.market_state().1.assets[0].effective_price,
@@ -500,12 +571,15 @@ pub(crate) fn fixture(side: usize, backing: u64) -> RecreditFixture {
     );
     assert_eq!(
         env.portfolio_state(portfolios[1]).pnl.get(),
-        -i128::from(SPENT)
+        if competing { 0 } else { -i128::from(SPENT) }
     );
+    if competing {
+        assert_eq!(env.portfolio_state(portfolios[2]).pnl.get(), 0);
+    }
     env.svm.warp_to_slot(40);
     env.resolve();
     env.svm.warp_to_slot(43);
-    for actor in [1, 0, 2] {
+    for actor in if competing { [1, 2, 0] } else { [1, 0, 2] } {
         for _ in 0..8 {
             if resolved_portfolio_is_terminal(&env, portfolios[actor]) {
                 break;
@@ -532,7 +606,7 @@ pub(crate) fn fixture(side: usize, backing: u64) -> RecreditFixture {
             peak = peak.max(cu);
         }
         assert!(resolved_portfolio_is_terminal(&env, portfolios[actor]));
-        assert_eq!(env.token_amount(tokens[actor]), PAYOUTS[actor]);
+        assert_eq!(env.token_amount(tokens[actor]), payouts[actor]);
         env.send(
             env.close_portfolio_ix(portfolios[actor]),
             vec![
