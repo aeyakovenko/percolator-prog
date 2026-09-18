@@ -487,10 +487,10 @@ impl World {
         assert_eq!(group.assets[1].mode_short, SideModeV16::Normal);
         assert_eq!(
             group.assets[1].lifecycle,
-            if state == AdmissionState::Recovery {
-                AssetLifecycleV16::Recovery
-            } else {
-                AssetLifecycleV16::Active
+            match state {
+                AdmissionState::DrainOnly => AssetLifecycleV16::DrainOnly,
+                AdmissionState::Recovery => AssetLifecycleV16::Recovery,
+                _ => AssetLifecycleV16::Active,
             }
         );
         self.assert_principal();
@@ -529,6 +529,52 @@ impl World {
         }
         assert_eq!(self.env.market_state().1.vault, 0);
     }
+}
+
+#[test]
+fn v16_program_reset_finalization_preserves_overlapping_drain_and_unrelated_exit() {
+    let mut peak_cu = 0;
+    for sign in [-1, 1] {
+        let mut world = World::new(AdmissionState::ResetPending, sign, false);
+        world.lifecycle(processor::ASSET_ACTION_DRAIN_ONLY, 1, 0);
+        let pending = world.env.market_state().1.assets[1];
+        assert_eq!(pending.lifecycle, AssetLifecycleV16::DrainOnly);
+        assert_eq!(
+            if sign > 0 {
+                pending.mode_short
+            } else {
+                pending.mode_long
+            },
+            SideModeV16::ResetPending
+        );
+
+        // The same owner/generation-bound request must stay forbidden after side cleanup.
+        let open = world.batch(&[(1, sign * POS_SCALE as i128)]);
+        world.execute_batch(open.clone(), true);
+        world.cleanup_reset(AdmissionState::DrainOnly, sign);
+        let finalized = world.env.market_state().1.assets[1];
+        assert_eq!(finalized.lifecycle, AssetLifecycleV16::DrainOnly);
+        assert_eq!(finalized.mode_long, SideModeV16::Normal);
+        assert_eq!(finalized.mode_short, SideModeV16::Normal);
+        assert_eq!(finalized.market_id, pending.market_id);
+        assert_eq!(finalized.oi_eff_long_q, 0);
+        assert_eq!(finalized.oi_eff_short_q, 0);
+        world.execute_batch(open, true);
+
+        let exit = world.batch(&[(0, -sign * EXIT_Q as i128)]);
+        world.execute_batch(exit, false);
+        assert_eq!(world.env.market_state().1.assets[1], finalized);
+        for actor in 0..4 {
+            for asset in 0..2 {
+                world.assert_position(actor, asset, 0);
+            }
+        }
+        world.withdraw_all();
+        assert_eq!(world.env.market_state().1.assets[1], finalized);
+        assert_eq!((world.accepted_batches, world.rejected_batches), (1, 2));
+        peak_cu = peak_cu.max(world.peak_cu);
+    }
+    eprintln!("INV-055/065/074 overlapping drain/reset: 2 sides, 4 admission rollbacks, 2 unrelated exits, 8 principal withdrawals, peak CU={peak_cu}");
 }
 
 #[test]
