@@ -1,5 +1,57 @@
 # Invariant-owned test coverage
 
+## INV-067 reserve retry authority epochs (2026-09-18)
+
+Classification: **stale test expectation / missing current-epoch envelope**, not
+a persistent LoF/DoS or reserve-entitlement order bug. At wrapper base
+`aa35bfe753735a583fa6b7020469dfa6b6b374d1`, engine `4db11a8c`, the exact selector
+`inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::v16_program_terminal_provider_and_insurance_retries_preserve_separate_entitlements`
+fails on freshly built default-feature SBF. In backing-first order the first
+251 provider atoms and 151 insurance atoms both pay; insurance advances asset 1's
+authority epoch from 3 to 4. Replaying the epoch-3 insurance envelope returns
+`EngineStale` (19), while the old test expects `EngineLockActive` (21).
+Insurance-first likewise invalidates the retained provider envelope because both
+roles bind the same asset epoch. This is the terminal debit epoch consumption
+already documented in the row-428 reconciliation.
+
+[The repaired test](cu/inv_067_terminal_provider_insurance_retries.rs) keeps the
+original envelopes and asserts their stale rejection with full account rollback.
+Current-epoch overdraws independently assert `EngineLockActive`, so epoch rejection
+cannot mask excess entitlement. Each two-instruction rollback binds the suffix to
+the epoch after the real SPL payout prefix; retrying the unchanged prefix after
+rollback pays exactly its remainder. Both orders pay users 1,100/900, provider
+401, insurance beneficiary 204 and unrelated insurance 1,000, conserve the fixed
+3,605 supply, empty the vault and close the slab. No terminal scan or additional
+Clock advancement is required. INV-067/073 and rows 420/421/433 gain no status
+promotion; production code and entitlement assertions are unchanged.
+
+Red: the unmodified exact selector fails 0/1 with `Custom(19)` versus `Custom(21)`.
+Green: the repaired exact selector passes 1/1, both orders; measured suffix peaks
+**334,746 CU** on the first green run and **346,746 CU** on the final exact rerun.
+Default-feature wrapper and auth matcher were built locked/offline
+with platform-tools v1.52 inside the isolated worktree. Wrapper SHA-256:
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`;
+matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+The three-selector `provider_insurance_retries::` run passes 2/3: this selector
+(328,746 CU in that run) and the unchanged replenished-provider control
+(430,054/427,054 CU). The unchanged absent-provider branch fails its separate
+instruction-3 rejection oracle, `Custom(11)` versus expected `Custom(8)`, after
+the insurance prefix; this repair does not claim a green result for that sibling.
+Targeted rustfmt and Git whitespace checks pass.
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target/host"
+export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR="$PWD"
+CARGO_TARGET_DIR="$PWD/target/sbf" CARGO_BUILD_JOBS=4 RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/target/host/deploy" -- --locked
+# From tests/fixtures/auth_matcher, using the same absolute TMPDIR:
+# CARGO_TARGET_DIR="$TMPDIR/target/auth" CARGO_BUILD_JOBS=2 RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/target/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::v16_program_terminal_provider_and_insurance_retries_preserve_separate_entitlements -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries:: -- --nocapture --test-threads=1
+rustfmt --check --edition 2021 --config skip_children=true tests/invariants/cu/inv_067_terminal_provider_insurance_retries.rs
+git diff --check
+```
+
 ## Open holdout coverage triage (2026-09-18)
 
 Astra Ultra subagents rechecked the current open LoF/DoS holdout rows against

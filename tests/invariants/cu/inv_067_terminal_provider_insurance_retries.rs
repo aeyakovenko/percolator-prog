@@ -1,6 +1,8 @@
 //! Terminal backing and insurance have separate recipients and finite allowances even when
 //! the vault remains liquid. All state and collateral are created through System/SPL/wrapper
 //! instructions; retries retain the original wire bytes and use fresh transaction blockhashes.
+//! Insurance debits consume the shared asset authority epoch; remaining entitlements use
+//! renewed envelopes while retained stale envelopes and current-epoch overdraws both reject.
 //! The absent-provider suffix reverses user order and leaves replenished principal attributed
 //! while the current insurance beneficiary exits without the provider or insurance operator.
 
@@ -306,7 +308,7 @@ fn run_terminal_provider_and_insurance(exit: ProviderExit) {
             );
             env.svm.send_transaction(tx)
         };
-        let withdraw = |env: &V16CuEnv, insurance: bool, amount: u64| {
+        let withdraw = |env: &V16CuEnv, insurance: bool, amount: u64, authority_epoch: u64| {
             let role = usize::from(insurance);
             Instruction {
                 program_id: env.program_id,
@@ -322,23 +324,24 @@ fn run_terminal_provider_and_insurance(exit: ProviderExit) {
                     ProgInstruction::WithdrawInsuranceAsset {
                         asset_index: 1,
                         market_id: env.asset_market_id(1),
-                        authority_epoch: env.control_sequences(1).authority_epoch,
+                        authority_epoch,
                         amount: u128::from(amount),
                     }
                 } else {
                     ProgInstruction::WithdrawBackingBucket {
                         domain: 3,
                         market_id: env.asset_market_id(1),
-                        authority_epoch: env.control_sequences(1).authority_epoch,
+                        authority_epoch,
                         amount: u128::from(amount),
                     }
                 }
                 .encode(),
             }
         };
+        let retained_epoch = env.control_sequences(1).authority_epoch;
         let retained = [
-            withdraw(&env, false, FIRST[0]),
-            withdraw(&env, true, FIRST[1]),
+            withdraw(&env, false, FIRST[0], retained_epoch),
+            withdraw(&env, true, FIRST[1], retained_epoch),
         ];
         let authorities = [&provider, &insurer];
         let reject = |env: &mut V16CuEnv,
@@ -350,7 +353,10 @@ fn run_terminal_provider_and_insurance(exit: ProviderExit) {
             let failure = land(env, batch, signers).expect_err("terminal allowance must reject");
             assert_eq!(
                 failure.err,
-                TransactionError::InstructionError(index, InstructionError::Custom(error as u32),)
+                TransactionError::InstructionError(index, InstructionError::Custom(error as u32),),
+                "insurance_first={insurance_first}, epoch={}, balances={:?}",
+                env.control_sequences(1).authority_epoch,
+                tokens.map(|token| env.token_amount(token)),
             );
             assert_eq!(
                 frame(env),
@@ -482,9 +488,24 @@ fn run_terminal_provider_and_insurance(exit: ProviderExit) {
         let order = if insurance_first { [1, 0] } else { [0, 1] };
         let mut paid = [0u64; 2];
         for role in order {
+            let epoch = env.control_sequences(1).authority_epoch;
+            if epoch != retained_epoch {
+                reject(
+                    &mut env,
+                    &[retained[role].clone()],
+                    &[authorities[role]],
+                    2,
+                    PercolatorError::EngineStale,
+                );
+            }
+            let first = withdraw(&env, role == 1, FIRST[role], epoch);
             let before = frame(&env);
-            let meta = land(&mut env, &[retained[role].clone()], &[authorities[role]])
-                .expect("retained withdrawal becomes payable only after user exits");
+            let meta = land(&mut env, &[first], &[authorities[role]])
+                .expect("current-epoch withdrawal becomes payable after user exits");
+            assert_eq!(
+                env.control_sequences(1).authority_epoch,
+                epoch + role as u64
+            );
             assert_cu_within(
                 "INV-067 terminal first withdrawal",
                 meta.compute_units_consumed,
@@ -502,23 +523,38 @@ fn run_terminal_provider_and_insurance(exit: ProviderExit) {
                 }
             }
             partition(&env, paid);
+            let current_epoch = env.control_sequences(1).authority_epoch;
             reject(
                 &mut env,
                 &[retained[role].clone()],
+                &[authorities[role]],
+                2,
+                if current_epoch == retained_epoch {
+                    PercolatorError::EngineLockActive
+                } else {
+                    PercolatorError::EngineStale
+                },
+            );
+            let overdraw = withdraw(&env, role == 1, FIRST[role], current_epoch);
+            reject(
+                &mut env,
+                &[overdraw],
                 &[authorities[role]],
                 2,
                 PercolatorError::EngineLockActive,
             );
         }
 
-        // The first instruction really transfers, then the other recipient's retained
-        // overdraw rejects. The whole prefix must roll back, leaving its remainder payable.
+        // The first instruction really transfers, then the other recipient's overdraw
+        // rejects at the epoch after that prefix. Rollback leaves the same remainder payable.
         for role in order {
             let other = 1 - role;
-            let remainder = withdraw(&env, role == 1, REMAINDER[role]);
+            let epoch = env.control_sequences(1).authority_epoch;
+            let remainder = withdraw(&env, role == 1, REMAINDER[role], epoch);
+            let overdraw = withdraw(&env, other == 1, FIRST[other], epoch + role as u64);
             let rejected = reject(
                 &mut env,
-                &[remainder.clone(), retained[other].clone()],
+                &[remainder.clone(), overdraw],
                 &authorities,
                 3,
                 PercolatorError::EngineLockActive,
@@ -539,6 +575,10 @@ fn run_terminal_provider_and_insurance(exit: ProviderExit) {
             peak_cu = peak_cu.max(rejected.compute_units_consumed);
             let meta = land(&mut env, &[remainder.clone()], &[authorities[role]])
                 .expect("unchanged remainder pays after rollback");
+            assert_eq!(
+                env.control_sequences(1).authority_epoch,
+                epoch + role as u64
+            );
             assert_cu_within(
                 "INV-067 terminal remainder retry",
                 meta.compute_units_consumed,
@@ -547,14 +587,27 @@ fn run_terminal_provider_and_insurance(exit: ProviderExit) {
             peak_cu = peak_cu.max(meta.compute_units_consumed);
             paid[role] += REMAINDER[role];
             partition(&env, paid);
-            for instruction in [retained[role].clone(), remainder] {
-                reject(
-                    &mut env,
-                    &[instruction],
-                    &[authorities[role]],
-                    2,
+            for (instruction, error) in [
+                (retained[role].clone(), PercolatorError::EngineStale),
+                (
+                    remainder,
+                    if role == 1 {
+                        PercolatorError::EngineStale
+                    } else {
+                        PercolatorError::EngineLockActive
+                    },
+                ),
+                (
+                    withdraw(
+                        &env,
+                        role == 1,
+                        REMAINDER[role],
+                        env.control_sequences(1).authority_epoch,
+                    ),
                     PercolatorError::EngineLockActive,
-                );
+                ),
+            ] {
+                reject(&mut env, &[instruction], &[authorities[role]], 2, error);
             }
         }
         assert_eq!(paid, [BACKING, INSURANCE]);
