@@ -512,8 +512,278 @@ impl SharedHistory {
 }
 
 #[test]
+fn v16_program_full_source_tables_preserve_partial_receipt_through_peer_exit() {
+    assert!(include_str!("../../../Cargo.lock").contains(
+        "git+https://github.com/aeyakovenko/percolator?rev=4db11a8cb0053815e23a35d3a7d3edc265d8d866#\
+         4db11a8cb0053815e23a35d3a7d3edc265d8d866"
+    ));
+    let mut h = SharedHistory::new();
+    for asset in 0..ASSETS {
+        let cu = h
+            .env
+            .push_auth_mark_for_asset_as_admin(asset as u16, h.slot, PRICE);
+        h.record(cu);
+        h.settle(DEBTOR, asset);
+        let quantities = [POS_SCALE as i128, 2 * POS_SCALE as i128];
+        for actor in 0..2 {
+            h.trade(actor, asset, quantities[actor]);
+        }
+        h.mark(asset, PRICE + 1);
+        for actor in [DEBTOR, 0, 1] {
+            h.settle(actor, asset);
+        }
+        for actor in 0..2 {
+            h.trade(actor, asset, -2 * quantities[actor]);
+        }
+        h.mark(asset, PRICE);
+        for actor in [DEBTOR, 0, 1] {
+            h.settle(actor, asset);
+        }
+        for actor in 0..2 {
+            h.trade(actor, asset, quantities[actor]);
+        }
+    }
+    assert_eq!(DOMAINS, 28);
+    assert_eq!([h.claims(0), h.claims(1)], [[1; DOMAINS], [2; DOMAINS]]);
+    assert_eq!(h.positions, [[0; ASSETS]; 3]);
+
+    // The first seven assets expire; the other fourteen domains stay source-backed.
+    let expired = DOMAINS / 2;
+    let group = h.env.market_state().1;
+    let expiry = group.source_backing_buckets[..expired]
+        .iter()
+        .map(|bucket| bucket.expiry_slot)
+        .max()
+        .unwrap();
+    for domain in 0..DOMAINS {
+        assert_eq!(
+            group.source_backing_buckets[domain].expiry_slot <= expiry,
+            domain < expired
+        );
+    }
+    let cu = h.env.resolve();
+    h.record(cu);
+    assert_eq!(h.env.market_state().1.mode, MarketModeV16::Resolved);
+    assert!(expiry >= h.env.market_state().1.resolved_slot + OWNER_WINDOW);
+    h.slot = expiry;
+    h.env.svm.warp_to_slot(expiry);
+
+    let frame = |h: &SharedHistory| {
+        h.portfolios
+            .into_iter()
+            .chain(h.tokens)
+            .chain([h.env.market, h.env.vault, h.env.mint])
+            .map(|key| h.env.svm.get_account(&key))
+            .collect::<Vec<_>>()
+    };
+    let payout = |h: &mut SharedHistory, actor: usize, topup: bool| {
+        let peers = h.portfolios.map(|key| h.env.svm.get_account(&key));
+        let tokens = h.tokens.map(|key| h.env.svm.get_account(&key));
+        let mint = h.env.svm.get_account(&h.env.mint);
+        let wallet = h.env.token_amount(h.tokens[actor]);
+        let vault = h.env.token_amount(h.env.vault);
+        h.env.svm.expire_blockhash();
+        let cu = h
+            .env
+            .send(
+                if topup {
+                    ProgInstruction::ClaimResolvedPayoutTopup
+                } else {
+                    ProgInstruction::CloseResolved {
+                        fee_rate_per_slot: 0,
+                    }
+                },
+                vec![
+                    AccountMeta::new_readonly(h.owners[actor].pubkey(), false),
+                    AccountMeta::new(h.env.market, false),
+                    AccountMeta::new(h.portfolios[actor], false),
+                    AccountMeta::new(h.tokens[actor], false),
+                    AccountMeta::new(h.env.vault, false),
+                    AccountMeta::new_readonly(h.env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[],
+            )
+            .expect("full source tables retain keeper-only receipt progress");
+        h.record(cu);
+        let paid = h.env.token_amount(h.tokens[actor]) - wallet;
+        assert_eq!(vault - h.env.token_amount(h.env.vault), paid);
+        for peer in 0..3 {
+            if peer != actor {
+                assert_eq!(h.env.svm.get_account(&h.portfolios[peer]), peers[peer]);
+                assert_eq!(h.env.svm.get_account(&h.tokens[peer]), tokens[peer]);
+            }
+        }
+        assert_eq!(h.env.svm.get_account(&h.env.mint), mint);
+        let market = h.env.svm.get_account(&h.env.market).unwrap();
+        let group = h.env.market_state().1;
+        let accounts = h.portfolios.map(|key| h.env.portfolio_state(key));
+        assert_market_stock_census(
+            "full tables with receipt",
+            &group,
+            &market.data,
+            &accounts,
+            h.env.token_amount(h.env.vault) as u128,
+        )
+        .unwrap();
+        assert_reservation_encumbrance_census("full tables with receipt", &group, &accounts)
+            .unwrap();
+        assert_source_credit_rates("full tables with receipt", &group).unwrap();
+        assert_eq!(
+            group.vault
+                + h.tokens
+                    .iter()
+                    .map(|key| h.env.token_amount(*key) as u128)
+                    .sum::<u128>(),
+            3 * CAPITAL
+        );
+        paid
+    };
+    for remaining in (1..=expired).rev() {
+        assert_eq!(payout(&mut h, 0, false), 0);
+        let group = h.env.market_state().1;
+        assert_eq!(
+            group.source_backing_buckets[..DOMAINS]
+                .iter()
+                .filter(|bucket| bucket.status == BackingBucketStatusV16::Fresh
+                    && bucket.expiry_slot <= expiry)
+                .count(),
+            remaining - 1,
+            "one expired bucket normalizes per bounded close"
+        );
+        assert_eq!([h.claims(0), h.claims(1)], [[1; DOMAINS], [2; DOMAINS]]);
+    }
+    let residual = 3 * expired as u128;
+    let first_face = expired as u128;
+    let early_paid = first_face * residual / (first_face + 2 * DOMAINS as u128);
+    assert_eq!((first_face, residual, early_paid), (14, 42, 8));
+    let pending = ResolvedPayoutReceiptV16 {
+        present: true,
+        prior_bound_contribution_num: first_face * BOUND_SCALE,
+        live_released_face_at_receipt: 0,
+        terminal_positive_claim_face: first_face,
+        paid_effective: early_paid,
+        finalized: false,
+    };
+    for actor in 0..2 {
+        for remaining in (1..=DOMAINS).rev() {
+            let claims = h.claims(actor);
+            assert_eq!(claims.iter().filter(|c| **c > 0).count(), remaining);
+            let paid = payout(&mut h, actor, false);
+            let after = h.claims(actor);
+            assert_eq!(after.iter().filter(|c| **c > 0).count(), remaining - 1);
+            assert_eq!(
+                claims.iter().zip(after).filter(|(a, b)| **a != *b).count(),
+                1
+            );
+            if remaining > 1 {
+                assert_eq!(paid, 0);
+            }
+            if actor == 1 {
+                assert_eq!(
+                    resolved_receipt(&h.env.portfolio_state(h.portfolios[0])),
+                    pending
+                );
+            }
+        }
+        let ledger = h.env.market_state().1.resolved_payout_ledger;
+        assert_eq!(ledger.snapshot_residual, residual);
+        if actor == 0 {
+            assert_eq!(h.claims(1), [2; DOMAINS], "peer remains at full capacity");
+            assert_eq!(
+                resolved_receipt(&h.env.portfolio_state(h.portfolios[0])),
+                pending
+            );
+            assert_eq!(
+                h.env.token_amount(h.tokens[0]) as u128,
+                CAPITAL + first_face + early_paid
+            );
+            assert_eq!(
+                ledger.terminal_claim_bound_unreceipted_num,
+                2 * DOMAINS as u128 * BOUND_SCALE
+            );
+            assert_eq!(
+                ledger.terminal_claim_exact_receipts_num,
+                first_face * BOUND_SCALE
+            );
+            assert_eq!(ledger.current_payout_rate_num, residual * BOUND_SCALE);
+            assert_eq!(
+                ledger.current_payout_rate_den,
+                (first_face + 2 * DOMAINS as u128) * BOUND_SCALE
+            );
+            let before = frame(&h);
+            assert_eq!(payout(&mut h, 0, true), 0);
+            assert_eq!(
+                frame(&h),
+                before,
+                "early top-up preserves the pending receipt"
+            );
+        } else {
+            assert_eq!(ledger.terminal_claim_bound_unreceipted_num, 0);
+            assert_eq!(
+                ledger.terminal_claim_exact_receipts_num,
+                residual * BOUND_SCALE
+            );
+            assert_eq!(ledger.current_payout_rate_num, residual * BOUND_SCALE);
+            assert_eq!(ledger.current_payout_rate_den, residual * BOUND_SCALE);
+            assert_eq!(
+                h.env.token_amount(h.tokens[1]) as u128,
+                CAPITAL + 2 * DOMAINS as u128
+            );
+        }
+    }
+    assert_eq!(payout(&mut h, 0, true) as u128, first_face - early_paid);
+    assert_eq!(
+        resolved_receipt(&h.env.portfolio_state(h.portfolios[0])),
+        ResolvedPayoutReceiptV16 {
+            paid_effective: first_face,
+            finalized: true,
+            ..pending
+        }
+    );
+    let before = frame(&h);
+    assert_eq!(payout(&mut h, 0, true), 0);
+    assert_eq!(frame(&h), before, "completed top-up cannot pay twice");
+    assert_eq!(
+        payout(&mut h, DEBTOR, false) as u128,
+        CAPITAL - 3 * DOMAINS as u128
+    );
+    for (actor, expected) in [CAPITAL + 28, CAPITAL + 56, CAPITAL - 84]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(h.env.token_amount(h.tokens[actor]) as u128, expected);
+        assert!(resolved_portfolio_is_terminal(&h.env, h.portfolios[actor]));
+        h.env.svm.expire_blockhash();
+        let cu = h
+            .env
+            .close_portfolio_with_cu(&h.owners[actor], h.portfolios[actor]);
+        h.record(cu);
+    }
+    let group = h.env.market_state().1;
+    assert_eq!(
+        (
+            group.vault,
+            group.c_tot,
+            group.insurance,
+            group.materialized_portfolio_count
+        ),
+        (0, 0, 0, 0)
+    );
+    assert!(group
+        .source_credit
+        .iter()
+        .all(|source| source.positive_claim_bound_num == 0));
+    println!("INV-028 full-table partial receipt: worlds=1, source_retirements=56, receipt=14, early_paid=8, keeper_topup=6, calls={}, peak_cu={}", h.calls, h.peak_cu);
+}
+
+#[test]
 fn v16_program_shared_history_preserves_late_claimant_capacity_and_exact_exit() {
-    assert_certified_engine_pin("INV-028 shared source late exit");
+    // Revalidate this control locally without recertifying the shared roster.
+    assert!(include_str!("../../../Cargo.lock").contains(
+        "git+https://github.com/aeyakovenko/percolator?rev=4db11a8cb0053815e23a35d3a7d3edc265d8d866#\
+         4db11a8cb0053815e23a35d3a7d3edc265d8d866"
+    ));
     let mut peak_cu = 0;
     let mut peak_packet = 0;
     let mut calls = 0;

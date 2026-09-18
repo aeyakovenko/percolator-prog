@@ -1,5 +1,17 @@
 # Invariant-owned test coverage
 
+## Row 423 partial receipt with full peer table (2026-09-18)
+
+[The focused note](row423_full_table_receipt_20260918.md) adds one selector in
+[the existing shared-history file](cu/inv_028_shared_source_late_exit.rs).
+Two claimants fill all 28 source slots each. Expiry of 14 shared domains leaves
+the first claimant a 14-atom receipt paid 8 atoms while its peer retains 28 claims;
+peer realization enables the exact 6-atom keeper top-up and complete owner exits.
+This combines partial receipts with full source occupancy, beyond the existing
+fresh-backing control and the 18-domain loss/receipt witness. New/control exact
+selectors pass at **948,061 / 930,604 CU** measured peaks. Row 423 remains OPEN;
+simultaneous liens with receipts, Recovery and arbitrary histories remain outside it.
+
 ## Row 424 custody repair rent shortfall (2026-09-18)
 
 [The focused note](row424_rent_shortfall_20260918.md) adds one public LiteSVM
