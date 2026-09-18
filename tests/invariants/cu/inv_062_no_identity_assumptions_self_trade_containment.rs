@@ -16,7 +16,9 @@
 //! the same identity-independence rule past open/close round trips into a genuine authenticated
 //! mark move, certificate refresh, and partial liquidation. A common owner must receive the same
 //! bounded mark, matched OI, unchanged counterparty account, custody, and value result as two
-//! independent owners over the same public no-CPI/CPI routes.
+//! independent owners over all four public trade routes and both losing sides.
+//! The short-side case crosses a distinct rounded-maintenance boundary after the
+//! same five-atom loss; it must liquidate from refreshed health without an owner privilege.
 //! Paid off-mark coalition attacks
 //! are independently exercised by INV-045's fee-reserve and liquidation-reward
 //! models; this file owns the identity-independence and terminal-custody assertion.
@@ -495,15 +497,26 @@ fn assert_common_control_certificate(
 
 fn run_common_control_liquidation_world(
     route: CommonControlRoute,
+    direction: i128,
     common_owner: bool,
 ) -> CommonControlLiquidationOutcome {
     const INITIAL_PRICE: u64 = 100;
-    const TARGET_PRICE: u64 = 95;
     const TARGET_DEPOSIT: u128 = 14;
     const PEER_DEPOSIT: u128 = 200;
     const MOVE_BPS: u64 = 500;
 
-    let label = format!("{route:?}/common_owner={common_owner}");
+    let target_price = match direction {
+        1 => 95,
+        -1 => 105,
+        _ => panic!("common-control position direction must be signed unit"),
+    };
+    let expected_equity = TARGET_DEPOSIT - 5;
+    let expected_maintenance = (u128::from(target_price) * 1_000).div_ceil(10_000);
+    let expected_deficit = expected_maintenance - expected_equity;
+    // With zero fees and 10% maintenance, nine equity atoms support at most
+    // ninety notional atoms. This closed form is independent of the selector.
+    let expected_remaining_q = expected_equity * 10 * POS_SCALE / u128::from(target_price);
+    let label = format!("{route:?}/direction={direction}/common_owner={common_owner}");
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, MOVE_BPS);
     env.svm.warp_to_slot(0);
     env.configure_auth_mark_with_cu(0, INITIAL_PRICE);
@@ -520,8 +533,17 @@ fn run_common_control_liquidation_world(
     env.deposit(&target_owner, target, TARGET_DEPOSIT);
     env.deposit(peer_owner, peer, PEER_DEPOSIT);
 
-    let matcher = common_control_route_uses_matcher(route)
-        .then(|| configure_common_control_matcher(&mut env, peer_owner, peer));
+    let matcher = common_control_route_uses_matcher(route).then(|| {
+        let program = Pubkey::new_unique();
+        let bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+        env.svm.add_program(program, &bytes);
+        let (context, delegate, _) = env.init_auth_matcher_context(program, peer_owner, peer);
+        CommonControlMatcher {
+            program,
+            context,
+            delegate,
+        }
+    });
     execute_common_control_trade(
         &mut env,
         route,
@@ -530,7 +552,7 @@ fn run_common_control_liquidation_world(
         peer_owner,
         peer,
         matcher,
-        POS_SCALE as i128,
+        direction * POS_SCALE as i128,
         INITIAL_PRICE,
         0,
     );
@@ -538,12 +560,17 @@ fn run_common_control_liquidation_world(
     let opened = env.market_state().1;
     assert_eq!(opened.assets[0].oi_eff_long_q, POS_SCALE, "{label}");
     assert_eq!(opened.assets[0].oi_eff_short_q, POS_SCALE, "{label}");
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(target), 0).basis_pos_q,
+        direction * POS_SCALE as i128,
+        "{label}: fixture must expose the selected losing side"
+    );
     let conserved_value = common_control_pair_value_with_insurance(&env, target, peer);
     let spl_vault = env.token_amount(env.vault);
     assert_eq!(conserved_value, i128::from(spl_vault), "{label}");
 
     env.svm.warp_to_slot(1);
-    env.push_auth_mark_with_cu(1, TARGET_PRICE);
+    env.push_auth_mark_with_cu(1, target_price);
     let pending_group = env.market_state().1;
     let pending_cert = health_cert(&env.portfolio_state(target));
     assert_eq!(
@@ -551,7 +578,7 @@ fn run_common_control_liquidation_world(
         "{label}"
     );
     assert_eq!(
-        pending_group.assets[0].raw_oracle_target_price, TARGET_PRICE,
+        pending_group.assets[0].raw_oracle_target_price, target_price,
         "{label}"
     );
     assert!(
@@ -563,7 +590,7 @@ fn run_common_control_liquidation_world(
     let marked_group = env.market_state().1;
     let marked_target = env.portfolio_state(target);
     assert_eq!(
-        marked_group.assets[0].effective_price, TARGET_PRICE,
+        marked_group.assets[0].effective_price, target_price,
         "{label}"
     );
     assert_eq!(
@@ -575,7 +602,16 @@ fn run_common_control_liquidation_world(
         &format!("{label}/marked-target"),
         &marked_group,
         &marked_target,
-        1,
+        expected_deficit,
+    );
+    let marked_cert = health_cert(&marked_target);
+    assert_eq!(
+        marked_cert.certified_equity, expected_equity as i128,
+        "{label}"
+    );
+    assert_eq!(
+        marked_cert.certified_maintenance_req, expected_maintenance,
+        "{label}"
     );
 
     crank_common_control_account(&mut env, peer, vec![]);
@@ -604,7 +640,7 @@ fn run_common_control_liquidation_world(
         &format!("{label}/liquidatable-target"),
         &liquidatable_group,
         &liquidatable_target,
-        1,
+        expected_deficit,
     );
 
     let peer_before_liquidation = env.svm.get_account(&peer).unwrap();
@@ -619,6 +655,12 @@ fn run_common_control_liquidation_world(
         liquidation_reduction_q > 0 && liquidation_reduction_q < POS_SCALE,
         "{label}: fixture requires a genuine partial liquidation"
     );
+    assert_eq!(
+        liquidation_reduction_q,
+        POS_SCALE - expected_remaining_q,
+        "{label}: liquidation must close exactly the rounded health deficit"
+    );
+    assert_eq!(group.insurance, 0, "{label}: zero-fee sizing precondition");
     assert_eq!(
         group.assets[0].oi_eff_long_q, group.assets[0].oi_eff_short_q,
         "{label}: liquidation must preserve matched effective OI"
@@ -675,28 +717,43 @@ fn run_common_control_liquidation_world(
 
 #[test]
 fn v16_program_common_control_partial_liquidation_matches_independent_owners_and_routes() {
-    let mut route_baseline = None;
     let mut worlds = 0usize;
 
-    for route in [CommonControlRoute::NoCpi, CommonControlRoute::Cpi] {
-        let common = run_common_control_liquidation_world(route, true);
-        let independent = run_common_control_liquidation_world(route, false);
-        assert_eq!(
-            common, independent,
-            "{route:?}: owner identity changed public liquidation economics"
-        );
-        if let Some(baseline) = &route_baseline {
+    for direction in [1, -1] {
+        let mut route_baseline = None;
+        for route in [
+            CommonControlRoute::NoCpi,
+            CommonControlRoute::BatchNoCpi,
+            CommonControlRoute::Cpi,
+            CommonControlRoute::BatchCpi,
+        ] {
+            let common = run_common_control_liquidation_world(route, direction, true);
+            let independent = run_common_control_liquidation_world(route, direction, false);
             assert_eq!(
-                &common, baseline,
-                "{route:?}: trade transport changed public liquidation economics"
+                common, independent,
+                "{route:?}/{direction}: owner identity changed public liquidation economics"
             );
-        } else {
-            route_baseline = Some(common);
+            if let Some(baseline) = &route_baseline {
+                assert_eq!(
+                    &common, baseline,
+                    "{route:?}/{direction}: trade transport changed public liquidation economics"
+                );
+            } else {
+                route_baseline = Some(common);
+            }
+            worlds += 2;
         }
-        worlds += 2;
+        let baseline = route_baseline.unwrap();
+        eprintln!(
+            "common-control direction={direction}: four routes, close_q={}, remaining_q={}, equity={}, maintenance={}",
+            baseline.liquidation_reduction_q,
+            baseline.target_effective_q,
+            baseline.target_equity,
+            baseline.target_maintenance_req,
+        );
     }
 
-    assert_eq!(worlds, 4, "common-control liquidation census changed");
+    assert_eq!(worlds, 16, "common-control liquidation census changed");
 }
 
 #[test]

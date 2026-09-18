@@ -60,7 +60,65 @@ fresh optional ledgers. Active user principal/loss, distinct authorities, native
 secondary custody, account close/recreation, retained nonzero ledger histories,
 same-asset stale-epoch bundles, arbitrary schedules and supported maxima remain
 outside this witness. Exact rollback still relies on the named SVM semantics.
+## INV-062 common-owner liquidation across batch routes and sides (2026-09-18)
 
+Classification: **nonduplicative public-route and rounding-boundary coverage**,
+with secondary INV-045/053/061 evidence. Base: current `origin/main` at
+`32bc8244ec32f35dced512e44eff6eb60d39ccbb`, isolated worktree
+`/home/anatoly/percolator-astra-oracle-20260918`. Review used current-main invariant
+owners, public wrapper routes and coverage ledgers; no open PR branch or diff was
+inspected. No production defect, LoF/DoS finding or invariant-status change.
+
+Owner: [cu/inv_062_no_identity_assumptions_self_trade_containment.rs](cu/inv_062_no_identity_assumptions_self_trade_containment.rs),
+expanded selector `v16_program_common_control_partial_liquidation_matches_independent_owners_and_routes`.
+The previous four worlds covered only a losing long opened by `TradeNoCpi` or
+`TradeCpi`, under common and independent ownership. The selector now crosses all
+four opening transports, both losing sides and both ownership arrangements:
+**16 worlds, including 12 new cells**. Batches contain one leg. The existing
+192-world identity round-trip matrix does not pass through partial liquidation;
+the INV-061 quantity matrices do not supply this ownership comparison.
+
+Every world opens one unit at 100, publishes an authenticated five-atom adverse
+mark at the next slot, refreshes both portfolios, and partially liquidates the
+target through `PermissionlessCrank`. With 14 deposited atoms, the target has
+nine equity atoms after the move. Prices 95 and 105 round maintenance to ten and
+eleven, yielding deficits one and two. An input-derived zero-fee closed form,
+`remaining_q = floor(9 * 10 * POS_SCALE / price)`, independently requires closes
+of 52,632 and 142,858 position atoms. It does not call the liquidation selector.
+Both sides finish with equity and maintenance nine. The inherited independent
+certificate oracle, exact peer-account frame, effective OI reconstruction,
+pair-value conservation and SPL custody checks remain active. Economic outcome
+vectors must match common versus independent owners and all routes on each side.
+
+This selector's CPI setup now uses the repository's authenticated matcher fixture
+instead of requiring a sibling matcher build. Final validation used a private
+host target copied from the existing dependency cache, with `percolator-prog`
+cleaned and rebuilt. The impacted selector passes **1/1, 16 worlds, 6.62 s**;
+the adjacent fee-bearing self-trade selector passes **1/1, 0.36 s**. No broad suite
+or engine proof ran. Scoped rustfmt and `git diff --check` pass.
+
+Both SBF artifacts were copied, not rebuilt. Wrapper SHA-256:
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`;
+`src`, `Cargo.toml` and `Cargo.lock` match the main-ledger build base `2e88c39b`.
+Matcher SHA-256: `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`;
+its source/Cargo blobs match the main-ledger build base `6992e91f`.
+Exact final commands from the isolated worktree:
+
+```sh
+export TMPDIR=/dev/shm CARGO_TARGET_DIR=/dev/shm/astra-oracle-coverage-20260918-host
+export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+cargo test --locked --offline --test v16_cu inv_062_no_identity_assumptions_self_trade_containment::v16_program_common_control_partial_liquidation_matches_independent_owners_and_routes -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_062_no_identity_assumptions_self_trade_containment::v16_program_same_owner_fee_self_trade_is_negative_sum_not_profitable -- --exact --nocapture --test-threads=1
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_062_no_identity_assumptions_self_trade_containment.rs
+git diff --check
+```
+
+Remaining frontier for this ownership/liquidation product: multi-leg batches,
+fee-bearing or rewarded liquidation, Hybrid/EWMA provenance transitions, pending
+target lag, prior nonunit ADL, and varied observation/settlement orders. Existing
+owners retain their separate evidence for those dimensions. This finite AuthMark
+extension does not close INV-062 or any open holdout.
 ## INV-078 keeper-only resource-failure pair exit (2026-09-18)
 
 Classification: **nonduplicative public-route coverage**, with secondary
