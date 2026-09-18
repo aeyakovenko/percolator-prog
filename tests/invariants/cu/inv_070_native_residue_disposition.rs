@@ -1,7 +1,8 @@
 //! INV-070/073: reserve custody recreation and native surplus classification
 //! compose with exact dual-vault retirement. INV-018/021/025/069/077/078/081
 //! own token integrity, rent, normalization, bounded continuation and validity.
-//! Native-primary expired booked principal remains outside this finite witness.
+//! Row 418 additionally owns native-primary expired booked principal after a
+//! secondary-rail payment, including rollback of the complete retirement prefix.
 
 use super::*;
 use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
@@ -115,8 +116,7 @@ fn absent(env: &V16CuEnv, key: Pubkey) {
             && !account.executable));
 }
 
-#[test]
-fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_retirement() {
+fn run_native_residue_disposition(native_booked: bool) {
     let mut worlds = 0;
     let mut peak = 0;
     let mut payments = 0;
@@ -124,14 +124,15 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
     let mut normalizations = 0;
     for native_rail in 0..2 {
         for expire in [false, true] {
-            // SPL-primary retirement burns booked residue. The native-primary
-            // booked-residue limit is documented, not converted into a green oracle.
-            if expire && native_rail == 0 {
+            if (expire && native_rail == 0) != native_booked {
                 continue;
             }
             for raw in [0, 19] {
                 for sync_at in 0..3 {
                     for missing in [false, true] {
+                        if native_booked && (raw != 19 || sync_at != 2 || missing) {
+                            continue;
+                        }
                         let (mut env, admin, holders, rails) = reserve_world(native_rail);
                         let wallets = holders.each_ref().map(|holder| holder.pubkey());
                         env.resolve();
@@ -154,7 +155,7 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                             .collect::<Vec<_>>();
                         let native = &rails[native_rail];
                         let rent = native.empty[0].lamports;
-                        let close = Instruction {
+                        let mut close = Instruction {
                             program_id: env.program_id,
                             accounts: vec![
                                 AccountMeta::new(admin.pubkey(), true),
@@ -172,6 +173,11 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                             }
                             .encode(),
                         };
+                        if native_booked {
+                            close
+                                .accounts
+                                .push(AccountMeta::new(native.recipients[1], false));
+                        }
                         let mut unsigned_close = close.clone();
                         unsigned_close.accounts[0].is_signer = false;
                         let sync =
@@ -384,8 +390,15 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                         let mut redeemed = [0; 2];
                         let mut present = [true; 2];
                         let mut insurance_debits = 0;
-                        let mut rank =
-                            check(&env, paid, redeemed, present, insurance_debits, false, synced);
+                        let mut rank = check(
+                            &env,
+                            paid,
+                            redeemed,
+                            present,
+                            insurance_debits,
+                            false,
+                            synced,
+                        );
                         for kind in 0..3 {
                             let ix = payout(&env, kind, native_rail, PREFIX[kind]);
                             let recipient = usize::from(kind == 2);
@@ -500,7 +513,7 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                                 rank = next_rank;
                                 continue;
                             }
-                            let rail = if kind == 1 {
+                            let rail = if kind == 1 || (native_booked && kind == 0) {
                                 1 - native_rail
                             } else {
                                 native_rail
@@ -608,7 +621,7 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                         let refund = market_frame.lamports - tombstone_rent
                             + rails.iter().map(|rail| rail.empty[0].lamports).sum::<u64>()
                             + if synced { 0 } else { raw };
-                        let changed = [
+                        let mut changed = vec![
                             env.market,
                             admin.pubkey(),
                             rails[0].vault,
@@ -617,11 +630,37 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                             rails[1].admin_token,
                             rails[0].mint,
                         ];
+                        if native_booked {
+                            changed.push(native.recipients[1]);
+                        }
                         let mut close = close;
                         close.data = ProgInstruction::CloseSlab {
                             authority_epoch: env.control_sequences(0).authority_epoch,
                         }
                         .encode();
+                        if native_booked {
+                            assert_eq!((retired, sweep), (248, [319, 697]));
+                            let mut denied = unsigned_close.clone();
+                            denied.accounts[0] = AccountMeta::new(wallets[1], false);
+                            peak = peak.max(land(
+                                &mut env,
+                                &[close.clone(), denied],
+                                &[&admin],
+                                &tracked,
+                                &[],
+                                0,
+                                true,
+                            ));
+                            check(
+                                &env,
+                                paid,
+                                redeemed,
+                                present,
+                                insurance_debits,
+                                expired,
+                                synced,
+                            );
+                        }
                         peak = peak.max(land(
                             &mut env,
                             &[close],
@@ -637,6 +676,12 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                         let mut expected_admin = admin_before;
                         expected_admin.lamports += refund;
                         assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
+                        if native_booked {
+                            assert_eq!(
+                                env.svm.get_account(&native.recipients[1]),
+                                Some(token_image(&native.empty[2], CLAIMS[2] + retired))
+                            );
+                        }
                         for (rail, custody) in rails.iter().enumerate() {
                             absent(&env, custody.vault);
                             assert_eq!(
@@ -644,7 +689,7 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                                 Some(token_image(&custody.empty[3], sweep[rail]))
                             );
                             let mut expected_mint = custody.mint_frame.clone();
-                            if rail == 0 && retired != 0 {
+                            if rail == 0 && retired != 0 && !native_booked {
                                 let mut mint = Mint::unpack(&expected_mint.data).unwrap();
                                 mint.supply -= retired;
                                 Mint::pack(mint, &mut expected_mint.data).unwrap();
@@ -663,7 +708,11 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                                     } else {
                                         0
                                     }
-                                    + if rail == 0 { retired } else { 0 },
+                                    + if rail == 0 && !native_booked {
+                                        retired
+                                    } else {
+                                        0
+                                    },
                                 if rail == 0 { FUNDED } else { SECONDARY }
                                     + if rail == native_rail && synced {
                                         raw
@@ -703,7 +752,7 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
                             market_frame.lamports - tombstone_rent
                                 + rails.iter().map(|rail| rail.empty[0].lamports).sum::<u64>()
                                 + if native_rail == 0 {
-                                    FUNDED - paid_by_rail[0]
+                                    FUNDED - paid_by_rail[0] - retired
                                 } else {
                                     SECONDARY - paid_by_rail[1]
                                 }
@@ -718,7 +767,21 @@ fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_ret
     }
     assert_eq!(
         (worlds, payments, repairs, normalizations),
-        (36, 204, 36, 12)
+        if native_booked {
+            (1, 5, 0, 1)
+        } else {
+            (36, 204, 36, 12)
+        }
     );
-    eprintln!("native residue disposition: worlds={worlds}, payments={payments}, repairs={repairs}, normalizations={normalizations}, retirements={worlds}, rollbacks={}, peak={peak} CU", payments - worlds * 3);
+    eprintln!("native residue disposition: native_booked={native_booked}, worlds={worlds}, payments={payments}, repairs={repairs}, normalizations={normalizations}, retirements={worlds}, rollbacks={}, peak={peak} CU", payments - worlds * 3 + usize::from(native_booked));
+}
+
+#[test]
+fn v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_retirement() {
+    run_native_residue_disposition(false);
+}
+
+#[test]
+fn v16_program_native_primary_booked_residue_survives_dual_quote_retirement_retry() {
+    run_native_residue_disposition(true);
 }
