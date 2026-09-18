@@ -24190,6 +24190,40 @@ releases, and 40 exact payouts and terminal deletions. Existing test-support dea
 and the Solana-client future-incompatibility warning remain. No full unfiltered suite or engine
 proof rerun is claimed.
 
+## INV-085 last-representable quotient boundaries (2026-09-18)
+
+One selector in [the CU arithmetic owner](cu/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs),
+`v16_program_mul_div_adapters_match_at_last_representable_quotients`, derives the last
+representable floor, ceil and doubled-ceil inputs with BigUint, then checks each input
+and its immediate neighbors. Nine rates give 81 evaluations, all with products wider
+than `u128`. Existing BigUint helpers, the independent host long-division oracle in
+`tests/support/reference_math.rs`, and production `fee_share_floor` / `batch_leg_fee`
+must agree on both exact results and overflow. The identity-price notional must remain
+exact; `two_sided_trade_fee_paid` must agree with bigint doubling before narrowing.
+Each derived limit explicitly succeeds and its successor rejects. Nonvacuity checks
+observe eight evaluations where floor is `u128::MAX` but ceil overflows, and 41 where
+the one-sided fee fits but doubling overflows.
+
+This adds correlated success/error boundaries absent from the existing fixed-value
+Cartesian corpus and deliberately untargeted by its generated words. It would detect
+a saturating/wrapping final ceil increment or premature rejection of a wide product.
+The rates exceed public policy limits to exercise already-exposed pure helpers: this
+is host execution of production wrapper arithmetic, not new SBF transition evidence.
+Engine U256/prover arithmetic and generic INV-086 history equivalence remain outside
+this increment; no production code, proof, pin or invariant status changes.
+
+Exact verification: **3/3 pass**, including the new selector and both existing corpora:
+
+```sh
+CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+cargo test --locked --offline --test v16_cu -- --exact --nocapture \
+  inv_085_proven_arithmetic_equals_deployed_arithmetic::v16_program_mul_div_adapters_match_at_last_representable_quotients \
+  inv_085_proven_arithmetic_equals_deployed_arithmetic::v16_program_canonical_arithmetic_matches_bigint_on_full_width_boundaries \
+  inv_085_proven_arithmetic_equals_deployed_arithmetic::v16_program_policy_arithmetic_matches_independent_full_width_corpus
+rustfmt --edition 2021 --check tests/invariants/cu/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs
+git diff --check
+```
+
 ## Wrapper arithmetic conformance checkpoint (2026-09-08)
 
 Finding-blind tests/docs increment from

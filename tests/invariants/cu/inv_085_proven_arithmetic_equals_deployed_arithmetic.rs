@@ -965,6 +965,111 @@ fn v16_program_canonical_arithmetic_matches_bigint_on_full_width_boundaries() {
 }
 
 #[test]
+fn v16_program_mul_div_adapters_match_at_last_representable_quotients() {
+    use percolator_prog::policy_v16;
+    use support::reference_math;
+
+    let denominator = BigUint::from(10_000u64);
+    let maximum = BigUint::from(u128::MAX);
+    let identity_price = u64::try_from(POS_SCALE).unwrap();
+    let mut cases = 0;
+    let mut ceil_only_overflows = 0;
+    let mut doubling_only_overflows = 0;
+
+    for bps in [
+        10_001u16,
+        10_003,
+        16_383,
+        16_384,
+        19_999,
+        20_000,
+        32_767,
+        32_768,
+        u16::MAX,
+    ] {
+        let factor = BigUint::from(bps);
+        // Derive adjacent success/error inputs from mathematical output limits,
+        // independently of the deployed quotient/remainder decomposition.
+        let last_floor = (((&maximum + 1u8) * &denominator - 1u8) / &factor)
+            .to_u128()
+            .unwrap();
+        let last_ceil = (&maximum * &denominator / &factor).to_u128().unwrap();
+        let last_double = ((&maximum / 2u8) * &denominator / &factor)
+            .to_u128()
+            .unwrap();
+
+        assert!(policy_v16::fee_share_floor(last_floor, bps).is_some());
+        assert_eq!(policy_v16::fee_share_floor(last_floor + 1, bps), None);
+        assert!(policy_v16::batch_leg_fee(last_ceil, identity_price, u64::from(bps)).is_some());
+        assert_eq!(
+            policy_v16::batch_leg_fee(last_ceil + 1, identity_price, u64::from(bps)),
+            None
+        );
+        assert!(policy_v16::two_sided_trade_fee_paid(last_double, u64::from(bps)).is_some());
+        assert_eq!(
+            policy_v16::two_sided_trade_fee_paid(last_double + 1, u64::from(bps)),
+            None
+        );
+
+        for boundary in [last_floor, last_ceil, last_double] {
+            for amount in [boundary - 1, boundary, boundary + 1] {
+                let label = format!("amount={amount}, bps={bps}, boundary={boundary}");
+                let product = BigUint::from(amount) * &factor;
+                assert!(
+                    product > maximum,
+                    "{label}: multiplication must exceed u128"
+                );
+                let floor = inv_085_big_mul_div_floor(amount, u64::from(bps), 10_000);
+                let ceil = inv_085_big_mul_div_ceil(amount, u64::from(bps), 10_000);
+                let doubled = (((&product + &denominator - 1u8) / &denominator) * 2u8).to_u128();
+                assert_eq!(
+                    reference_math::mul_div_floor(amount, u128::from(bps), 10_000).ok(),
+                    floor,
+                    "{label}: host floor oracle"
+                );
+                assert_eq!(
+                    reference_math::mul_div_ceil(amount, u128::from(bps), 10_000).ok(),
+                    ceil,
+                    "{label}: host ceil oracle"
+                );
+                assert_eq!(policy_v16::fee_share_floor(amount, bps), floor, "{label}");
+                assert_eq!(
+                    policy_v16::risk_notional_ceil(amount, identity_price),
+                    Some(amount),
+                    "{label}: identity notional must survive a wide intermediate"
+                );
+                assert_eq!(
+                    policy_v16::batch_leg_fee(amount, identity_price, u64::from(bps)),
+                    ceil,
+                    "{label}"
+                );
+                assert_eq!(
+                    policy_v16::two_sided_trade_fee_paid(amount, u64::from(bps)),
+                    doubled,
+                    "{label}"
+                );
+                ceil_only_overflows += usize::from(floor == Some(u128::MAX) && ceil.is_none());
+                doubling_only_overflows += usize::from(ceil.is_some() && doubled.is_none());
+                cases += 1;
+            }
+        }
+    }
+    assert_eq!(cases, 81);
+    assert!(
+        ceil_only_overflows > 0,
+        "ceil must overflow while floor still fits"
+    );
+    assert!(
+        doubling_only_overflows > 0,
+        "one-side fee must fit while doubling overflows"
+    );
+    println!(
+        "INV-085 quotient boundaries: cases={cases}, ceil_only_overflows={ceil_only_overflows}, \
+         doubling_only_overflows={doubling_only_overflows}"
+    );
+}
+
+#[test]
 fn v16_program_public_arithmetic_envelope_is_strictly_inside_u128() {
     let max_risk_notional =
         inv_085_big_risk_notional(percolator::MAX_TRADE_SIZE_Q, percolator::MAX_ORACLE_PRICE)
