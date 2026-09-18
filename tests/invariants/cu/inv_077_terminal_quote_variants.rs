@@ -1454,3 +1454,268 @@ fn quote_variants_terminal_close_at_capacity(terminal_backing: bool) {
         }
     }
 }
+
+#[test]
+fn v16_program_max_market_dense_backing_expiry_has_bounded_terminal_progress() {
+    use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_capacity;
+
+    const N: usize = MAX_10M_MARKET_SLOTS;
+    const CHUNK: usize = percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL;
+    const LIMIT: u64 = 300_000;
+    let expiry = N as u64 + 10;
+    let funded: Vec<_> = (0..2 * CHUNK)
+        .chain(std::iter::once(2 * N - 1))
+        .map(|domain| (domain, 3 + (domain % 7) as u64))
+        .collect();
+    let total: u64 = funded.iter().map(|(_, amount)| amount).sum();
+    assert!(CHUNK < N);
+    assert!(state::market_account_len_for_capacity(N).unwrap() <= 10 * 1024 * 1024);
+    assert!(state::market_account_len_for_capacity(N + 1).unwrap() > 10 * 1024 * 1024);
+
+    let mut env = inv018_public_spl_market_with_capacity(0, V16CuMarketParams::default(), N);
+    let admin = env.admin.insecure_clone();
+    for asset in 1..N {
+        assert_cu_within(
+            "dense backing public activation",
+            env.activate_asset(asset as u16, asset as u64 + 1, 100),
+            LIMIT,
+        );
+    }
+    assert_eq!(env.market_state().1.config.max_market_slots as usize, N);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data.len(),
+        state::market_account_len_for_capacity(N).unwrap()
+    );
+    let destination = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &env.mint,
+            &destination,
+            &admin.pubkey(),
+            &[],
+            total,
+        )
+        .unwrap(),
+        &[&admin],
+    )
+    .unwrap();
+    for &(domain, amount) in &funded {
+        assert_cu_within(
+            "dense backing public funding",
+            env.top_up_backing_bucket_from_admin_token_with_cu(
+                destination,
+                domain as u16,
+                amount.into(),
+                expiry,
+            ),
+            LIMIT,
+        );
+    }
+    env.resolve();
+    let (initial_cfg, initial_group) = env.market_state();
+    assert_eq!(initial_cfg.terminal_slab_scan_progress, 0);
+    assert_eq!(initial_group.materialized_portfolio_count, 0);
+    assert_eq!(initial_group.mode, MarketModeV16::Resolved);
+    assert_eq!(
+        initial_group
+            .source_backing_buckets
+            .iter()
+            .filter(|bucket| bucket.status == percolator::BackingBucketStatusV16::Fresh)
+            .count(),
+        funded.len()
+    );
+    let market_frame = env.svm.get_account(&env.market).unwrap();
+    let custody_keys = [
+        env.vault,
+        env.mint,
+        destination,
+        admin.pubkey(),
+        env.vault_authority,
+    ];
+    let custody_frame = custody_keys.map(|key| env.svm.get_account(&key));
+    assert_eq!(env.token_amount(env.vault), total);
+    assert_eq!(env.token_amount(destination), 0);
+    let close = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.mint, false),
+        ],
+        data: ProgInstruction::CloseSlab {
+            authority_epoch: env.control_sequences(0).authority_epoch,
+        }
+        .encode(),
+    };
+
+    // Each expiry invalidates the prefix. The tail expiry therefore requires a
+    // complete rescan, even after both sides of the first full window are retired.
+    let expected_calls = 2 * CHUNK + (N - 1) / CHUNK + 1 + N.div_ceil(CHUNK);
+    let mut expired = 0;
+    let mut cursor = 0;
+    let mut fresh_atoms = total;
+    let mut peaks = [0u64; 3];
+    for call in 0..expected_calls {
+        let before_rank = (funded.len() - expired, N - cursor);
+        let scan_end = (cursor + CHUNK).min(N);
+        let expiring = funded
+            .get(expired)
+            .copied()
+            .filter(|(domain, _)| (cursor..scan_end).contains(&(domain / 2)));
+        let final_call = expiring.is_none() && scan_end == N;
+        assert_eq!(final_call, call + 1 == expected_calls);
+        let before = env.svm.get_account(&env.market).unwrap();
+        env.svm.warp_to_slot(expiry + call as u64);
+        env.svm.expire_blockhash();
+        let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        payer.lamports -= 2 * solana_sdk::fee::FeeStructure::default().lamports_per_signature;
+        let cu = send_raw_ixs(
+            &mut env.svm,
+            &env.payer,
+            vec![
+                heap_ix(),
+                ComputeBudgetInstruction::set_compute_unit_limit(LIMIT as u32),
+                close.clone(),
+            ],
+            &[&admin],
+        )
+        .expect("dense expiry must commit bounded terminal progress");
+        assert_cu_within("maximum-market dense backing terminal step", cu, LIMIT);
+        assert_eq!(env.svm.get_account(&env.payer.pubkey()), Some(payer));
+        let route = if final_call {
+            2
+        } else if expiring.is_some() {
+            0
+        } else {
+            1
+        };
+        peaks[route] = peaks[route].max(cu);
+        if final_call {
+            break;
+        }
+        if let Some((_, amount)) = expiring {
+            expired += 1;
+            fresh_atoms -= amount;
+            cursor = 0;
+        } else {
+            cursor = scan_end;
+        }
+        let (cfg, group) = env.market_state();
+        let after_rank = (
+            group
+                .source_backing_buckets
+                .iter()
+                .filter(|bucket| bucket.status == percolator::BackingBucketStatusV16::Fresh)
+                .count(),
+            N - usize::try_from(cfg.terminal_slab_scan_progress).unwrap(),
+        );
+        assert_eq!(after_rank, (funded.len() - expired, N - cursor));
+        assert!(
+            after_rank < before_rank,
+            "every successful continuation must lower the decoded expiry/scan rank"
+        );
+        let mut expected_cfg = initial_cfg;
+        expected_cfg.terminal_slab_scan_progress = cursor as u128;
+        assert_eq!(cfg, expected_cfg);
+        assert_eq!(group.current_slot, expiry + call as u64);
+        assert_eq!(
+            (group.c_tot, group.insurance, group.vault),
+            (0, 0, total.into())
+        );
+        assert_eq!(group.materialized_portfolio_count, 0);
+        assert_eq!(group.backing_provider_earnings_total, 0);
+        assert_eq!(group.source_claim_bound_total_num, 0);
+        for (index, &(domain, amount)) in funded.iter().enumerate() {
+            let bucket = group.source_backing_buckets[domain];
+            let remaining = if index < expired {
+                0
+            } else {
+                u128::from(amount) * BOUND_SCALE
+            };
+            assert_eq!(bucket.expiry_slot, expiry);
+            assert_eq!(
+                bucket.status,
+                if index < expired {
+                    percolator::BackingBucketStatusV16::Expired
+                } else {
+                    percolator::BackingBucketStatusV16::Fresh
+                }
+            );
+            assert_eq!(bucket.fresh_unliened_backing_num, remaining);
+            assert_eq!(
+                group.source_credit[domain].fresh_reserved_backing_num,
+                remaining
+            );
+        }
+        let after = env.svm.get_account(&env.market).unwrap();
+        assert_eq!(
+            market_group_header_bytes(&after.data)
+                .source_fresh_backing_total_num
+                .get(),
+            u128::from(fresh_atoms) * BOUND_SCALE
+        );
+        let slots_start =
+            MARKET_GROUP_OFF + std::mem::size_of::<percolator::MarketGroupV16HeaderAccount>();
+        let slot_len = std::mem::size_of::<percolator::Market<state::AssetOracleStorageV16>>();
+        let changed_start = expiring.map_or(after.data.len(), |(domain, _)| {
+            slots_start + domain / 2 * slot_len
+        });
+        let changed_end = expiring.map_or(after.data.len(), |_| changed_start + slot_len);
+        assert!(after.data[slots_start..changed_start] == before.data[slots_start..changed_start]);
+        assert!(after.data[changed_end..] == before.data[changed_end..]);
+        assert_eq!(
+            (
+                after.lamports,
+                after.owner,
+                after.executable,
+                after.rent_epoch
+            ),
+            (
+                before.lamports,
+                before.owner,
+                before.executable,
+                before.rent_epoch
+            )
+        );
+        assert_eq!(
+            custody_keys.map(|key| env.svm.get_account(&key)),
+            custody_frame
+        );
+    }
+    assert_eq!(expired, funded.len());
+    assert_eq!(fresh_atoms, 0);
+    let tombstone = env.svm.get_account(&env.market).unwrap();
+    assert_closed_market_tombstone(&tombstone);
+    let rent = env
+        .svm
+        .minimum_balance_for_rent_exemption(tombstone.data.len());
+    assert_eq!(tombstone.lamports, rent);
+    assert_eq!(tombstone.owner, env.program_id);
+    let mut expected_admin = custody_frame[3].clone().unwrap();
+    expected_admin.lamports +=
+        market_frame.lamports - rent + custody_frame[0].as_ref().unwrap().lamports;
+    assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
+    assert!(env
+        .svm
+        .get_account(&env.vault)
+        .is_none_or(|account| account.lamports == 0));
+    let mut expected_mint = custody_frame[1].clone().unwrap();
+    let mut mint = Mint::unpack(&expected_mint.data).unwrap();
+    assert_eq!(mint.supply, total);
+    mint.supply = 0;
+    Mint::pack(mint, &mut expected_mint.data).unwrap();
+    assert_eq!(env.svm.get_account(&env.mint), Some(expected_mint));
+    assert_eq!(env.svm.get_account(&destination), custody_frame[2]);
+    assert_eq!(env.svm.get_account(&env.vault_authority), custody_frame[4]);
+    println!(
+        "INV-077 dense terminal expiry: assets={N}, funded_domains={}, atoms={total}, calls={expected_calls}, expiry_peak={}, scan_peak={}, close_peak={}, max_CU={}",
+        funded.len(), peaks[0], peaks[1], peaks[2], peaks.iter().max().unwrap()
+    );
+}

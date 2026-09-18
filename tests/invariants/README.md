@@ -1493,6 +1493,74 @@ component replacement. No retained-authority or terminal workflow is involved.
 Production code, dependency pins and invariant statuses are unchanged.
 [Scope, comparison, exact commands and results](inv_020_equal_composite_audit_20260917.md).
 
+## INV-077 dense backing expiry at maximum market capacity (2026-09-18)
+
+One new selector in [the existing terminal quote owner](cu/inv_077_terminal_quote_variants.rs),
+`v16_program_max_market_dense_backing_expiry_has_bounded_terminal_progress`,
+publicly activates all **5,782 assets / 11,564 domains** in a **10,483,956-byte**
+market and checks that capacity plus one exceeds 10 MiB. Public SPL funding and
+wrapper top-ups populate both backing sides of the first **256-asset scan window**
+and the final short domain: **513 funded domains**, with unequal principal amounts.
+All program-owned state is public instruction output.
+
+At exact backing expiry, administrative `CloseSlab` starts a bounded continuation
+on successively later authenticated slots. Each normalization retires exactly one
+domain and resets the cursor; each scan advances by the 256-asset budget. The
+test requires exactly **558 calls**, including the full rescan after final-domain
+expiry. Every nonfinal success strictly lowers the decoded lexicographic rank
+of remaining Fresh buckets and remaining scan distance, while retaining exact
+principal totals, all other asset-slot bytes, wrapper configuration, SPL custody,
+mint, destination and administrator Accounts. Exact payer fees are checked.
+Final closure burns only the funded principal, preserves destination custody,
+and checks the market tombstone and exact vault/slab rent refunds.
+
+This adds dense repeated expiry and cursor invalidation to maximum-capacity
+terminal progress. The nearby public quote-capacity selector has only one funded
+last domain; the INV-071 dense-claimant selector pays all reserves before closure
+and needs no terminal scan. The native maximum-market selector covers insurance
+payments and optional ledgers, not backing normalization. This is one SPL,
+claim-free, administrator-signed retirement history. It does not saturate every
+market domain or add earned fees, insurance recredit, receipts, active legs,
+source liens, Recovery, or unavailable-authority retirement. INV-077 and rows
+420/421/423/433 retain their existing open scope; no status promotion is claimed.
+
+Validation is confined to exact selectors, scoped rustfmt and patch whitespace
+checks. Default-feature SBF is freshly rebuilt with platform-tools v1.52 on base
+`601f8b7dfa2a905e25226f1833286ddf4f97c4c8`, engine
+`4db11a8cb0053815e23a35d3a7d3edc265d8d866`; SBF SHA-256:
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`.
+
+The final isolated new selector is **1 passed / 0 failed**, 1,504 filtered,
+56.58s: all 558 calls complete and retire **3,078 atoms**. Route peaks are
+**142,085 CU** (expiry), **131,483 CU** (scan), and **96,569 CU** (close).
+The highest observed peak across the exact runs is **151,085 CU**, below the
+enforced **300,000-CU transaction limit**. Construction is excluded from these peaks.
+
+The two-selector run is **1 passed / 1 failed**: the unchanged sparse control
+`v16_program_quote_variants_retire_public_last_domain_backing_at_capacity`
+expects cursor 254 after expiry in its first 255-slot world, but receives 0.
+Its isolated exact retry reproduces the same assertion at line 1334 before any
+CU summary is printed. The pinned wrapper resets the cursor on `BackingExpired`
+to rediscover earlier recredit; the new selector explicitly verifies that reset
+and the subsequent full rescan. The existing control is byte-for-byte unchanged
+and its stale cursor/call-count oracle is outside this one-selector addition.
+This validation does not claim a green neighboring matrix or broad suite.
+
+Reproduction from the isolated worktree (all build output stays under `target`):
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target" TMPDIR="$PWD/target/tmp"
+export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_max_market_dense_backing_expiry_has_bounded_terminal_progress -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_max_market_dense_backing_expiry_has_bounded_terminal_progress \
+  inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_quote_variants_retire_public_last_domain_backing_at_capacity
+rustfmt --check --edition 2021 --config skip_children=true tests/invariants/cu/inv_077_terminal_quote_variants.rs
+git diff --check
+```
+
 ## INV-077 public native insurance completion at capacity (2026-09-17)
 
 Owner: [cu/inv_077_public_native_insurance_capacity.rs](cu/inv_077_public_native_insurance_capacity.rs),
