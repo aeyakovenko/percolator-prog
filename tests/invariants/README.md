@@ -1,5 +1,17 @@
 # Invariant-owned test coverage
 
+## Row 428 atomic thaw and retained debit (2026-09-18)
+
+[The focused note](row428_atomic_thaw_20260918.md) adds one selector in
+[the existing Resolved-debit retry file](cu/inv_008_resolved_debit_retry.rs).
+A stale insurance suffix restores a completed destination thaw, payout and epoch
+increment, including lazy ledger initialization. The retained repair/payout then
+commits; its old debit stays stale with sufficient stock, and the successor drains
+the remainder. This adds atomic thaw rollback to existing fixed-custody retries
+and replacement-custody coverage. New/control exact selectors pass at
+**49,692 / 72,101 CU** measured peaks. Row 428 remains COVERED; liabilities,
+recredit, native redemption and retirement are outside this bounded increment.
+
 ## Row 417 atomic native receipt repair (2026-09-18)
 
 [The focused note](row417_native_receipt_repair_20260918.md) adds one selector in

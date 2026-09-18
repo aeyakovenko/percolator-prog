@@ -9,6 +9,318 @@ use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 use std::collections::BTreeMap;
 
 #[test]
+fn v16_resolved_retained_debit_restores_atomic_thaw_before_consuming_epoch() {
+    use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_freeze_authority;
+
+    const FUNDED: u64 = 60;
+    const DEBIT: u64 = 29;
+    const LIMIT: u64 = 200_000;
+    let freezer = Keypair::new();
+    let params = V16CuMarketParams::default();
+    let mut env = inv018_public_spl_market_with_freeze_authority(
+        0,
+        params,
+        params.max_portfolio_assets as usize,
+        Some(freezer.pubkey()),
+    );
+    let admin = env.admin.insecure_clone();
+    assert_ne!(freezer.pubkey(), admin.pubkey());
+    let wallet = create_ata_for_test(&mut env.svm, &env.payer, admin.pubkey(), env.mint);
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &wallet,
+                &admin.pubkey(),
+                &[],
+                FUNDED,
+            )
+            .unwrap(),
+            spl_token::instruction::set_authority(
+                &spl_token::ID,
+                &env.mint,
+                None,
+                spl_token::instruction::AuthorityType::MintTokens,
+                &admin.pubkey(),
+                &[],
+            )
+            .unwrap(),
+        ],
+        &[&admin],
+    )
+    .unwrap();
+    let controls = env.control_sequences(0);
+    env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            market_id: env.asset_market_id(0),
+            authority_epoch: controls.authority_epoch,
+            intent_id: next_control_sequence(controls.insurance_top_up),
+            amount: FUNDED.into(),
+        },
+        vec![
+            AccountMeta::new_readonly(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(wallet, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    )
+    .unwrap();
+    let ledger = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &ledger,
+        state::insurance_ledger_account_len(),
+        env.program_id,
+    );
+    env.resolve();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::freeze_account(
+            &spl_token::ID,
+            &wallet,
+            &env.mint,
+            &freezer.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&freezer],
+    )
+    .unwrap();
+    let controls = env.control_sequences(0);
+    let initial_market = env.market_state();
+    assert_eq!(initial_market.1.mode, MarketModeV16::Resolved);
+    let withdrawal = |authority_epoch, amount: u64| Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(admin.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(wallet, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger.pubkey(), false),
+        ],
+        data: ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            market_id: env.asset_market_id(0),
+            authority_epoch,
+            amount: amount.into(),
+        }
+        .encode(),
+    };
+    let retained = withdrawal(controls.authority_epoch, DEBIT);
+    let remainder = withdrawal(controls.authority_epoch + 1, FUNDED - DEBIT);
+    let thaw = spl_token::instruction::thaw_account(
+        &spl_token::ID,
+        &wallet,
+        &env.mint,
+        &freezer.pubkey(),
+        &[],
+    )
+    .unwrap();
+    let stale = PercolatorError::EngineStale as u32;
+    let requests = [
+        (
+            vec![retained.clone()],
+            Some((2, PercolatorError::InvalidTokenAccount as u32)),
+            [0, 0],
+            0,
+        ),
+        (
+            vec![thaw.clone(), retained.clone(), retained.clone()],
+            Some((4, stale)),
+            [1, 2],
+            0,
+        ),
+        (vec![thaw, retained.clone()], None, [1, 2], DEBIT),
+        (vec![retained], Some((2, stale)), [0, 0], DEBIT),
+        (vec![remainder], None, [1, 1], FUNDED),
+    ];
+    // Retain every wire envelope before delivery; only the mint freezer signs repairs.
+    let requests: Vec<_> = requests
+        .into_iter()
+        .enumerate()
+        .map(|(step, (ixs, error, completed, paid))| {
+            let repairs = ixs[0].program_id == spl_token::ID;
+            let mut all = vec![
+                heap_ix(),
+                ComputeBudgetInstruction::set_compute_unit_limit(LIMIT as u32 - step as u32),
+            ];
+            all.extend(ixs);
+            let mut signers = vec![&env.payer];
+            if repairs {
+                signers.push(&freezer);
+            }
+            let tx = Transaction::new_signed_with_payer(
+                &all,
+                Some(&env.payer.pubkey()),
+                &signers,
+                env.svm.latest_blockhash(),
+            );
+            assert_eq!(
+                tx.message.header.num_required_signatures,
+                if repairs { 2 } else { 1 }
+            );
+            assert!(
+                !tx.message.account_keys[..tx.message.header.num_required_signatures as usize]
+                    .contains(&admin.pubkey())
+            );
+            (bincode::serialize(&tx).unwrap(), error, completed, paid)
+        })
+        .collect();
+    drop(admin);
+    let keys = [
+        env.market,
+        env.mint,
+        env.vault,
+        wallet,
+        ledger.pubkey(),
+        env.admin.pubkey(),
+        env.vault_authority,
+        freezer.pubkey(),
+    ];
+    let baseline: BTreeMap<_, _> = keys
+        .iter()
+        .map(|key| (*key, env.svm.get_account(key)))
+        .collect();
+    let mint = Mint::unpack(&baseline[&env.mint].as_ref().unwrap().data).unwrap();
+    assert_eq!((mint.supply, mint.mint_authority), (FUNDED, COption::None));
+    assert_eq!(mint.freeze_authority, COption::Some(freezer.pubkey()));
+    assert_eq!(
+        TokenAccount::unpack(&baseline[&wallet].as_ref().unwrap().data)
+            .unwrap()
+            .state,
+        AccountState::Frozen
+    );
+    let mut debits = 0;
+    let mut rollbacks = 0;
+    let mut peak = 0;
+    for (wire, error, completed, paid) in requests {
+        let tx: Transaction = bincode::deserialize(&wire).unwrap();
+        tx.verify().unwrap();
+        assert_eq!(bincode::serialize(&tx).unwrap(), wire);
+        assert!(wire.len() <= solana_sdk::packet::PACKET_DATA_SIZE);
+        let before: BTreeMap<_, _> = keys
+            .iter()
+            .chain(&tx.message.account_keys)
+            .map(|key| (*key, env.svm.get_account(key)))
+            .collect();
+        let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+        payer.lamports -= FeeStructure::default().lamports_per_signature
+            * u64::from(tx.message.header.num_required_signatures);
+        let result = env.svm.send_transaction(tx);
+        let meta = if let Some((index, code)) = error {
+            let failure = result.expect_err("frozen custody or consumed epoch must reject");
+            assert_eq!(
+                failure.err,
+                TransactionError::InstructionError(index, InstructionError::Custom(code))
+            );
+            for (key, account) in &before {
+                if *key != env.payer.pubkey() {
+                    assert_eq!(
+                        env.svm.get_account(key),
+                        *account,
+                        "complete rollback {key}"
+                    );
+                }
+            }
+            rollbacks += 1;
+            failure.meta
+        } else {
+            debits += 1;
+            result.expect("retained repair and successor payment must commit")
+        };
+        for (program, count) in [env.program_id, spl_token::ID].into_iter().zip(completed) {
+            assert_eq!(
+                meta.logs
+                    .iter()
+                    .filter(|line| **line == format!("Program {program} success"))
+                    .count(),
+                count
+            );
+        }
+        assert_eq!(env.svm.get_account(&env.payer.pubkey()), Some(payer));
+        assert!(meta.compute_units_consumed > 0);
+        assert_cu_within("row428 atomic thaw", meta.compute_units_consumed, LIMIT);
+        peak = peak.max(meta.compute_units_consumed);
+        let remaining = FUNDED - paid;
+        if paid == DEBIT {
+            assert!(remaining >= DEBIT, "stale debit still fully funded");
+        }
+        let mut expected = initial_market.clone();
+        expected.1.insurance = remaining.into();
+        expected.1.vault = remaining.into();
+        expected.1.insurance_domain_budget[0] = remaining.into();
+        expected.1.insurance_domain_budget_remaining_total = remaining.into();
+        assert_eq!(env.market_state(), expected);
+        let mut expected_controls = controls;
+        expected_controls.authority_epoch += debits;
+        assert_eq!(env.control_sequences(0), expected_controls);
+        for (key, amount) in [(env.vault, remaining), (wallet, paid)] {
+            let mut expected = baseline[&key].clone().unwrap();
+            let mut token = TokenAccount::unpack(&expected.data).unwrap();
+            token.amount = amount;
+            if key == wallet && paid > 0 {
+                token.state = AccountState::Initialized;
+            }
+            TokenAccount::pack(token, &mut expected.data).unwrap();
+            assert_eq!(env.svm.get_account(&key), Some(expected));
+        }
+        let mut expected_ledger = baseline[&ledger.pubkey()].clone().unwrap();
+        if paid > 0 {
+            state::init_insurance_ledger(
+                &mut expected_ledger.data,
+                &state::InsuranceLedgerAccountV16 {
+                    market_group: env.market.to_bytes(),
+                    authority: env.admin.pubkey().to_bytes(),
+                    total_principal_atoms: 0,
+                    total_deposited_atoms: 0,
+                    total_withdrawn_atoms: paid.into(),
+                    cumulative_profit_atoms: 0,
+                    cumulative_loss_atoms: 0,
+                    last_observed_insurance_atoms: remaining.into(),
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(env.svm.get_account(&ledger.pubkey()), Some(expected_ledger));
+        for (key, account) in &before {
+            if ![
+                env.payer.pubkey(),
+                env.market,
+                env.vault,
+                wallet,
+                ledger.pubkey(),
+            ]
+            .contains(key)
+            {
+                assert_eq!(env.svm.get_account(key), *account, "success frame {key}");
+            }
+        }
+        let market = env.svm.get_account(&env.market).unwrap();
+        assert_market_stock_census(
+            "row428 atomic thaw",
+            &expected.1,
+            &market.data,
+            &[],
+            remaining.into(),
+        )
+        .unwrap();
+        assert_reservation_encumbrance_census("row428 atomic thaw", &expected.1, &[]).unwrap();
+    }
+    assert_eq!((debits, rollbacks), (2, 3));
+    eprintln!("row428 atomic thaw: 1 history, 5 transactions, 3 exact rollbacks, 1 restored thaw and payout, 2 payouts, peak {peak} CU");
+}
+
+#[test]
 fn v16_resolved_retained_debit_retries_restore_epochs_across_signed_and_unsigned_delivery() {
     const INITIAL: [u128; 4] = [19, 41, 23, 47];
     const SUPPLY: u64 = 130;
