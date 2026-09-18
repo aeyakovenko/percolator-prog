@@ -5,9 +5,190 @@
 //! a later honest caller from discovering the canonical progressing action, and
 //! out-of-order budgeted cranks must refresh without stealing rewards or starving
 //! pending selected marks.
+//! The sparse full-leg witness grows to 70 assets, fills all fourteen leg slots
+//! across asset IDs 63/64, and cranks with sixteen hints in both orders. It joins
+//! INV-071/077 rank and CU checks; the existing sparse admission witness stops
+//! after trading, while contiguous full-leg refresh does not exercise this mapping.
 
 use super::*;
 use percolator::AutoCrankPlanV16;
+
+#[test]
+fn v16_program_sparse_full_leg_crank_at_hint_cap_has_order_independent_progress() {
+    const CAPACITY: usize = 70;
+    const LEGS: [u16; 14] = [15, 19, 23, 28, 31, 37, 41, 47, 52, 56, 60, 63, 66, 69];
+    const OPEN_SLOT: u64 = 80;
+    const CRANK_SLOT: u64 = 81;
+    const PRICE: u64 = 100;
+    let mut outcomes = Vec::new();
+
+    for reverse in [false, true] {
+        let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+            V16CuMarketParams {
+                max_portfolio_assets: percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS,
+                max_price_move_bps_per_slot: 10_000,
+                ..V16CuMarketParams::default()
+            },
+            CAPACITY,
+        );
+        assert_eq!(
+            LEGS.len(),
+            env.market_state().1.config.max_portfolio_assets as usize
+        );
+        for asset in LEGS.len()..CAPACITY {
+            env.activate_asset(asset as u16, asset as u64 + 1, PRICE);
+        }
+        assert_eq!(
+            env.market_state().1.config.max_market_slots as usize,
+            CAPACITY
+        );
+        env.svm.warp_to_slot(OPEN_SLOT);
+        let mut hints = vec![0, 1];
+        hints.extend(LEGS);
+        assert_eq!(hints.len(), 16);
+        for &asset in &hints {
+            env.configure_auth_mark_for_asset_as_admin(asset, OPEN_SLOT, PRICE);
+        }
+        env.portfolio_account_len =
+            state::portfolio_account_len_for_market_slots(CAPACITY).unwrap();
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, 5_000_000);
+        env.deposit(&short_owner, short, 5_000_000);
+        for asset in LEGS {
+            env.svm.expire_blockhash();
+            env.trade_asset_with_cu(
+                asset,
+                &long_owner,
+                long,
+                &short_owner,
+                short,
+                POS_SCALE as i128,
+                PRICE,
+                0,
+            );
+        }
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(long))),
+            14
+        );
+        env.svm.warp_to_slot(CRANK_SLOT);
+        for asset in LEGS {
+            env.push_auth_mark_for_asset_as_admin(asset, CRANK_SLOT, PRICE + u64::from(asset));
+        }
+        if reverse {
+            hints.reverse();
+        }
+        let peer_before = env.svm.get_account(&short).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let rank = |env: &V16CuEnv| {
+            let (_, group) = env.market_state();
+            let cert = health_cert(&env.portfolio_state(long));
+            let pending: u64 = hints
+                .iter()
+                .map(|&asset| CRANK_SLOT.saturating_sub(group.assets[asset as usize].slot_last))
+                .sum();
+            (
+                pending,
+                u8::from(
+                    cert.cert_oracle_epoch != group.oracle_epoch
+                        || cert.cert_funding_epoch != group.funding_epoch
+                        || cert.cert_risk_epoch != group.risk_epoch,
+                ),
+            )
+        };
+        assert_eq!(rank(&env).0, 16, "all hinted assets start one slot behind");
+        let mut ranks = vec![rank(&env)];
+        let mut peak = 0;
+        // Asset IDs differ from compact leg slots; the two unheld hints bracket the work.
+        for limit in [900_000, 1_375_000] {
+            let before = rank(&env);
+            if before == (0, 0) {
+                break;
+            }
+            env.svm.expire_blockhash();
+            let cu = env
+                .send(
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: CRANK_SLOT,
+                        observations: hints
+                            .iter()
+                            .map(|&asset_index| CrankObservationHint {
+                                asset_index,
+                                oracle_accounts: 0,
+                            })
+                            .collect(),
+                    },
+                    vec![
+                        AccountMeta::new(env.payer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(long, false),
+                    ],
+                    &[],
+                )
+                .expect("sparse full-leg public refresh must remain executable");
+            assert_cu_within("sparse full-leg, full-hint crank", cu, limit);
+            peak = peak.max(cu);
+            let after = rank(&env);
+            assert!(
+                after < before,
+                "reverse={reverse}: rank {before:?} -> {after:?}"
+            );
+            ranks.push(after);
+            assert_eq!(env.svm.get_account(&short).unwrap(), peer_before);
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+        }
+        assert_eq!(
+            rank(&env),
+            (0, 0),
+            "at most two public calls complete catch-up and certification"
+        );
+        let (_, group) = env.market_state();
+        let account = env.portfolio_state(long);
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&account)),
+            14
+        );
+        assert_eq!(account.capital.get(), 5_000_000);
+        assert_eq!(
+            (group.c_tot, group.vault, group.insurance),
+            (10_000_000, 10_000_000, 0)
+        );
+        let prices: Vec<_> = LEGS
+            .iter()
+            .map(|&asset| {
+                let state = &group.assets[asset as usize];
+                assert_eq!(state.effective_price, PRICE + u64::from(asset));
+                assert_eq!(state.slot_last, CRANK_SLOT);
+                assert_eq!(
+                    (state.oi_eff_long_q, state.oi_eff_short_q),
+                    (POS_SCALE, POS_SCALE)
+                );
+                assert_eq!(
+                    active_leg_for_asset(&account, usize::from(asset)).basis_pos_q,
+                    POS_SCALE as i128
+                );
+                (
+                    state.effective_price,
+                    state.oi_eff_long_q,
+                    state.oi_eff_short_q,
+                )
+            })
+            .collect();
+        eprintln!("INV-072 sparse full-leg/full-hint progress: reverse={reverse} ranks={ranks:?} peak_cu={peak}");
+        outcomes.push((
+            ranks,
+            prices,
+            bytemuck::bytes_of(&account.health_cert).to_vec(),
+        ));
+    }
+    assert_eq!(
+        outcomes[0], outcomes[1],
+        "hint order preserves rank, prices, OI and the full certificate"
+    );
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct CrankProgressSnapshot {
