@@ -1,5 +1,17 @@
 # Invariant-owned test coverage
 
+## Row 429 missing fee-successor wallet (2026-09-18)
+
+[The focused note](row429_missing_successor_wallet_20260918.md) adds one selector
+in [the existing beneficiary-handoff file](cu/inv_024_recreated_beneficiary_handoff.rs).
+After funded fee succession and 17/19-atom paid prefixes, both holder wallets
+disappear. A former-ledger suffix rolls back a five-atom payout; keeper-only
+retries preserve the separate paid histories and drain the exact remaining claims.
+Existing succession tests retain wallets; wallet-absence tests keep the backing
+beneficiary fixed. New/control exact selectors pass at **450,936 / 423,123 CU**
+measured peaks. Row 429 remains COVERED. Live shutdown, expiry/recredit, custody
+repair and slab retirement are outside this bounded increment.
+
 ## Row 428 atomic thaw and retained debit (2026-09-18)
 
 [The focused note](row428_atomic_thaw_20260918.md) adds one selector in

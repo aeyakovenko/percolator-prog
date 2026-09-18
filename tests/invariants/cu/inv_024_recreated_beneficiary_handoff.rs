@@ -21,6 +21,250 @@ fn unsigned_payment(
 }
 
 #[test]
+fn v16_program_missing_fee_successor_wallet_preserves_paid_history_and_unsigned_tail() {
+    let mut world = terminal_earnings_world();
+    let ledgers = [0; 2].map(|_| {
+        let key = Keypair::new();
+        system_create_account_for_test(
+            &mut world.env.svm,
+            &world.env.payer,
+            &key,
+            state::backing_domain_ledger_account_len(),
+            world.env.program_id,
+        );
+        key.pubkey()
+    });
+    let epoch = world.env.control_sequences(0).authority_epoch;
+    let mut book = Entitlements {
+        remaining: [EARNINGS, INSURANCE],
+        paid: [PAYOUTS[0], PAYOUTS[1], 0, 0, 0],
+        holders: [2, 4],
+        principal: BACKING,
+        rotations: 0,
+    };
+    book.check(&world);
+    let prefix = [
+        payout(&world, PRINCIPAL, 2, BACKING, epoch, ledgers[0]),
+        payout(&world, FEES, 2, 17, epoch, ledgers[0]),
+    ];
+    let mut peak = land(&mut world, &ledgers, &prefix, None);
+    book.pay(PRINCIPAL, 2, BACKING);
+    book.pay(FEES, 2, 17);
+    book.check(&world);
+    let old_ledger = world.env.svm.get_account(&ledgers[0]).unwrap();
+    let old_record = state::read_backing_domain_ledger(&old_ledger.data).unwrap();
+    assert_eq!(old_record.authority, world.wallets[2].to_bytes());
+    assert_eq!(old_record.total_earnings_withdrawn_atoms, 17);
+    assert_eq!(
+        old_record.last_observed_bucket_earnings_atoms,
+        u128::from(EARNINGS - 17)
+    );
+
+    let handoff = [
+        rotate(&world, FEES, 2, 3, epoch),
+        payout(&world, FEES, 3, 19, epoch + 1, ledgers[1]),
+    ];
+    peak = peak.max(land(&mut world, &ledgers, &handoff, None));
+    book.holders[FEES] = 3;
+    book.pay(FEES, 3, 19);
+    book.check(&world);
+    let first = unsigned_payment(&world, FEES, 3, 5, epoch + 1, ledgers[1]);
+    let wrong_ledger = unsigned_payment(&world, FEES, 3, 1, epoch + 1, ledgers[0]);
+    let tail = unsigned_payment(&world, FEES, 3, EARNINGS - 41, epoch + 1, ledgers[1]);
+    let TerminalEarningsWorld {
+        mut env,
+        incumbent,
+        successor,
+        wallets,
+        tokens,
+        portfolios,
+        mint_frame,
+        ..
+    } = world;
+    let tracked = [env.market, env.vault, env.mint]
+        .into_iter()
+        .chain(wallets)
+        .chain(tokens)
+        .chain(portfolios)
+        .chain(ledgers)
+        .collect::<Vec<_>>();
+    let keeper = env.payer.pubkey();
+    assert!(!wallets.contains(&keeper));
+    assert!(![wallets[2], wallets[3]].contains(&env.admin.pubkey()));
+    for signer in [&incumbent, &successor] {
+        let wallet = signer.pubkey();
+        let balance = env.svm.get_account(&wallet).unwrap().lamports;
+        peak = peak.max(terminal_reserve_destination_recovery::land(
+            &mut env,
+            &[system_instruction::transfer(&wallet, &keeper, balance)],
+            &[signer],
+            &tracked,
+            &[wallet],
+            0,
+            Some((keeper, balance)),
+            None,
+        ));
+        assert!(env.svm.get_account(&wallet).is_none_or(|account| {
+            account.lamports == 0
+                && account.data.is_empty()
+                && account.owner == solana_sdk::system_program::ID
+                && !account.executable
+        }));
+    }
+    drop((incumbent, successor));
+    let wallet_frames = wallets.map(|key| env.svm.get_account(&key));
+    let token_frames = tokens.map(|key| env.svm.get_account(&key).unwrap());
+    let vault_frame = env.svm.get_account(&env.vault).unwrap();
+    let market_frame = env.svm.get_account(&env.market).unwrap();
+    let profile = state::read_asset_oracle_profile(&market_frame.data, 0).unwrap();
+    assert_eq!(profile.backing_bucket_authority, wallets[3].to_bytes());
+    let sequences = env.control_sequences(0);
+    assert_eq!(sequences.authority_epoch, epoch + 1);
+    let successor_ledger = env.svm.get_account(&ledgers[1]).unwrap();
+    let record = state::read_backing_domain_ledger(&successor_ledger.data).unwrap();
+    assert_eq!(record.market_group, env.market.to_bytes());
+    assert_eq!(record.authority, wallets[3].to_bytes());
+    assert_eq!(record.domain, 1);
+    assert_eq!(record.total_earnings_atoms, 0);
+    assert_eq!(record.total_earnings_withdrawn_atoms, 19);
+    assert_eq!(
+        record.last_observed_bucket_earnings_atoms,
+        u128::from(EARNINGS - 36)
+    );
+    let check = |env: &V16CuEnv, successor_paid: u64, insurance_paid: u64| {
+        let remaining = EARNINGS - 17 - successor_paid;
+        let stock = remaining + INSURANCE - insurance_paid;
+        let group = env.market_state().1;
+        assert_eq!(group.mode, MarketModeV16::Resolved);
+        assert_eq!(
+            (
+                group.c_tot,
+                group.pnl_pos_tot,
+                group.materialized_portfolio_count
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(group.backing_provider_earnings_total, remaining.into());
+        assert_eq!(
+            group.source_backing_buckets[1].utilization_fee_earnings,
+            remaining.into()
+        );
+        assert_eq!(
+            group.source_backing_buckets[1].fresh_unliened_backing_num,
+            0
+        );
+        assert_eq!(group.source_credit[1].fresh_reserved_backing_num, 0);
+        assert_eq!(group.insurance, u128::from(INSURANCE - insurance_paid));
+        assert_eq!(group.insurance_domain_budget[0], group.insurance);
+        assert!(group.insurance_domain_budget[1..]
+            .iter()
+            .all(|amount| *amount == 0));
+        assert!(group
+            .insurance_domain_spent
+            .iter()
+            .all(|amount| *amount == 0));
+        assert_eq!(group.vault, stock.into());
+        let balances = [
+            PAYOUTS[0],
+            PAYOUTS[1],
+            BACKING + 17,
+            successor_paid,
+            insurance_paid,
+        ];
+        assert_eq!(balances.iter().sum::<u64>() + stock, SUPPLY);
+        for ((key, frame), amount) in tokens
+            .into_iter()
+            .zip(&token_frames)
+            .zip(balances)
+            .chain([((env.vault, &vault_frame), stock)])
+        {
+            let mut expected = frame.clone();
+            let mut token = TokenAccount::unpack(&expected.data).unwrap();
+            token.amount = amount;
+            TokenAccount::pack(token, &mut expected.data).unwrap();
+            assert_eq!(env.svm.get_account(&key), Some(expected));
+        }
+        assert_eq!(wallets.map(|key| env.svm.get_account(&key)), wallet_frames);
+        assert_eq!(env.svm.get_account(&env.mint), Some(mint_frame.clone()));
+        assert_eq!(env.svm.get_account(&ledgers[0]), Some(old_ledger.clone()));
+        let account = env.svm.get_account(&ledgers[1]).unwrap();
+        let mut expected = record;
+        expected.total_earnings_withdrawn_atoms = successor_paid.into();
+        expected.last_observed_bucket_earnings_atoms = remaining.into();
+        assert_eq!(
+            state::read_backing_domain_ledger(&account.data).unwrap(),
+            expected
+        );
+        assert_eq!(account.lamports, successor_ledger.lamports);
+        let market = env.svm.get_account(&env.market).unwrap();
+        assert_eq!(market.lamports, market_frame.lamports);
+        assert_eq!(
+            state::read_asset_oracle_profile(&market.data, 0).unwrap(),
+            profile
+        );
+        let mut expected_sequences = sequences;
+        expected_sequences.authority_epoch += u64::from(insurance_paid != 0);
+        assert_eq!(env.control_sequences(0), expected_sequences);
+        crate::support::fuzz_model::assert_market_stock_census(
+            "missing fee successor wallet",
+            &group,
+            &market.data,
+            &[],
+            stock.into(),
+        )
+        .unwrap();
+        crate::support::fuzz_model::assert_reservation_encumbrance_census(
+            "missing fee successor wallet",
+            &group,
+            &[],
+        )
+        .unwrap();
+    };
+    check(&env, 19, 0);
+    // The successful fee prefix must roll back despite both beneficiary wallets being absent.
+    peak = peak.max(terminal_reserve_destination_recovery::land(
+        &mut env,
+        &[first.clone(), wrong_ledger],
+        &[],
+        &tracked,
+        &[],
+        0,
+        None,
+        Some((3, PercolatorError::Unauthorized)),
+    ));
+    check(&env, 19, 0);
+    let allowed = [env.market, env.vault, tokens[3], ledgers[1]];
+    peak = peak.max(terminal_reserve_destination_recovery::land(
+        &mut env,
+        &[first],
+        &[],
+        &tracked,
+        &allowed,
+        0,
+        None,
+        None,
+    ));
+    check(&env, 24, 0);
+    let insurance =
+        terminal_public_reserves::reserve_payout(&env, wallets, tokens, ledgers[1], 2, INSURANCE);
+    assert!(insurance.accounts.iter().all(|meta| !meta.is_signer));
+    let allowed = [env.market, env.vault, tokens[3], tokens[4], ledgers[1]];
+    peak = peak.max(terminal_reserve_destination_recovery::land(
+        &mut env,
+        &[tail, insurance],
+        &[],
+        &tracked,
+        &allowed,
+        0,
+        None,
+        None,
+    ));
+    check(&env, EARNINGS - 17, INSURANCE);
+    assert_cu_within("missing fee successor wallet", peak, 600_000);
+    eprintln!("missing fee successor wallet: worlds=1, absent_wallets=2, exact_rollbacks=1, payouts=6, peak_CU={peak}");
+}
+
+#[test]
 fn v16_program_recreated_reserve_beneficiary_return_preserves_spent_prefix_and_rollback() {
     let mut peak = 0;
     let mut rollbacks = 0;
