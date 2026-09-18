@@ -1,5 +1,66 @@
 # Invariant-owned test coverage
 
+## INV-064 two-asset withdrawal rollback and retry (2026-09-18)
+
+Classification: **nonduplicative public-route coverage**, with secondary
+INV-018/021/080 evidence; no production defect or invariant-status promotion.
+Base: current `origin/main` at `32bc8244ec32f35dced512e44eff6eb60d39ccbb`, isolated
+worktree `/home/anatoly/worktrees/astra-insurance-custody-20260918`. Only current-main
+invariant sources, public wrapper routes and coverage ledgers informed this test;
+no open PR branch, diff, fix, test or withheld holdout body was inspected.
+
+Owner: [cu/inv_064_insurance_withdrawal_policy_equivalence.rs](cu/inv_064_insurance_withdrawal_policy_equivalence.rs),
+selector `v16_program_second_asset_overwithdraw_restores_paid_prefix_ledgers_and_consent`.
+Four public System/SPL/ATA/wrapper histories cross Live/Resolved with both asset
+orders. Fixed domain endowments `[11, 13, 17, 19]` and revoked mint authority bound
+the total payout to 60 atoms. A transaction creates two insurance ledgers, withdraws
+across the first asset's long/short boundary, then requests one atom above the
+second asset's budget while global custody remains sufficient. Exact instruction-5
+`EngineLockActive` and successful System/wrapper/SPL logs establish rejection after
+both rent payments and the first token payout. Every compiled transaction Account,
+plus mint and Clock, returns to its prior value except the exact payer signature fee.
+
+Retry preserves both ledger creations and the captured first withdrawal unchanged,
+reducing only the second request by one atom. Input-derived domain budgets, aggregate
+insurance/vault, SPL balances, full decoded ledgers, per-asset control sequences,
+ledger rent, payer fees, mint and unrelated Account frames check both retry and final
+drain. Live withdrawals require the operator; the Resolved suffix has only payer and
+new-ledger signatures, with no operator signature. Both modes/orders pay exactly 60.
+
+This joins a completed outgoing insurance CPI and consumed debit epoch to a later
+asset-budget failure. Existing INV-064 schedules cover successful splitting and
+post-schedule rejection; INV-080's insurance prefix covers incoming funding before
+a user-capital error; its standalone terminal-insurance failure rejects a corrupted
+vault before SPL execution. None supplies this two-asset withdrawal composition.
+Current main has retired the old proportional-cap/cooldown controls; this test makes
+no claim about those removed controls or whole-invariant closure.
+
+Validation: new exact selector **1/1**, **4 worlds, 4 exact rollbacks, 12 committed
+payouts**, peak **71,962 CU** under 300,000, 1.49 seconds. The adjacent exact
+split-schedule selector passes **1/1** in 0.39 seconds. Scoped rustfmt and
+`git diff --check` pass. No broad suite or engine proofs ran. Reused default-feature
+wrapper SBF SHA-256 `a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`;
+`git diff 2e88c39b HEAD -- src Cargo.toml Cargo.lock` is empty against its
+README-recorded main build base. No wrapper rebuild or matcher is needed.
+
+Exact commands from the isolated worktree:
+
+```sh
+export TMPDIR=/dev/shm CARGO_TARGET_DIR=/dev/shm/percolator-inv077/target/host
+export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv077/target/deploy/percolator_prog.so
+cargo test --locked --offline --test v16_cu inv_064_insurance_withdrawal_policy_equivalence::v16_program_second_asset_overwithdraw_restores_paid_prefix_ledgers_and_consent -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_064_insurance_withdrawal_policy_equivalence::v16_program_insurance_withdrawal_schedules_preserve_asset_allowance_and_exact_retry -- --exact --nocapture --test-threads=1
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_064_insurance_withdrawal_policy_equivalence.rs
+git diff --check
+```
+
+Remaining limits: one authority, one ordinary-SPL quote mint, two flat assets and
+fresh optional ledgers. Active user principal/loss, distinct authorities, native or
+secondary custody, account close/recreation, retained nonzero ledger histories,
+same-asset stale-epoch bundles, arbitrary schedules and supported maxima remain
+outside this witness. Exact rollback still relies on the named SVM semantics.
+
 ## INV-078 keeper-only resource-failure pair exit (2026-09-18)
 
 Classification: **nonduplicative public-route coverage**, with secondary
