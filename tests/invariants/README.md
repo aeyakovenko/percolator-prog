@@ -301,6 +301,62 @@ The new selector and two earnings controls pass: peak CU 450,839 / 249,389 /
 administrator cleanup, paid native-secondary redemption, recredit and arbitrary
 histories. Production, shared helpers, fixtures and TSVs are unchanged.
 
+## Rows 421/433 funded ledger across two recredits (2026-09-18)
+
+One new selector in [the existing INV-073 ledger file](cu/inv_073_insurance_loss_recredit_ledger.rs)
+retains funded insurance telemetry through two unrelated backing expiries.
+The public history deposits 117 insurance atoms, realizes a 100-atom loss, and
+pays 17 before either expiry. Later-asset buckets release 37 at slot 44 and 107
+at slot 48; the same ledger records only 37 then 63 recovered atoms. Each wave
+pays in two keeper-only installments, while administrative normalization crosses
+a saved earlier-asset scan prefix. The second wave cannot overwrite the prior
+loss, profit, withdrawals or paid custody. A retained first-wave 19-atom payment
+rejects `EngineStale` with 22 atoms still payable; the current instruction drains
+that remainder. Final retirement burns exactly 44 excess backing atoms and
+preserves the fully paid ledger and recipient Account with exact rent refunds.
+
+Both recovery/payment prefixes execute before a rejected administrative suffix;
+complete tracked and compiled Accounts roll back, except the exact payer fee.
+The history checks seven rollbacks, five unsigned insurance payments, full ledger
+records, authority epochs, prior user payouts, stock/reservation censuses, mint
+supply and bounded cleanup. Existing funded-ledger tests have one expiry; the
+INV-070 two-wave scanner tests omit the funded insurance ledger. This adds their
+accounting composition, not another scanner or custody variant. The two existing
+single-wave selectors reuse the generalized local loop and retain their oracles.
+
+Rows 421/433 remain OPEN and no TSV status changes. This bounded SPL history has
+no pending user receipts during recredit and does not close row 417 / PR #442,
+native/dual-quote products, arbitrary histories or unavailable-administrator
+retirement. Owner portfolio deletion and administrative normalization/retirement
+retain their existing signers. No production bug or production change is claimed.
+
+Base: `a657d195b3bd982e5800daddbfe235f22acc19a6`; engine
+`4db11a8cb0053815e23a35d3a7d3edc265d8d866`. Isolated worktree:
+`/dev/shm/percolator-inv-agent-terminal-20260918151208`.
+Default-feature wrapper SBF was rebuilt from this worktree using private copied
+caches and platform-tools v1.52; SHA-256:
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`.
+
+Exact validation commands (run from the worktree):
+
+```sh
+env CARGO_TARGET_DIR=/dev/shm/percolator-inv-agent-terminal-20260918151208-sbf-target CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=2 TMPDIR=/dev/shm cargo build-sbf --tools-version v1.52 -- --locked --offline
+env CARGO_TARGET_DIR=/dev/shm/percolator-inv-agent-terminal-20260918151208-host-target PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv-agent-terminal-20260918151208-sbf-target/deploy/percolator_prog.so CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=2 TMPDIR=/dev/shm cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_073_no_permanent_user_lock::insurance_loss_recredit_ledger::v16_program_funded_insurance_ledger_accumulates_two_recredits_without_replaying_paid_prefix \
+  inv_073_no_permanent_user_lock::insurance_loss_recredit_ledger::v16_program_unsigned_insurance_ledger_preserves_loss_and_recredit_after_cleanup \
+  inv_073_no_permanent_user_lock::insurance_loss_recredit_ledger::v16_program_partially_recredited_insurance_ledger_preserves_unrecovered_principal_through_retirement_retry
+rustfmt --check --edition 2021 --config skip_children=true tests/invariants/cu/inv_073_insurance_loss_recredit_ledger.rs
+git diff --check
+git diff --exit-code a657d195b3bd982e5800daddbfe235f22acc19a6 -- . ':(exclude)tests/invariants/cu/inv_073_insurance_loss_recredit_ledger.rs' ':(exclude)tests/invariants/README.md'
+```
+
+Build and exact tests pass: **3 passed, 0 failed**, 1.73s. New/full/partial
+measured CU peaks: **218,448 / 216,943 / 215,443**, below the existing 400,000
+ceiling. Initial host compilation identified a missing test-local
+`Option<Instruction>` annotation, fixed before the successful run. Only this
+README and the existing invariant file change; Cargo inputs, production, shared
+helpers, fixtures and harness registrations are unchanged.
+
 ## Row 421 funded insurance ledger through loss and recredit (2026-09-17)
 
 [The focused note](row421_loss_recredit_ledger_20260917.md) documents one new

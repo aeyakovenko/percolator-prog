@@ -2,6 +2,7 @@
 //! A funded ledger observes the loss before backing expiry, then records recovery
 //! without erasing the loss or counting the earlier payment twice. Public setup only.
 //! Partial recovery leaves unpaid principal as telemetry through retirement and retry.
+//! Two expiry waves retain the same funded ledger and cap cumulative recovery at loss.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -60,16 +61,23 @@ fn close(env: &V16CuEnv, destination: Pubkey) -> Instruction {
 
 #[test]
 fn v16_program_unsigned_insurance_ledger_preserves_loss_and_recredit_after_cleanup() {
-    insurance_ledger_loss_recredit(307);
+    insurance_ledger_loss_recredit(&[(0, 307, EXPIRY)]);
 }
 
 #[test]
 fn v16_program_partially_recredited_insurance_ledger_preserves_unrecovered_principal_through_retirement_retry(
 ) {
-    insurance_ledger_loss_recredit(61);
+    insurance_ledger_loss_recredit(&[(0, 61, EXPIRY)]);
 }
 
-fn insurance_ledger_loss_recredit(backing: u64) {
+#[test]
+fn v16_program_funded_insurance_ledger_accumulates_two_recredits_without_replaying_paid_prefix() {
+    insurance_ledger_loss_recredit(&[(2, 37, EXPIRY), (3, 107, EXPIRY + 4)]);
+}
+
+fn insurance_ledger_loss_recredit(waves: &[(u16, u64, u64)]) {
+    let backing = waves.iter().map(|(_, amount, _)| amount).sum::<u64>();
+    let assets = if waves.len() == 2 { 2 } else { 1 };
     let recovery = backing.min(LOSS);
     let entitlement = FIRST + recovery;
     let supply = CAPITAL.iter().sum::<u64>() + FUNDED + backing;
@@ -77,7 +85,7 @@ fn insurance_ledger_loss_recredit(backing: u64) {
     let mut env = inv018_public_spl_market_with_params(
         0,
         V16CuMarketParams {
-            max_portfolio_assets: 1,
+            max_portfolio_assets: assets,
             maintenance_margin_bps: 1_000,
             initial_margin_bps: 1_000,
             max_price_move_bps_per_slot: 500,
@@ -108,7 +116,9 @@ fn insurance_ledger_loss_recredit(backing: u64) {
         .unwrap();
     }
     env.svm.warp_to_slot(1);
-    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    for asset in 0..assets {
+        env.configure_auth_mark_for_asset_as_admin(asset as u16, 1, 100);
+    }
     env.configure_permissionless_resolve_with_cu(20, 3);
     let owners: [Keypair; 3] = std::array::from_fn(|_| Keypair::new());
     let portfolios = owners.each_ref().map(|owner| {
@@ -218,27 +228,14 @@ fn insurance_ledger_loss_recredit(backing: u64) {
         &[&beneficiary],
     )
     .unwrap();
-    env.send(
-        ProgInstruction::TopUpBackingBucket {
-            domain: 0,
-            market_id: env.asset_market_id(0),
-            authority_epoch: env.control_sequences(0).authority_epoch,
-            intent_id: 0,
-            backing_fee_bps: 0,
-            insurance_share_bps: 0,
-            amount: backing.into(),
-            expiry_slot: EXPIRY,
-        },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(destination, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[&admin],
-    )
-    .unwrap();
+    for &(domain, amount, expiry) in waves {
+        env.top_up_backing_bucket_from_admin_token_with_cu(
+            destination,
+            domain,
+            amount.into(),
+            expiry,
+        );
+    }
     let funded_ledger = env.svm.get_account(&ledger).unwrap();
     let funded_record = state::InsuranceLedgerAccountV16 {
         market_group: env.market.to_bytes(),
@@ -402,14 +399,12 @@ fn insurance_ledger_loss_recredit(backing: u64) {
             (0, 0, 0)
         );
         assert_eq!(group.insurance, insurance.into());
-        assert_eq!(
-            group.insurance_domain_budget,
-            vec![u128::from(FUNDED - paid), 0]
-        );
-        assert_eq!(
-            group.insurance_domain_spent,
-            vec![u128::from(LOSS - recovered), 0]
-        );
+        let mut budgets = vec![0; usize::from(assets) * 2];
+        let mut spent = budgets.clone();
+        budgets[0] = u128::from(FUNDED - paid);
+        spent[0] = u128::from(LOSS - recovered);
+        assert_eq!(group.insurance_domain_budget, budgets);
+        assert_eq!(group.insurance_domain_spent, spent);
         assert_eq!(
             group.insurance_domain_budget_remaining_total,
             insurance.into()
@@ -469,7 +464,7 @@ fn insurance_ledger_loss_recredit(backing: u64) {
     peaks[2] = land(&mut env, &[first], &[], &tracked, &changed, None, (1, 1));
     check(&env, FIRST, 0, 1);
     assert_eq!(
-        env.market_state().1.source_backing_buckets[0].status,
+        env.market_state().1.source_backing_buckets[usize::from(waves[0].0)].status,
         BackingBucketStatusV16::Fresh
     );
     let premature = payment(&env, beneficiary_key, reserve, ledger, 1);
@@ -486,65 +481,118 @@ fn insurance_ledger_loss_recredit(backing: u64) {
         (0, 0),
     ));
     check(&env, FIRST, 0, 1);
-    env.svm.warp_to_slot(EXPIRY);
-    let normalize = close(&env, destination);
-    peaks[3] = peaks[3].max(land(
-        &mut env,
-        &[normalize],
-        &[&admin],
-        &tracked,
-        &[market],
-        None,
-        (1, 0),
-    ));
-    check(&env, FIRST, 0, 1);
-    assert_eq!(
-        env.market_state().1.source_backing_buckets[0].status,
-        BackingBucketStatusV16::Expired
-    );
-    assert_eq!(
-        env.market_state().1.source_credit[0].fresh_reserved_backing_num,
-        0
-    );
-    // Recredit and the ledger's profit observation occur in the same unsigned call.
-    // A denied administrative suffix must restore both, preserving the earlier loss/payment.
-    let recovered_prefix = payment(&env, beneficiary_key, reserve, ledger, 41);
-    let mut denied_close = close(&env, destination);
-    denied_close.accounts[0].is_signer = false;
-    peaks[1] = peaks[1].max(land(
-        &mut env,
-        &[recovered_prefix.clone(), denied_close],
-        &[],
-        &tracked,
-        &[],
-        Some((
-            3,
-            InstructionError::Custom(PercolatorError::ExpectedSigner as u32),
-        )),
-        (1, 1),
-    ));
-    check(&env, FIRST, 0, 1);
-    peaks[2] = peaks[2].max(land(
-        &mut env,
-        &[recovered_prefix],
-        &[],
-        &tracked,
-        &changed,
-        None,
-        (1, 1),
-    ));
-    check(&env, FIRST + 41, recovery, 2);
-    let tail = payment(&env, beneficiary_key, reserve, ledger, recovery - 41);
-    peaks[2] = peaks[2].max(land(
-        &mut env,
-        &[tail],
-        &[],
-        &tracked,
-        &changed,
-        None,
-        (1, 1),
-    ));
-    check(&env, entitlement, recovery, 3);
+    let mut paid = FIRST;
+    let mut recovered = 0;
+    let mut payments = 1;
+    let mut retained_prefix: Option<Instruction> = None;
+    for (wave, &(domain, amount, expiry)) in waves.iter().enumerate() {
+        if assets == 2 {
+            let scan = close(&env, destination);
+            peaks[3] = peaks[3].max(land(
+                &mut env,
+                &[scan],
+                &[&admin],
+                &tracked,
+                &[market],
+                None,
+                (1, 0),
+            ));
+            assert_eq!(env.market_state().0.terminal_slab_scan_progress, 1);
+            check(&env, paid, recovered, payments);
+        }
+        env.svm.warp_to_slot(expiry);
+        let normalize = close(&env, destination);
+        peaks[3] = peaks[3].max(land(
+            &mut env,
+            &[normalize],
+            &[&admin],
+            &tracked,
+            &[market],
+            None,
+            (1, 0),
+        ));
+        check(&env, paid, recovered, payments);
+        assert_eq!(
+            env.market_state().1.source_backing_buckets[usize::from(domain)].status,
+            BackingBucketStatusV16::Expired
+        );
+        assert_eq!(
+            env.market_state().1.source_credit[usize::from(domain)].fresh_reserved_backing_num,
+            0
+        );
+        let next_recovered = (recovered + amount).min(LOSS);
+        let prefix_amount = if amount < 41 { 19 } else { 41 };
+        // The second profit observation must retain the first loss, recovery and withdrawals.
+        // Rejection after an actual transfer rolls back this observation and recredit together.
+        let recovered_prefix = payment(&env, beneficiary_key, reserve, ledger, prefix_amount);
+        let mut denied_close = close(&env, destination);
+        denied_close.accounts[0].is_signer = false;
+        peaks[1] = peaks[1].max(land(
+            &mut env,
+            &[recovered_prefix.clone(), denied_close],
+            &[],
+            &tracked,
+            &[],
+            Some((
+                3,
+                InstructionError::Custom(PercolatorError::ExpectedSigner as u32),
+            )),
+            (1, 1),
+        ));
+        check(&env, paid, recovered, payments);
+        peaks[2] = peaks[2].max(land(
+            &mut env,
+            &[recovered_prefix.clone()],
+            &[],
+            &tracked,
+            &changed,
+            None,
+            (1, 1),
+        ));
+        paid += prefix_amount;
+        payments += 1;
+        recovered = next_recovered;
+        check(&env, paid, recovered, payments);
+        if let Some(ref stale) = retained_prefix {
+            assert!(FIRST + recovered - paid >= 19);
+            peaks[1] = peaks[1].max(land(
+                &mut env,
+                &[stale.clone()],
+                &[],
+                &tracked,
+                &[],
+                Some((
+                    2,
+                    InstructionError::Custom(PercolatorError::EngineStale as u32),
+                )),
+                (0, 0),
+            ));
+            check(&env, paid, recovered, payments);
+        }
+        if wave == 0 {
+            retained_prefix = Some(recovered_prefix);
+        }
+        let tail = payment(
+            &env,
+            beneficiary_key,
+            reserve,
+            ledger,
+            FIRST + recovered - paid,
+        );
+        peaks[2] = peaks[2].max(land(
+            &mut env,
+            &[tail],
+            &[],
+            &tracked,
+            &changed,
+            None,
+            (1, 1),
+        ));
+        paid = FIRST + recovered;
+        payments += 1;
+        check(&env, paid, recovered, payments);
+    }
+    assert_eq!((paid, recovered), (entitlement, recovery));
     let overclaim = payment(&env, beneficiary_key, reserve, ledger, 1);
     let overclaim_error = if recovery < LOSS {
         11
@@ -560,7 +608,7 @@ fn insurance_ledger_loss_recredit(backing: u64) {
         Some((2, InstructionError::Custom(overclaim_error))),
         (0, 0),
     ));
-    check(&env, entitlement, recovery, 3);
+    check(&env, entitlement, recovery, payments);
     let paid_ledger = env.svm.get_account(&ledger);
     let paid_reserve = env.svm.get_account(&reserve);
     let tombstone_rent = env
@@ -602,7 +650,7 @@ fn insurance_ledger_loss_recredit(backing: u64) {
             Some((3, InstructionError::Custom(1))),
             close_successes,
         ));
-        check(&env, entitlement, recovery, 3);
+        check(&env, entitlement, recovery, payments);
     }
     let close_changes = [env.market, env.vault, env.mint, admin.pubkey()];
     peaks[3] = peaks[3].max(land(
@@ -630,6 +678,6 @@ fn insurance_ledger_loss_recredit(backing: u64) {
             .supply,
         supply - burned
     );
-    let rollbacks = 5 + usize::from(recovery < LOSS);
-    println!("row421 loss/recredit ledger: backing={backing}, paid={entitlement}, loss={LOSS}, profit={recovery}, unpaid_principal={}, rollbacks={rollbacks}, peak_CU(user,rejection,payment,cleanup)={peaks:?}", LOSS - recovery);
+    let rollbacks = 5 + usize::from(recovery < LOSS) + 2 * (waves.len() - 1);
+    println!("row421 loss/recredit ledger: waves={}, backing={backing}, paid={entitlement}, loss={LOSS}, profit={recovery}, unpaid_principal={}, rollbacks={rollbacks}, peak_CU(user,rejection,payment,cleanup)={peaks:?}", waves.len(), LOSS - recovery);
 }
