@@ -182,7 +182,8 @@ fn run_authenticated_handoff(
     fresh_prices: &[u64],
     shares: &[u16],
     raw_prints: &[u64],
-) {
+    terminal_order: Option<[usize; 5]>,
+) -> u64 {
     const ACCEPTED: u64 = ENTRY - 2_400;
     // MARK is below the accepted frontier: the premium hits the negative cap.
     // Funding rounds down before the per-lot index is scaled by ADL_ONE.
@@ -453,6 +454,47 @@ fn run_authenticated_handoff(
                             InstructionError::Custom(PercolatorError::EngineNonProgress as u32),
                         )),
                     ));
+                    let loss = i128::from(ENTRY - ACCEPTED) - funding_per_lot;
+                    expected[0] -= 100 * loss + penalty as i128;
+                    expected[1] += 100 * loss;
+                    expected[2] -= loss;
+                    expected[3] += loss;
+                    expected[4] += reward as i128;
+                    if let Some(order) = terminal_order {
+                        assert_eq!(funding_per_lot, 1);
+                        assert_eq!(reward, 0);
+                        // Collect the losing trader's debit before freezing the
+                        // sources; both winning portfolios keep their pending K/F.
+                        for _ in 0..4 {
+                            if census(&env, portfolios)[2] {
+                                break;
+                            }
+                            let settle_loss =
+                                observe(&env, trader_a, owners[4].pubkey(), Some(fresh), None);
+                            peak_cu = peak_cu.max(submit(
+                                &mut env,
+                                &owners[4],
+                                &[settle_loss],
+                                &tracked,
+                                None,
+                            ));
+                        }
+                        assert!(census(&env, portfolios)[2]);
+                        assert_eq!(values(&env, portfolios)[2], expected[2]);
+                        peak_cu = peak_cu.max(redeem_unsettled_funded_handoff(
+                            &mut env,
+                            &owners,
+                            portfolios,
+                            tokens,
+                            &tracked,
+                            feed,
+                            order,
+                            expected,
+                            2 * paid + penalty,
+                        ));
+                        worlds += 1;
+                        continue;
+                    }
                     // Complete ADL and source accounting before checking every owner's entitlement.
                     for _ in 0..8 {
                         for index in [1, 2, 3, 0] {
@@ -471,12 +513,6 @@ fn run_authenticated_handoff(
                         }
                     }
                     assert!(census(&env, portfolios)[..4].iter().all(|current| *current));
-                    let loss = i128::from(ENTRY - ACCEPTED) - funding_per_lot;
-                    expected[0] -= 100 * loss + penalty as i128;
-                    expected[1] += 100 * loss;
-                    expected[2] -= loss;
-                    expected[3] += loss;
-                    expected[4] += reward as i128;
                     assert_eq!(values(&env, portfolios), expected);
                     let expected_pnl = [0, 100 * loss, 0, loss, 0];
                     for i in 0..5 {
@@ -551,6 +587,7 @@ fn run_authenticated_handoff(
     );
     assert_eq!(liquidation_rollbacks, worlds);
     println!("authenticated handoff: max_funding={max_funding}, funding_per_lot={funding_per_lot}, worlds={worlds}, late_rollbacks={late_rejections}, liquidation_rollbacks={liquidation_rollbacks}, peak_transaction_cu={peak_cu}");
+    peak_cu
 }
 
 #[test]
@@ -560,10 +597,250 @@ fn v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper
         &[MARK, MARK - 1_000],
         &[3_333, 10_000],
         &[980_000, 900_000],
+        None,
     );
 }
 
 #[test]
 fn v16_program_nonzero_funding_fresh_handoff_preserves_owner_and_keeper_entitlement() {
-    run_authenticated_handoff(1_000, &[MARK], &[3_333], &[980_000]);
+    run_authenticated_handoff(1_000, &[MARK], &[3_333], &[980_000], None);
+}
+
+fn redeem_unsettled_funded_handoff(
+    env: &mut V16CuEnv,
+    owners: &[Keypair; 5],
+    portfolios: [Pubkey; 5],
+    tokens: [Pubkey; 5],
+    tracked: &[Pubkey],
+    feed: [u8; 32],
+    order: [usize; 5],
+    expected: [i128; 5],
+    retained: u128,
+) -> u64 {
+    const LIMIT: u64 = 500_000;
+    let mut peak = 0;
+    let mut tracked = tracked.to_vec();
+    let live = env.market_state().1;
+    assert_eq!(live.assets[0].effective_price, ENTRY - 2_400);
+    assert_eq!(
+        (live.assets[0].f_long_num, live.assets[0].f_short_num),
+        (ADL_ONE as i128, -(ADL_ONE as i128))
+    );
+    assert!(!census(env, portfolios)[1]);
+    assert_eq!(values(env, portfolios)[1], i128::from(FUNDS[1]));
+    assert_eq!(env.portfolio_state(portfolios[1]).pnl.get(), 0);
+    assert!(expected[1] > i128::from(FUNDS[1]));
+    let supply = FUNDS.iter().map(|amount| u128::from(*amount)).sum::<u128>();
+    let due = expected.map(|value| u128::try_from(value).unwrap());
+    assert_eq!(due.iter().sum::<u128>() + retained, supply);
+    let mint = env.svm.get_account(&env.mint);
+    let accounts = portfolios.map(|key| env.svm.get_account(&key));
+    let resolve = Instruction {
+        program_id: env.program_id,
+        data: ProgInstruction::ResolveMarket {
+            asset_generation_frontier: live.next_market_id,
+            authority_epoch: env.control_sequences(0).authority_epoch,
+        }
+        .encode(),
+        accounts: vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+    };
+    let admin = env.admin.insecure_clone();
+    peak = peak.max(submit_with_cu_limit(
+        env,
+        &admin,
+        &[resolve],
+        &tracked,
+        None,
+        LIMIT,
+    ));
+    assert_eq!(portfolios.map(|key| env.svm.get_account(&key)), accounts);
+    let frozen_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(
+        frozen_profile.effective_price_provenance,
+        percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
+    );
+
+    // Resolve while K/F are still pending on the peer. Later time and evidence
+    // must neither accrue more funding nor reclassify the withheld reward.
+    set_test_clock(env, 30, 1_025);
+    let later = env.set_pyth_price_with_conf(&feed, 1_200_000, -6, 0, 1_025);
+    tracked.push(later);
+    let report = env.svm.get_account(&later);
+    let frame = |env: &V16CuEnv| {
+        let group = env.market_state().1;
+        assert_eq!(group.mode, MarketModeV16::Resolved);
+        assert_eq!(group.resolved_slot, 6);
+        assert_eq!(group.assets[0].slot_last, 6);
+        assert_eq!(group.assets[0].effective_price, ENTRY - 2_400);
+        for (index, frozen_index, oi) in [
+            (
+                group.assets[0].f_long_num,
+                live.assets[0].f_long_num,
+                group.assets[0].oi_eff_long_q,
+            ),
+            (
+                group.assets[0].f_short_num,
+                live.assets[0].f_short_num,
+                group.assets[0].oi_eff_short_q,
+            ),
+        ] {
+            if index != frozen_index {
+                assert_eq!((index, oi), (0, 0), "only a retired side clears funding");
+            }
+        }
+        assert_eq!(
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0,)
+                .unwrap(),
+            frozen_profile
+        );
+        assert_eq!(group.insurance, retained);
+        assert_eq!(group.insurance_domain_budget_remaining_total, 0);
+        assert!(group
+            .insurance_domain_budget
+            .iter()
+            .all(|value| *value == 0));
+        let paid = tokens.map(|key| u128::from(env.token_amount(key)));
+        for i in 0..5 {
+            assert!(paid[i] <= due[i], "owner {i} cannot borrow another claim");
+        }
+        assert_eq!(group.vault, u128::from(env.token_amount(env.vault)));
+        assert_eq!(group.vault + paid.iter().sum::<u128>(), supply);
+        assert_eq!(env.svm.get_account(&env.mint), mint);
+        assert_eq!(env.svm.get_account(&later), report);
+        census(env, portfolios);
+        paid
+    };
+    assert_eq!(frame(env), [0; 5]);
+    let invalid_suffix = Instruction {
+        program_id: solana_sdk::system_program::ID,
+        accounts: vec![],
+        data: vec![255],
+    };
+    let mut rollback_checked = [false; 5];
+    let mut closes = 0;
+    let mut waiting = 0;
+    for round in 0..16 {
+        let mut progressed = false;
+        for actor in order {
+            if resolved_portfolio_is_terminal(env, portfolios[actor]) {
+                continue;
+            }
+            let close = Instruction {
+                program_id: env.program_id,
+                data: ProgInstruction::CloseResolved {
+                    fee_rate_per_slot: 0,
+                }
+                .encode(),
+                accounts: vec![
+                    AccountMeta::new_readonly(owners[actor].pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolios[actor], false),
+                    AccountMeta::new(tokens[actor], false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+            };
+            let before = env.portfolio_state(portfolios[actor]);
+            if percolator::active_bitmap_is_empty(active_bitmap(&before))
+                && before.pnl.get() > 0
+                && env.market_state().1.resolved_payout_blocker_count > 0
+            {
+                peak = peak.max(submit_with_cu_limit(
+                    env,
+                    &owners[actor],
+                    &[close],
+                    &tracked,
+                    Some((
+                        2,
+                        InstructionError::Custom(PercolatorError::EngineNonProgress as u32),
+                    )),
+                    LIMIT,
+                ));
+                waiting += 1;
+                frame(env);
+                continue;
+            }
+            if !rollback_checked[actor] {
+                peak = peak.max(submit_with_cu_limit(
+                    env,
+                    &owners[actor],
+                    &[close.clone(), invalid_suffix.clone()],
+                    &tracked,
+                    Some((3, InstructionError::InvalidInstructionData)),
+                    LIMIT,
+                ));
+                rollback_checked[actor] = true;
+            }
+            let before_paid = frame(env);
+            let before_accounts = portfolios.map(|key| env.svm.get_account(&key));
+            peak = peak.max(submit_with_cu_limit(
+                env,
+                &owners[actor],
+                &[close],
+                &tracked,
+                None,
+                LIMIT,
+            ));
+            let after_paid = frame(env);
+            assert!(after_paid[actor] >= before_paid[actor]);
+            assert!(before != env.portfolio_state(portfolios[actor]) || before_paid != after_paid);
+            for i in 0..5 {
+                if i != actor {
+                    assert_eq!(env.svm.get_account(&portfolios[i]), before_accounts[i]);
+                    assert_eq!(after_paid[i], before_paid[i]);
+                }
+            }
+            progressed = true;
+            closes += 1;
+        }
+        if portfolios
+            .iter()
+            .all(|key| resolved_portfolio_is_terminal(env, *key))
+        {
+            break;
+        }
+        assert!(progressed, "funded cohort stalled in round {round}");
+    }
+    assert!(rollback_checked.iter().all(|checked| *checked));
+    assert!(portfolios
+        .iter()
+        .all(|key| resolved_portfolio_is_terminal(env, *key)));
+    assert_eq!(frame(env), due);
+    assert_eq!(due[4], u128::from(FUNDS[4]));
+    let terminal = env.market_state().1;
+    assert_eq!((terminal.c_tot, terminal.pnl_pos_tot), (0, 0));
+    assert_eq!(terminal.source_claim_bound_total_num, 0);
+    assert_eq!(terminal.resolved_payout_blocker_count, 0);
+    assert_eq!(
+        (
+            terminal.assets[0].oi_eff_long_q,
+            terminal.assets[0].oi_eff_short_q
+        ),
+        (0, 0)
+    );
+    assert_eq!(terminal.vault, retained);
+    assert_cu_within("unsettled funded handoff redemption", peak, LIMIT);
+    println!("row422 funded terminal: order={order:?}, paid={due:?}, retained={retained}, closes={closes}, suffix_rollbacks=5, waiting_rollbacks={waiting}, peak={peak} CU");
+    peak
+}
+
+#[test]
+fn v16_program_unsettled_funding_handoff_preserves_retained_penalty_through_terminal_orders() {
+    let mut peak = 0;
+    for order in [[0, 1, 2, 3, 4], [4, 3, 2, 1, 0]] {
+        peak = peak.max(run_authenticated_handoff(
+            1_000,
+            &[MARK],
+            &[3_333],
+            &[980_000],
+            Some(order),
+        ));
+    }
+    println!("row422 unsettled funding/terminal composition: 4 histories, peak={peak} CU");
 }

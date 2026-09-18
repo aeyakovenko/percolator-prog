@@ -734,6 +734,67 @@ rollback transactions now execute scan rediscovery and native reclassification
 through exact retirement. All three exact selectors pass. Production and status
 TSVs are unchanged; broader receipt/recredit/classification compositions stay open.
 
+## Row 422 pending funding through terminal payout (2026-09-18)
+
+One new selector in [the existing handoff owner](cu/inv_045_authenticated_reward_handoff.rs)
+composes nonzero funding, paid-origin liquidation and `ResolveMarket` during
+Hybrid price lag. Four public LiteSVM histories cross report publication order
+with forward/reverse cohort redemption. The losing trader's debit is collected
+in Live mode; the winning peer still has its original capital, zero stored PnL
+and a stale certificate when resolution freezes its pending K/F at slot 6.
+Later Clock/report inputs cannot accrue more funding or reclassify the retained
+penalty. Funding indexes may clear only after their side's OI reaches zero.
+
+Input arithmetic gives one funding atom per lot and 2,399 atoms of net loss per
+lot. The 5,986-atom liquidation penalty earns zero reward during paid-price lag.
+All five SPL payouts equal `[4854114, 100239900, 9227565, 9232363, 1000]`;
+all accounts terminate, OI and source claims clear, and exactly 1,546,058 atoms
+remain as unbudgeted insurance. Every close frames other owners and reconciles
+custody. The four histories require 28 progressing closes, 20 terminal suffix
+rollbacks and four waiting-close rollbacks, plus the existing handoff rejections.
+
+This is substantive INV-045 evidence with INV-020/024/036/041/061 checks: the
+existing funded handoff settles every owner in Live mode and only withdraws the
+keeper; the reward terminal witness disables funding. The dual-Hybrid recipient
+witness also disables funding, while INV-024's recycled/PnL reward terminal
+histories use maintenance rewards. None owns this pending-funding/retained-penalty
+terminal composition. Row 422 remains OPEN. Arbitrary histories, exposed keepers,
+other transports, maintenance, insurance withdrawal and slab retirement remain
+outside this increment. Resolving before the losing trader's debit is collected
+also remains outside scope: a development probe left one-atom receipt shortfalls
+for each winner. No general terminal completeness or production-fix claim is made.
+
+Validation from `f45df361045e1ca05f953198c00b579ef41261e4`: the new selector and
+both existing handoff controls pass (3/3). Measured transaction peaks are
+301,027 CU (new and funded control) and 298,170 CU (zero-funding control).
+The new terminal suffix alone peaks at 189,794 CU, below its 500,000-CU bound;
+initial funding/configuration and opening/discovery trades are outside these peaks.
+Private host/SBF caches were copied from `percolator-main-host-target` and
+`percolator-public-gap-20260916-c91e-sbf-target`. The default SBF was rebuilt
+locked/offline with platform-tools v1.52 and engine
+`4db11a8cb0053815e23a35d3a7d3edc265d8d866`; SHA-256
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`.
+
+```bash
+export TMPDIR=/dev/shm CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_TARGET_DIR=/dev/shm/row422-funding-terminal-20260918-host-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/row422-funding-terminal-20260918-sbf-target/deploy/percolator_prog.so
+CARGO_TARGET_DIR=/dev/shm/row422-funding-terminal-20260918-sbf-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/row422-funding-terminal-20260918-sbf-target/deploy -- --locked
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::v16_program_unsettled_funding_handoff_preserves_retained_penalty_through_terminal_orders \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::v16_program_nonzero_funding_fresh_handoff_preserves_owner_and_keeper_entitlement \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper_exit
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_045_authenticated_reward_handoff.rs
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
+The changed-path allowlist contains only this README and the handoff owner;
+production, Cargo, fixtures, TSVs, support and global harness files are unchanged.
+No broad suite or Kani result is claimed.
+
 ## Row 422 active keeper maintenance receipts (2026-09-18)
 
 [One focused selector](row422_active_keeper_maintenance_receipts_20260918.md) in
