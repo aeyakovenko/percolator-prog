@@ -1,5 +1,32 @@
 # Invariant-owned test coverage
 
+## Open holdout coverage triage (2026-09-18)
+
+Astra Ultra subagents rechecked the current open LoF/DoS holdout rows against
+`origin/main` at `0f7ce3ab`. This was a coverage-fidelity pass, not a status
+promotion and not a proof that the full invariant set is closed.
+
+The pass found no net-new nonduplicative selector to add for rows 416, 417, 420,
+421, 422, 423, 424 or 433. Each row already has at least one public-wrapper
+LiteSVM selector that would rediscover the corresponding withheld bug class:
+
+| Row | Existing public invariant evidence checked |
+| --- | --- |
+| 416 | `inv_005_authority_incarnation_binding::retained_oracle_exposure::{v16_program_retained_empty_oracle_handoff_rechecks_exposure_before_payout,v16_program_cold_oracle_handoff_waits_for_recovery_loss_cleanup}` covers funded cold-oracle takeover, Recovery cleanup and rollback. |
+| 417 | `inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_program_late_unrelated_backing_cannot_outlive_and_erase_resolved_receipt` and `native_receipt_redemption::v16_program_native_payout_redeem_recreate_replay_preserves_receipts_and_terminal_value` cover late-expiry receipt survival and native replay/rollback. |
+| 420 | `inv_024_attributed_quote_value_conservation::terminal_earnings_succession::distinct_provider_disposition::{v16_program_distinct_absent_provider_inverse_expiry_unblocks_scan_without_losing_fees,v16_program_absent_multi_asset_provider_rejects_cross_domain_earnings_ledger_and_retries}` covers inverse expiry and provider principal/earnings isolation. |
+| 421 | `inv_073_no_permanent_user_lock::insurance_loss_recredit_ledger::{v16_program_funded_insurance_ledger_accumulates_two_recredits_without_replaying_paid_prefix,v16_program_partially_recredited_insurance_ledger_preserves_unrecovered_principal_through_retirement_retry}` covers funded ledger loss, repeated partial recredit, paid-prefix preservation and retirement retry. |
+| 422 | `inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper_exit` and `...::retained_penalty_handoff::mixed_selected_provenance::v16_program_mixed_exposed_legs_bind_rewards_to_selected_price_lineage` cover stale-paid-fresh reward laundering and mixed selected-leg provenance. |
+| 423 | `inv_028_source_domain_realizability_cap::historical_latent_capacity::generation_capacity_admission::v16_program_used_generation_admission_reserves_latent_capacity_through_exact_exit` covers latent-domain reservation, exact exit and rollback/retry. |
+| 424 | `inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_scan_recredit::{v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry,v16_program_terminal_scan_competing_assets_share_expired_residual_once,v16_program_competing_recredit_rechecks_retained_custody_repair_at_unchanged_epoch}` covers expiry-triggered scan restart, competing recredit and custody repair. A requested pending-receipt/Recovery overlap was not public-reachable: `CloseSlab` requires Resolved mode with zero materialized portfolios, pending receipts prevent deletion, and new Recovery cannot be declared after resolution. |
+| 433 | `inv_073_no_permanent_user_lock::{v16_program_terminal_public_reserve_disposition_preserves_value_across_orders,v16_program_public_reserve_payments_wait_for_resolved_senior_disposition,v16_program_absent_reserve_recipients_preserve_paid_prefix_through_final_close_rollback_and_retry}` covers unsigned terminal reserve payout ordering, seniority and rollback/retry. |
+
+These checks mean the current invariant corpus rediscovers the open public
+LoF/DoS rows as withheld data. The rows remain OPEN where the README already
+names arbitrary-history, maximum-shape, environmental, pending-receipt, Recovery
+or authority-participation frontiers. PR #439 is not classified here because it
+is a Pinocchio resize/build-capability PR, not a LoF/DoS holdout.
+
 ## Rows 424/433 competing recredit through custody repair (2026-09-18)
 
 One new selector in [the existing scan-recredit owner](cu/inv_070_terminal_scan_recredit.rs)
