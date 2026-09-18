@@ -37,6 +37,55 @@ and replacement-custody coverage. New/control exact selectors pass at
 **49,692 / 72,101 CU** measured peaks. Row 428 remains COVERED; liabilities,
 recredit, native redemption and retirement are outside this bounded increment.
 
+## Rows 412/414 retained grant across funded cure (2026-09-18)
+
+[The existing INV-012 cure owner](cu/inv_012_cure_revocation.rs) adds one exact
+selector for owner-signed grant admission across `CureAndCancelClose`. Four public
+LiteSVM histories cross both CPI routes and both fill signs. A funded
+2,000,000-atom cure and its SPL transfer succeed before the retained grant suffix
+rejects `EngineStale`; complete transaction/protected Accounts roll back, with
+only the exact separate payer signature fee charged. The original standalone
+signed grant then lands unchanged while the close remains active.
+
+The next grant is retained and successfully simulated before cure commits.
+Committed cure leaves position legs and grant sequence unchanged, advances the
+episode and disables authority. The retained grant rejects with exact rollback;
+changing only its episode admits renewal and an actual nonzero CPI fill. Existing
+consumer rejection, peer isolation, custody, capital and OI assertions are reused.
+This adds four funded-cure bundle rollbacks, four unchanged signed deliveries,
+four post-cure grant rollbacks and four episode-only renewals.
+
+Distinct ownership: the original cure selector retains CPI consumers; the retained
+grant episode selector uses bilateral partial reduction/direct flip; generated
+grant bindings use matched round trips and asset replacement. None joins retained
+grant admission with funded close cancellation and rollback of its SPL deposit.
+This is bounded row 412 writer evidence within the remaining rows 412/414 gap;
+arbitrary histories, other lifecycle writers and row 414 generation products are
+not closed or reclassified. No production defect or mutation experiment is claimed.
+
+Base: fetched `origin/main` at `edf12f3a2fc9df8b0646bc477d0da5bc65fa1121`.
+Private worktree: `/dev/shm/percolator-inv012-writer-gap-20260918`.
+Wrapper and auth matcher SBF builds pass with platform-tools v1.52, locked/offline,
+and private build targets. Exact selectors pass **3/3**; measured peaks are
+**433,870 / 430,870 / 465,380 CU**, respectively (setup excluded):
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv012-writer-gap-20260918-host-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv012-writer-gap-20260918-sbf-target/deploy/percolator_prog.so
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=2 TMPDIR=/dev/shm
+cargo test --locked --offline --test v16_cu inv_012_capability_and_delegate_scope::cure_revocation::v16_program_retained_grant_binds_funded_cure_commit_and_rollback -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_012_capability_and_delegate_scope::cure_revocation::v16_program_funded_close_cancellation_requires_fresh_matcher_capability \
+  inv_012_capability_and_delegate_scope::joint_incarnation_binding::revocation_atomicity::retained_grant_episode_retry::v16_program_retained_grant_admission_tracks_partial_and_cross_zero_commit_or_rollback
+rustfmt --check --edition 2021 --config skip_children=true tests/invariants/cu/inv_012_cure_revocation.rs
+git diff --check
+git diff --exit-code edf12f3a2fc9df8b0646bc477d0da5bc65fa1121 -- . ':(exclude)tests/invariants/cu/inv_012_cure_revocation.rs' ':(exclude)tests/invariants/README.md'
+git show --check --oneline HEAD
+```
+
+Only this README and the existing invariant-owned Rust file change. Production,
+Cargo files, fixture sources, TSVs, shared support and global harnesses are protected.
+
 ## Row 412 partial-fill flat and cross-zero round trips (2026-09-18)
 
 [The focused note](row412_partial_boundary_roundtrip_20260918.md) adds one selector

@@ -8,8 +8,58 @@
 
 use super::*;
 
+fn reject_cure_grant(env: &mut V16CuEnv, tx: Transaction, protected: &[Pubkey], index: u8) -> u64 {
+    tx.verify().unwrap();
+    assert!(bincode::serialized_size(&tx).unwrap() <= solana_sdk::packet::PACKET_DATA_SIZE as u64);
+    let before: Vec<_> = tx
+        .message
+        .account_keys
+        .iter()
+        .chain(protected)
+        .map(|key| (*key, env.svm.get_account(key)))
+        .collect();
+    let fee = solana_sdk::fee::FeeStructure::default().lamports_per_signature
+        * tx.signatures.len() as u64;
+    let failed = env.svm.send_transaction(tx).expect_err("stale cure grant");
+    assert_eq!(
+        failed.err,
+        solana_sdk::transaction::TransactionError::InstructionError(
+            index,
+            solana_sdk::instruction::InstructionError::Custom(PercolatorError::EngineStale as u32),
+        )
+    );
+    for program in [env.program_id, spl_token::ID] {
+        assert_eq!(
+            failed
+                .meta
+                .logs
+                .iter()
+                .filter(|line| **line == format!("Program {program} success"))
+                .count(),
+            usize::from(index == 3),
+            "the funded cure and its SPL transfer must precede grant rejection"
+        );
+    }
+    for (key, mut account) in before {
+        if key == env.payer.pubkey() {
+            account.as_mut().unwrap().lamports -= fee;
+        }
+        assert_eq!(env.svm.get_account(&key), account, "grant rollback: {key}");
+    }
+    failed.meta.compute_units_consumed
+}
+
 #[test]
 fn v16_program_funded_close_cancellation_requires_fresh_matcher_capability() {
+    funded_close_cancellation(false);
+}
+
+#[test]
+fn v16_program_retained_grant_binds_funded_cure_commit_and_rollback() {
+    funded_close_cancellation(true);
+}
+
+fn funded_close_cancellation(retain_grants: bool) {
     const CURE: u128 = 2_000_000;
     const PRICE: u64 = 100;
     const EXPIRY: u64 = 100;
@@ -175,8 +225,8 @@ fn v16_program_funded_close_cancellation_requires_fresh_matcher_capability() {
                     env.svm.latest_blockhash(),
                 )
             };
-            let retained_ix = trade(&env, lp);
-            let retained = sign_trade(&env, &retained_ix, lp, context, delegate);
+            let mut retained_ix = trade(&env, lp);
+            let mut retained = sign_trade(&env, &retained_ix, lp, context, delegate);
             let untouched = sign_trade(&env, &trade(&env, peer), peer, peer_context, peer_delegate);
             assert_eq!(retained.signatures.len(), 2, "no LP owner signature");
             let blockhash = retained.message.recent_blockhash;
@@ -260,6 +310,90 @@ fn v16_program_funded_close_cancellation_requires_fresh_matcher_capability() {
             );
             peak_cu = peak_cu.max(rejected.meta.compute_units_consumed);
 
+            let sign_owner = |env: &V16CuEnv, instructions: &[Instruction]| {
+                let mut all = vec![heap_ix(), cu_ix()];
+                all.extend_from_slice(instructions);
+                let tx = Transaction::new_signed_with_payer(
+                    &all,
+                    Some(&env.payer.pubkey()),
+                    &[&env.payer, &lp_owner],
+                    blockhash,
+                );
+                tx.verify().unwrap();
+                assert!(
+                    bincode::serialized_size(&tx).unwrap()
+                        <= solana_sdk::packet::PACKET_DATA_SIZE as u64
+                );
+                tx
+            };
+            let grant_instruction = |env: &V16CuEnv| Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(lp_owner.pubkey(), true),
+                    AccountMeta::new_readonly(env.market, false),
+                    AccountMeta::new(lp, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new_readonly(context, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                data: ProgInstruction::SetMatcherConfig {
+                    portfolio_id: identities[0],
+                    expected_sequence: env.portfolio_matcher_sequence(lp),
+                    position_epoch: epoch,
+                    asset_generation_frontier: env.market_state().1.next_market_id,
+                    enabled: 1,
+                    trade_fee_cap_bps: CAP,
+                    expiry_slot: EXPIRY,
+                }
+                .encode(),
+            };
+            let mut grant_sequence = GRANT_SEQUENCE;
+            let mut retained_grant = None;
+            if retain_grants {
+                let old_grant = grant_instruction(&env);
+                let original = sign_owner(&env, &[old_grant.clone()]);
+                let bytes = bincode::serialize(&original).unwrap();
+                let simulated = env
+                    .svm
+                    .simulate_transaction(original.clone().into())
+                    .expect("grant admission is live during the active close");
+                peak_cu = peak_cu.max(simulated.compute_units_consumed);
+                assert_eq!(snapshot(&env), before);
+                let bundle = sign_owner(&env, &[cure(&env, CURE), old_grant]);
+                peak_cu = peak_cu.max(reject_cure_grant(&mut env, bundle, &keys, 3));
+                assert_eq!(snapshot(&env), before);
+                assert_eq!(env.svm.latest_blockhash(), blockhash);
+                assert_eq!(bincode::serialize(&original).unwrap(), bytes);
+                let landed = env
+                    .svm
+                    .send_transaction(original)
+                    .expect("unchanged signed grant survives the rolled-back funded cure");
+                peak_cu = peak_cu.max(landed.compute_units_consumed);
+                grant_sequence += 1;
+                assert_eq!(env.portfolio_matcher_sequence(lp), grant_sequence);
+                assert_eq!(env.portfolio_position_epoch(lp), epoch);
+                assert_eq!(env.portfolio_state(lp), closing);
+                assert_eq!(env.portfolio_matcher_config(lp), grant);
+                assert_eq!(env.portfolio_matcher_expiry(lp), EXPIRY);
+                for (key, old) in keys.iter().zip(&before) {
+                    if *key != lp {
+                        assert_eq!(&env.svm.get_account(key), old, "grant scope: {key}");
+                    }
+                }
+
+                // Retain fresh sequence consent while the same close is still active.
+                let next = grant_instruction(&env);
+                let tx = sign_owner(&env, &[next.clone()]);
+                let simulated = env
+                    .svm
+                    .simulate_transaction(tx.clone().into())
+                    .expect("next grant remains live before committed cure");
+                peak_cu = peak_cu.max(simulated.compute_units_consumed);
+                retained_grant = Some((next, tx));
+                retained_ix = trade(&env, lp);
+                retained = sign_trade(&env, &retained_ix, lp, context, delegate);
+            }
+
             let funded_cure = Transaction::new_signed_with_payer(
                 &[heap_ix(), cu_ix(), cure(&env, CURE)],
                 Some(&env.payer.pubkey()),
@@ -295,7 +429,7 @@ fn v16_program_funded_close_cancellation_requires_fresh_matcher_capability() {
             assert_eq!(current_grant.matcher_program, grant.matcher_program);
             assert_eq!(current_grant.matcher_context, grant.matcher_context);
             assert_eq!(current_grant.matcher_delegate, grant.matcher_delegate);
-            assert_eq!(env.portfolio_matcher_sequence(lp), GRANT_SEQUENCE);
+            assert_eq!(env.portfolio_matcher_sequence(lp), grant_sequence);
             assert_eq!(env.portfolio_matcher_expiry(lp), 0);
             for (key, old) in keys.iter().zip(&before) {
                 if ![env.market, lp, cure_source, env.vault].contains(key) {
@@ -353,19 +487,37 @@ fn v16_program_funded_close_cancellation_requires_fresh_matcher_capability() {
                 peak_cu = peak_cu.max(rejected.meta.compute_units_consumed);
             }
 
-            env.try_set_matcher_config_with_trade_fee_cap_and_expiry(
-                matcher_program,
-                &lp_owner,
-                lp,
-                context,
-                delegate,
-                1,
-                CAP,
-                EXPIRY,
-            )
-            .expect("explicit fresh owner authorization after cure");
+            if let Some((mut instruction, tx)) = retained_grant {
+                peak_cu = peak_cu.max(reject_cure_grant(&mut env, tx, &keys, 2));
+                let mut repaired = ProgInstruction::decode(&instruction.data).unwrap();
+                match &mut repaired {
+                    ProgInstruction::SetMatcherConfig { position_epoch, .. } => {
+                        *position_epoch = epoch + 1;
+                    }
+                    _ => unreachable!(),
+                }
+                instruction.data = repaired.encode();
+                let tx = sign_owner(&env, &[instruction]);
+                let renewed = env
+                    .svm
+                    .send_transaction(tx)
+                    .expect("changing only the retained grant's episode restores authorization");
+                peak_cu = peak_cu.max(renewed.compute_units_consumed);
+            } else {
+                env.try_set_matcher_config_with_trade_fee_cap_and_expiry(
+                    matcher_program,
+                    &lp_owner,
+                    lp,
+                    context,
+                    delegate,
+                    1,
+                    CAP,
+                    EXPIRY,
+                )
+                .expect("explicit fresh owner authorization after cure");
+            }
             assert_eq!(env.portfolio_position_epoch(lp), epoch + 1);
-            assert_eq!(env.portfolio_matcher_sequence(lp), GRANT_SEQUENCE + 1);
+            assert_eq!(env.portfolio_matcher_sequence(lp), grant_sequence + 1);
             match &mut current_ix {
                 ProgInstruction::TradeCpi {
                     account_b_matcher_sequence,
@@ -375,7 +527,7 @@ fn v16_program_funded_close_cancellation_requires_fresh_matcher_capability() {
                     account_b_matcher_sequence,
                     ..
                 } => {
-                    *account_b_matcher_sequence = GRANT_SEQUENCE + 1;
+                    *account_b_matcher_sequence = grant_sequence + 1;
                 }
                 _ => unreachable!(),
             }
@@ -399,7 +551,7 @@ fn v16_program_funded_close_cancellation_requires_fresh_matcher_capability() {
             );
             assert_eq!(env.portfolio_matcher_config(lp).enabled(), 1);
             assert_eq!(env.portfolio_matcher_expiry(lp), EXPIRY);
-            assert_eq!(env.portfolio_matcher_sequence(lp), GRANT_SEQUENCE + 1);
+            assert_eq!(env.portfolio_matcher_sequence(lp), grant_sequence + 1);
             assert_eq!(env.portfolio_position_epoch(lp), epoch + 2);
             assert_eq!(env.market_state().1.assets[1].oi_eff_long_q, POS_SCALE);
             assert_eq!(env.market_state().1.assets[1].oi_eff_short_q, POS_SCALE);
@@ -408,5 +560,5 @@ fn v16_program_funded_close_cancellation_requires_fresh_matcher_capability() {
             assert_cu_within("funded cure capability history", peak_cu, 500_000);
         }
     }
-    println!("INV-012 funded cure revocation: 4 worlds, 8 consumer rollbacks, 4 fresh fills; peak {peak_cu} CU");
+    println!("INV-012 funded cure revocation: retain_grants={retain_grants}, 4 worlds, 8 consumer rollbacks, 4 fresh fills; peak {peak_cu} CU");
 }
