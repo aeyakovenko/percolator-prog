@@ -1724,6 +1724,84 @@ fn v16_attack_sync_maintenance_fee_future_slot_no_overcharge() {
     );
 }
 
+#[test]
+fn v16_program_fee_watermark_rejects_clock_rewind_without_double_charge() {
+    const DEPOSIT: u128 = 1_000_000;
+    const RATE: u128 = 58;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        maintenance_fee_per_slot: RATE,
+        ..V16CuMarketParams::default()
+    });
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, DEPOSIT);
+    assert_eq!(env.portfolio_state(portfolio).last_fee_slot.get(), 0);
+    assert_eq!(env.market_state().1.current_slot, 0);
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let mut paid_through = 0;
+    let mut peak_cu = 0;
+
+    // A flat portfolio's fee watermark advances without advancing market time.
+    // Rewind only the authenticated Clock; caller slots cannot repair that rewind.
+    for (clock_slot, caller_slot) in [
+        (10, u64::MAX),
+        (9, u64::MAX),
+        (9, 0),
+        (10, 0),
+        (10, u64::MAX),
+        (11, 0),
+        (11, u64::MAX),
+    ] {
+        set_test_clock(&mut env, clock_slot, 100);
+        env.svm.expire_blockhash();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+        let result = env.send(
+            ProgInstruction::SyncMaintenanceFee {
+                now_slot: caller_slot,
+            },
+            // Clock is deliberately absent from instruction account metas.
+            vec![
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        );
+        if clock_slot < paid_through {
+            let error = result.expect_err("rewound Clock must not reuse a newer fee watermark");
+            assert!(
+                error.contains(&format!("Custom({})", PercolatorError::EngineStale as u32)),
+                "unexpected rewind rejection: {error}"
+            );
+        } else {
+            let cu = result.expect("current Clock must permit fee sync despite the caller slot");
+            assert_cu_within("fee watermark Clock boundary", cu, CUSTODY_CU_LIMIT);
+            peak_cu = peak_cu.max(cu);
+        }
+        if clock_slot <= paid_through {
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            assert_eq!(
+                env.svm.get_account(&portfolio).unwrap(),
+                portfolio_before,
+                "rewind and same-slot retry must leave the entire account unchanged"
+            );
+        }
+        paid_through = paid_through.max(clock_slot);
+        let fee = RATE * u128::from(paid_through);
+        let account = env.portfolio_state(portfolio);
+        let group = env.market_state().1;
+        assert_eq!(account.last_fee_slot.get(), paid_through);
+        assert_eq!(account.capital.get(), DEPOSIT - fee);
+        assert_eq!(account.pnl.get(), 0);
+        assert_eq!(group.c_tot, DEPOSIT - fee);
+        assert_eq!(group.insurance, fee);
+        assert_eq!(group.current_slot, 0, "the portfolio watermark gates time");
+        assert_eq!(group.vault, DEPOSIT);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    }
+    println!("fee watermark Clock: 2 rewind rejections, 3 exact no-ops, 638 fee atoms, peak {peak_cu} CU");
+}
+
 // security.md sweep -- permissionless resolve slot spoof (#30 DoS): ResolveStalePermissionless is
 // public. A cranker must not be able to pass a far-future caller now_slot and resolve a still-fresh
 // market. The handler must authenticate against Clock; once the real Clock reaches the stale window,
