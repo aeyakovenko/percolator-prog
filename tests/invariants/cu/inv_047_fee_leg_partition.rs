@@ -731,3 +731,137 @@ fn v16_program_nonintegral_two_asset_fee_legs_match_cpi_nocpi_batch_and_singles(
 fn v16_program_off_mark_quotes_preserve_fractional_fee_route_equivalence() {
     check_nonintegral_fee_leg_routes([4_000, 2_500]);
 }
+
+#[test]
+fn v16_program_retained_routes_apply_current_redirect_policy_per_payer() {
+    // A three-atom fee redirects one atom at 50%: splitting each payer's redirect
+    // credits [0, 2], whereas incorrectly pooling the two redirects credits [1, 1].
+    let owner_fee = (QUANTITIES[1] * u128::from(PRICES[1]))
+        .div_ceil(POS_SCALE)
+        .checked_mul(u128::from(FEE_BPS))
+        .unwrap()
+        .div_ceil(10_000);
+    assert_eq!(owner_fee, 3);
+    let mut peak_cu = 0;
+    let mut fills = 0;
+    for direction in [-1, 1] {
+        let mut reference = None;
+        for (cpi, batch) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut fixture = Fixture::new();
+            fixture.env.update_fee_redirect_policy_with_cu(3_333);
+            let initial_sequence = fixture.env.control_sequences(0).fee_redirect;
+            let initial_epochs = fixture
+                .portfolios
+                .map(|key| fixture.env.portfolio_position_epoch(key));
+            let custody_keys = [
+                fixture.env.vault,
+                fixture.env.mint,
+                fixture.tokens[0],
+                fixture.tokens[1],
+            ];
+            let custody = fixture.frame(&custody_keys);
+            let mut domains = [0u128; 4];
+            let mut frames = Vec::new();
+            for (step, redirect_bps) in [5_000u16, 10_000].into_iter().enumerate() {
+                let sign = if step == 0 { direction } else { -direction };
+                let retained = fixture.transaction(cpi, batch, &[1], sign, false, PRICES);
+                retained.verify().unwrap();
+                let signed_bytes = bincode::serialize(&retained).unwrap();
+                let old_bps = fixture.env.market_state().0.fee_redirect_to_market_0_bps;
+                let redirect = owner_fee * u128::from(redirect_bps) / 10_000;
+                assert_ne!(redirect, owner_fee * u128::from(old_bps) / 10_000);
+                fixture.env.update_fee_redirect_policy_with_cu(redirect_bps);
+                assert_eq!(
+                    fixture.env.control_sequences(0).fee_redirect,
+                    initial_sequence + step as u64 + 1
+                );
+                assert_eq!(bincode::serialize(&retained).unwrap(), signed_bytes);
+                let landed = fixture.env.svm.send_transaction(retained).unwrap();
+                peak_cu = peak_cu.max(landed.compute_units_consumed);
+                assert_cu_within(
+                    "retained redirect route",
+                    landed.compute_units_consumed,
+                    TRADE_CU_LIMIT,
+                );
+                fills += 1;
+
+                for source_side in 0..2 {
+                    domains[source_side + 2] += owner_fee - redirect;
+                    domains[0] += redirect / 2;
+                    domains[1] += redirect - redirect / 2;
+                }
+                assert_eq!(
+                    domains,
+                    if step == 0 {
+                        [0, 2, 2, 2]
+                    } else {
+                        [2, 6, 2, 2]
+                    }
+                );
+                let commits = step as u64 + 1;
+                let paid = u128::from(commits) * owner_fee;
+                let (cfg, group) = fixture.env.market_state();
+                assert_eq!(cfg.fee_redirect_to_market_0_bps, redirect_bps);
+                assert_eq!(&group.insurance_domain_budget[..4], &domains);
+                assert!(group.insurance_domain_budget[4..]
+                    .iter()
+                    .all(|budget| *budget == 0));
+                assert_eq!(group.insurance, 2 * paid);
+                assert_eq!(group.c_tot, 2 * (CAPITAL - paid));
+                assert_eq!(group.vault, 2 * CAPITAL);
+                assert_eq!(group.vault, group.c_tot + group.insurance);
+                assert_eq!(
+                    u128::from(fixture.env.token_amount(fixture.env.vault)),
+                    group.vault
+                );
+                assert_eq!(fixture.frame(&custody_keys), custody);
+                for asset in 0..2 {
+                    let q = if step == 0 && asset == 1 {
+                        QUANTITIES[1]
+                    } else {
+                        0
+                    };
+                    assert_eq!(
+                        [
+                            group.assets[asset].oi_eff_long_q,
+                            group.assets[asset].oi_eff_short_q
+                        ],
+                        [q; 2]
+                    );
+                }
+                for actor in 0..2 {
+                    let account = fixture.env.portfolio_state(fixture.portfolios[actor]);
+                    assert_eq!(account.capital.get(), CAPITAL - paid);
+                    assert_eq!(account.pnl.get(), 0);
+                    assert_eq!(
+                        fixture
+                            .env
+                            .portfolio_position_epoch(fixture.portfolios[actor]),
+                        initial_epochs[actor] + commits
+                    );
+                    assert_eq!(
+                        percolator::active_bitmap_count_ones(active_bitmap(&account)),
+                        u32::from(step == 0)
+                    );
+                    if step == 0 {
+                        assert_eq!(
+                            active_leg_for_asset(&account, 1).basis_pos_q,
+                            direction * if actor == 0 { -1 } else { 1 } * QUANTITIES[1] as i128
+                        );
+                    }
+                }
+                frames.push(fixture.normalized(commits, cpi));
+            }
+            if let Some(expected) = &reference {
+                assert_eq!(
+                    &frames, expected,
+                    "cpi={cpi}, batch={batch}, direction={direction}"
+                );
+            } else {
+                reference = Some(frames);
+            }
+        }
+    }
+    assert_eq!(fills, 16);
+    println!("INV-036/047 retained redirect: 8 worlds, 16 fills, peak CU={peak_cu}");
+}
