@@ -71,6 +71,68 @@ fresh-backing control and the 18-domain loss/receipt witness. New/control exact
 selectors pass at **948,061 / 930,604 CU** measured peaks. Row 423 remains OPEN;
 simultaneous liens with receipts, Recovery and arbitrary histories remain outside it.
 
+## Row 424 native recredit after a paid first scan wave (2026-09-18)
+
+One new INV-070 selector in [the existing multiwave child](cu/inv_070_terminal_scan_multiwave.rs)
+extends its local construction and oracle with native custody. The
+[SPL multiwave witness](row424_multiwave_scan_20260917.md) already owns two scanner
+rediscoveries, while [native rediscovery](row424_native_scan_surplus_20260917.md)
+owns one wave with external surplus. Neither carries a committed native insurance
+payment through a second saved prefix, SyncNative, and another scanner recredit.
+
+Four public LiteSVM histories cross both source sides with later backing of
+37 then 41/107 atoms, expiring at slots 44 and 48. After the first scanner restores
+and an unsigned payment consumes 37 atoms, cursor 1 persists again. A System
+transfer and SyncNative add 53 custody atoms while preserving the entire market
+Account. The second expiry must rewind the cursor and the scanner must restore
+exactly 41/63 more insurance atoms, capped by booked residual and remaining spend.
+The synchronized surplus cannot enlarge that recovery. Both waves check exact
+earlier-asset bytes during normalization, source/stock/reservation censuses,
+ledger additions, authority epochs and native token/lamport Accounts.
+
+The new case checks **40 commits, 28 complete-Account rollbacks and eight scanner
+rediscoveries**. Second-wave rollback preserves the first payment and the later
+surplus. Payment and final-close prefixes execute before rejected suffixes, then
+retry unchanged. Retirement sends 0/44 booked native residue to insurance custody,
+53 external surplus atoms to admin token custody, and exact market/vault rent to
+the admin wallet; mint, prior user payments and tracked lamports reconcile.
+Construction uses existing public helpers and instructions, with no injected
+program-owned state. The existing native helper supplies the native-mint genesis
+Account. Initial validation exposed an omitted booked-native-residue destination
+in the test's CloseSlab account list; the existing custody convention supplies it.
+
+Base: fetched `origin/main`, `a1a3ff3bc1a6cf786a361c75cb131c305149c6e9`.
+Private worktree: `/dev/shm/percolator-row424-pending-native-scan-20260918`.
+The wrapper was rebuilt locked/offline here using platform-tools v1.52 and engine
+`4db11a8cb0053815e23a35d3a7d3edc265d8d866`; SHA-256:
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`.
+Private host/SBF caches were copied from `percolator-public-gap-20260916-c91e`.
+Each exact selector below passes **1/1**, with peaks **220,026 / 221,437 / 221,526 CU**
+in command order, below 400,000. Peaks include user cleanup and campaign
+transactions, including rejection; earlier construction is excluded.
+
+```bash
+export TMPDIR=/dev/shm CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_TARGET_DIR=/dev/shm/percolator-row424-pending-native-scan-20260918-host-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row424-pending-native-scan-20260918-sbf-target/deploy/percolator_prog.so
+CARGO_TARGET_DIR=/dev/shm/percolator-row424-pending-native-scan-20260918-sbf-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/percolator-row424-pending-native-scan-20260918-sbf-target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_scan_recredit::multiwave::v16_program_native_terminal_scan_caps_second_recredit_after_paid_prefix_and_sync -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_scan_recredit::multiwave::v16_program_terminal_scan_rediscovers_remaining_insurance_across_two_expiry_waves -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_scan_recredit::native_surplus::v16_program_native_terminal_scan_excludes_synced_surplus_from_rediscovered_insurance -- --exact --nocapture --test-threads=1
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_070_terminal_scan_multiwave.rs
+git diff --check
+git diff --cached --check
+git diff --exit-code a1a3ff3bc1a6cf786a361c75cb131c305149c6e9 -- . ':!tests/invariants/cu/inv_070_terminal_scan_multiwave.rs' ':!tests/invariants/README.md'
+git show --check --oneline HEAD
+```
+
+Only this README and the existing CU child change. Scoped formatting, whitespace
+and protected-path checks pass. No broad suite or engine proof ran. Row 424 stays
+OPEN for pending receipts/obligations during scanning, Recovery, dual custody,
+unavailable retirement resources, maximum shapes and arbitrary expiry schedules.
+This is finite scanner/custody composition, with no production or status change.
+
 ## Row 424 custody repair rent shortfall (2026-09-18)
 
 [The focused note](row424_rent_shortfall_20260918.md) adds one public LiteSVM
