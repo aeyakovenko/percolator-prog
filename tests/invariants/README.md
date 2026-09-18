@@ -501,6 +501,13 @@ Sixteen split/aggregate histories reconcile exact rounded fees, positions,
 OI/count/notional, epochs and 96 owner payouts; peak CU is 343,425. Row427 remains
 OPEN; nonunit ADL, elapsed rates and broader composition remain unproved.
 
+[The shared-maker partial increment](row427_shared_maker_partial_20260918.md)
+adds two partial CPI fills through one maker and matcher at the shared cap.
+A one-atom shortfall rolls back both edges; the retained next-epoch request then
+succeeds with exact fees and OI. Both signs pass, peak CU 370,634; the existing
+disjoint partial-fill control passes at 344,925 CU. Earlier shared-maker coverage
+used full fills, while partial-fill coverage used disjoint pairs. Row 427 stays OPEN.
+
 ## Rows 420/421/423/433 regression health (2026-09-17)
 
 [The focused follow-up](row420421423433_regression_health_20260917.md) updates the
