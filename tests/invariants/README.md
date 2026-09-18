@@ -1,5 +1,16 @@
 # Invariant-owned test coverage
 
+## Row 424 custody repair rent shortfall (2026-09-18)
+
+[The focused note](row424_rent_shortfall_20260918.md) adds one public LiteSVM
+history in [the existing scan-recredit file](cu/inv_070_terminal_scan_recredit.rs).
+A repair bundle whose keeper is one lamport short of ATA rent rolls back expiry
+and scanner rediscovery, preserving prior insurance. A one-lamport transfer enables the unchanged
+repair/payout pair, then exact retirement. Existing retired-custody coverage funds
+repair fully. New/control exact selectors pass at **216,937 / 221,593 CU**;
+the new case checks seven commits and three complete-Account rollbacks. Row 424
+remains OPEN; this is one bounded repair-funding boundary, with no status changes.
+
 ## Row 423 native source reservation and redemption (2026-09-17)
 
 [The focused note](row423_native_latent_exit_20260917.md) adds four public

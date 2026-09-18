@@ -414,6 +414,256 @@ fn v16_program_rediscovered_insurance_recreates_prefunded_beneficiary_before_ret
 }
 
 #[test]
+fn v16_program_rediscovered_insurance_retries_one_lamport_short_custody_repair() {
+    const BACKING: u64 = 61;
+    let RecreditFixture {
+        mut env,
+        admin,
+        beneficiary,
+        owners,
+        portfolios,
+        tokens,
+        reserve,
+        destination,
+        mut peak,
+    } = fixture(0, BACKING);
+    let keeper = Keypair::new();
+    let rent = env
+        .svm
+        .minimum_balance_for_rent_exemption(TokenAccount::LEN);
+    env.svm.airdrop(&keeper.pubkey(), rent - 1).unwrap();
+    let empty_reserve = env.svm.get_account(&reserve).unwrap();
+    assert_eq!(empty_reserve.lamports, rent);
+    let initial_sequences = env.control_sequences(0);
+    let initial_ledger = env.market_state().1.resolved_payout_ledger;
+    let close_at = |authority_epoch| {
+        wrap(
+            &env,
+            ProgInstruction::CloseSlab { authority_epoch },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.mint, false),
+            ],
+        )
+    };
+    let close = close_at(initial_sequences.authority_epoch);
+    let final_close = close_at(initial_sequences.authority_epoch + 1);
+    let repair = Instruction {
+        program_id: associated_token_program_id(),
+        accounts: vec![
+            AccountMeta::new(keeper.pubkey(), true),
+            AccountMeta::new(reserve, false),
+            AccountMeta::new_readonly(beneficiary.pubkey(), false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(solana_sdk::sysvar::rent::ID, false),
+        ],
+        data: vec![],
+    };
+    let payout = wrap(
+        &env,
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            market_id: env.asset_market_id(0),
+            authority_epoch: initial_sequences.authority_epoch,
+            amount: BACKING.into(),
+        },
+        vec![
+            AccountMeta::new_readonly(beneficiary.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(reserve, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+    );
+    let mut tracked = vec![
+        env.market,
+        env.vault,
+        env.mint,
+        reserve,
+        destination,
+        admin.pubkey(),
+        beneficiary.pubkey(),
+        keeper.pubkey(),
+        solana_sdk::sysvar::clock::ID,
+    ];
+    tracked.extend(tokens);
+    tracked.extend(portfolios);
+    tracked.extend(owners.each_ref().map(Signer::pubkey));
+    let market_only = [env.market];
+    let payment = [env.market, env.vault, reserve, keeper.pubkey()];
+    let closing = [env.market, env.vault, admin.pubkey()];
+    let mut commits = 0;
+    let mut rollbacks = 0;
+    let mut send = |env: &mut V16CuEnv,
+                    ixs: &[Instruction],
+                    signers: &[&Keypair],
+                    changed: &[Pubkey],
+                    rejection: Option<(u8, InstructionError)>,
+                    successes| {
+        commits += usize::from(rejection.is_none());
+        rollbacks += usize::from(rejection.is_some());
+        peak = peak.max(land(
+            env, ixs, signers, &tracked, changed, rejection, successes,
+        ));
+    };
+    send(
+        &mut env,
+        &[close.clone()],
+        &[&admin],
+        &market_only,
+        None,
+        (1, 0),
+    );
+    stocks_at_cursor(&env, 0, BACKING, false, 0, 0, tokens, reserve, 1);
+    let parked = env.svm.get_account(&env.market).unwrap();
+    let retire = spl_token::instruction::close_account(
+        &spl_token::ID,
+        &reserve,
+        &beneficiary.pubkey(),
+        &beneficiary.pubkey(),
+        &[],
+    )
+    .unwrap();
+    send(
+        &mut env,
+        &[retire],
+        &[&beneficiary],
+        &[reserve, beneficiary.pubkey()],
+        None,
+        (0, 1),
+    );
+    drop(beneficiary);
+    env.svm.warp_to_slot(EXPIRY);
+    assert_eq!(env.svm.get_account(&env.market), Some(parked.clone()));
+
+    // Rent is paid by the keeper; the independent transaction payer covers signatures.
+    let short = InstructionError::Custom(
+        solana_sdk::system_instruction::SystemError::ResultWithNegativeLamports as u32,
+    );
+    send(
+        &mut env,
+        &[close.clone(), close.clone(), repair.clone(), payout.clone()],
+        &[&admin, &keeper],
+        &[],
+        Some((4, short.clone())),
+        (2, 1),
+    );
+    assert_eq!(env.svm.get_account(&env.market), Some(parked.clone()));
+    assert_eq!(
+        env.svm.get_account(&keeper.pubkey()).unwrap().lamports,
+        rent - 1
+    );
+    send(
+        &mut env,
+        &[close.clone()],
+        &[&admin],
+        &market_only,
+        None,
+        (1, 0),
+    );
+    assert_eq!(env.market_state().0.terminal_slab_scan_progress, 0);
+    assert_eq!(env.market_state().1.insurance, 0);
+    assert_eq!(
+        market_engine_slot_bytes(&env.svm.get_account(&env.market).unwrap().data, 0),
+        market_engine_slot_bytes(&parked.data, 0),
+    );
+    send(
+        &mut env,
+        &[close.clone()],
+        &[&admin],
+        &market_only,
+        None,
+        (1, 0),
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.terminal_slab_scan_progress, 0);
+    assert_eq!(
+        (group.vault, group.insurance),
+        (BACKING.into(), BACKING.into())
+    );
+    assert_eq!(group.insurance_domain_spent[0], u128::from(SPENT - BACKING));
+    let mut expected_ledger = initial_ledger;
+    expected_ledger.snapshot_residual += u128::from(BACKING);
+    assert_eq!(group.resolved_payout_ledger, expected_ledger);
+    assert_eq!(env.control_sequences(0), initial_sequences);
+    let retry = [repair, payout];
+    send(&mut env, &retry, &[&keeper], &[], Some((2, short)), (0, 1));
+    send(
+        &mut env,
+        &[close],
+        &[&admin],
+        &[],
+        Some((
+            2,
+            InstructionError::Custom(PercolatorError::EngineLockActive as u32),
+        )),
+        (0, 0),
+    );
+
+    let fund = solana_sdk::system_instruction::transfer(&admin.pubkey(), &keeper.pubkey(), 1);
+    let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();
+    expected_admin.lamports -= 1;
+    send(
+        &mut env,
+        &[fund],
+        &[&admin],
+        &[admin.pubkey(), keeper.pubkey()],
+        None,
+        (0, 0),
+    );
+    assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
+    assert_eq!(
+        env.svm.get_account(&keeper.pubkey()).unwrap().lamports,
+        rent
+    );
+    send(&mut env, &retry, &[&keeper], &payment, None, (1, 4));
+    stocks_at_cursor(&env, 0, BACKING, true, BACKING, BACKING, tokens, reserve, 0);
+    assert_eq!(env.market_state().1.resolved_payout_ledger, expected_ledger);
+    let mut expected_sequences = initial_sequences;
+    expected_sequences.authority_epoch += 1;
+    assert_eq!(env.control_sequences(0), expected_sequences);
+    let mut expected_reserve = empty_reserve;
+    let mut token = TokenAccount::unpack(&expected_reserve.data).unwrap();
+    token.amount = BACKING;
+    TokenAccount::pack(token, &mut expected_reserve.data).unwrap();
+    assert_eq!(env.svm.get_account(&reserve), Some(expected_reserve));
+    assert!(env
+        .svm
+        .get_account(&keeper.pubkey())
+        .is_none_or(|account| account.lamports == 0));
+
+    let market = env.svm.get_account(&env.market).unwrap();
+    let vault = env.svm.get_account(&env.vault).unwrap();
+    let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();
+    send(&mut env, &[final_close], &[&admin], &closing, None, (1, 1));
+    let tombstone = env.svm.get_account(&env.market).unwrap();
+    assert_closed_market_tombstone(&tombstone);
+    assert_eq!(
+        tombstone.lamports,
+        env.svm
+            .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN)
+    );
+    expected_admin.lamports += market.lamports - tombstone.lamports + vault.lamports;
+    assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
+    assert!(env
+        .svm
+        .get_account(&env.vault)
+        .is_none_or(|account| account.lamports == 0));
+    assert_eq!(env.token_amount(reserve), BACKING);
+    assert_eq!(env.token_amount(destination), 0);
+    assert_eq!((commits, rollbacks), (7, 3));
+    println!("INV-070 rent-short scanner repair: 1 history, {commits} commits, {rollbacks} exact rollbacks, peak={peak} CU");
+}
+
+#[test]
 fn v16_program_terminal_scan_rediscovers_earlier_insurance_after_later_expiry() {
     let lock = InstructionError::Custom(PercolatorError::EngineLockActive as u32);
     let stale = InstructionError::Custom(PercolatorError::EngineStale as u32);
