@@ -202,6 +202,189 @@ fn materialize(world: &mut World, book: &mut Book, actor: usize, expired: bool) 
 }
 
 #[test]
+fn v16_program_native_receipt_repair_and_expiry_roll_back_with_paid_suffix() {
+    let mut world = World::before_native_receipts();
+    let mut book = Book::new(&world);
+    for actor in [0, 4] {
+        materialize(&mut world, &mut book, actor, false);
+    }
+    assert_eq!(book.paid, [1_116, 0, 0, 0, 1_217]);
+    let original = [world.receipt(0), world.receipt(4)];
+    assert!(original.iter().all(|r| r.present && !r.finalized));
+    let retained = world.payout(0, true);
+    let peer = world.payout(4, true);
+    let wallet = world.actors[0].token;
+    let owner = world.actors[0].owner.insecure_clone();
+    let rent = book.wallets[0].lamports;
+    assert_eq!(
+        rent,
+        world
+            .env
+            .svm
+            .minimum_balance_for_rent_exemption(TokenAccount::LEN)
+    );
+
+    let before = world.frame();
+    let mut redeemed_owner = world.env.svm.get_account(&owner.pubkey()).unwrap();
+    redeemed_owner.lamports += world.env.svm.get_account(&wallet).unwrap().lamports;
+    let close = send_raw_tx(
+        &mut world.env.svm,
+        &world.env.payer,
+        spl_token::instruction::close_account(
+            &spl_token::ID,
+            &wallet,
+            &owner.pubkey(),
+            &owner.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&owner],
+    )
+    .unwrap();
+    world.peak_cu = world.peak_cu.max(close);
+    book.redeemed[0] = book.paid[0];
+    assert_eq!(
+        world.env.svm.get_account(&owner.pubkey()),
+        Some(redeemed_owner)
+    );
+    world.assert_frame_except(&before, &[wallet, owner.pubkey()]);
+    book.check(&world, false, Some(0));
+    assert_eq!([world.receipt(0), world.receipt(4)], original);
+
+    // The keeper repairs custody in the same transaction that releases stock
+    // and pays both retained receipts. A failed suffix must also undo ATA rent.
+    let repair = Instruction {
+        program_id: associated_token_program_id(),
+        accounts: vec![
+            AccountMeta::new(world.env.payer.pubkey(), true),
+            AccountMeta::new(wallet, false),
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new_readonly(world.env.mint, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(solana_sdk::sysvar::rent::ID, false),
+        ],
+        data: vec![],
+    };
+    let bundle = [
+        repair,
+        world.payout(2, false),
+        peer.clone(),
+        retained.clone(),
+    ];
+    world.env.svm.warp_to_slot(13);
+    let before = world.frame();
+    let mut aborted = vec![heap_ix(), cu_ix()];
+    aborted.extend_from_slice(&bundle);
+    aborted.push(Instruction {
+        program_id: solana_sdk::system_program::ID,
+        accounts: vec![],
+        data: vec![],
+    });
+    let compiled_before: Vec<_> =
+        solana_sdk::message::Message::new(&aborted, Some(&world.env.payer.pubkey()))
+            .account_keys
+            .into_iter()
+            .map(|key| (key, world.env.svm.get_account(&key)))
+            .collect();
+    let failure = world
+        .land(&aborted[2..], false)
+        .expect_err("abort after native ATA repair, expiry and both transfers");
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(6, InstructionError::InvalidInstructionData)
+    );
+    for (program, expected) in [
+        (associated_token_program_id(), 1),
+        (world.env.program_id, 3),
+    ] {
+        assert_eq!(
+            failure
+                .meta
+                .logs
+                .iter()
+                .filter(|line| **line == format!("Program {program} success"))
+                .count(),
+            expected
+        );
+    }
+    assert_eq!(
+        failure
+            .meta
+            .logs
+            .iter()
+            .filter(|line| line.as_str() == "Program log: Instruction: Transfer")
+            .count(),
+        2
+    );
+    for (key, mut account) in compiled_before {
+        if key == world.env.payer.pubkey() {
+            account.as_mut().unwrap().lamports -= FeeStructure::default().lamports_per_signature;
+        }
+        assert_eq!(
+            world.env.svm.get_account(&key),
+            account,
+            "repair rollback {key}"
+        );
+    }
+    assert_eq!(world.frame(), before);
+    book.check(&world, false, Some(0));
+    assert_eq!([world.receipt(0), world.receipt(4)], original);
+
+    let mut payer = world
+        .env
+        .svm
+        .get_account(&world.env.payer.pubkey())
+        .unwrap();
+    payer.lamports -= rent + FeeStructure::default().lamports_per_signature;
+    world.land(&bundle, false).unwrap();
+    assert_eq!(
+        world.env.svm.get_account(&world.env.payer.pubkey()),
+        Some(payer)
+    );
+    for (index, actor) in [0, 4].into_iter().enumerate() {
+        book.paid[actor] = CAPITAL[actor] + entitlement(actor, true);
+        assert_eq!(
+            world.receipt(actor),
+            ResolvedPayoutReceiptV16 {
+                paid_effective: entitlement(actor, true),
+                ..original[index]
+            }
+        );
+    }
+    book.check(&world, true, None);
+    assert_eq!(book.paid, [1_198, 0, 0, 0, 1_368]);
+    assert_eq!(world.env.token_amount(wallet), 82);
+    assert_eq!(
+        world.env.svm.get_account(&wallet).unwrap().lamports,
+        rent + 82
+    );
+    world.assert_frame_except(
+        &before,
+        &[
+            wallet,
+            world.env.market,
+            world.env.vault,
+            world.actors[0].portfolio,
+            world.actors[2].portfolio,
+            world.actors[4].portfolio,
+            world.actors[4].token,
+        ],
+    );
+    let before = world.frame();
+    world.land(&[peer, retained], false).unwrap();
+    assert_eq!(
+        world.frame(),
+        before,
+        "repair cannot replenish paid receipt value"
+    );
+    book.check(&world, true, None);
+    // Match the existing receipt-repair bundle limit; this includes three wrapper calls.
+    assert_cu_within("atomic native receipt repair", world.peak_cu, 600_000);
+    println!("Row 417 atomic native receipt repair: 1 world, 1 complete-Account rollback, 2 positive top-ups (82/151), retained retry; peak {} CU", world.peak_cu);
+}
+
+#[test]
 fn v16_program_native_receipt_redemption_preserves_topups_and_rounding_beneficiary() {
     let expected: [u128; 5] = std::array::from_fn(|a| CAPITAL[a] + entitlement(a, true));
     let rounding = 851 - (expected.iter().sum::<u128>() - CAPITAL.iter().sum::<u128>());

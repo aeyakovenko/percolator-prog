@@ -1,5 +1,16 @@
 # Invariant-owned test coverage
 
+## Row 417 atomic native receipt repair (2026-09-18)
+
+[The focused note](row417_native_receipt_repair_20260918.md) adds one selector in
+[the existing native receipt file](cu/inv_067_native_receipt_redemption.rs).
+Keeper-funded ATA repair, late backing expiry and two receipt payments roll back
+together after a rejected suffix, including native backing lamports and ATA rent.
+Retained instructions then pay exactly 82/151 atoms without replaying redeemed SOL.
+Existing native repair commits separately; atomic receipt repair uses ordinary SPL.
+New/control exact selectors pass at **339,081 / 173,615 CU** measured peaks.
+Row 417 remains OPEN; recredit, Recovery and arbitrary histories are outside this increment.
+
 ## Row 423 partial receipt with full peer table (2026-09-18)
 
 [The focused note](row423_full_table_receipt_20260918.md) adds one selector in
