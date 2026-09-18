@@ -1,5 +1,73 @@
 # Invariant-owned test coverage
 
+## INV-051 two-asset nonunit batch clear/resize (2026-09-18)
+
+Classification: **nonduplicative public-route coverage**, with secondary
+INV-048/052/053 evidence; no production finding or invariant-status promotion.
+Owner: [cu/inv_051_dual_adl_matched_partitions.rs](cu/inv_051_dual_adl_matched_partitions.rs),
+selector `v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles`.
+The existing dual-ADL partition selector uses one-leg batches. INV-058's two-asset
+clear/resize witness fixes both ADL indices at one. This addition crosses actual
+two-leg batches with asset-specific nonunit indices, a full detach/reset on one
+asset, and a retained raw-basis resize on the other. Both asset orders, both side
+orientations, and all four transports compare against one economic endpoint.
+
+The exact public suffix after the shared V16Svm initialization/deposits is:
+
+1. At price `POS_SCALE`, `TradeNoCpi` opens opposite-signed assets 0 and 1 with
+   quantities `3 * POS_SCALE + 7` and `5 * POS_SCALE + 11`. On each asset, actor 0
+   calls `RebalanceReduce` for one third/one fifth of the opening quantity; actor
+   1 then reduces one fourth/one third of the remaining effective quantity.
+2. `UpdateTradeFeePolicy(137)` enables rounded fees. CPI worlds renew actor 1's
+   `SetMatcherConfig` against its current position episode before the snapshot.
+3. Each batch world submits a valid first reduction and a second request for
+   `effective + 1`, still below both retained raw bases. `EngineLockActive` must
+   preserve complete tracked economic Accounts, including matcher state. No
+   claim is made that rejection occurs after the first leg executes.
+4. `BatchTradeNoCpi`/`BatchTradeCpi`, or the corresponding ordered single calls,
+   close asset 0 exactly and leave 11 effective atoms on asset 1. The public
+   single-asset route closes that final residual, renewing CPI consent as needed.
+5. Four `FinalizeResetSide` calls return both assets to Normal. Two `Withdraw`
+   calls pay each owner's input-derived principal less its exact rounded fees.
+
+Input-derived floor/ceil equations check both raw bases, effective OI, loss
+weights, counts, epoch increments and reset indices at every reduction prefix.
+All five numeric certificate lanes must be no more favorable than independent
+full recomputation; conservative pre-ADL caches are permitted. Per-owner fees,
+protocol insurance, SPL custody, passive accounts, stock and encumbrance censuses
+are checked independently of cross-route equality. The 11-atom residual gives
+32 concrete wrong-asset-index distinctions; raw subtraction differs in 64 cells.
+Public trace validation requires zero out-of-band economic mutations.
+
+At isolated base `6992e91f94ffd1b09baa5fe50ff63b4e5b5b42b1`, the new exact selector
+passes **16 worlds, 8 exact rollbacks, 64 resets and 32 payouts**, peak **240,692 CU**
+(trade ceiling 345,000; custody ceiling 300,000), in 8.34 seconds. The unchanged
+adjacent dual-ADL selector also passes: **48 worlds, 128 fills, 96 resets and 96
+payouts**, peak **164,886 CU**, in 23.66 seconds. Both exact tests exit 0; scoped
+rustfmt and `git diff --check` pass. Initial local
+runs corrected test-only index-reset/certificate assumptions and a missing CPI
+matcher renewal; they did not identify production defects. Remaining frontiers:
+changing prices/funding during nonunit vector reductions, nonzero source liens,
+more than two assets, maximum shape, and liquidation/terminal composition. This
+fixed-price Live witness does not discharge those products or any open holdout.
+
+Validation reuses the README-recorded default-feature wrapper SBF
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`;
+`src/v16_program.rs`, `Cargo.toml` and `Cargo.lock` Git blobs match its recorded
+main build base `2e88c39b`. The authenticated matcher was freshly built from this
+worktree, hash `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+No wrapper rebuild or full-suite run. Exact commands from the isolated worktree:
+
+```sh
+# Matcher build runs in tests/fixtures/auth_matcher:
+env CARGO_TARGET_DIR=/dev/shm/astra-position-oi-cap-matcher CARGO_BUILD_JOBS=2 RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /tmp/percolator-astra-position-oi-cap-20260918/tests/fixtures/auth_matcher/target/deploy -- --locked
+# Both exact host selectors run at the worktree root:
+env TMPDIR=/dev/shm CARGO_TARGET_DIR=/dev/shm/percolator-inv077/target/host CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv077/target/deploy/percolator_prog.so cargo test --locked --offline --test v16_cu inv_051_canonical_adl_effective_quantity::dual_adl_matched_partitions::v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles -- --exact --nocapture --test-threads=1
+env TMPDIR=/dev/shm CARGO_TARGET_DIR=/dev/shm/percolator-inv077/target/host CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv077/target/deploy/percolator_prog.so cargo test --locked --offline --test v16_cu inv_051_canonical_adl_effective_quantity::dual_adl_matched_partitions::v16_program_dual_adl_matched_partitions_preserve_both_bases_and_fee_adjusted_exits -- --exact --nocapture --test-threads=1
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_051_dual_adl_matched_partitions.rs
+git diff --check
+```
+
 ## INV-039/076 pending-obligation resolved-close order conformance (2026-09-18)
 
 Classification: **former red invariant witness now green on current main**. The
