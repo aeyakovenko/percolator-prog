@@ -15,6 +15,131 @@
 
 use super::*;
 
+#[test]
+fn v16_program_decoder_error_rolls_back_deposit_prefix_and_all_account_fields() {
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let source = env.token_account(owner.pubkey(), 25);
+    let sequence = env.portfolio_matcher_sequence(portfolio);
+    let accounts = vec![
+        AccountMeta::new(owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolio, false),
+        AccountMeta::new(source, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    let prefix = Instruction {
+        program_id: env.program_id,
+        accounts: accounts.clone(),
+        data: env.deposit_ix(portfolio, 7).encode(),
+    };
+    let suffix = Instruction {
+        program_id: env.program_id,
+        accounts,
+        data: ProgInstruction::Deposit {
+            portfolio_id: env.portfolio_id(portfolio),
+            expected_sequence: sequence + 1,
+            amount: 11,
+        }
+        .encode(),
+    };
+    let mut truncated = suffix.clone();
+    truncated.data.pop();
+    let mut trailing = suffix.clone();
+    trailing.data.push(0);
+
+    // Both malformed suffixes retain every valid account role after a real SPL transfer.
+    for (label, malformed) in [("truncated", truncated), ("trailing", trailing)] {
+        let tx = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), prefix.clone(), malformed],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &owner],
+            env.svm.latest_blockhash(),
+        );
+        let before: Vec<_> = tx
+            .message
+            .account_keys
+            .iter()
+            .chain(std::iter::once(&env.mint))
+            .map(|key| (*key, env.svm.get_account(key)))
+            .collect();
+        let fee = FeeStructure::default().lamports_per_signature
+            * u64::from(tx.message.header.num_required_signatures);
+        let error = env.svm.send_transaction(tx).unwrap_err();
+        assert_eq!(
+            error.err,
+            TransactionError::InstructionError(3, InstructionError::InvalidInstructionData),
+            "{label}: reject at the decoder after the deposit prefix"
+        );
+        for program in [env.program_id, spl_token::ID] {
+            assert_eq!(
+                error
+                    .meta
+                    .logs
+                    .iter()
+                    .filter(|line| **line == format!("Program {program} success"))
+                    .count(),
+                1,
+                "{label}: prefix wrapper and SPL transfer must complete"
+            );
+        }
+        for (key, mut expected) in before {
+            if key == env.payer.pubkey() {
+                expected.as_mut().unwrap().lamports -= fee;
+            }
+            assert_eq!(
+                env.svm.get_account(&key),
+                expected,
+                "{label}: rollback {key}"
+            );
+        }
+        assert_cu_within(label, error.meta.compute_units_consumed, CUSTODY_CU_LIMIT);
+    }
+
+    let source_before = env.svm.get_account(&source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let retry = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), prefix, suffix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &owner],
+        env.svm.latest_blockhash(),
+    );
+    let result = env
+        .svm
+        .send_transaction(retry)
+        .expect("canonical pair retries");
+    assert_cu_within(
+        "canonical deposit pair",
+        result.compute_units_consumed,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 18);
+    assert_eq!(env.portfolio_matcher_sequence(portfolio), sequence + 2);
+    for (key, mut expected, credit) in [
+        (source, source_before, false),
+        (env.vault, vault_before, true),
+    ] {
+        let mut token = TokenAccount::unpack(&expected.data).unwrap();
+        token.amount = if credit {
+            token.amount + 18
+        } else {
+            token.amount - 18
+        };
+        TokenAccount::pack(token, &mut expected.data).unwrap();
+        assert_eq!(
+            env.svm.get_account(&key),
+            Some(expected),
+            "retry token frame {key}"
+        );
+    }
+}
+
 fn send_raw_program_instruction(
     env: &mut V16CuEnv,
     data: Vec<u8>,
