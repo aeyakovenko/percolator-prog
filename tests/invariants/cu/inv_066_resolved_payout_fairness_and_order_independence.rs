@@ -22,6 +22,225 @@
 
 use super::*;
 
+// A positive face can own no whole payout atom. Removing that claimant must not
+// donate its denominator contribution to the remaining claimant.
+#[test]
+fn v16_program_zero_floor_receipt_preserves_other_claimant_entitlement() {
+    const DEPOSITS: [u128; 3] = [100, 100, 2];
+    const FACES: [u128; 2] = [1, 3];
+    const BACKING: u128 = 1;
+    const RESIDUAL: u128 = DEPOSITS[2] + BACKING;
+    const TOTAL_FACE: u128 = FACES[0] + FACES[1];
+    let junior = FACES.map(|face| face * RESIDUAL / TOTAL_FACE);
+    assert_eq!(junior, [0, 2]);
+    let mut peak_cu = 0;
+    for order in [[0usize, 1], [1, 0]] {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            ..V16CuMarketParams::default()
+        });
+        let owners = [Keypair::new(), Keypair::new(), Keypair::new()];
+        let portfolios = owners.each_ref().map(|owner| env.create_portfolio(owner));
+        let tokens =
+            std::array::from_fn::<_, 3, _>(|i| env.deposit(&owners[i], portfolios[i], DEPOSITS[i]));
+        env.top_up_backing_bucket(1, BACKING, 22);
+        let check = |env: &V16CuEnv| {
+            let group = env.market_state().1;
+            let accounts = portfolios.map(|portfolio| env.portfolio_state(portfolio));
+            support::fuzz_model::assert_market_stock_census(
+                "INV-066 zero-floor receipt",
+                &group,
+                &env.svm.get_account(&env.market).unwrap().data,
+                &accounts,
+                u128::from(env.token_amount(env.vault)),
+            )
+            .unwrap();
+            assert_eq!(
+                u128::from(env.token_amount(env.vault))
+                    + tokens
+                        .iter()
+                        .map(|&token| u128::from(env.token_amount(token)))
+                        .sum::<u128>(),
+                DEPOSITS.iter().sum::<u128>() + BACKING
+            );
+        };
+        env.svm.warp_to_slot(1);
+        env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+        for i in 0..2 {
+            env.trade_asset_with_cu(
+                0,
+                &owners[i],
+                portfolios[i],
+                &owners[2],
+                portfolios[2],
+                (FACES[i] * POS_SCALE / 100) as i128,
+                100,
+                0,
+            );
+            check(&env);
+        }
+        for (offset, price) in (105..=200).step_by(5).enumerate() {
+            let slot = 2 + offset as u64;
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_for_asset_as_admin(0, slot, price);
+            // Leave winners unsettled until the complete one-/three-atom gain exists.
+            env.crank_if_actionable(
+                portfolios[2],
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+            check(&env);
+        }
+        assert_eq!(env.market_state().1.assets[0].effective_price, 200);
+        for i in 0..2 {
+            env.crank_if_actionable(
+                portfolios[i],
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 21,
+                    observations: crank_observations(0),
+                },
+            );
+            check(&env);
+            env.trade_asset_with_cu(
+                0,
+                &owners[i],
+                portfolios[i],
+                &owners[2],
+                portfolios[2],
+                -((FACES[i] * POS_SCALE / 100) as i128),
+                200,
+                0,
+            );
+            check(&env);
+            assert_eq!(
+                env.portfolio_state(portfolios[i]).pnl.get(),
+                FACES[i] as i128
+            );
+        }
+        assert_eq!(
+            env.market_state().1.source_claim_bound_total_num,
+            TOTAL_FACE * BOUND_SCALE
+        );
+        env.resolve();
+        env.svm.warp_to_slot(22);
+        check(&env);
+
+        let pay = |env: &mut V16CuEnv, i: usize, claim: bool| {
+            env.svm.expire_blockhash();
+            env.send(
+                if claim {
+                    ProgInstruction::ClaimResolvedPayoutTopup
+                } else {
+                    ProgInstruction::CloseResolved {
+                        fee_rate_per_slot: 0,
+                    }
+                },
+                vec![
+                    AccountMeta::new_readonly(owners[i].pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolios[i], false),
+                    AccountMeta::new(tokens[i], false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[],
+            )
+            .unwrap_or_else(|error| panic!("actor {i}, claim={claim}: {error}"))
+        };
+        for _ in 0..8 {
+            if resolved_portfolio_is_terminal(&env, portfolios[2]) {
+                break;
+            }
+            peak_cu = peak_cu.max(pay(&mut env, 2, false));
+            check(&env);
+        }
+        assert!(resolved_portfolio_is_terminal(&env, portfolios[2]));
+        assert_eq!(env.token_amount(tokens[2]), 0);
+        let mut exact = 0;
+        for i in order {
+            for _ in 0..8 {
+                if resolved_receipt(&env.portfolio_state(portfolios[i])).present
+                    || resolved_portfolio_is_terminal(&env, portfolios[i])
+                {
+                    break;
+                }
+                let peer = env.svm.get_account(&portfolios[1 - i]);
+                peak_cu = peak_cu.max(pay(&mut env, i, false));
+                assert_eq!(env.svm.get_account(&portfolios[1 - i]), peer);
+                check(&env);
+            }
+            let receipt = resolved_receipt(&env.portfolio_state(portfolios[i]));
+            if exact == 0 {
+                assert!(receipt.present && !receipt.finalized);
+                assert_eq!(receipt.terminal_positive_claim_face, FACES[i]);
+                assert_eq!(receipt.prior_bound_contribution_num, FACES[i] * BOUND_SCALE);
+                assert_eq!(receipt.paid_effective, junior[i]);
+            } else {
+                assert_eq!(receipt, ResolvedPayoutReceiptV16::EMPTY);
+                assert!(resolved_portfolio_is_terminal(&env, portfolios[i]));
+            }
+            assert_eq!(
+                u128::from(env.token_amount(tokens[i])),
+                DEPOSITS[i] + junior[i]
+            );
+            exact += FACES[i];
+            let ledger = env.market_state().1.resolved_payout_ledger;
+            assert_eq!(ledger.snapshot_residual, RESIDUAL);
+            assert_eq!(ledger.current_payout_rate_den, TOTAL_FACE * BOUND_SCALE);
+            assert_eq!(
+                ledger.terminal_claim_exact_receipts_num,
+                exact * BOUND_SCALE
+            );
+            assert_eq!(
+                ledger.terminal_claim_bound_unreceipted_num,
+                (TOTAL_FACE - exact) * BOUND_SCALE
+            );
+            // A zero-due top-up cannot replace the same bound twice or pay a fraction as an atom.
+            let balances = tokens.map(|token| env.token_amount(token));
+            peak_cu = peak_cu.max(pay(&mut env, i, true));
+            assert_eq!(tokens.map(|token| env.token_amount(token)), balances);
+            check(&env);
+        }
+        for _ in 0..8 {
+            for i in order {
+                if !resolved_portfolio_is_terminal(&env, portfolios[i]) {
+                    peak_cu = peak_cu.max(pay(&mut env, i, false));
+                    check(&env);
+                }
+            }
+            if portfolios
+                .iter()
+                .all(|&p| resolved_portfolio_is_terminal(&env, p))
+            {
+                break;
+            }
+        }
+        assert!(portfolios
+            .iter()
+            .all(|&p| resolved_portfolio_is_terminal(&env, p)));
+        assert_eq!(tokens.map(|token| env.token_amount(token)), [100, 102, 0]);
+        let group = env.market_state().1;
+        assert_eq!(group.c_tot, 0);
+        assert_eq!(group.insurance, 0);
+        assert_eq!(group.source_claim_bound_total_num, 0);
+        assert_eq!(group.vault, RESIDUAL - junior.iter().sum::<u128>());
+        assert_eq!(group.vault, 1, "the unpaid fractions remain rounding stock");
+        for i in 0..3 {
+            env.close_portfolio_with_cu(&owners[i], portfolios[i]);
+        }
+        assert_eq!(env.market_state().1.materialized_portfolio_count, 0);
+        assert_eq!(env.token_amount(env.vault), 1);
+        assert_eq!(tokens.map(|token| env.token_amount(token)), [100, 102, 0]);
+    }
+    assert_cu_within("INV-066 zero-floor receipt", peak_cu, CUSTODY_CU_LIMIT);
+    println!("INV-066 zero-floor receipt: 2 claimant orders, exact payouts [100, 102, 0], rounding 1; peak {peak_cu} CU");
+}
+
 #[test]
 fn v16_program_late_receipt_materialization_preserves_snapshot_entitlements() {
     use super::inv_067_terminal_payout_completeness_and_exact_once_settlement::late_expiry::World;
