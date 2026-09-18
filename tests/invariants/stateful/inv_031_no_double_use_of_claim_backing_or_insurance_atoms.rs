@@ -40,6 +40,9 @@
 //! impaired exactly once, each owner must release only its own amount while the sibling remains
 //! byte-exact, and replacement backing must reject until both old liens clear. Only the newly
 //! transferred aggregate or split refill may then become fresh.
+//! `v16_program_cpi_created_shared_liens_expire_release_and_refill_exactly_once` builds that
+//! expiry frontier through both CPI transports. Both source sides and owner orders cross exact
+//! and late expiry before no-CPI reduction, sibling-preserving release and one fresh refill.
 //! The haircut-conversion matrix also submits a cap one atom below the independently known
 //! conversion amount. The deployed handler reaches its post-conversion cap rejection, and SVM
 //! rollback must restore the claim, backing bucket, portfolio, custody, and every auxiliary
@@ -1589,6 +1592,32 @@ fn v16_program_shared_lien_expiry_refill_preserves_owner_attribution() {
             }
         }
     }
+}
+
+#[test]
+fn v16_program_cpi_created_shared_liens_expire_release_and_refill_exactly_once() {
+    let mut worlds = 0;
+    for route in [TradeRoute::Cpi, TradeRoute::BatchCpi] {
+        for late in [false, true] {
+            for reverse_order in [false, true] {
+                for winner_long in [false, true] {
+                    verify_two_account_concurrent_lien_ownership(
+                        route,
+                        reverse_order,
+                        winner_long,
+                        ConcurrentLienSuffix::ExpiryRefill {
+                            late,
+                            split_refill: false,
+                        },
+                    )
+                    .unwrap_or_else(|error| panic!("{error}"));
+                    worlds += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(worlds, 16);
+    eprintln!("INV-031 CPI shared-lien expiry/refill: {worlds} public histories completed");
 }
 
 fn verify_haircut_conversion_retry(route: TradeRoute, seed_tag: u8) -> Result<(), String> {

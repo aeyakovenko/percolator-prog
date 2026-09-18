@@ -29941,6 +29941,57 @@ arbitrary expiry/refill schedules, conversion or terminal payout after replaceme
 Recovery/receipts, provider exit, insurance and supported maximum shapes remain open. The result
 does not promote INV-031, INV-032 or INV-063 status.
 
+### INV-031/032 CPI-created shared-lien expiry and refill (2026-09-18)
+
+The existing stateful INV-031 owner adds
+`v16_program_cpi_created_shared_liens_expire_release_and_refill_exactly_once`.
+Sixteen public histories cross single/batch CPI construction, both source sides,
+both reservation/release orders and exact/late authenticated expiry. They reuse
+the unchanged shared-lien oracle with one 37-atom refill and no-CPI reductions.
+
+This fills the intersection between the existing CPI-created live-consumption
+test and the no-CPI shared expiry/refill test. The INV-026/030 lifecycle matrices
+have one claimant; they cannot check that releasing one impaired lien preserves
+a second claimant's portfolio bytes and nonzero lien. Capacity, used-generation,
+and terminal receipt/scan owners are not duplicated or modified.
+
+Each world requires two nonzero liens, exact valid-to-impaired aggregate movement,
+bounded normalization and release, and two `EngineLockActive` refill rollbacks:
+before normalization and while the sibling remains impaired. After both releases,
+only the actual 37-atom SPL transfer becomes fresh backing. Independent stock,
+encumbrance and rate-transition oracles, custody, supply and public traces compose.
+The prefix also verifies two admission-frontier rejections per world.
+
+Validation uses isolated `origin/main` base
+`e8c7be9cc464d06f0ce542d4f1bd53d03205cb28`, engine `4db11a8c`, a freshly compiled
+host harness and reused default-feature wrapper SBF SHA-256
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`.
+The authenticated matcher was rebuilt from this worktree with platform-tools
+v1.52 to `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+The new exact selector passes **1/1: 16 histories, 64 checked rejections**
+(32 admission-frontier and 32 refill rejections), in 32.40 seconds. The adjacent
+mixed-latent-capacity selector passes **1/1: four worlds, 184 checked transactions,
+32 rollbacks, 28 restored prefixes and 116 terminal calls**, peak 1,009,251 CU.
+The first stateful compilation exhausted temporary shared-disk space before any
+test ran; the retry compiled and passed. No broad suite or engine proof ran.
+
+```bash
+export TMPDIR=/dev/shm CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_TARGET_DIR=/dev/shm/astra-source-capacity-20260918-host
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv077/target/deploy/percolator_prog.so
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_031_no_double_use_of_claim_backing_or_insurance_atoms::v16_program_cpi_created_shared_liens_expire_release_and_refill_exactly_once -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_028_source_domain_realizability_cap::historical_latent_capacity::generation_capacity_admission::v16_program_mixed_materialized_latent_reclamation_admits_only_fitting_replacement -- --exact --nocapture --test-threads=1
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs tests/invariants/cu/inv_028_generation_capacity_admission.rs
+git diff --check
+```
+
+This is coverage only. CPI reductions after impairment, unequal shared claims,
+split refill on CPI histories, repeated expiry cycles, conversion/payout after
+refill, Recovery, insurance reservations, latent capacity at maximum shape and
+arbitrary future exit resources remain open. INV-028/031/032/057/077/078/089
+statuses and row 423 remain unchanged. No production fix or LoF/DoS claim.
+
 ## Recorded PR135 inventory
 
 This is an artifact inventory with historical fixed-pin evidence descriptions, not a current
