@@ -9,20 +9,21 @@
 //! public LiteSVM worlds, installs the same LP-consented nonzero market base fee, and executes one
 //! trade through `TradeNoCpi`, `TradeCpi`, `BatchTradeNoCpi`, and `BatchTradeCpi`. The comparison is
 //! byte-exact for both markets, every portfolio, the backing ledger, every SPL account, economic
-//! lamports, and token supply after normalizing three documented transport/capability differences:
+//! lamports, and token supply after normalizing documented transport/capability differences:
 //! the CPI-only matcher request sequence, the single-CPI matcher's 64-byte ABI return cache, and
-//! the LP matcher-enabled bit retained after a matcher-synchronized fill but revoked by a bilateral
-//! fill. Matcher tuple, fee cap, position epoch, and every other byte remain exact. The fixed matrix
-//! covers minimum, interior, and maximum fee rates; the generated matrix varies seed, size, side,
-//! and fee rate.
+//! the LP matcher-enabled bit and expiry retained after a matcher-synchronized fill but revoked by
+//! a bilateral fill. Enabled/expiry postconditions and exact owner fee debits and insurance credit
+//! are checked before normalization. Matcher tuple, fee cap, position epoch, and every other byte
+//! remain exact. The fixed matrix covers minimum, interior, and maximum fee rates; the generated
+//! matrix varies seed, size, side, and fee rate.
 //!
 //! The bounded stale-liability product composes all four routes with direct admission, canonical
 //! public refresh, omitted-liability hints, reversed cached hints, and duplicate-benign-hint
 //! rollback/retry. A stale certificate would admit the candidate, but full refresh includes a
 //! 50-atom loss and must reject it. A public SPL deposit then makes the same trade usable. The
-//! committed account frames converge after the transport normalization above plus the LP expiry
-//! cleared with its enabled bit by bilateral fills. Both expiry postconditions are checked before
-//! normalization. Certificates are checked with the existing full-refresh oracle. This supplies
+//! committed account frames converge after the transport normalization above. Both expiry
+//! postconditions are checked before normalization. Certificates are checked with the existing
+//! full-refresh oracle. This supplies
 //! INV-056 composition evidence without repeating its max-shape omission matrix.
 //!
 //! Guarantee boundary: this closes the one-leg trade-route and nonzero-fee partition. It does not
@@ -112,6 +113,11 @@ fn normalized_primary_portfolios(env: &V16Svm) -> Result<Vec<Vec<u8>>, String> {
             state::write_portfolio_matcher_config(&mut portfolio, &matcher).map_err(|error| {
                 format!("INV-047 write portfolio {index} matcher normalization: {error:?}")
             })?;
+            if index == MAKER {
+                portfolio[PORTFOLIO_MATCHER_EXPIRY_OFF
+                    ..PORTFOLIO_MATCHER_EXPIRY_OFF + PORTFOLIO_MATCHER_EXPIRY_LEN]
+                    .fill(0);
+            }
             Ok(portfolio)
         })
         .collect()
@@ -146,6 +152,10 @@ fn run_nonzero_fee_route(
         .map_err(|error| format!("INV-047 install common base fee: {error}"))?;
     let initial_contexts = env.all_matcher_context_data();
     let insurance_before = env.primary_market_state().1.insurance;
+    let capital_before = [TAKER, MAKER].map(|index| env.primary_portfolio(index).capital.get());
+    // Whole lots at the fixed mark have integral notional; each owner pays a rounded-up fee.
+    let expected_fee =
+        (u128::from(lots) * u128::from(INITIAL_PRICE) * u128::from(fee_bps)).div_ceil(10_000);
     let signed_lots = if account_a_long {
         i128::from(lots)
     } else {
@@ -187,10 +197,11 @@ fn run_nonzero_fee_route(
     }
 
     let (_, group) = env.primary_market_state();
-    if group.insurance <= insurance_before {
+    if group.insurance != insurance_before + 2 * expected_fee {
         return Err(format!(
-            "INV-047 {route:?} nonzero fee did not fund insurance: {}/{}",
-            group.insurance, insurance_before
+            "INV-047 {route:?} fee insurance mismatch: {}, expected {}",
+            group.insurance,
+            insurance_before + 2 * expected_fee
         ));
     }
     if group.vault != group.c_tot + group.insurance
@@ -206,6 +217,30 @@ fn run_nonzero_fee_route(
     }
     let taker = env.primary_portfolio(TAKER);
     let maker = env.primary_portfolio(MAKER);
+    if taker.capital.get() != capital_before[0] - expected_fee
+        || maker.capital.get() != capital_before[1] - expected_fee
+    {
+        return Err(format!(
+            "INV-047 {route:?} owner fee mismatch: capital={}/{}, before={capital_before:?}, fee/owner={expected_fee}",
+            taker.capital.get(), maker.capital.get()
+        ));
+    }
+    for index in [TAKER, MAKER] {
+        let portfolio = env.primary_portfolio_data(index);
+        let matcher = state::read_portfolio_matcher_config(&portfolio)
+            .map_err(|error| format!("INV-047 read portfolio {index} matcher: {error:?}"))?;
+        let expiry = state::read_portfolio_matcher_expiry(&portfolio)
+            .map_err(|error| format!("INV-047 read portfolio {index} expiry: {error:?}"))?;
+        let synchronized =
+            index == MAKER && matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi);
+        let expected_expiry = if synchronized { u64::MAX } else { 0 };
+        if matcher.enabled() != u64::from(synchronized) || expiry != expected_expiry {
+            return Err(format!(
+                "INV-047 {route:?} portfolio {index} matcher postcondition: enabled={}, expiry={expiry}, expected={}/{expected_expiry}",
+                matcher.enabled(), u64::from(synchronized)
+            ));
+        }
+    }
     let taker_position = taker
         .legs
         .iter()
@@ -306,11 +341,7 @@ fn hint_route_accounts(env: &V16Svm, normalize_transport: bool) -> Vec<(Pubkey, 
         .collect();
     if normalize_transport {
         let market = normalized_primary_market(env).expect("normalize route market");
-        let mut portfolios =
-            normalized_primary_portfolios(env).expect("normalize route portfolios");
-        portfolios[MAKER][PORTFOLIO_MATCHER_EXPIRY_OFF
-            ..PORTFOLIO_MATCHER_EXPIRY_OFF + PORTFOLIO_MATCHER_EXPIRY_LEN]
-            .fill(0);
+        let portfolios = normalized_primary_portfolios(env).expect("normalize route portfolios");
         let contexts = normalized_matcher_contexts(env).expect("normalize matcher return cache");
         for (key, account) in &mut accounts {
             if *key == env.market {
