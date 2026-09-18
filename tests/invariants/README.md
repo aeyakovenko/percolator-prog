@@ -12,6 +12,19 @@ beneficiary fixed. New/control exact selectors pass at **450,936 / 423,123 CU**
 measured peaks. Row 429 remains COVERED. Live shutdown, expiry/recredit, custody
 repair and slab retirement are outside this bounded increment.
 
+## Row 410 control repair and populated resolution rollback (2026-09-18)
+
+[The focused note](row410_populated_resolution_20260918.md) records both exact
+selectors in [the existing resolution file](cu/inv_024_resolution_submitter_reserve.rs).
+The control now expects terminal destination rejection as `InvalidTokenAccount`
+and counts every committed Live/Resolved insurance debit in `authority_epoch`.
+Full Account rollback still preserves the operator's committed 7-atom Live payout;
+terminal reserves go only to the provider and insurer. The populated-resolution
+case from `cb1e0ec47febecada61a8bc6e1538b551a860e7d` restores resolution and a
+trader payout on redirect rejection, then pays users 56,627/1,995,000 atoms while
+preserving 100,000 backing, 875 earned-fee and 31 insurance atoms. Both pass:
+control **62,012 CU**, populated **260,263 CU**. Row 410 status is unchanged.
+
 ## Row 428 atomic thaw and retained debit (2026-09-18)
 
 [The focused note](row428_atomic_thaw_20260918.md) adds one selector in
@@ -2684,17 +2697,21 @@ insurance ledger remains attributed to the insurer.
 The retained operator request follows resolution, a 79-atom provider payout and
 a 17-atom insurer payout in one transaction. All three prefix instructions
 complete, including two SPL transfers and both ledger writes; the operator
-suffix rejects with `Unauthorized` at transaction instruction 5. Exact complete
+suffix rejects with `InvalidTokenAccount` at transaction instruction 5 because
+terminal destination validation precedes role and retained-epoch validation.
+Exact complete
 Account frames restore the **Live** mode, fresh backing, insurer reserve,
 ledgers, mint, destinations, wallets and every compiled transaction account,
 apart from the actual signature fee. The same three prefix instructions then
 commit, followed by the insurer's 107-atom tail. Both terminal beneficiaries
-are nonsigners; operator payer privilege supplies no terminal entitlement.
+retain their own destinations; the provider is unsigned and the insurer signs
+in this control. Operator payer privilege supplies no terminal entitlement.
 
 An input-derived checker reads raw market, token and ledger accounts after
 each attempt. It reconciles the 210-atom fixed mint supply, backing and insurance
 stocks, beneficiary identities, deposited and withdrawn history, unchanged
-authority profiles/sequences and complete token/ledger Account frames, alongside
+authority profiles, exact insurance-debit epochs, all other unchanged control
+sequences and complete token/ledger Account frames, alongside
 the stock census and shape check. Final balances are provider 79, insurer 124,
 operator 7 (Live only), setup payer 0 and market authority 0. Both histories
 finish with an exact market tombstone and rent refund to the market authority;

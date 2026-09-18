@@ -6,6 +6,180 @@ use terminal_public_reserves::reserve_payout;
 use terminal_reserve_destination_recovery::land;
 
 #[test]
+fn v16_program_populated_resolution_rollback_preserves_trader_payout_and_earned_reserves() {
+    let (
+        TerminalEarningsWorld {
+            mut env,
+            admin,
+            successor: operator,
+            wallets,
+            tokens,
+            portfolios,
+            mint_frame,
+            ..
+        },
+        users,
+    ) = terminal_earnings_world_with_user_signers(false, None);
+    env.payer = operator;
+    let live = env.market_state();
+    let sequences = env.control_sequences(0);
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(live.1.mode, MarketModeV16::Live);
+    assert_eq!(live.1.materialized_portfolio_count, 2);
+    assert_eq!(
+        live.1.c_tot,
+        u128::from(CAPITAL.iter().sum::<u64>() - PROFIT - EARNINGS)
+    );
+    assert_eq!(live.1.backing_provider_earnings_total, EARNINGS.into());
+    assert!(portfolios
+        .iter()
+        .all(|key| has_active_leg_for_asset(&env.portfolio_state(*key), 0)));
+    assert_eq!(tokens.map(|key| env.token_amount(key)), [0; 5]);
+    let tracked = [env.market, env.vault, env.mint]
+        .into_iter()
+        .chain(wallets)
+        .chain(tokens)
+        .chain(portfolios)
+        .collect::<Vec<_>>();
+    let token_frames = tokens.map(|key| env.svm.get_account(&key).unwrap());
+    let vault_frame = env.svm.get_account(&env.vault).unwrap();
+    let close_user = |actor: usize| Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(wallets[actor], true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolios[actor], false),
+            AccountMeta::new(tokens[actor], false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        }
+        .encode(),
+    };
+    let user_closes = [close_user(0), close_user(1)];
+    let prefix = [
+        Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: ProgInstruction::ResolveMarket {
+                asset_generation_frontier: live.1.next_market_id,
+                authority_epoch: sequences.authority_epoch,
+            }
+            .encode(),
+        },
+        user_closes[1].clone(),
+    ];
+    let mut redirect = reserve_payout(&env, wallets, tokens, Pubkey::default(), 2, 1);
+    redirect.accounts[0] = AccountMeta::new_readonly(wallets[3], true);
+    redirect.accounts[2].pubkey = tokens[3];
+    let mut rejected = prefix.to_vec();
+    rejected.push(redirect);
+    // The operator's payer signature cannot change the terminal token beneficiary.
+    // The completed resolution and user payout must both return to the Live frame.
+    let mut peak = land(
+        &mut env,
+        &rejected,
+        &[&admin, &users[1]],
+        &tracked,
+        &[],
+        0,
+        None,
+        Some((4, PercolatorError::InvalidTokenAccount)),
+    );
+    assert_eq!(env.market_state(), live);
+    let allowed = [env.market, env.vault, portfolios[1], tokens[1]];
+    peak = peak.max(land(
+        &mut env,
+        &prefix,
+        &[&admin, &users[1]],
+        &tracked,
+        &allowed,
+        0,
+        None,
+        None,
+    ));
+    assert!(resolved_portfolio_is_terminal(&env, portfolios[1]));
+    assert!(!resolved_portfolio_is_terminal(&env, portfolios[0]));
+    assert_eq!(env.token_amount(tokens[1]), PAYOUTS[1]);
+    assert_eq!(env.token_amount(tokens[0]), 0);
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    assert_eq!(env.market_state().1.resolved_slot, 2);
+
+    let allowed = [env.market, env.vault, portfolios[0], tokens[0]];
+    peak = peak.max(land(
+        &mut env,
+        &user_closes[..1],
+        &[&users[0]],
+        &tracked,
+        &allowed,
+        0,
+        None,
+        None,
+    ));
+    assert!(resolved_portfolio_is_terminal(&env, portfolios[0]));
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg, live.0);
+    assert_eq!(env.control_sequences(0), sequences);
+    assert_eq!(group.materialized_portfolio_count, 2);
+    assert_eq!((group.c_tot, group.pnl_pos_tot), (0, 0));
+    assert_eq!(group.source_claim_bound_total_num, 0);
+    assert_eq!(group.backing_provider_earnings_total, EARNINGS.into());
+    assert_eq!(group.insurance, INSURANCE.into());
+    assert_eq!(group.insurance_domain_budget, vec![INSURANCE.into(), 0]);
+    let bucket = group.source_backing_buckets[1];
+    assert_eq!(
+        bucket.fresh_unliened_backing_num,
+        u128::from(BACKING) * BOUND_SCALE
+    );
+    assert_eq!(bucket.utilization_fee_earnings, EARNINGS.into());
+    let remaining = BACKING + EARNINGS + INSURANCE;
+    assert_eq!(group.vault, remaining.into());
+    let amounts = [PAYOUTS[0], PAYOUTS[1], 0, 0, 0];
+    for ((key, frame), amount) in tokens
+        .into_iter()
+        .zip(&token_frames)
+        .zip(amounts)
+        .chain(std::iter::once(((env.vault, &vault_frame), remaining)))
+    {
+        let mut expected = frame.clone();
+        let mut token = TokenAccount::unpack(&expected.data).unwrap();
+        token.amount = amount;
+        TokenAccount::pack(token, &mut expected.data).unwrap();
+        assert_eq!(env.svm.get_account(&key), Some(expected));
+    }
+    assert_eq!(amounts.iter().sum::<u64>() + remaining, SUPPLY);
+    assert_eq!(env.svm.get_account(&env.mint), Some(mint_frame));
+    let mut image = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(
+        state::read_asset_oracle_profile(&image.data, 0).unwrap(),
+        profile
+    );
+    let accounts = portfolios.map(|key| env.portfolio_state(key));
+    crate::support::fuzz_model::assert_market_stock_census(
+        "populated resolution submitter",
+        &group,
+        &image.data,
+        &accounts,
+        remaining.into(),
+    )
+    .unwrap();
+    state::market_view_mut(&mut image.data)
+        .unwrap()
+        .1
+        .validate_shape()
+        .unwrap();
+    eprintln!("row410 populated resolution: 1 complete rollback, 2 trader payouts, 875 earned fees and 31 insurance preserved; peak={peak} CU");
+}
+
+#[test]
 fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authority() {
     use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_capacity;
 
@@ -168,7 +342,7 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
             .collect::<Vec<_>>();
 
         // Inputs, not observed payout deltas, determine every remaining entitlement.
-        let check = |env: &V16CuEnv, resolved: bool, paid: [u64; 3]| {
+        let check = |env: &V16CuEnv, resolved: bool, paid: [u64; 3], insurance_debits: u64| {
             let [backing_paid, operator_paid, insurer_paid] = paid;
             let backing = PRINCIPAL - backing_paid;
             let insurance = FUNDED - operator_paid - insurer_paid;
@@ -239,7 +413,8 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
                 profile
             );
             let mut expected_sequences = sequences;
-            expected_sequences.authority_epoch += u64::from(operator_paid != 0);
+            // Every committed Live or Resolved insurance debit consumes one epoch.
+            expected_sequences.authority_epoch += insurance_debits;
             assert_eq!(env.control_sequences(0), expected_sequences);
             assert_eq!(
                 profile.backing_bucket_authority,
@@ -296,7 +471,7 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
                 .validate_shape()
                 .unwrap();
         };
-        check(&env, false, [0; 3]);
+        check(&env, false, [0; 3], 0);
         let insurance_payout = |env: &V16CuEnv, actor, amount| {
             let mut ix = reserve_payout(env, wallets, tokens, ledgers[0], 2, amount);
             ix.accounts[0].pubkey = wallets[actor];
@@ -319,7 +494,7 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
             None,
             None,
         ));
-        check(&env, false, [0, LIVE_PAID, 0]);
+        check(&env, false, [0, LIVE_PAID, 0], 1);
 
         env.svm.warp_to_slot(7);
         let resolve = Instruction {
@@ -370,6 +545,7 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
         rejected_signers.push(&operator);
         // All three prefix instructions complete, including two SPL transfers and
         // both ledger writes. Rejection must also restore the Live market mode.
+        // Terminal destination validation precedes the role and retained-epoch checks.
         peak = peak.max(land(
             &mut env,
             &rejected,
@@ -378,9 +554,9 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
             &[],
             0,
             None,
-            Some((5, PercolatorError::Unauthorized)),
+            Some((5, PercolatorError::InvalidTokenAccount)),
         ));
-        check(&env, false, [0, LIVE_PAID, 0]);
+        check(&env, false, [0, LIVE_PAID, 0], 1);
         let resolve = Instruction {
             program_id: env.program_id,
             accounts: if permissionless {
@@ -416,7 +592,7 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
         peak = peak.max(land(
             &mut env, &prefix, &signers, &tracked, &allowed, 0, None, None,
         ));
-        check(&env, true, [PRINCIPAL, LIVE_PAID, TERMINAL_PREFIX]);
+        check(&env, true, [PRINCIPAL, LIVE_PAID, TERMINAL_PREFIX], 2);
         let tail = insurance_payout(&env, 4, FUNDED - LIVE_PAID - TERMINAL_PREFIX);
         let allowed = [env.market, env.vault, tokens[4], ledgers[1]];
         peak = peak.max(land(
@@ -429,7 +605,7 @@ fn v16_program_resolution_bundle_cannot_preserve_submitter_live_reserve_authorit
             None,
             None,
         ));
-        check(&env, true, [PRINCIPAL, LIVE_PAID, FUNDED - LIVE_PAID]);
+        check(&env, true, [PRINCIPAL, LIVE_PAID, FUNDED - LIVE_PAID], 3);
 
         let close = Instruction {
             program_id: env.program_id,
