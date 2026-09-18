@@ -599,6 +599,164 @@ fn v16_program_source_credit_saturation_boundary_preserves_claims_and_advances_e
     }
 }
 
+#[test]
+fn v16_program_backing_expiry_rewrite_cannot_renew_discounted_credit() {
+    const CLAIM: u128 = 20 * 5;
+    const BACKING: u128 = 37;
+    const EXPIRY: u64 = 10;
+
+    for (domain, direction, mark) in [(1usize, 1i128, 105u64), (0, -1, 95)] {
+        let mut env = V16Svm::new(
+            [0x30 + domain as u8; 32],
+            MarketConfig {
+                initial_price: 100,
+                maintenance_margin_bps: 1_000,
+                initial_margin_bps: 1_000,
+                max_price_move_bps_per_slot: 500,
+                max_accrual_dt_slots: 1,
+                min_funding_lifetime_slots: 1,
+                actor_deposits: [1_000, 1_000, 1, 1, 1],
+                actor_token_balances: [1_000, 1_000, 1, 1, 1],
+                ..MarketConfig::default()
+            },
+        );
+        env.begin_public_trace();
+        env.top_up_backing_bucket(domain as u16, BACKING, EXPIRY)
+            .unwrap();
+        env.trade_no_cpi(0, 1, 0, direction * 20 * POS_SCALE as i128, 100, 0)
+            .unwrap();
+        env.warp_to_slot(2);
+        env.push_auth_mark(0, 2, mark).unwrap();
+        // Keep the loser's principal unsettled: only the provider funds this claim.
+        for actor in [4usize, 0] {
+            inv_030_crank_actor_steps(&mut env, actor, 2, &[0], "expiry rewrite setup");
+        }
+
+        let checkpoint = |env: &V16Svm, available: u128, deposited: u128| {
+            assert_inv_030_census("expiry rewrite", env);
+            let group = env.primary_market_state().1;
+            let source = group.source_credit[domain];
+            let bucket = group.source_backing_buckets[domain];
+            let account = env.primary_portfolio(0);
+            let claims: u128 = account
+                .source_domains
+                .iter()
+                .filter(|s| s.is_occupied())
+                .map(|s| {
+                    assert_eq!(s.domain.get() as usize, domain);
+                    assert_eq!(s.source_claim_liened_num.get(), 0);
+                    s.source_claim_bound_num.get()
+                })
+                .sum();
+            assert_eq!(claims, CLAIM * BOUND_SCALE);
+            assert_eq!(account.pnl.get(), CLAIM as i128);
+            assert_eq!(group.source_claim_bound_total_num, claims);
+            assert_eq!(source.exact_positive_claim_num, claims);
+            assert_eq!(source.positive_claim_bound_num, claims);
+            assert_eq!(source.fresh_reserved_backing_num, available * BOUND_SCALE);
+            assert_eq!(bucket.fresh_unliened_backing_num, available * BOUND_SCALE);
+            assert_eq!(bucket.expiry_slot, EXPIRY);
+            assert_eq!(source.valid_liened_backing_num, 0);
+            assert_eq!(source.impaired_liened_backing_num, 0);
+            assert_eq!(source.insurance_credit_reserved_num, 0);
+            assert_eq!(source.valid_liened_insurance_num, 0);
+            assert_eq!(source.impaired_liened_insurance_num, 0);
+            assert_eq!(
+                source.credit_rate_num,
+                available * CREDIT_RATE_SCALE / CLAIM
+            );
+            assert!(claims * source.credit_rate_num / CREDIT_RATE_SCALE <= available * BOUND_SCALE);
+            assert_eq!(group.c_tot, 2_003);
+            assert_eq!(group.vault, 2_003 + deposited);
+            assert_eq!(group.vault, u128::from(env.token_amount(env.vault)));
+        };
+        checkpoint(&env, BACKING, BACKING);
+
+        for requested_expiry in [EXPIRY - 1, EXPIRY + 1] {
+            let before = env.market_data(false);
+            let error = env
+                .top_up_backing_bucket(domain as u16, 1, requested_expiry)
+                .expect_err("funded top-up cannot rewrite a live bucket's expiry");
+            let expected = format!(
+                "Custom({})",
+                percolator_prog::error::PercolatorError::EngineLockActive as u32
+            );
+            assert!(error.contains(&expected), "{error}");
+            assert_eq!(env.market_data(false), before);
+            checkpoint(&env, BACKING, BACKING);
+        }
+        // The same amount with the original expiry succeeds and changes only funded credit.
+        let before = env.primary_market_state().1;
+        let tokens_before = env.token_amount(env.provider_source_token);
+        env.top_up_backing_bucket(domain as u16, 1, EXPIRY).unwrap();
+        checkpoint(&env, BACKING + 1, BACKING + 1);
+        assert_eq!(
+            env.token_amount(env.provider_source_token),
+            tokens_before - 1
+        );
+        let after = env.primary_market_state().1;
+        assert_source_credit_rate_transition("same expiry deposit", &before, &after).unwrap();
+        assert!(
+            after.source_credit[domain].credit_epoch > before.source_credit[domain].credit_epoch
+        );
+
+        for expired in [false, true] {
+            if expired {
+                env.warp_to_slot(EXPIRY);
+                env.push_auth_mark(0, EXPIRY, mark).unwrap();
+                let before = env.primary_market_state().1;
+                inv_030_crank_actor_steps(&mut env, 0, EXPIRY, &[0], "original expiry");
+                let after = env.primary_market_state().1;
+                assert_source_credit_rate_transition("original expiry", &before, &after).unwrap();
+                assert!(
+                    after.source_credit[domain].credit_epoch
+                        > before.source_credit[domain].credit_epoch
+                );
+            }
+            let available = if expired { 0 } else { BACKING + 1 };
+            checkpoint(&env, available, BACKING + 1);
+            let before = env.primary_market_state().1;
+            assert_eq!(
+                before.source_backing_buckets[domain].status,
+                if expired {
+                    BackingBucketStatusV16::Expired
+                } else {
+                    BackingBucketStatusV16::Fresh
+                }
+            );
+            let portfolios = env.all_primary_portfolio_data();
+            let ledger = env.backing_domain_ledger_data();
+            let tokens = env.all_token_account_data();
+            for requested_expiry in [0, EXPIRY - 1, EXPIRY, EXPIRY + 1, u64::MAX] {
+                env.top_up_backing_bucket(domain as u16, 0, requested_expiry)
+                    .unwrap();
+                checkpoint(&env, available, BACKING + 1);
+                let after = env.primary_market_state().1;
+                assert_eq!(after.source_credit, before.source_credit);
+                assert_eq!(after.source_backing_buckets, before.source_backing_buckets);
+                assert_eq!(env.all_primary_portfolio_data(), portfolios);
+                assert_eq!(env.backing_domain_ledger_data(), ledger);
+                assert_eq!(env.all_token_account_data(), tokens);
+            }
+        }
+        let trace = env.finish_public_trace();
+        trace
+            .validate_public_execution()
+            .expect("public expiry rewrite history with exact error rollback");
+        assert_eq!(trace.out_of_band_economic_mutations, 0);
+        eprintln!(
+            "INV-030 expiry rewrite: domain={domain}, steps={}, peak CU={}",
+            trace.steps.len(),
+            trace
+                .steps
+                .iter()
+                .filter_map(|s| s.compute_units)
+                .max()
+                .unwrap()
+        );
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
