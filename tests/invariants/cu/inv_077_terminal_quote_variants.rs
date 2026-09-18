@@ -1309,11 +1309,9 @@ fn quote_variants_terminal_close_at_capacity(terminal_backing: bool) {
                 .map(|key| env.svm.get_account(key))
                 .collect();
             let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
-            let expected_calls = if terminal_backing {
-                slots.div_ceil(CHUNK) + 1
-            } else {
-                1
-            };
+            let scan_calls = slots.div_ceil(CHUNK);
+            // Expiry invalidates the prefix: newly released residual requires a full rescan.
+            let expected_calls = if terminal_backing { 2 * scan_calls } else { 1 };
             let authority_epoch = env.control_sequences(0).authority_epoch;
             let mut close_peak = 0;
             for call in 1..=expected_calls {
@@ -1331,16 +1329,18 @@ fn quote_variants_terminal_close_at_capacity(terminal_backing: bool) {
                     break;
                 }
                 let (cfg, group) = env.market_state();
+                let expired = call >= scan_calls;
+                let scan_call = if expired { call - scan_calls } else { call };
                 assert_eq!(
                     cfg.terminal_slab_scan_progress,
-                    (call * CHUNK).min(slots - 1) as u128
+                    (scan_call * CHUNK) as u128,
+                    "quote={label}, slots={slots}, call={call}, expired={expired}"
                 );
                 assert_eq!(
                     (group.c_tot, group.vault, group.insurance),
                     (0, BACKING.into(), 0)
                 );
                 assert_eq!(group.materialized_portfolio_count, 0);
-                let expired = call == expected_calls - 1;
                 let bucket = group.source_backing_buckets[usize::from(domain)];
                 assert_eq!(
                     bucket.status,

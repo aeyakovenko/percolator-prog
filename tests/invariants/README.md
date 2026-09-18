@@ -28,6 +28,50 @@ cargo test --locked --offline --test v16_cu inv_076_close_drift_residual_durabil
 cargo test --locked --offline --test v16_cu inv_076_close_drift_residual_durability_and_finalization_atomicity::v16_program_cure_and_cancel_close_rejects_when_resolve_matured_atomically -- --exact --nocapture
 ```
 
+## INV-077 last-domain expiry scan expectation repair (2026-09-18)
+
+Classification: **stale test expectation**, not a new public LoF/DoS/CU bug.
+At base `2e88c39b6bbdc57c86e7ab18548d42205ba6b831`, the unmodified exact selector
+`v16_program_quote_variants_retire_public_last_domain_backing_at_capacity`
+fails with cursor **0 versus expected 254** (exit 101, 0/1 tests), using a freshly
+built default-feature SBF. Production commit `547847ed9c01a2f2f165caecdbdbeacf4c644c8e`
+intentionally invalidates the terminal scan prefix after backing expiry: released
+residual can make earlier spent insurance actionable. Keeping the old cursor
+would skip that evidence. The wrapper behavior is correct.
+
+The public trace activates N assets, deposits and returns 1,009 user atoms,
+funds 307 backing atoms in the final short domain, resolves and closes the
+portfolio, advances Clock to expiry, and repeatedly calls `CloseSlab`.
+[The repaired helper](cu/inv_077_terminal_quote_variants.rs) requires exactly
+`2 * ceil(N / 256)` calls: scan to expiry, reset to zero, then scan to retirement.
+At N = 255, 256, 257 and 5,782, this is **2, 2, 4 and 46 calls**, superseding
+the historical Row 418 report's 2, 2, 3 and 24. Backing must stay expired throughout
+the second pass; all existing custody, exact burn/surplus, rent and 300,000-CU
+assertions remain. The shared empty-custody selector still requires one call.
+Dense-backing coverage already checks scan invalidation, but does not replace
+this public quote-variant/capacity matrix. No production change or invariant
+status promotion is included.
+
+Green: **2/2 exact selectors, 40/40 worlds** (16 backing, 24 empty), exit 0,
+468.71 seconds. Peak close cost was **174,604 CU**; peak measured lifecycle cost
+was **214,758 CU**, both below 300,000. Scoped rustfmt and Git whitespace checks
+pass. The fresh locked/offline platform-tools v1.52 SBF has SHA-256
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`.
+Only the two selectors sharing the changed helper were run; no full suite.
+
+Commands from `/dev/shm/percolator-inv077` (the red run preceded the test edit):
+
+```sh
+env CARGO_TARGET_DIR=/dev/shm/percolator-inv077/target/sbf CARGO_BUILD_JOBS=4 RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/percolator-inv077/target/deploy -- --locked
+export TMPDIR=/dev/shm/percolator-inv077 CARGO_TARGET_DIR=/dev/shm/percolator-inv077/target/host PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv077/target/deploy/percolator_prog.so
+export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+cargo test --locked --offline --test v16_cu inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_quote_variants_retire_public_last_domain_backing_at_capacity -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_quote_variants_retire_public_last_domain_backing_at_capacity inv_077_bounded_work_and_maximum_shape_compute::terminal_quote_variants::v16_program_quote_variants_have_bounded_empty_terminal_close_at_capacity
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_077_terminal_quote_variants.rs
+git diff --check
+git diff --cached --check
+```
+
 ## INV-067 absent-provider rejection precedence (2026-09-18)
 
 Classification: **stale test expectation**, with no production fix or missing
