@@ -79,6 +79,18 @@ current-main SBF at **218,682 / 224,593 / 33,758 CU**. Row 424 remains OPEN for 
 dual custody, repeated native recredit, maximum shapes and unavailable retirement
 resources. Production, fixtures, shared helpers, Cargo and TSVs are unchanged.
 
+## Row 433 paid native-secondary redemption (2026-09-18)
+
+[The focused note](row433_native_secondary_redemption_20260918.md) adds one
+history in [the existing earnings file](cu/inv_073_native_secondary_earnings.rs).
+A provider redeems 17 native-secondary fee atoms before its wallet disappears.
+Keeper-only SPL payment and native ATA repair finish the same 875-atom ledger;
+an overclaim suffix rolls back repair/payment exactly before unchanged retry.
+Final custody separates redeemed SOL, remaining fees, principal, surplus and rent.
+The nearest control closes empty native custody; paid redemption previously used
+native primary. New/control exact selectors pass at **450,839 / 450,839 CU** peak.
+Row 433 remains OPEN; one bounded history, with no fixture/helper or status edits.
+
 ## Row 433 native-secondary earnings (2026-09-17)
 
 [The focused note](row433_native_secondary_earnings_20260917.md) adds one public

@@ -1,6 +1,7 @@
 //! Row433 / INV-024/073: native-secondary earnings share the SPL-paid ledger.
 //! Repaired native custody pays the fee tail, while unsynced vault donations and
 //! displaced primary liquidity remain surplus through exact terminal closure.
+//! A redeemed native fee prefix remains counted after wallet loss and ATA repair.
 
 use super::*;
 use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_create_public_spl_mint;
@@ -10,8 +11,18 @@ use terminal_public_reserves::reserve_payout;
 
 #[test]
 fn v16_program_native_secondary_earnings_repair_excludes_donations_and_closes_both_rails() {
+    verify_native_secondary_earnings(false);
+}
+
+#[test]
+fn v16_program_redeemed_native_secondary_earnings_preserve_ledger_through_repair_and_close() {
+    verify_native_secondary_earnings(true);
+}
+
+fn verify_native_secondary_earnings(redeem_prefix: bool) {
     const DONATION: u64 = 19;
     const TAIL: u64 = EARNINGS - PREFIX;
+    let redeemed = if redeem_prefix { PREFIX } else { 0 };
     let mut peak = [0; 4]; // setup, payment, rejected suffix, final closure
     let mut env = inv081_public_native_market_with_params(
         1,
@@ -344,6 +355,28 @@ fn v16_program_native_secondary_earnings_repair_excludes_donations_and_closes_bo
     .chain(portfolios)
     .chain(custody_keys)
     .collect::<Vec<_>>();
+    if redeem_prefix {
+        let mut first = reserve_payout(&env, wallets, tokens, ledger, 1, redeemed);
+        first.accounts[3].pubkey = native_provider;
+        first.accounts[4].pubkey = native_vault;
+        assert!(first.accounts.iter().all(|meta| !meta.is_signer));
+        let allowed = [env.market, ledger, native_vault, native_provider];
+        peak[1] = peak[1].max(land(
+            &mut env,
+            &[first],
+            &[],
+            &tracked,
+            &allowed,
+            0,
+            None,
+            None,
+        ));
+        assert_eq!(env.token_amount(native_provider), redeemed);
+        assert_eq!(
+            env.svm.get_account(&native_provider).unwrap().lamports,
+            rent + redeemed
+        );
+    }
     let remove = spl_token::instruction::close_account(
         &spl_token::ID,
         &native_provider,
@@ -359,7 +392,7 @@ fn v16_program_native_secondary_earnings_repair_excludes_donations_and_closes_bo
         &tracked,
         &[native_provider],
         0,
-        Some((wallets[2], rent)),
+        Some((wallets[2], rent + redeemed)),
         None,
     ));
     let balance = env.svm.get_account(&wallets[2]).unwrap().lamports;
@@ -468,14 +501,14 @@ fn v16_program_native_secondary_earnings_repair_excludes_donations_and_closes_bo
             remaining + fees[1],
             EARNINGS - fees[1],
             principal + fees[0],
-            fees[1],
+            fees[1] - redeemed,
             insurance,
             0,
         ]
         .into_iter()
         .enumerate()
         {
-            if i == 3 && fees[1] == 0 {
+            if i == 3 && fees[1] == redeemed {
                 assert_absent(env, native_provider);
             } else {
                 assert_eq!(
@@ -489,7 +522,15 @@ fn v16_program_native_secondary_earnings_repair_excludes_donations_and_closes_bo
                 + env.token_amount(env.vault),
             SUPPLY
         );
-        assert_eq!(env.token_amount(native_vault) + fees[1], EARNINGS);
+        let native_custody = if fees[1] == redeemed {
+            0
+        } else {
+            env.token_amount(native_provider)
+        };
+        assert_eq!(
+            env.token_amount(native_vault) + native_custody + redeemed,
+            EARNINGS
+        );
         assert_eq!(env.token_amount(tokens[0]), PAYOUTS[0]);
         assert_eq!(env.token_amount(tokens[1]), PAYOUTS[1]);
         if paid == 0 {
@@ -522,7 +563,7 @@ fn v16_program_native_secondary_earnings_repair_excludes_donations_and_closes_bo
         .unwrap();
         assert_reservation_encumbrance_census("native secondary earnings", &group, &[]).unwrap();
     };
-    check(&env, [0, 0], 0, 0);
+    check(&env, [0, redeemed], 0, 0);
     let first = reserve_payout(&env, wallets, tokens, ledger, 1, PREFIX);
     let first_allowed = [env.market, ledger, env.vault, tokens[2]];
     assert!(first.accounts.iter().all(|meta| !meta.is_signer));
@@ -536,7 +577,7 @@ fn v16_program_native_secondary_earnings_repair_excludes_donations_and_closes_bo
         None,
         None,
     ));
-    check(&env, [PREFIX, 0], 0, 0);
+    check(&env, [PREFIX, redeemed], 0, 0);
     let paid_prefix_ledger = env.svm.get_account(&ledger).unwrap();
     let repair = Instruction {
         program_id: associated_token_program_id(),
@@ -550,7 +591,7 @@ fn v16_program_native_secondary_earnings_repair_excludes_donations_and_closes_bo
         ],
         data: vec![1],
     };
-    let mut tail = reserve_payout(&env, wallets, tokens, ledger, 1, TAIL);
+    let mut tail = reserve_payout(&env, wallets, tokens, ledger, 1, TAIL - redeemed);
     tail.accounts[3].pubkey = native_provider;
     tail.accounts[4].pubkey = native_vault;
     let prefix = [repair, tail];
@@ -570,7 +611,7 @@ fn v16_program_native_secondary_earnings_repair_excludes_donations_and_closes_bo
         None,
         Some((4, PercolatorError::EngineLockActive)),
     );
-    check(&env, [PREFIX, 0], 0, 0);
+    check(&env, [PREFIX, redeemed], 0, 0);
     assert_eq!(
         env.svm.get_account(&ledger),
         Some(paid_prefix_ledger.clone())
@@ -666,7 +707,7 @@ fn v16_program_native_secondary_earnings_repair_excludes_donations_and_closes_bo
     assert_absent(&env, wallets[2]);
     for (i, amount) in [
         (2, BACKING + PREFIX),
-        (3, TAIL),
+        (3, TAIL - redeemed),
         (4, INSURANCE + TAIL),
         (5, PREFIX),
     ] {
@@ -684,11 +725,12 @@ fn v16_program_native_secondary_earnings_repair_excludes_donations_and_closes_bo
         SUPPLY
     );
     assert_eq!(
-        env.token_amount(native_provider) + env.token_amount(native_admin),
+        env.token_amount(native_provider) + env.token_amount(native_admin) + redeemed,
         EARNINGS
     );
     for value in peak {
         assert_cu_within("native secondary earnings", value, 1_200_000);
     }
-    eprintln!("row433 native-secondary earnings: 1 world, 4 unsigned payments, 1 exact rollback, 1 closure; fee={EARNINGS}, SPL={PREFIX}, native={TAIL}, unsynced={DONATION}, peak CU [setup, payment, rejection, close]={peak:?}");
+    let payments = 4 + usize::from(redeem_prefix);
+    eprintln!("row433 native-secondary earnings: 1 world, {payments} unsigned payments, 1 exact rollback, 1 closure; fee={EARNINGS}, SPL={PREFIX}, native={TAIL}, redeemed={redeemed}, unsynced={DONATION}, peak CU [setup, payment, rejection, close]={peak:?}");
 }
