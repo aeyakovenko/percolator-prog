@@ -1,5 +1,51 @@
 # Invariant-owned test coverage
 
+## INV-067 returned receipt payments remain raw surplus (2026-09-18)
+
+Classification: **nonduplicative public-route coverage**, primary INV-067/068,
+with bounded INV-066 order and INV-070 terminal-disposition evidence. Base:
+`20e842b746fa884dbca9d8c6d1a6e68e626b6a6b` (current main when isolated).
+No production finding, invariant status promotion, or coverage-row closure.
+
+New selector in [cu/inv_067_receipt_spend_replay.rs](cu/inv_067_receipt_spend_replay.rs):
+`v16_program_returned_receipt_payments_remain_surplus_across_topup_order`.
+Two public LiteSVM histories return initial receipt payments to the canonical
+vault while claims remain pending, then execute payout/return/retry bundles in
+both claimant orders, using both payout handlers. Independent input arithmetic
+requires gross payouts `[1198, 0, 1283, 0, 1368]` despite identical token balances
+before and after each bundle. Receipt identity and paid history, unchanged
+neighbor Accounts, booked stock, raw custody, mint supply, successful top-up
+retries and exact `EngineNonProgress` close rejections are checked separately.
+All five portfolios reach terminal settlement and owner-signed deletion.
+`CloseSlab` burns exactly 2 rounding atoms, sweeps 566 returned atoms, closes the
+vault and leaves the exact typed tombstone and rent. Final supply is 3850.
+
+The existing peer-wallet spend/replay test and native external-donation test do
+not return an already-paid claim into its own funding vault. This addition tests
+that feedback path with pending receipts and later real stock release. It adds
+no new expiry, fee, insurance-policy or general reachability claim.
+
+Validation: new selector **1 passed, 0 failed** (2 orders, 4 positive receipt
+payments, peak **268,733 CU**, ceiling 500,000); adjacent peer-wallet selector
+**1 passed, 0 failed**. Scoped rustfmt and `git diff --check` pass.
+Reused main-recorded SBF SHA-256
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`;
+production sources and Cargo files match recorded main build base `2e88c39b`.
+Host artifacts were copied into a private target directory; no SBF rebuild.
+No open PR data was inspected. Exact commands from the isolated worktree:
+
+```sh
+export TMPDIR=/dev/shm CARGO_TARGET_DIR=/dev/shm/percolator-astra-terminal-target-20260918
+export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv077/target/deploy/percolator_prog.so
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_spend_replay::v16_program_returned_receipt_payments_remain_surplus_across_topup_order -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::receipt_spend_replay::v16_program_spent_payouts_do_not_replenish_receipts_across_order_and_atomic_retry -- --exact --nocapture --test-threads=1
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_067_receipt_spend_replay.rs
+git diff --check
+git diff 2e88c39b HEAD -- src Cargo.toml Cargo.lock
+sha256sum /dev/shm/percolator-inv077/target/deploy/percolator_prog.so
+```
+
 ## INV-052 fee-adjusted owner-local withdrawal partitions (2026-09-18)
 
 Classification: **nonduplicative public-route coverage**, with INV-024/027 joins.

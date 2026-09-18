@@ -464,3 +464,250 @@ fn v16_program_spent_payouts_do_not_replenish_receipts_across_order_and_atomic_r
     assert_eq!(rollbacks, 4);
     println!("INV-067 spent receipts: 4 worlds, {rollbacks} exact rollbacks, peak CU {peak_cu}");
 }
+
+#[test]
+fn v16_program_returned_receipt_payments_remain_surplus_across_topup_order() {
+    fn returned_transfer(world: &World, actor: usize, amount: u128) -> Instruction {
+        spl_token::instruction::transfer(
+            &spl_token::ID,
+            &world.actors[actor].token,
+            &world.env.vault,
+            &world.actors[actor].owner.pubkey(),
+            &[],
+            amount.try_into().unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn check(world: &World, paid: [u128; 5], returned: [u128; 5]) {
+        let booked = SUPPLY - 1 - paid.iter().sum::<u128>();
+        let raw = returned.iter().sum::<u128>();
+        assert_eq!(world.env.market_state().1.vault, booked);
+        assert_eq!(
+            u128::from(world.env.token_amount(world.env.vault)),
+            booked + raw
+        );
+        for actor in 0..5 {
+            assert_eq!(
+                u128::from(world.env.token_amount(world.actors[actor].token)),
+                paid[actor] - returned[actor]
+            );
+            assert!(paid[actor] <= CAPITAL[actor] + claim(actor, FINAL));
+        }
+        assert_eq!(world.env.token_amount(world.provider_token), 1);
+        assert_eq!(
+            u128::from(
+                Mint::unpack(&world.env.svm.get_account(&world.env.mint).unwrap().data)
+                    .unwrap()
+                    .supply
+            ),
+            SUPPLY
+        );
+        let wallets: u128 = world
+            .actors
+            .iter()
+            .map(|actor| u128::from(world.env.token_amount(actor.token)))
+            .sum();
+        assert_eq!(
+            u128::from(world.env.token_amount(world.env.vault))
+                + wallets
+                + u128::from(world.env.token_amount(world.provider_token)),
+            SUPPLY
+        );
+    }
+
+    fn retry(world: &mut World, actor: usize) {
+        let before = world.frame();
+        world.land(&[world.payout(actor, true)], false).unwrap();
+        let failure = world
+            .land(&[world.payout(actor, false)], false)
+            .unwrap_err();
+        assert_eq!(
+            failure.err,
+            TransactionError::InstructionError(
+                2,
+                InstructionError::Custom(PercolatorError::EngineNonProgress as u32)
+            )
+        );
+        assert_eq!(
+            world.frame(),
+            before,
+            "fresh-blockhash retries cannot recycle surplus"
+        );
+    }
+
+    let expected = std::array::from_fn(|actor| CAPITAL[actor] + claim(actor, FINAL));
+    assert_eq!(expected, [1_198, 0, 1_283, 0, 1_368]);
+    let rounding = FINAL - (0..5).map(|actor| claim(actor, FINAL)).sum::<u128>();
+    assert_eq!(rounding, 2);
+    let mut peak_cu = 0;
+    for order in [[0, 4], [4, 0]] {
+        let mut world = World::new();
+        world.peak_cu = 0;
+        let mut paid = [
+            CAPITAL[0] + claim(0, INITIAL),
+            0,
+            0,
+            0,
+            CAPITAL[4] + claim(4, INITIAL),
+        ];
+        let mut returned = [0; 5];
+        let retained = order.map(|actor| world.payout(actor, true));
+        check(&world, paid, returned);
+
+        // Returning paid claim value increases only SPL custody, never the payout stock.
+        for actor in order {
+            let before = world.frame();
+            let bundle = [
+                returned_transfer(&world, actor, claim(actor, INITIAL)),
+                world.payout(actor, true),
+            ];
+            let meta = land_spending(&mut world, actor, &bundle).unwrap();
+            assert_eq!(successes(&meta.logs, spl_token::ID), 1);
+            returned[actor] = claim(actor, INITIAL);
+            world.assert_frame_except(&before, &[world.env.vault, world.actors[actor].token]);
+            check(&world, paid, returned);
+            retry(&mut world, actor);
+        }
+
+        world.env.svm.warp_to_slot(13);
+        world.land(&[world.payout(2, false)], false).unwrap();
+        let ledger = world.env.market_state().1.resolved_payout_ledger;
+        assert_eq!(ledger.snapshot_slot, 12);
+        assert_eq!(ledger.snapshot_residual, FINAL);
+        assert_eq!(ledger.current_payout_rate_num, FINAL * BOUND_SCALE);
+        assert_eq!(ledger.current_payout_rate_den, TOTAL_FACE * BOUND_SCALE);
+        check(&world, paid, returned);
+
+        for (index, actor) in order.into_iter().enumerate() {
+            let before = world.frame();
+            let mut receipt = world.receipt(actor);
+            let due = claim(actor, FINAL) - claim(actor, INITIAL);
+            let bundle = [
+                world.payout(actor, index == 0),
+                returned_transfer(&world, actor, due),
+                retained[index].clone(),
+            ];
+            let meta = land_spending(&mut world, actor, &bundle).unwrap();
+            assert_eq!(
+                successes(&meta.logs, spl_token::ID),
+                2,
+                "one payout, one return"
+            );
+            paid[actor] += due;
+            returned[actor] += due;
+            receipt.paid_effective = claim(actor, FINAL);
+            assert_eq!(world.receipt(actor), receipt);
+            assert_eq!(world.env.market_state().1.resolved_payout_ledger, ledger);
+            // Net token balances are identical despite a positive gross payment.
+            world.assert_frame_except(&before, &[world.env.market, world.actors[actor].portfolio]);
+            check(&world, paid, returned);
+            retry(&mut world, actor);
+        }
+
+        for actor in [2, order[0], order[1], 1, 3] {
+            for _ in 0..8 {
+                if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio) {
+                    break;
+                }
+                let before = world.env.token_amount(world.actors[actor].token);
+                world.land(&[world.payout(actor, false)], false).unwrap();
+                paid[actor] +=
+                    u128::from(world.env.token_amount(world.actors[actor].token) - before);
+                check(&world, paid, returned);
+            }
+            assert!(resolved_portfolio_is_terminal(
+                &world.env,
+                world.actors[actor].portfolio
+            ));
+            assert!(!world.receipt(actor).present);
+            let cu = world
+                .env
+                .close_portfolio_with_cu(&world.actors[actor].owner, world.actors[actor].portfolio);
+            world.peak_cu = world.peak_cu.max(cu);
+            check(&world, paid, returned);
+        }
+        assert_eq!(paid, expected);
+        let raw = claim(0, FINAL) + claim(4, FINAL);
+        assert_eq!(returned.iter().sum::<u128>(), raw);
+        assert_eq!(raw, 566);
+        let terminal = world.env.market_state().1;
+        assert_eq!(
+            (
+                terminal.materialized_portfolio_count,
+                terminal.c_tot,
+                terminal.pnl_pos_tot,
+                terminal.insurance,
+                terminal.source_claim_bound_total_num,
+                terminal.backing_provider_earnings_total
+            ),
+            (0, 0, 0, 0, 0, 0)
+        );
+        assert_eq!(terminal.vault, rounding);
+        crate::support::fuzz_model::assert_reservation_encumbrance_census(
+            "returned receipt terminal stock",
+            &terminal,
+            &[],
+        )
+        .unwrap();
+
+        let close = Instruction {
+            program_id: world.env.program_id,
+            accounts: vec![
+                AccountMeta::new(world.env.admin.pubkey(), true),
+                AccountMeta::new(world.env.market, false),
+                AccountMeta::new(world.env.vault, false),
+                AccountMeta::new_readonly(world.env.vault_authority, false),
+                AccountMeta::new(world.provider_token, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(world.env.mint, false),
+            ],
+            data: ProgInstruction::CloseSlab {
+                authority_epoch: world.env.control_sequences(0).authority_epoch,
+            }
+            .encode(),
+        };
+        for _ in 0..8 {
+            let before = world.frame();
+            world.land(&[close.clone()], true).unwrap();
+            assert_ne!(world.frame(), before);
+            if world
+                .env
+                .svm
+                .get_account(&world.env.market)
+                .unwrap()
+                .data
+                .len()
+                == percolator_prog::constants::HEADER_LEN
+            {
+                break;
+            }
+            world.assert_frame_except(&before, &[world.env.market]);
+            check(&world, paid, returned);
+        }
+        assert_closed_market_tombstone(&world.env.svm.get_account(&world.env.market).unwrap());
+        assert!(world
+            .env
+            .svm
+            .get_account(&world.env.vault)
+            .is_none_or(|account| account.lamports == 0 && account.data.is_empty()));
+        assert_eq!(
+            u128::from(world.env.token_amount(world.provider_token)),
+            1 + raw
+        );
+        let wallets: [u128; 5] = std::array::from_fn(|actor| {
+            u128::from(world.env.token_amount(world.actors[actor].token))
+        });
+        assert_eq!(wallets, [1_000, 0, 1_283, 0, 1_000]);
+        let supply = u128::from(
+            Mint::unpack(&world.env.svm.get_account(&world.env.mint).unwrap().data)
+                .unwrap()
+                .supply,
+        );
+        assert_eq!(supply, SUPPLY - rounding);
+        assert_eq!(wallets.iter().sum::<u128>() + 1 + raw, supply);
+        assert_cu_within("returned receipt lifecycle suffix", world.peak_cu, 500_000);
+        peak_cu = peak_cu.max(world.peak_cu);
+    }
+    println!("INV-067 returned payments: 2 orders, 4 positive topups, 566 raw surplus, 2 rounding burn; peak {peak_cu} CU");
+}
