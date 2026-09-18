@@ -201,6 +201,238 @@ fn materialize(world: &mut World, book: &mut Book, actor: usize, expired: bool) 
     );
 }
 
+fn land_redemption(
+    world: &mut World,
+    actor: usize,
+    instructions: &[Instruction],
+) -> Result<litesvm::types::TransactionMetadata, litesvm::types::FailedTransactionMetadata> {
+    world.env.svm.expire_blockhash();
+    let mut all = vec![heap_ix(), cu_ix()];
+    all.extend_from_slice(instructions);
+    let tx = Transaction::new_signed_with_payer(
+        &all,
+        Some(&world.env.payer.pubkey()),
+        &[&world.env.payer, &world.actors[actor].owner],
+        world.env.svm.latest_blockhash(),
+    );
+    let fee = u64::from(tx.message.header.num_required_signatures)
+        * FeeStructure::default().lamports_per_signature;
+    let before: Vec<_> = tx
+        .message
+        .account_keys
+        .iter()
+        .map(|&key| (key, world.env.svm.get_account(&key)))
+        .collect();
+    let result = world.env.svm.send_transaction(tx);
+    let meta = match &result {
+        Ok(meta) => meta,
+        Err(failure) => &failure.meta,
+    };
+    world.peak_cu = world.peak_cu.max(meta.compute_units_consumed);
+    assert_cu_within(
+        "native payout/redemption/replay",
+        meta.compute_units_consumed,
+        600_000,
+    );
+    if result.is_err() {
+        for (key, mut account) in before {
+            if key == world.env.payer.pubkey() {
+                account.as_mut().unwrap().lamports -= fee;
+            }
+            assert_eq!(
+                world.env.svm.get_account(&key),
+                account,
+                "redemption rollback {key}"
+            );
+        }
+    }
+    result
+}
+
+#[test]
+fn v16_program_native_payout_redeem_recreate_replay_preserves_receipts_and_terminal_value() {
+    let mut peak = 0;
+    for order in [[0, 4], [4, 0]] {
+        for landing in [13, 19] {
+            let mut world = World::before_native_receipts();
+            let mut book = Book::new(&world);
+            for actor in [0, 4] {
+                materialize(&mut world, &mut book, actor, false);
+            }
+            let original = order.map(|a| world.receipt(a));
+            let retained = order.map(|a| world.payout(a, true));
+            world.env.svm.warp_to_slot(landing);
+            world.land(&[world.payout(2, false)], false).unwrap();
+            assert_eq!(order.map(|a| world.receipt(a)), original);
+            book.check(&world, true, None);
+
+            for (index, actor) in order.into_iter().enumerate() {
+                let owner = world.actors[actor].owner.pubkey();
+                let wallet = world.actors[actor].token;
+                let rent = book.wallets[actor].lamports;
+                let expected = CAPITAL[actor] + entitlement(actor, true);
+                assert_eq!(
+                    expected - book.paid[actor],
+                    if actor == 0 { 82 } else { 151 }
+                );
+                // Closing funded native custody redeems the just-paid value and
+                // rent. The same-address empty replacement must retain zero due.
+                let bundle = [
+                    retained[index].clone(),
+                    spl_token::instruction::close_account(
+                        &spl_token::ID,
+                        &wallet,
+                        &owner,
+                        &owner,
+                        &[],
+                    )
+                    .unwrap(),
+                    Instruction {
+                        program_id: associated_token_program_id(),
+                        accounts: vec![
+                            AccountMeta::new(world.env.payer.pubkey(), true),
+                            AccountMeta::new(wallet, false),
+                            AccountMeta::new_readonly(owner, false),
+                            AccountMeta::new_readonly(world.env.mint, false),
+                            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+                            AccountMeta::new_readonly(spl_token::ID, false),
+                            AccountMeta::new_readonly(solana_sdk::sysvar::rent::ID, false),
+                        ],
+                        data: vec![],
+                    },
+                    retained[index].clone(),
+                ];
+                let before = world.frame();
+                let mut aborted = bundle.to_vec();
+                aborted.push(Instruction {
+                    program_id: solana_sdk::system_program::ID,
+                    accounts: vec![],
+                    data: vec![],
+                });
+                let failure = land_redemption(&mut world, actor, &aborted).unwrap_err();
+                assert_eq!(
+                    failure.err,
+                    TransactionError::InstructionError(6, InstructionError::InvalidInstructionData,)
+                );
+                let assert_executed = |logs: &[String]| {
+                    for (program, expected) in [
+                        (world.env.program_id, 2),
+                        (associated_token_program_id(), 1),
+                    ] {
+                        assert_eq!(
+                            logs.iter()
+                                .filter(|line| **line == format!("Program {program} success"))
+                                .count(),
+                            expected
+                        );
+                    }
+                    for instruction in ["Transfer", "CloseAccount"] {
+                        assert_eq!(
+                            logs.iter()
+                                .filter(|line| **line
+                                    == format!("Program log: Instruction: {instruction}"))
+                                .count(),
+                            1
+                        );
+                    }
+                };
+                assert_executed(&failure.meta.logs);
+                assert_eq!(
+                    world.frame(),
+                    before,
+                    "the second rollback also preserves the first committed redemption"
+                );
+                book.check(&world, true, None);
+
+                let mut owner_after = world.env.svm.get_account(&owner).unwrap();
+                owner_after.lamports += rent + u64::try_from(expected).unwrap();
+                let mut payer_after = world
+                    .env
+                    .svm
+                    .get_account(&world.env.payer.pubkey())
+                    .unwrap();
+                payer_after.lamports -= rent + 2 * FeeStructure::default().lamports_per_signature;
+                let meta = land_redemption(&mut world, actor, &bundle).unwrap();
+                // Inspect the committed trace as well as the rejected successful prefix.
+                assert_eq!(
+                    meta.logs
+                        .iter()
+                        .filter(|line| line.as_str() == "Program log: Instruction: Transfer")
+                        .count(),
+                    1
+                );
+                assert_eq!(world.env.svm.get_account(&owner), Some(owner_after));
+                assert_eq!(
+                    world.env.svm.get_account(&world.env.payer.pubkey()),
+                    Some(payer_after)
+                );
+                book.paid[actor] = expected;
+                book.redeemed[actor] = expected;
+                assert_eq!(
+                    world.receipt(actor),
+                    ResolvedPayoutReceiptV16 {
+                        paid_effective: entitlement(actor, true),
+                        ..original[index]
+                    }
+                );
+                book.check(&world, true, None);
+                world.assert_frame_except(
+                    &before,
+                    &[
+                        owner,
+                        wallet,
+                        world.actors[actor].portfolio,
+                        world.env.market,
+                        world.env.vault,
+                    ],
+                );
+                let before = world.frame();
+                world.land(&[retained[index].clone()], false).unwrap();
+                assert_eq!(
+                    world.frame(),
+                    before,
+                    "recreated empty native ATA cannot replenish the receipt"
+                );
+            }
+            materialize(&mut world, &mut book, 2, true);
+            assert_eq!(book.paid, [1_198, 0, 1_283, 0, 1_368]);
+            for _ in 0..16 {
+                for actor in [order[0], order[1], 2, 1, 3] {
+                    if !resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio) {
+                        world.land(&[world.payout(actor, false)], false).unwrap();
+                        book.check(&world, true, None);
+                    }
+                }
+                if world
+                    .actors
+                    .iter()
+                    .all(|a| resolved_portfolio_is_terminal(&world.env, a.portfolio))
+                {
+                    break;
+                }
+            }
+            for actor in 0..5 {
+                assert!(resolved_portfolio_is_terminal(
+                    &world.env,
+                    world.actors[actor].portfolio
+                ));
+                assert!(!world.receipt(actor).present);
+                let before = world.frame();
+                world.land(&[world.payout(actor, true)], false).unwrap();
+                assert_eq!(
+                    world.frame(),
+                    before,
+                    "terminal payout remains exact once after redemption"
+                );
+            }
+            book.check(&world, true, None);
+            assert_eq!(world.env.market_state().1.vault, 2);
+            peak = peak.max(world.peak_cu);
+        }
+    }
+    println!("Row 417 native payout/redemption/replay: 4 worlds, 8 complete-account rollbacks, 8 positive top-ups, 20 terminal retries; peak {peak} CU");
+}
+
 #[test]
 fn v16_program_native_receipt_repair_and_expiry_roll_back_with_paid_suffix() {
     let mut world = World::before_native_receipts();

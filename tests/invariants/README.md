@@ -156,6 +156,46 @@ Existing coverage partially reduces before a full-fill flip, or closes/reopens
 with full fills. New/control exact selectors pass at **195,502 / 364,593 CU**
 measured peaks. This is bounded episode evidence; no row status changes.
 
+## Row 417 native payout, redemption and same-transaction replay (2026-09-18)
+
+[The existing INV-067 native receipt owner](cu/inv_067_native_receipt_redemption.rs)
+adds `v16_program_native_payout_redeem_recreate_replay_preserves_receipts_and_terminal_value`.
+Four public LiteSVM histories cross both unequal claimant orders with exact/overdue
+backing expiry. After expiry commits, each retained claim pays, its funded native
+ATA closes to redeem the entire payout plus rent, the keeper recreates that ATA,
+and the identical claim executes again in the same transaction with zero due.
+Existing redemption happens before the top-up; ordinary SPL spending never
+deletes custody. This covers the native custody deletion/recreation boundary
+immediately after a positive payout, including the receipt's in-transaction replay.
+
+Eight rejected suffixes restore every compiled account except the exact signature
+fee, including receipt identity, wrapped SOL, owner redemption and keeper rent.
+The second rejection preserves the first claimant's committed redemption.
+Unchanged bundles then pay precisely 82/151 additional atoms, with one transfer
+each. All five portfolios become terminal, all receipts clear, and twenty fresh
+terminal retries move no value. Owner totals are 1,198/1,283/1,368, leaving two
+rounding atoms. Row 417 remains OPEN; this is bounded INV-067/068/080 evidence,
+not closure of arbitrary stock, insurance-recredit or Recovery compositions.
+
+Validation at base `a1d33c58` uses a private default-feature SBF rebuild with
+platform-tools v1.52 and locked/offline dependencies. All three exact selectors
+pass: new history peak 292,889 CU, native repair 339,081 CU, and native redemption
+182,615 CU. Scoped rustfmt and whitespace checks pass. Production and status TSVs
+are unchanged; no whole-suite or engine-proof result is claimed. Commands:
+
+```sh
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv-agent-receipts-20260918152833-host-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv-agent-receipts-20260918152833-sbf-target/deploy/percolator_prog.so
+export TMPDIR=/dev/shm CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+CARGO_TARGET_DIR=/dev/shm/percolator-inv-agent-receipts-20260918152833-sbf-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/percolator-inv-agent-receipts-20260918152833-sbf-target/deploy -- --locked
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::native_receipt_redemption::v16_program_native_payout_redeem_recreate_replay_preserves_receipts_and_terminal_value \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::native_receipt_redemption::v16_program_native_receipt_repair_and_expiry_roll_back_with_paid_suffix \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::native_receipt_redemption::v16_program_native_receipt_redemption_preserves_topups_and_rounding_beneficiary
+rustfmt --edition 2021 --check tests/invariants/cu/inv_067_native_receipt_redemption.rs
+git diff --check
+```
+
 ## Row 417 atomic native receipt repair (2026-09-18)
 
 [The focused note](row417_native_receipt_repair_20260918.md) adds one selector in
