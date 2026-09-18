@@ -864,6 +864,148 @@ fn inv071_assert_continuation_frame(
 }
 
 #[test]
+fn v16_program_inv082_public_close_classifier_matches_concrete_engine_dispatch() {
+    use percolator::{ActionableSummaryV16, AutoCrankPlanV16, AutoCrankWorkV16, V16PodU64};
+
+    let Inv071PublicCloseBOverlap {
+        mut env,
+        target_owner,
+        target,
+        target_b,
+        b_before,
+        close_before,
+        ..
+    } = inv071_public_close_b_overlap();
+    let deadline = close_before.max_close_slot;
+    let expired_slot = deadline.checked_add(1).unwrap();
+    let mut peak_cu = 0;
+
+    for (slot, caller_slot, expected_plan) in [
+        (deadline, u64::MAX, AutoCrankPlanV16::AdvanceClose),
+        (
+            expired_slot,
+            0,
+            AutoCrankPlanV16::DeclareRecovery {
+                reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+            },
+        ),
+        (expired_slot, u64::MAX, AutoCrankPlanV16::FinalizeRecovery),
+    ] {
+        env.svm.warp_to_slot(slot);
+        let before_rank = inv071_resolved_continuation_rank(&env, target, target_b);
+        let before_close = close_progress(&env.portfolio_state(target));
+        assert!(inv071_close_pending(before_close));
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(target), 1),
+            b_before
+        );
+        let frame = inv071_continuation_frame(&env, &[target_owner.pubkey()]);
+        let mut expected_market = env.svm.get_account(&env.market).unwrap();
+        let mut expected_portfolio = env.svm.get_account(&target).unwrap();
+
+        // Decode public bytes and execute the actual pinned classifier/dispatcher on
+        // private copies. No summary bits or economic state are injected into LiteSVM.
+        let result = {
+            let (_, mut group) = state::market_view_mut(&mut expected_market.data).unwrap();
+            let mut account = state::portfolio_view_mut_for_market_slots(
+                &mut expected_portfolio.data,
+                group.header.config.max_market_slots.get() as usize,
+            )
+            .unwrap();
+            group.validate_shape().unwrap();
+            account.validate_with_market(&group.as_view()).unwrap();
+            let summary = group
+                .build_actionable_summary_at_slot(&account.as_view(), slot)
+                .unwrap();
+            let live = expected_plan != AutoCrankPlanV16::FinalizeRecovery;
+            assert_eq!(
+                summary,
+                ActionableSummaryV16 {
+                    stale: live,
+                    b_stale: live,
+                    pending_close: live,
+                    expired_close: live && slot > deadline,
+                    liquidatable: false,
+                    source_liens_releasable: false,
+                    recovery_eligible: false,
+                    resolved_winner: false,
+                },
+                "public-state classification before {expected_plan:?}"
+            );
+            // The wrapper authenticates Clock and advances the expired-close clock
+            // before calling the engine. Reproduce only that boundary adaptation.
+            if summary.expired_close {
+                assert!(group.header.current_slot.get() < slot);
+                group.header.current_slot = V16PodU64::new(slot);
+            }
+            group
+                .permissionless_auto_crank_not_atomic(
+                    &mut account,
+                    AutoCrankWorkV16 {
+                        now_slot: slot,
+                        observations: &[],
+                        resolved_close_fee_rate_per_slot: 0,
+                    },
+                )
+                .expect("concrete engine continuation from validated public state")
+        };
+        assert_eq!(result.selected, expected_plan);
+        if expected_plan == AutoCrankPlanV16::FinalizeRecovery {
+            assert_eq!(
+                result.outcome,
+                percolator::AutoCrankOutcomeV16::RecoveryResolved
+            );
+        }
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: caller_slot,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new_readonly(env.payer.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(target, false),
+                ],
+                &[],
+            )
+            .expect("keeper-only public dispatch must agree with the pinned engine");
+        assert_cu_within("INV-082 concrete classifier/dispatch", cu, CRANK_CU_LIMIT);
+        peak_cu = peak_cu.max(cu);
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), expected_market);
+        assert_eq!(env.svm.get_account(&target).unwrap(), expected_portfolio);
+        inv071_assert_continuation_frame(&env, &frame, &[env.market, target]);
+
+        let after_rank = inv071_resolved_continuation_rank(&env, target, target_b);
+        assert!(after_rank < before_rank, "{expected_plan:?}: concrete rank");
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(target), 1),
+            b_before
+        );
+        match expected_plan {
+            AutoCrankPlanV16::AdvanceClose => {
+                assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+                assert!(after_rank.close_residual < before_rank.close_residual);
+                assert!(after_rank.close_residual > 0);
+            }
+            AutoCrankPlanV16::DeclareRecovery { .. } => {
+                assert_eq!(env.market_state().1.mode, MarketModeV16::Recovery);
+                assert_eq!(close_progress(&env.portfolio_state(target)), before_close);
+            }
+            AutoCrankPlanV16::FinalizeRecovery => {
+                assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+                assert_eq!(env.market_state().1.resolved_slot, slot);
+                assert_eq!(close_progress(&env.portfolio_state(target)), before_close);
+            }
+            _ => unreachable!(),
+        }
+    }
+    eprintln!("INV-082 concrete classifier/dispatch: steps=3 peak_cu={peak_cu}");
+}
+
+#[test]
 fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_progress() {
     let Inv071PublicCloseBOverlap {
         mut env,

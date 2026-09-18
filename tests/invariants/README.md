@@ -31525,6 +31525,47 @@ the configured authenticated Clock waits remain prerequisites. Independent claim
 other sides, overlapping lifecycle failures, junior/partial receipts, arbitrary resource histories
 and maximum shapes remain open. No invariant or verification-method status is promoted.
 
+### INV-082 concrete classifier/dispatch fidelity (2026-09-18)
+
+One new exact gate in [the existing INV-071 fixture owner](cu/inv_071_crank_progress.rs),
+`v16_program_inv082_public_close_classifier_matches_concrete_engine_dispatch`, reuses the
+public close/B-overlap construction. At the exact close deadline, one slot after it, and
+Recovery finalization, it decodes the persisted market/portfolio bytes and runs engine
+`4db11a8c`'s actual `build_actionable_summary_at_slot` and
+`permissionless_auto_crank_not_atomic` on private copies. All eight summary flags and the
+selected `AdvanceClose -> DeclareRecovery -> FinalizeRecovery` plans are checked explicitly.
+The deployed keeper-only wrapper calls use empty hints and deliberately opposite caller
+slots (`u64::MAX`, `0`, `u64::MAX`); authenticated Clock must determine the dispatch.
+
+Each public result must equal the complete engine-produced market and portfolio accounts,
+preserve the deferred B leg and tracked custody/other-account frames, and strictly decrease
+the existing independently decoded rank. The only pre-dispatch adaptation to the copied
+engine state is the wrapper's authenticated expired-close clock advancement. The exact-deadline
+call must reduce a still-positive close residual in Live; declaration and finalization must
+preserve that residual while lowering market mode. In Recovery, all summary flags are false
+but the concrete mode branch must select `FinalizeRecovery`, not a summary-only fixed point.
+
+This adds an executed public-state/classifier/concrete-dispatch join. The INV-071/072 rosters
+check names and callsites; the existing expired-close witness checks decoded outcomes without
+calling the engine classifier/dispatcher; the INV-082 Kani theorems supply summary flags and
+apply modeled lane decrements. This finite trace does not prove arbitrary-state fidelity or
+the missing general `FinalizeRecovery` rank theorem, and does not execute payout or signer-gated
+retirement. INV-082/AUDIT-082 dispositions remain unchanged.
+
+Validation on wrapper base `601f8b7d` / engine `4db11a8c`: both exact selectors below
+pass **1/1** under `cargo test --locked --offline --test v16_cu <selector> -- --exact
+--nocapture`. The new gate checks three engine/public byte comparisons and three rank
+decreases at **109,985 peak CU**; the existing terminal continuation control peaks at
+**257,925 CU**. Only these selectors ran; touched-file rustfmt and `git diff --check` pass.
+The default-feature SBF was rebuilt privately in this worktree with platform-tools v1.52,
+locked/offline dependencies, SHA-256
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`.
+
+```text
+inv_071_crank_progress::v16_program_inv082_public_close_classifier_matches_concrete_engine_dispatch
+inv_071_crank_progress::v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_progress
+```
+
 ### INV-082 implementation-readiness
 
 Finding-blind review, 2026-09-07: the next liveness increment is a bounded environmental product,
