@@ -656,3 +656,95 @@ fn v16_program_retained_partial_flip_binds_episode_grant_and_hostile_return() {
     assert_eq!(rejections, 28);
     println!("INV-012 partial/flip returns: 4 worlds, 16 fills, 8 payouts, {rejections} exact rollbacks, accepted/simulated_peak={}, rejected_peak={}", peaks[0], peaks[1]);
 }
+
+#[test]
+fn v16_program_retained_exit_stays_stale_after_partial_flat_or_cross_zero_roundtrip() {
+    let mut peaks = [0; 2];
+    let mut rejections = 0;
+    for batch_exit in [false, true] {
+        for direction in [-1i128, 1] {
+            for requested_lots in [8i128, 12] {
+                let mut w = World::new();
+                let q = direction * POS_SCALE as i128;
+                let changed = [w.env.market, w.portfolios[0], w.portfolios[1], w.context];
+                let open = w.sign(&[w.trade(false, 4 * q, 0)]);
+                let meta = w.land(open, &changed, None);
+                w.response(&meta, false, 4 * q, 4 * q, 1, false);
+                w.economics(4 * q, 4, 1, 0);
+
+                let old_exit = w.trade(batch_exit, -4 * q, 0);
+                let at_boundary = w.sign(&[old_exit.clone()]);
+                let mut after_roundtrip = w.sign(&[old_exit]);
+                // Distinct signed envelopes probe application staleness at both boundaries.
+                after_roundtrip.message.instructions[1].data =
+                    ComputeBudgetInstruction::set_compute_unit_limit(1_199_999).data;
+                after_roundtrip.sign(&[&w.env.payer, &w.owners[0]], w.env.svm.latest_blockhash());
+                for tx in [&at_boundary, &after_roundtrip] {
+                    tx.verify().unwrap();
+                    let before = w.snapshot(tx);
+                    let simulated = w.env.svm.simulate_transaction(tx.clone().into()).unwrap();
+                    w.calls(&simulated, 1, 1);
+                    assert_eq!(w.snapshot(tx), before);
+                    w.accepted_peak = w.accepted_peak.max(simulated.compute_units_consumed);
+                }
+
+                let request = -requested_lots * q;
+                let fill = request / 2;
+                let boundary = 4 * q + fill;
+                assert!(boundary == 0 || boundary.signum() == -q.signum());
+                let partial = w.sign(&[w.trade(false, request, 0)]);
+                let restore = w.sign(&[w.trade(!batch_exit, -fill, 1)]);
+                for tx in [&partial, &restore] {
+                    assert_eq!(tx.message.header.num_required_signatures, 2);
+                    assert!(!tx.message.account_keys.contains(&w.owners[1].pubkey()));
+                }
+                let mode = w.sign(&[w.control(15)]);
+                w.land(mode, &[w.context], None);
+                let meta = w.land(partial, &changed, None);
+                w.response(&meta, false, request, fill, 2, true);
+                let partial_fees = 4 + fee(fill);
+                w.economics(boundary, partial_fees, 2, 0);
+
+                let mode = w.sign(&[w.control(9)]);
+                w.land(mode, &[w.context], None);
+                w.land(
+                    at_boundary,
+                    &[],
+                    Some((
+                        2,
+                        InstructionError::Custom(PercolatorError::EngineStale as u32),
+                        0,
+                    )),
+                );
+                w.economics(boundary, partial_fees, 2, 0);
+
+                let meta = w.land(restore, &changed, None);
+                w.response(&meta, !batch_exit, -fill, -fill, 3, false);
+                let roundtrip_fees = partial_fees + fee(-fill);
+                w.economics(4 * q, roundtrip_fees, 3, 0);
+                w.land(
+                    after_roundtrip,
+                    &[],
+                    Some((
+                        2,
+                        InstructionError::Custom(PercolatorError::EngineStale as u32),
+                        0,
+                    )),
+                );
+                w.economics(4 * q, roundtrip_fees, 3, 0);
+
+                // The original size and grant can close the restored vector with fresh episodes.
+                let exit = w.sign(&[w.trade(batch_exit, -4 * q, 0)]);
+                assert_eq!(exit.message.header.num_required_signatures, 2);
+                let meta = w.land(exit, &changed, None);
+                w.response(&meta, batch_exit, -4 * q, -4 * q, 4, false);
+                w.economics(0, roundtrip_fees + 4, 4, 0);
+                peaks[0] = peaks[0].max(w.accepted_peak);
+                peaks[1] = peaks[1].max(w.rejected_peak);
+                rejections += w.rejected;
+            }
+        }
+    }
+    assert_eq!(rejections, 16);
+    println!("INV-012 partial flat/cross-zero roundtrip: 8 worlds, 32 fills, {rejections} exact rollbacks, accepted/simulated_peak={}, rejected_peak={}", peaks[0], peaks[1]);
+}

@@ -12,6 +12,17 @@ and replacement-custody coverage. New/control exact selectors pass at
 **49,692 / 72,101 CU** measured peaks. Row 428 remains COVERED; liabilities,
 recredit, native redemption and retirement are outside this bounded increment.
 
+## Row 412 partial-fill flat and cross-zero round trips (2026-09-18)
+
+[The focused note](row412_partial_boundary_roundtrip_20260918.md) adds one selector
+in [the existing partial/flip file](cu/inv_012_partial_flip_return_rollback.rs).
+The partial fill itself clears or crosses zero before restoring the original
+position; retained exits stay stale under an unchanged live LP grant. Eight
+histories cover both signs and exit routes, 32 fills and 16 exact rollbacks.
+Existing coverage partially reduces before a full-fill flip, or closes/reopens
+with full fills. New/control exact selectors pass at **195,502 / 364,593 CU**
+measured peaks. This is bounded episode evidence; no row status changes.
+
 ## Row 417 atomic native receipt repair (2026-09-18)
 
 [The focused note](row417_native_receipt_repair_20260918.md) adds one selector in
