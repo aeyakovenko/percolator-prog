@@ -1,5 +1,79 @@
 # Invariant-owned test coverage
 
+## INV-078 keeper-only resource-failure pair exit (2026-09-18)
+
+Classification: **nonduplicative public-route coverage**, with secondary
+INV-071/073/082 evidence. Base: current `origin/main` at
+`e8c7be9cc464d06f0ce542d4f1bd53d03205cb28`, isolated worktree
+`/tmp/percolator-astra-ultra-terminal-20260918`. Only current-main invariant
+sources, public routes and coverage ledgers informed this addition; no open PR
+branch, diff, fix, test or withheld holdout body was inspected.
+
+Owner: [stateful/inv_078_permissionless_recovery_coverage.rs](stateful/inv_078_permissionless_recovery_coverage.rs),
+new selector `v16_program_recovery_resource_failure_pair_close_preserves_keeper_exit`.
+The existing four-cell absent/expired-backing x absent/tiny-insurance setup is
+shared without changing its owner-forfeit suffix. The new route replaces those
+forfeits with `ForceCloseAbandonedAsset` and crosses the four resource cells with
+two schedules: forward pair/payout order and reverse pair/payout order, swapping
+the successful `PermissionlessCrank`/`CloseResolved` transport for every owner.
+These are eight finite worlds, not the Cartesian product of all cleanup orders.
+
+After the public administrative shutdown, only unrelated keepers sign. At slot
+42, force-close rejects despite caller slot `u64::MAX`; at the exact slot-43
+deadline it clears both legs despite caller slot zero. The route forfeits the
+six-atom junior gain while retaining the bankrupt account's input-derived
+three-atom flat debt. Insurance remains unspent and expired backing retains its
+stored label. Repeating force-close and cranking either flat account rejects
+exactly; configured stale resolution supplies the next progress edge. Both
+terminal routes reject inside the resolved owner window and pay at its exact
+deadline. Neither exposed owner signs a forfeit or subsequent transaction.
+
+An independent decoded mode/active-leg/debt/capital rank decreases on all seven
+successful suffix calls per world. Deposit/quantity/price inputs, rather than
+observed payout deltas or engine selectors, determine owner payouts
+`[10, 0, 100000000, 100000000, 2000000000]`. Every payout prefix checks every
+owner's capital, SPL delivery and remaining flat debt, plus exact insurance,
+engine/SPL custody, stock and encumbrance censuses. The debtor's loss survives
+other owners' cleanup and clears only on its own terminal call. Public trace
+validation enforces compiled keeper-only signatures and complete rejected
+economic frames; foreign market/portfolio bytes and mint supply are preserved.
+
+Validation: new exact selector **1/1**, **8 worlds, 184 suffix transactions,
+56 successes, 128 exact rejections, 40 terminal dispositions**, peak **291,068 CU**,
+9.92 seconds. The impacted existing selector also passes all four original worlds
+with **72 suffix transactions**, peak **184,776 CU**. Scoped rustfmt and
+`git diff --check` pass. Development corrected test-only assumptions that pair
+force-close shares owner-forfeit loss booking and normalizes untouched expired
+labels; no production defect was established. No broad suite or engine proof ran.
+
+Reused default-feature wrapper SBF SHA-256
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`;
+wrapper/Cargo blobs match its README-recorded main build base `2e88c39b`.
+The copied authenticated matcher has SHA-256
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`;
+its source/Cargo blobs match the README-recorded build base `6992e91f`.
+Neither SBF was rebuilt. Exact final commands from the isolated worktree:
+
+```sh
+export TMPDIR=/dev/shm CARGO_TARGET_DIR=/dev/shm/percolator-inv077/target/host
+export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv077/target/deploy/percolator_prog.so
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_078_permissionless_recovery_coverage::v16_program_recovery_resource_failure_pair_close_preserves_keeper_exit -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_078_permissionless_recovery_coverage::v16_program_recovery_resource_failure_lattice_preserves_public_exit -- --exact --nocapture --test-threads=1
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/stateful/inv_078_permissionless_recovery_coverage.rs
+git diff --check
+```
+
+Remaining frontier: keeper entry before the administrative shutdown, opposite
+position orientation, independent pair/claimant/transport permutations, consumed
+insurance/recredit, partial receipts, unavailable custody, overlapping lifecycle
+work and supported maxima. Each world retains five materialized portfolios and
+exactly `3 + expired_backing + insurance` vault atoms (3-5); reserve disposition,
+residue classification and administrative retirement are not claimed. INV-078
+and related invariant/status/holdout classifications remain unchanged. This is
+independent of INV-063 pre-expiry receipt continuation, INV-077 expiry rescanning,
+and existing row424/433 terminal-scan/reserve selectors.
+
 ## INV-051 two-asset nonunit batch clear/resize (2026-09-18)
 
 Classification: **nonduplicative public-route coverage**, with secondary
