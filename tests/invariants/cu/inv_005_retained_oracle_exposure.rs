@@ -890,3 +890,136 @@ fn v16_program_cold_oracle_handoff_waits_for_last_resolved_exposure() {
     }
     eprintln!("row416 last resolved exposure: worlds=4, exact_rejections=8, SPL_rollbacks=8, empty_management_controls=4, exact_owner_payouts=20, peak_success_cu={peak_cu}, peak_simulated_release_cu={peak_release_cu}");
 }
+
+#[test]
+fn v16_program_cold_oracle_handoff_waits_for_last_live_quantity_tick() {
+    const COLD: usize = 2;
+    const SUCCESSOR: usize = 3;
+    const PREFIX_OWNER: usize = 4;
+    const PREFIX: u128 = 7;
+    let mut peak_cu = 0;
+    for asset in [0u16, 1] {
+        for direction in [-1i128, 1] {
+            let config = MarketConfig::default();
+            let deposits = config.actor_deposits;
+            let mut env = V16Svm::new([0x49; 32], config);
+            env.begin_public_trace();
+            env.update_asset_authority_from_admin(asset, processor::ASSET_AUTH_ADMIN, COLD)
+                .unwrap();
+            let size = direction * 10 * percolator::POS_SCALE as i128;
+            env.trade_no_cpi(0, 1, asset, size, INITIAL_PRICE, 0)
+                .unwrap();
+            let profile = env.primary_profile(asset as usize);
+            let sequences = env.primary_control_sequences(asset as usize);
+            let peer = (1 - asset) as usize;
+            let peer_profile = env.primary_profile(peer);
+            let peer_sequences = env.primary_control_sequences(peer);
+            assert_ne!(
+                profile.oracle_authority,
+                env.actors[COLD].signer.pubkey().to_bytes()
+            );
+            let takeover = env.build_retained_asset_authority_handoff_between_actors(
+                asset,
+                processor::ASSET_AUTH_ORACLE,
+                COLD,
+                SUCCESSOR,
+            );
+
+            // One fixed-point quantity tick still funds the oracle role, even
+            // though almost the entire original position has been removed.
+            env.trade_no_cpi(0, 1, asset, -size + direction, INITIAL_PRICE, 0)
+                .unwrap();
+            let residual = env.primary_market_state().1;
+            let selected = residual.assets[asset as usize];
+            assert_eq!(residual.mode, MarketModeV16::Live);
+            assert_eq!(selected.lifecycle, AssetLifecycleV16::Active);
+            assert_eq!((selected.oi_eff_long_q, selected.oi_eff_short_q), (1, 1));
+            assert_eq!(
+                (
+                    selected.stored_pos_count_long,
+                    selected.stored_pos_count_short
+                ),
+                (1, 1)
+            );
+            assert_eq!(env.primary_profile(asset as usize), profile);
+            assert_eq!(env.primary_control_sequences(asset as usize), sequences);
+            let withdrawal = env.build_retained_withdrawal(PREFIX_OWNER, PREFIX);
+            let bundle = env.bundle_retained_transactions(&[withdrawal.clone(), takeover.clone()]);
+            reject(&mut env, bundle, 4, PercolatorError::EngineLockActive, 1, 1);
+
+            // Keep the handoff's signed bytes and epoch: only the public final
+            // reduction changes its admission, with the market still Live.
+            env.trade_no_cpi(0, 1, asset, -direction, INITIAL_PRICE, 0)
+                .expect("the final quantity tick remains reducible");
+            let flat = env.primary_market_state();
+            let selected = flat.1.assets[asset as usize];
+            assert_eq!((selected.oi_eff_long_q, selected.oi_eff_short_q), (0, 0));
+            assert_eq!(
+                (
+                    selected.stored_pos_count_long,
+                    selected.stored_pos_count_short
+                ),
+                (0, 0)
+            );
+            assert_eq!(flat.1.mode, MarketModeV16::Live);
+            assert_eq!(selected.lifecycle, AssetLifecycleV16::Active);
+            assert_eq!(flat.1.c_tot, deposits.iter().sum::<u128>());
+            assert_eq!(flat.1.pnl_pos_tot, 0);
+            assert_eq!(flat.1.vault, flat.1.c_tot);
+            assert_eq!(env.primary_control_sequences(asset as usize), sequences);
+            env.land_retained(takeover)
+                .expect("the original cold consent becomes valid at exactly zero exposure");
+            assert_eq!(env.primary_market_state(), flat);
+            let mut expected_profile = profile;
+            expected_profile.oracle_authority = env.actors[SUCCESSOR].signer.pubkey().to_bytes();
+            assert_eq!(env.primary_profile(asset as usize), expected_profile);
+            let mut expected_sequences = sequences;
+            expected_sequences.authority_epoch += 1;
+            assert_eq!(
+                env.primary_control_sequences(asset as usize),
+                expected_sequences
+            );
+            env.land_retained(withdrawal)
+                .expect("the rolled-back SPL prefix remains usable");
+            assert_eq!(
+                env.token_amount(env.actors[PREFIX_OWNER].destination_token),
+                PREFIX as u64
+            );
+
+            let mut remaining = deposits.iter().sum::<u128>() - PREFIX;
+            for (owner, deposited) in deposits.into_iter().enumerate() {
+                let owed = deposited - if owner == PREFIX_OWNER { PREFIX } else { 0 };
+                env.withdraw_primary(owner, owed)
+                    .expect("exact live principal exit");
+                remaining -= owed;
+                assert_eq!(
+                    u128::from(env.token_amount(env.actors[owner].destination_token)),
+                    deposited
+                );
+                let group = env.primary_market_state().1;
+                assert_eq!(
+                    (group.c_tot, group.pnl_pos_tot, group.vault),
+                    (remaining, 0, remaining)
+                );
+                assert_eq!(u128::from(env.token_amount(env.vault)), remaining);
+                assert_eq!(env.token_supply_observed(), env.initial_token_supply);
+            }
+            assert_eq!(remaining, 0);
+            assert_eq!(env.mint_supply() as u128, env.initial_token_supply);
+            assert_eq!(env.primary_profile(peer), peer_profile);
+            assert_eq!(env.primary_control_sequences(peer), peer_sequences);
+            let trace = env.finish_public_trace();
+            trace.validate_public_execution().unwrap();
+            assert_eq!(trace.steps.iter().filter(|step| !step.succeeded).count(), 1);
+            peak_cu = peak_cu.max(
+                trace
+                    .steps
+                    .iter()
+                    .filter_map(|step| step.compute_units)
+                    .max()
+                    .unwrap(),
+            );
+        }
+    }
+    eprintln!("row416 last live quantity tick: worlds=4, exact_SPL_rollbacks=4, empty_management_controls=4, exact_owner_exits=20, peak_success_cu={peak_cu}");
+}

@@ -419,6 +419,15 @@ TSVs are unchanged. Row 411 and arbitrary fee/history composition remain OPEN.
 
 ## Row 416 regression health (2026-09-17)
 
+The [last-live-tick follow-up](row416_last_live_quantity_tick_20260918.md) adds
+one exact selector in the existing retained-oracle test. Partial reduction to
+`q = 1` still blocks cold-admin oracle replacement and restores an executed SPL
+prefix; removing the final tick permits the same retained consent while Live.
+Both assets/signs finish twenty exact principal exits. New/control successful
+peaks are 135,067 / 126,361 CU (control simulation: 126,572). This adds the minimum
+live quantity boundary to whole-position and terminal coverage. Row 416 remains
+OPEN; production, Cargo, tracked fixtures, helpers and TSVs are unchanged.
+
 [The focused follow-up](row416_regression_health_20260917.md) adds retained
 empty-asset oracle handoffs across public exposure creation, including exact
 rollback of an SPL withdrawal prefix, incumbent succession and full owner payouts.
