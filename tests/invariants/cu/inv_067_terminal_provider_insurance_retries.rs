@@ -881,6 +881,7 @@ fn verify_absent_provider_suffix(
     }
     let terminal = env.market_state().1;
     assert_eq!(terminal.materialized_portfolio_count, 0);
+    let insurance_epoch = env.control_sequences(1).authority_epoch;
     let insurance_payout = Instruction {
         program_id: env.program_id,
         accounts: vec![
@@ -894,16 +895,28 @@ fn verify_absent_provider_suffix(
         data: ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 1,
             market_id: env.asset_market_id(1),
-            authority_epoch: env.control_sequences(1).authority_epoch,
+            authority_epoch: insurance_epoch,
             amount: INSURANCE.into(),
         }
         .encode(),
     };
-    let mut wrong_provider = unsigned_provider.clone();
+    // Insurance consumes the shared epoch before each provider suffix is checked.
+    let mut provider_suffix = unsigned_provider;
+    provider_suffix.data = ProgInstruction::WithdrawBackingBucket {
+        domain: 3,
+        market_id: env.asset_market_id(1),
+        authority_epoch: insurance_epoch + 1,
+        amount: BACKING.into(),
+    }
+    .encode();
+    let mut wrong_provider = provider_suffix.clone();
     wrong_provider.accounts[0] = AccountMeta::new(admin.pubkey(), true);
+    let wrong_authority = wrong_provider.clone();
     wrong_provider.accounts[2] = AccountMeta::new(tokens[4], false);
-    let mut misdirected_provider = unsigned_provider;
+    let mut misdirected_provider = provider_suffix;
     misdirected_provider.accounts[2].pubkey = tokens[4];
+    // Destination custody is bound to the provider even when the admin signs.
+    // Keep a valid provider destination to exercise Unauthorized independently.
     for (suffix, signers, error) in [
         (
             misdirected_provider,
@@ -913,10 +926,16 @@ fn verify_absent_provider_suffix(
         (
             wrong_provider,
             vec![insurer, &admin],
+            PercolatorError::InvalidTokenAccount,
+        ),
+        (
+            wrong_authority,
+            vec![insurer, &admin],
             PercolatorError::Unauthorized,
         ),
     ] {
         let meta = reject(env, &[insurance_payout.clone(), suffix], &signers, 3, error);
+        assert_eq!(env.control_sequences(1).authority_epoch, insurance_epoch);
         for program in [env.program_id, spl_token::ID] {
             assert_eq!(
                 meta.logs
@@ -931,6 +950,10 @@ fn verify_absent_provider_suffix(
     }
     let meta = land(env, &[insurance_payout], &[insurer])
         .expect("beneficiary exit needs no operator or provider");
+    assert_eq!(
+        env.control_sequences(1).authority_epoch,
+        insurance_epoch + 1
+    );
     assert_cu_within(
         "INV-064 terminal beneficiary exit",
         meta.compute_units_consumed,
@@ -974,5 +997,5 @@ fn verify_absent_provider_suffix(
     );
     assert_eq!(final_state.backing_provider_earnings_total, 0);
     assert_eq!(final_state.materialized_portfolio_count, 0);
-    println!("INV-073 absent provider/operator: winner_first={winner_first}, keeper_calls={calls}/16, exact_rollbacks=3, retained_principal={BACKING}, peak_cu={peak_cu}; administrative retirement remains open");
+    println!("INV-073 absent provider/operator: winner_first={winner_first}, keeper_calls={calls}/16, exact_rollbacks=4, retained_principal={BACKING}, peak_cu={peak_cu}; administrative retirement remains open");
 }

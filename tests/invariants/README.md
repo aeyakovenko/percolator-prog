@@ -1,5 +1,55 @@
 # Invariant-owned test coverage
 
+## INV-067 absent-provider rejection precedence (2026-09-18)
+
+Classification: **stale test expectation**, with no production fix or missing
+public prerequisite. At base `669c1dd41327841b5915a859bf5c92095b386ede`, the exact
+absent-provider selector fails at instruction 3 with `InvalidTokenAccount` (11)
+versus expected `Unauthorized` (8). The backing withdrawal preflight validates
+destination ownership against the configured provider, even when the market
+administrator signs. The administrator's own destination therefore fails custody
+validation before the resolved-mode authority check.
+
+[The narrow repair](cu/inv_067_terminal_provider_insurance_retries.rs) expects
+`InvalidTokenAccount` for both unsigned and administrator-signed misdirection.
+An additional administrator-signed suffix uses the valid provider destination and
+still requires `Unauthorized`, preserving independent authority coverage. All
+three suffixes bind to the shared asset epoch after the insurance prefix. Each
+bundle proves one wrapper and one SPL success before rejection, then checks full
+tracked/compiled Account rollback, including the epoch and exact payer fee. The
+unchanged insurance prefix subsequently succeeds and consumes exactly one epoch.
+
+Both user orders retain exact payouts 1,100/900, beneficiary insurance 204,
+unrelated insurance 1,000, and 401 attributed provider atoms in custody. The
+provider/operator keys remain absent; rank, entitlement, fixed 3,605 mint supply,
+bucket preservation and custody assertions are unchanged. No extra scan, Clock
+advance or signer prerequisite is added. INV-067/073 and rows 420/421/433 retain
+their existing status and scope limits; slab retirement remains outside this test.
+
+Red: unmodified exact selector **0/1**, exit 101, `InstructionError(3, Custom(11))`
+versus `InstructionError(3, Custom(8))`. Green: repaired exact selector **1/1**,
+exit 0, both orders, four exact rollbacks per order. Printed suffix peaks are
+**326,196 CU** (loser first, two keeper calls) and **330,696 CU** (winner first,
+three keeper calls). Scoped rustfmt and Git whitespace checks pass.
+Default-feature wrapper and auth matcher were freshly built locked/offline inside
+this isolated worktree with platform-tools v1.52. Their SHA-256 values match the
+reserve-retry note below: wrapper `a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`,
+matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+Exact build/test commands (the selector command was run before and after repair):
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target/host" PERCOLATOR_FUZZ_SBF="$PWD/target/host/deploy/percolator_prog.so"
+export CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 TMPDIR="$PWD"
+CARGO_TARGET_DIR="$PWD/target/sbf" CARGO_BUILD_JOBS=4 RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/target/host/deploy" -- --locked
+# Run from tests/fixtures/auth_matcher, retaining the absolute TMPDIR above:
+# CARGO_TARGET_DIR="$TMPDIR/target/auth" CARGO_BUILD_JOBS=2 RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir "$PWD/target/deploy" -- --locked
+cargo test --locked --offline --test v16_cu inv_067_terminal_payout_completeness_and_exact_once_settlement::provider_insurance_retries::v16_program_absent_provider_preserves_user_order_and_operator_free_insurance_exit -- --exact --nocapture --test-threads=1
+rustfmt --check --edition 2021 --config skip_children=true tests/invariants/cu/inv_067_terminal_provider_insurance_retries.rs
+git diff --check
+git diff --cached --check
+```
+
 ## INV-067 reserve retry authority epochs (2026-09-18)
 
 Classification: **stale test expectation / missing current-epoch envelope**, not
