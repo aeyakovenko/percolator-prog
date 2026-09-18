@@ -105,6 +105,14 @@ existing behavioral test body, production code, dependency, or invariant status 
 The new test initially used the single-asset 325,000-CU limit; final validation
 uses the preexisting two-feed 650,000 limit above.
 
+The complete-observation sibling was subsequently repaired on `4a2604e1` by
+renewing both reports at unchanged prices in each tested slot and asserting current
+publication provenance. The unchanged selector first reproduced the rejection
+above against a fresh SBF build. With the test-only repair, all eight partition
+histories pass with their original fractional carry, liquidation, rollback and
+SPL entitlement assertions; fee/reward remain 2,095/698 atoms, and peak CU is
+427,749. This supersedes the sibling failure report.
+
 The traceability row-count guard is synchronized to 36: integrated main already
 had 35 rows after the INV-062 evidence, and this evidence adds one. The
 exact traceability check passes (1/1), validating every evidence link and all

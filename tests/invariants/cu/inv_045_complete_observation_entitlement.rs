@@ -380,7 +380,7 @@ impl ObservationWorld {
     fn assert_prices(&self, elapsed: u64) {
         let group = self.env.market_state().1;
         for (i, profile) in self.profiles().iter().enumerate() {
-            // The anchor belongs to the report episode, so transaction boundaries cannot compound it.
+            // Renewing reports at the same target cannot compound the anchor across transactions.
             let numerator = ENTRY[i] * 24 * elapsed;
             let price = ENTRY[i] - numerator / 10_000;
             let remainder = (numerator % 10_000) as u16;
@@ -393,8 +393,8 @@ impl ObservationWorld {
             assert_eq!(profile.price_move_remainder_bps_num, remainder);
             assert_eq!(profile.mark_ewma_e6, price);
             assert_eq!(profile.oracle_target_price_e6, REPORT[i]);
-            assert_eq!(profile.oracle_target_publish_time, 101);
-            assert_eq!(profile.last_good_oracle_slot, 2);
+            assert_eq!(profile.oracle_target_publish_time, 100 + elapsed as i64);
+            assert_eq!(profile.last_good_oracle_slot, 1 + elapsed);
             assert_eq!(
                 asset.k_long,
                 -((ENTRY[i] - price) as i128) * ADL_ONE as i128
@@ -450,6 +450,19 @@ fn v16_program_complete_observation_partitions_preserve_fractional_liquidation_e
                 let slots: &[u64] = if split_time { &[2, 3, 4] } else { &[2, 4] };
                 for &slot in slots {
                     set_test_clock(&mut world.env, slot, 99 + slot as i64);
+                    // Renew the same targets so each active Hybrid leg is authenticated in
+                    // this slot; unchanged targets must retain their fractional cap carry.
+                    for (i, profile) in world.profiles().iter().enumerate() {
+                        let mut report = world.env.svm.get_account(&world.reports[i]).unwrap();
+                        report.data = make_pyth_data(
+                            &profile.oracle_leg_feeds[0],
+                            REPORT[i] as i64,
+                            -6,
+                            0,
+                            99 + slot as i64,
+                        );
+                        world.env.svm.set_account(world.reports[i], report).unwrap();
+                    }
                     let before = world.frame();
                     let error = world
                         .crank(0, &[order[0], order[1], order[0]], true)
