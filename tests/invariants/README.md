@@ -1,5 +1,33 @@
 # Invariant-owned test coverage
 
+## INV-039/076 pending-obligation resolved-close order conformance (2026-09-18)
+
+Classification: **former red invariant witness now green on current main**. The
+generic public selector
+`inv_076_close_drift_residual_durability_and_finalization_atomicity::v16_program_resolved_close_order_preserves_pending_obligation_attribution`
+was held out of the invariant suite after local commit `5744d1f2` because the old
+engine pin produced order-dependent owner payouts for the same resolved close.
+On current wrapper `2e88c39b6bbdc57c86e7ab18548d42205ba6b831` with the cached
+default-feature SBF `a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`,
+the same public-route oracle passes.
+
+The selector creates a public asset-1 bankruptcy prefix, forfeits the winning
+Recovery leg into exactly one zero-basis/nonzero-loss-weight pending obligation,
+resolves the market while preserving the pending count and attribution weights,
+then drains both economically equivalent resolved-close orders. It normalizes
+payouts by owner, requires all obligation/OI/count/weight state to clear, and
+checks that owner payouts plus retained protocol custody reconcile exactly to the
+vault at resolution. The adjacent stale-cure INV-076 control was rerun unchanged
+to preserve the file's existing atomicity boundary.
+
+```sh
+export TMPDIR=/dev/shm CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv-coverage-20260918151146-host-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv-coverage-20260918151146-sbf-target/deploy/percolator_prog.so
+cargo test --locked --offline --test v16_cu inv_076_close_drift_residual_durability_and_finalization_atomicity::v16_program_resolved_close_order_preserves_pending_obligation_attribution -- --exact --nocapture
+cargo test --locked --offline --test v16_cu inv_076_close_drift_residual_durability_and_finalization_atomicity::v16_program_cure_and_cancel_close_rejects_when_resolve_matured_atomically -- --exact --nocapture
+```
+
 ## INV-067 absent-provider rejection precedence (2026-09-18)
 
 Classification: **stale test expectation**, with no production fix or missing
@@ -24864,16 +24892,15 @@ the same public-interface violation without consuming finding metadata. PR- or i
 remain useful direct regressions, but they cannot satisfy independent-discovery or invariant-
 coverage completion by themselves.
 
-Current red witness to keep out of PR135 until fixed: the generic
+Former red witness now mounted on current main: the generic
 `inv_076_close_drift_residual_durability_and_finalization_atomicity::v16_program_resolved_close_order_preserves_pending_obligation_attribution`
-selector from local commit `5744d1f2` still fails on PR135 head `387ef9ef` with the cached SBF.
-The two public resolved-close orders both terminate and conserve aggregate custody, but normalize
-to different owner payouts and terminal vault state: pending-owner-first yields
-`([0, 10, 1000, 1000], vault=3, insurance=1)` while opposing-debtor-first yields
-`([0, 8, 1000, 1000], vault=5, insurance=1)`. Treat this as an uncovered INV-039/076
-order-attribution gap requiring a fix plus the unchanged red/green test; do not weaken it into
-aggregate-conservation evidence.
-closure claims. Any holdout miss is evidence of a missing normative oracle or a missing route,
+selector from local commit `5744d1f2` previously exposed order-dependent resolved-close owner
+attribution. On the current main pin it passes unchanged and is part of the invariant suite; keep
+the owner-normalized payout and terminal-custody equality as the required oracle. Any future failure
+of this selector reopens INV-039/076 as an order-attribution gap rather than aggregate-conservation
+evidence.
+
+Any holdout miss is evidence of a missing normative oracle or a missing route,
 state, ordering, boundary, account-shape, or environmental partition and must reopen the owning
 invariant.
 
