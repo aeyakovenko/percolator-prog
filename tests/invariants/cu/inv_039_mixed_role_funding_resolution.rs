@@ -607,6 +607,180 @@ fn v16_program_solvent_mixed_funding_preserves_input_derived_owner_entitlements(
 }
 
 #[test]
+fn v16_program_live_booked_mixed_funding_preserves_underfunded_receipt_entitlements() {
+    let mut peak = 0;
+    let mut checkpoints = 0;
+    for reverse in [false, true] {
+        let sign = if reverse { -1i128 } else { 1 };
+        let funding: i128 = (1..=SETTLE_SLOT)
+            .map(|slot| {
+                let price = ENTRY + sign * i128::from(slot) * ENTRY / 100;
+                (sign * FUNDING_RATE_E9 as i128 * price).div_euclid(1_000_000_000)
+            })
+            .sum();
+        assert_eq!(funding, sign * 6);
+        let per_lot = (SETTLE_MOVE - sign * funding) as u128;
+        let credit = CREDITOR_LOTS_Q as u128 * per_lot / POS_SCALE;
+        let debt = DEBTOR_LOTS_Q as u128 * per_lot / POS_SCALE;
+        let residual = credit - DEPOSITS[1];
+        assert_eq!((credit, debt, residual), (209_979, 119_988, 29_979));
+        // The bankrupt peer contributes only its deposit; the mixed owner pays
+        // its own funding-adjusted debt in full. Receipt rounding cannot move
+        // the remaining backing atom to a different owner at expiry.
+        let expected = [
+            DEPOSITS[0] + DEPOSITS[1] - debt,
+            0,
+            DEPOSITS[2] + debt,
+            DEPOSITS[3],
+            DEPOSITS[4],
+        ];
+        assert_eq!(expected.iter().sum::<u128>(), DEPOSITS.iter().sum());
+        let side = usize::from(reverse);
+        let mut b = [0; 2];
+        b[side] = residual * SOCIAL_LOSS_DEN / CREDITOR_LOTS_Q as u128;
+        let mut remainder = [0; 2];
+        remainder[side] = residual * SOCIAL_LOSS_DEN % CREDITOR_LOTS_Q as u128;
+        for order in [[0, 2, 1, 3, 4], [2, 0, 3, 1, 4]] {
+            let mut world = setup(reverse);
+            let initial = close_progress(&world.env.portfolio_state(world.actors[1].portfolio));
+            assert!(initial.active && !initial.finalized && !initial.canceled);
+            assert_eq!(initial.gross_loss_at_close_start, residual);
+            assert_eq!(initial.residual_remaining, residual);
+            assert_eq!(initial.b_loss_booked, 0);
+            let mixed = world.env.portfolio_state(world.actors[0].portfolio);
+            assert_eq!(mixed.capital.get(), DEPOSITS[0] - debt);
+            assert_eq!(mixed.pnl.get(), credit as i128);
+            let pending = active_leg_for_asset(&mixed, 1);
+            assert_eq!(pending.basis_pos_q, 0);
+            assert_eq!(pending.loss_weight, CREDITOR_LOTS_Q as u128);
+            assert_eq!((pending.b_snap, pending.b_rem), (0, 0));
+            let before = world.frame();
+            let cu = world.env.crank(
+                world.actors[1].portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: SETTLE_SLOT,
+                    observations: crank_observations(1),
+                },
+            );
+            assert_cu_within("mixed funding Live loss booking", cu, CRANK_CU_LIMIT);
+            peak = peak.max(cu);
+            assert_eq!(world.env.market_state().1.mode, MarketModeV16::Live);
+            let asset = world.env.market_state().1.assets[1];
+            assert_eq!(
+                [
+                    asset.social_loss_remainder_long_num,
+                    asset.social_loss_remainder_short_num
+                ],
+                remainder
+            );
+            for (key, account) in before {
+                if ![world.env.market, world.actors[1].portfolio].contains(&key) {
+                    assert_eq!(world.env.svm.get_account(&key), account);
+                }
+            }
+            let booked = close_progress(&world.env.portfolio_state(world.actors[1].portfolio));
+            assert_eq!(
+                booked,
+                CloseProgressLedgerV16 {
+                    finalized: true,
+                    b_loss_booked: residual,
+                    residual_remaining: 0,
+                    ..initial
+                }
+            );
+            let checks = std::cell::Cell::new(0);
+            let retained_receipts = std::cell::Cell::new(0);
+            let check = |world: &AttributionWorld, deleted: [bool; 5]| {
+                checks.set(checks.get() + 1);
+                let env = &world.env;
+                let group = env.market_state().1;
+                for asset in 1..=2 {
+                    let a = group.assets[asset];
+                    assert_eq!(a.effective_price as i128, ENTRY + sign * SETTLE_MOVE);
+                    assert_eq!(a.slot_last, SETTLE_SLOT);
+                    assert_eq!([a.a_long, a.a_short], [ADL_ONE; 2]);
+                    assert_eq!(
+                        [a.f_long_num, a.f_short_num],
+                        [-funding * ADL_ONE as i128, funding * ADL_ONE as i128]
+                    );
+                    assert_eq!(
+                        [a.b_long_num, a.b_short_num],
+                        if asset == 1 { b } else { [0; 2] }
+                    );
+                }
+                let mut accounts = Vec::new();
+                for (actor, owner) in world.actors.iter().enumerate() {
+                    let paid = u128::from(env.token_amount(owner.token));
+                    assert!(
+                        paid <= expected[actor],
+                        "owner {actor}: input-derived payout cap"
+                    );
+                    if deleted[actor] {
+                        assert_eq!(paid, expected[actor], "owner {actor}: terminal entitlement");
+                        assert!(env
+                            .svm
+                            .get_account(&owner.portfolio)
+                            .is_none_or(|a| { a.lamports == 0 && a.data.is_empty() }));
+                        continue;
+                    }
+                    let account = env.portfolio_state(owner.portfolio);
+                    assert_eq!(account.owner, owner.owner.pubkey().to_bytes());
+                    if actor == 1 {
+                        assert_eq!(close_progress(&account), booked);
+                    }
+                    if actor == 0 {
+                        let receipt = resolved_receipt(&account);
+                        if receipt.present {
+                            assert_eq!(receipt.terminal_positive_claim_face, 2);
+                            assert!(receipt.paid_effective <= 1);
+                            if deleted == [false, true, true, true, true]
+                                && receipt.paid_effective == 0
+                            {
+                                assert_eq!(paid, expected[0] - 1);
+                                assert_eq!(group.vault, 1);
+                                retained_receipts.set(retained_receipts.get() + 1);
+                            }
+                        }
+                    }
+                    accounts.push(account);
+                }
+                assert_market_stock_census(
+                    "Live-booked mixed funding",
+                    &group,
+                    &env.svm.get_account(&env.market).unwrap().data,
+                    &accounts,
+                    u128::from(env.token_amount(env.vault)),
+                )
+                .unwrap();
+                assert_reservation_encumbrance_census(
+                    "Live-booked mixed funding",
+                    &group,
+                    &accounts,
+                )
+                .unwrap();
+                assert_eq!(group.materialized_portfolio_count as usize, accounts.len());
+                assert_eq!(group.insurance, 0);
+            };
+            let (outcome, expiries) = close_all_checked(&mut world, order, &mut peak, check);
+            assert_eq!(expiries, 1);
+            assert!(
+                retained_receipts.get() > 0,
+                "underfunded mixed receipt survives peer deletion"
+            );
+            assert_eq!(
+                outcome,
+                Outcome {
+                    paid: expected,
+                    vault: 0
+                }
+            );
+            checkpoints += checks.get();
+        }
+    }
+    println!("INV-039 Live-booked mixed funding: 4 worlds, {checkpoints} checkpoints, 4 retained receipts/expiry topups, 20 exact payouts/deletions; peak {peak} CU");
+}
+
+#[test]
 fn v16_program_mixed_roles_preserve_funding_attribution_through_resolution() {
     let mut worlds = 0usize;
     let mut peak = 0u64;

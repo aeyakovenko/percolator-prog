@@ -503,6 +503,58 @@ exact selector passes 16 histories, 32 stale rollbacks, 16 omission rollbacks,
 Production, fixtures and status TSVs are unchanged; broader reward, identity and
 funding compositions remain open. Exact commands and limits are in the note.
 
+## Rows 419/435 Live-booked mixed funding (2026-09-18)
+
+Owner: [cu/inv_039_mixed_role_funding_resolution.rs](cu/inv_039_mixed_role_funding_resolution.rs).
+New exact selector:
+`inv_039_pending_loss_obligation_durability::mixed_role_resolution::funding_resolution::v16_program_live_booked_mixed_funding_preserves_underfunded_receipt_entitlements`.
+
+Four public LiteSVM worlds cross mirrored sides and two resolved close orders.
+The existing insolvent mixed-funding setup now books the bankrupt peer's B loss
+in **Live**, before resolution, while preserving every other economic Account,
+including the mixed owner's zero-basis creditor weight and debtor leg. The
+complete close ledger changes only by finalizing and booking the original loss.
+Signed interval funding derives credit **209,979**, debt **119,988**, and residual
+**29,979** from the input prices and quantities. The oracle checks B's floor and
+booking remainder, frozen funding and domain-local B indices, owner payout caps,
+stock/reservation censuses, and exact deletion entitlements. Every history must
+retain the last two-atom receipt, pay its owner the final backing atom after the
+authenticated expiry, and end with input-derived SPL payouts
+`[460012, 0, 419988, 250000, 777]` and zero vault residue. The existing cleanup
+helper supplies waiting-debt and premature-expiry rollback checks.
+
+This is a distinct INV-039 funding-order/underfunded-receipt composition: the
+existing insolvent funding selector books B after resolution and compares
+observed outcomes; the independent solvent funding oracle has no B or retained
+receipt. The funded-bankruptcy owner uses separate debtor portfolios. The
+funding-free mixed-role owner already covers Live B booking, but cannot check
+these funding-derived owner entitlements. Reserve recredit and terminal-fee
+coverage are not duplicated. No ADL, reserve-role, fee, arbitrary-history or
+slab-retirement closure is claimed; row and invariant statuses are unchanged.
+
+Validation on base `943bf8d25cfe8861d39d9aea83a465d14288cc38`, private worktree
+`/dev/shm/percolator-inv039-419-435-20260918`: rebuilt default-feature SBF with
+platform-tools v1.52, SHA-256
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`.
+Private host/SBF targets append `-host-target`/`-sbf-target` to that worktree path.
+With `PERCOLATOR_FUZZ_SBF` set to the latter's `deploy/percolator_prog.so`:
+
+```sh
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_039_pending_loss_obligation_durability::mixed_role_resolution::funding_resolution::v16_program_live_booked_mixed_funding_preserves_underfunded_receipt_entitlements \
+  inv_039_pending_loss_obligation_durability::mixed_role_resolution::funding_resolution::v16_program_mixed_roles_preserve_funding_attribution_through_resolution \
+  inv_039_pending_loss_obligation_durability::mixed_role_resolution::funding_resolution::v16_program_solvent_mixed_funding_preserves_input_derived_owner_entitlements
+```
+
+Result: **3 passed**, 1,493 filtered. New coverage: **72 checkpoints**, four
+retained-receipt expiries/top-ups, 20 exact payouts/deletions; peak **205,937 CU**.
+Adjacent insolvent/solvent peaks: **204,595 / 197,426 CU**. A development oracle
+incorrectly rounded B upward; the existing fractional-loss owner establishes
+floor division with a separate remainder, both now asserted. Scoped rustfmt,
+working/staged/committed whitespace checks, and a guard excluding every path
+except this README and the invariant-owned test pass. No production, Cargo,
+fixture, TSV, support helper or global harness edits; local commit only.
+
 ## Rows 419/435 regression health (2026-09-17)
 
 [The focused follow-up](row419435_regression_health_20260917.md) adds four solvent
