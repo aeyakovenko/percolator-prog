@@ -540,6 +540,17 @@ rollback transactions now execute scan rediscovery and native reclassification
 through exact retirement. All three exact selectors pass. Production and status
 TSVs are unchanged; broader receipt/recredit/classification compositions stay open.
 
+## Row 422 active keeper maintenance receipts (2026-09-18)
+
+[One focused selector](row422_active_keeper_maintenance_receipts_20260918.md) in
+[the existing maintenance-policy owner](cu/inv_045_mixed_selected_maintenance_policy.rs)
+joins earned maintenance receipts, unpaid keeper fees and unsettled Hybrid K
+with mixed Hybrid/AuthMark target selection during lag. Two worlds preserve the
+old nine-atom receipt, selected reward eligibility and exact later keeper value;
+four suffix rollbacks pass. New/control peak transaction CU: 450,294 / 434,066.
+Earlier maintenance witnesses have flat keepers; exposed-keeper witnesses have
+zero maintenance. Row 422 remains OPEN; funding and terminal composition stay open.
+
 ## Row 422 mixed selection with an exposed keeper (2026-09-17)
 
 [The focused increment](row422_mixed_selected_exposed_keeper_20260917.md) adds

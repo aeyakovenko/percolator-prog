@@ -77,6 +77,255 @@ fn submit_sync(env: &mut V16CuEnv, ix: Instruction) -> u64 {
 }
 
 #[test]
+fn v16_program_mixed_selected_rewards_preserve_active_keeper_maintenance_receipts() {
+    const KEEPER_DEPOSIT: u64 = 100_000;
+    const PRICE: u64 = ENTRY - 2_400;
+    let mut peak = 0;
+    let mut rollbacks = 0;
+    for selected in [0usize, 1] {
+        let eligible = selected == 1;
+        let mut env = inv018_public_spl_market_with_params(
+            6,
+            V16CuMarketParams {
+                max_portfolio_assets: 2,
+                max_abs_funding_e9_per_slot: 0,
+                maintenance_fee_per_slot: RATE,
+                ..production_risk_params()
+            },
+        );
+        set_test_clock(&mut env, 1, 100);
+        env.configure_auth_mark_for_asset_as_admin(1, 1, ENTRY);
+        env.update_liquidation_fee_policy_with_cu(LIQ_SHARE as u16);
+        env.update_maintenance_fee_policy_with_cu(3_333);
+        let feed = [0x79; 32];
+        let initial = env.set_pyth_price_with_conf(&feed, ENTRY as i64, -6, 0, 100);
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0; 32], [0; 32]],
+            &[initial],
+            1,
+            100,
+            0,
+            0,
+            1,
+            0,
+        )
+        .unwrap();
+        let owners: [Keypair; 5] = std::array::from_fn(|_| Keypair::new());
+        let mut deposits = DEPOSITS;
+        deposits[4] = KEEPER_DEPOSIT;
+        let funded = std::array::from_fn::<_, 5, _>(|i| fund(&mut env, &owners[i], deposits[i]));
+        let portfolios = funded.map(|pair| pair.0);
+        let tokens = funded.map(|pair| pair.1);
+        let [target, peer, trader_a, trader_b, keeper] = portfolios;
+        for asset in [selected, selected ^ 1] {
+            peak = peak.max(env.trade_asset_with_cu(
+                asset as u16,
+                &owners[0],
+                target,
+                &owners[1],
+                peer,
+                (100 * POS_SCALE) as i128,
+                ENTRY,
+                0,
+            ));
+        }
+        peak = peak.max(env.trade_asset_with_cu(
+            0,
+            &owners[4],
+            keeper,
+            &owners[1],
+            peer,
+            POS_SCALE as i128,
+            ENTRY,
+            0,
+        ));
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::set_authority(
+                &spl_token::ID,
+                &env.mint,
+                None,
+                spl_token::instruction::AuthorityType::MintTokens,
+                &env.admin.pubkey(),
+                &[],
+            )
+            .unwrap(),
+            &[&env.admin],
+        )
+        .unwrap();
+        let custody = [env.mint, env.vault].map(|key| env.svm.get_account(&key));
+        let mut tracked = vec![env.market, env.mint, env.vault, env.admin.pubkey(), initial];
+        tracked.extend(portfolios);
+        tracked.extend(tokens);
+        tracked.extend(owners.each_ref().map(Signer::pubkey));
+        set_test_clock(&mut env, 5, 1_000);
+        let advance = observation(&env, trader_a, owners[4].pubkey(), initial, None, false);
+        peak = peak.max(submit(&mut env, &owners[4], &[advance], &tracked, None));
+        let mut maintenance = Maintenance::default();
+        let receipt = sync(&env, trader_b, Some(keeper));
+        peak = peak.max(submit_sync(&mut env, receipt));
+        assert_eq!(maintenance.record(3, 4 * RATE, 3_333), 9);
+        assert_eq!(
+            env.portfolio_state(keeper).capital.get(),
+            u128::from(KEEPER_DEPOSIT) + 9
+        );
+        assert_eq!(env.portfolio_state(keeper).last_fee_slot.get(), 1);
+        let oi = env.market_state().1.assets[0].oi_eff_long_q / POS_SCALE;
+        assert_eq!(oi, 101);
+        peak = peak.max(env.trade_asset_with_cu(
+            0,
+            &owners[2],
+            trader_a,
+            &owners[3],
+            trader_b,
+            POS_SCALE as i128,
+            900_000,
+            0,
+        ));
+        maintenance.record(2, 4 * RATE, 0);
+        let required = (2 * oi * u128::from(ENTRY) * 77).div_ceil(10_000);
+        let bps = (required * 10_000).div_ceil(2 * u128::from(ACCEPTED_PRINT));
+        let discovery = 2 * fee(POS_SCALE, ACCEPTED_PRINT, bps);
+        maintenance.check(&env, discovery, selected, 0, 0, eligible);
+        peak = peak.max(env.push_auth_mark_for_asset_as_admin(1, 5, MARK));
+
+        set_test_clock(&mut env, 6, 1_001);
+        let fresh = env.set_pyth_price_with_conf(&feed, MARK as i64, -6, 0, 1_001);
+        let conflict = env.set_pyth_price_with_conf(&feed, MARK as i64 + 1, -6, 0, 1_001);
+        tracked.extend([fresh, conflict]);
+        let valid = observation(&env, target, owners[4].pubkey(), fresh, Some(keeper), false);
+        let invalid = observation(
+            &env,
+            target,
+            owners[4].pubkey(),
+            conflict,
+            Some(keeper),
+            false,
+        );
+        let foreign = [peer, trader_a, trader_b].map(|key| env.svm.get_account(&key));
+        let mut liquidation = None;
+        for _ in 0..6 {
+            let before = env.market_state().1;
+            let recipient = env.portfolio_state(keeper);
+            peak = peak.max(submit(
+                &mut env,
+                &owners[4],
+                &[valid.clone(), invalid.clone()],
+                &tracked,
+                Some((
+                    3,
+                    InstructionError::Custom(PercolatorError::OracleInvalid as u32),
+                )),
+            ));
+            rollbacks += 1;
+            peak = peak.max(submit(
+                &mut env,
+                &owners[4],
+                &[valid.clone()],
+                &tracked,
+                None,
+            ));
+            if maintenance.fees[0] == 0 {
+                maintenance.record(0, 5 * RATE, 0);
+            }
+            assert_eq!(env.portfolio_state(target).last_fee_slot.get(), 6);
+            let after = env.market_state().1;
+            for asset in 0..2 {
+                assert_eq!(after.assets[asset].effective_price, PRICE);
+                assert_eq!(after.assets[asset].raw_oracle_target_price, MARK);
+                assert_eq!(
+                    after.assets[asset].oi_eff_long_q,
+                    after.assets[asset].oi_eff_short_q
+                );
+            }
+            let profile = state::read_asset_oracle_profile(
+                &env.svm.get_account(&env.market).unwrap().data,
+                0,
+            )
+            .unwrap();
+            assert_eq!(profile.last_good_oracle_slot, 6);
+            assert_eq!(
+                profile.effective_price_provenance,
+                percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
+            );
+            let closed =
+                before.assets[selected].oi_eff_long_q - after.assets[selected].oi_eff_long_q;
+            assert_eq!(
+                before.assets[selected ^ 1].oi_eff_long_q,
+                after.assets[selected ^ 1].oi_eff_long_q
+            );
+            let penalty = fee(closed, PRICE, 5);
+            let reward = if eligible {
+                penalty * LIQ_SHARE / 10_000
+            } else {
+                0
+            };
+            let mut expected = recipient;
+            expected.capital = percolator::V16PodU128::new(recipient.capital.get() + reward);
+            if reward != 0 {
+                expected.health_cert.valid = 0;
+            }
+            assert_eq!(env.portfolio_state(keeper), expected,
+                "selected={selected}: credit preserves old maintenance receipt, unpaid fees and unsettled K");
+            assert_eq!(
+                [peer, trader_a, trader_b].map(|key| env.svm.get_account(&key)),
+                foreign
+            );
+            maintenance.check(&env, discovery, selected, penalty, reward, eligible);
+            if closed != 0 {
+                assert!(closed < 100 * POS_SCALE && penalty * LIQ_SHARE / 10_000 > 0);
+                assert_ne!(penalty, fee(closed, ENTRY, 5));
+                assert_ne!(penalty, fee(closed, MARK, 5));
+                assert_eq!(
+                    health_cert(&env.portfolio_state(target)).certified_liq_deficit,
+                    0
+                );
+                assert!(census(&env, portfolios)[0]);
+                liquidation = Some((penalty, reward));
+                break;
+            }
+        }
+        let (penalty, reward) =
+            liquidation.expect("bounded liquidation with maintenance-bearing active keeper");
+        let recipient = env.portfolio_state(keeper);
+        assert_eq!(recipient.last_fee_slot.get(), 1);
+        assert_eq!(recipient.pnl.get(), 0);
+        assert!(has_active_leg_for_asset(&recipient, 0));
+        let settle = observation(&env, keeper, owners[4].pubkey(), fresh, None, false);
+        peak = peak.max(submit(&mut env, &owners[4], &[settle], &tracked, None));
+        maintenance.record(4, 5 * RATE, 0);
+        assert_eq!(env.portfolio_state(keeper).last_fee_slot.get(), 6);
+        assert_eq!(
+            values(&env, portfolios)[4],
+            i128::from(KEEPER_DEPOSIT) + 9 + reward as i128 - 35 - 2_400
+        );
+        assert!(has_active_leg_for_asset(&env.portfolio_state(keeper), 0));
+        maintenance.check(&env, discovery, selected, penalty, reward, eligible);
+        assert_eq!(
+            [env.mint, env.vault].map(|key| env.svm.get_account(&key)),
+            custody
+        );
+        assert!(tokens.iter().all(|key| env.token_amount(*key) == 0));
+        assert_eq!(
+            env.market_state().1.vault,
+            deposits.iter().map(|n| u128::from(*n)).sum::<u128>()
+        );
+        eprintln!("active keeper maintenance selected={selected}: penalty={penalty} reward={reward} receipt=9 keeper_fee=35 keeper_value={}", values(&env, portfolios)[4]);
+    }
+    assert_eq!(rollbacks, 4);
+    assert_cu_within(
+        "active keeper maintenance with mixed selection",
+        peak,
+        650_000,
+    );
+    eprintln!("active keeper maintenance: worlds=2 exact_rollbacks={rollbacks} peak_cu={peak}");
+}
+
+#[test]
 fn v16_program_mixed_selected_liquidation_preserves_maintenance_policy_receipts_and_payout() {
     let mut peak = [0; 4]; // progress/rollback, maintenance, policy, withdrawal/rollback
     let mut worlds = 0;
