@@ -1,5 +1,74 @@
 # Invariant-owned test coverage
 
+## INV-004/008 cross-asset taker consent consumption (2026-09-18)
+
+Classification: **nonduplicative public-route coverage**; no production finding or
+status promotion. Base: fetched `origin/main`
+`aa1cbe9e3f09629895d2613d2d7b0403a01af3a5`, in isolated worktree
+`/tmp/percolator-intent-census-20260918`. Only current-main sources informed this
+addition; no open PR content was inspected.
+
+Pre-edit census of current owners (source review, not new execution claims):
+
+| Binding / obligation | Existing owner and boundary |
+| --- | --- |
+| `market_id` / INV-001/007 | [Whole-market ABA](public_sbf/inv_007_no_aba_reuse.rs) and [market incarnation](public_sbf/inv_001_market_incarnation_binding.rs): permanent typed tombstone, retained operation matrix and domain composition. |
+| `asset_generation` / INV-002 | [Asset generation](public_sbf/inv_002_asset_generation_binding.rs): per-slot `market_id`, exact allocation frontier, retained trades, funding, oracle and lifecycle requests. |
+| `portfolio_id` / INV-003 | [Portfolio incarnation](public_sbf/inv_003_portfolio_incarnation_binding.rs): same-address owner A-B-A operation matrix and unaffected-neighbor deposit liveness. |
+| `position_episode` / INV-004/012/013 | [Position episodes](cu/inv_004_position_episode_binding.rs): portfolio-wide `position_epoch`; [cross-asset LP episode](cu/inv_012_retained_cross_asset_episode.rs) isolates the maker under a live grant; [destructive consent](cu/inv_013_destructive_consent_scope.rs) covers committed versus rolled-back funding and close consent. |
+| `authority_epoch`, A-B-A / INV-005/007 | [Authority matrix](public_sbf/inv_005_authority_incarnation_binding.rs) covers 34 retained kinds; [CU authority owner](cu/inv_005_authority_incarnation_binding.rs) adds asset-local oracle ABA and retained-prefix rollback. |
+| `intent_id` / INV-008/009 | [Replay owner](public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs): signed envelopes plus program sequence/episode consumption, eleven retained families, fixed-pair trade route matrix; [partial fills](cu/inv_009_partial_fill_and_retry_accounting.rs) consumes one-shot consent and signs residuals afresh. |
+| Expiry / INV-006/008/012 | [Message domains](public_sbf/inv_006_program_chain_message_type_and_version_binding.rs) rejects signed-domain tampering; [matcher capabilities](cu/inv_012_capability_and_delegate_scope.rs) checks Clock-bound grant expiry. Validator transaction age is an explicit assumption: pinned LiteSVM 0.1.0 does not validate it. |
+| Authority/policy consent / INV-010/011/014 | [Order relations](cu/inv_010_out_of_order_safety.rs), [aggregate bounds](cu/inv_011_signed_aggregate_economic_bounds.rs), and [policy owner](cu/inv_014_delayed_policy_and_policy_epoch_safety.rs) own supersession, independent control lanes and retained fee/price bounds. |
+| Domain/seed/schema joins / INV-006/016/022 | [Lookup-table identity](public_sbf/inv_006_lookup_table_retained_identity.rs), [canonical seeds](cu/inv_016_canonical_pda_and_seed_binding.rs), and [strict decoding](cu/inv_022_instruction_decoding_and_schema_upgrade_safety.rs). |
+
+New owner: [public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs](public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs),
+selector `v16_program_cross_asset_taker_episode_consumption_binds_every_trade_route`.
+Four identical starting worlds retain all four single/batch CPI/no-CPI requests
+from taker 0 to maker 1 on asset 0. Each world first executes a different route
+from taker 0 to maker 2 on asset 1. The original maker's complete portfolio and
+matcher Accounts remain unchanged, as do portfolio IDs and asset generations.
+Every retained request rejects with `EngineStale` and tracked economic rollback.
+Refreshing only `account_a_position_epoch` restores every route in simulation;
+account keys, signer/writable header, blockhash and all other wrapper instruction
+bytes remain identical. A rotating fresh route then commits. Exact episodes, OI,
+SPL data/supply and public execution traces check the outcome.
+
+This isolates the taker guard: the fixed-pair replay matrix advances both parties,
+and the cross-asset capability witness isolates the LP guard on two CPI routes.
+The existing [shared-taker fee bundle](stateful/inv_014_retained_fee_bundle.rs)
+pre-signs the next episode and tests fee policy; it does not reject an old taker
+episode with an untouched maker. No new expiry, authority rotation, partial-fill,
+maximum-shape, terminal-exit or arbitrary-history claim is made. Initial account
+construction and runtime semantics remain fixture assumptions; the measured
+trade trace contains no out-of-band economic mutation.
+
+Validation: new selector **1 passed, 0 failed**, covering **4 worlds, 16 stale
+rejections, 32 successful simulations and 8 commits**, peak **153,317 CU**.
+Adjacent fixed-pair replay selector **1 passed, 0 failed**. Scoped rustfmt and
+`git diff --check` pass. No broad suite or engine proof ran.
+Reused default-feature wrapper SBF SHA-256
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`;
+`src/`, Cargo manifest/lock match README-recorded main build base `2e88c39b`.
+Copied authenticated matcher SHA-256
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`;
+matcher source/manifest/lock match recorded main build base `6992e91f`.
+Host artifacts were copied into a private target directory; no SBF rebuild.
+
+Exact validation commands from the isolated worktree:
+
+```sh
+export TMPDIR=/dev/shm CARGO_TARGET_DIR=/dev/shm/percolator-intent-census-20260918-host
+export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv077/target/deploy/percolator_prog.so
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_008_intent_uniqueness_and_bounded_replay::v16_program_cross_asset_taker_episode_consumption_binds_every_trade_route -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_008_intent_uniqueness_and_bounded_replay::v16_program_trade_route_retry_sets_remain_consumed_across_fresh_episode -- --exact --nocapture --test-threads=1
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs
+git diff --check
+git diff 2e88c39b HEAD -- src Cargo.toml Cargo.lock
+git diff 6992e91f HEAD -- tests/fixtures/auth_matcher
+```
+
 ## INV-064 two-asset withdrawal rollback and retry (2026-09-18)
 
 Classification: **nonduplicative public-route coverage**, with secondary

@@ -146,6 +146,156 @@ fn assert_retained_trade_is_stale(
 }
 
 #[test]
+fn v16_program_cross_asset_taker_episode_consumption_binds_every_trade_route() {
+    use percolator_prog::ix::Instruction as ProgInstruction;
+
+    const SIZE: i128 = POS_SCALE as i128 / 4;
+    let build = |env: &mut V16Svm, route, maker, asset| match route {
+        DiscoveryTradeRoute::NoCpi => env.build_retained_no_cpi_trade(0, maker, asset, SIZE, 100),
+        DiscoveryTradeRoute::BatchNoCpi => {
+            env.build_retained_batch_no_cpi_trade(0, maker, asset, SIZE, 100)
+        }
+        DiscoveryTradeRoute::Cpi => env.build_retained_cpi_trade(0, maker, asset, SIZE, 100),
+        DiscoveryTradeRoute::BatchCpi => {
+            env.build_retained_batch_cpi_trade(0, maker, asset, SIZE, 100)
+        }
+    };
+    let instruction = |tx: &Transaction| {
+        tx.message
+            .instructions
+            .iter()
+            .find(|ix| {
+                tx.message.account_keys[ix.program_id_index as usize] == percolator_prog::id()
+            })
+            .unwrap()
+            .clone()
+    };
+    let mut peak_cu = 0;
+    for (index, winner_route) in DiscoveryTradeRoute::ALL.into_iter().enumerate() {
+        let mut env = V16Svm::new(
+            [0x9d; 32],
+            MarketConfig {
+                initial_price: 100,
+                ..MarketConfig::default()
+            },
+        );
+        let epochs = [0, 1, 2].map(|actor| env.primary_portfolio_position_epoch(actor));
+        let ids = [0, 1, 2].map(|actor| env.primary_portfolio_id(actor));
+        let generations = [0, 1].map(|asset| env.primary_market_state().1.assets[asset].market_id);
+        let maker = env.svm.get_account(&env.actors[1].portfolio).unwrap();
+        let matcher = env.svm.get_account(&env.actors[1].matcher_context).unwrap();
+        let tokens = env.all_token_account_data();
+        let supply = env.token_supply_observed();
+        let retained: Vec<_> = DiscoveryTradeRoute::ALL
+            .into_iter()
+            .map(|route| (route, build(&mut env, route, 1, 0)))
+            .collect();
+        let before = RetainedTradeSnapshot::capture(&env);
+        for (_, tx) in &retained {
+            tx.verify().unwrap();
+            env.svm
+                .simulate_transaction(tx.clone().into())
+                .expect("every original request is executable before the competing trade");
+            assert_eq!(RetainedTradeSnapshot::capture(&env), before);
+        }
+
+        env.begin_public_trace();
+        let winner = build(&mut env, winner_route, 2, 1);
+        peak_cu = peak_cu.max(env.land_retained(winner).unwrap().compute_units);
+        assert_eq!(env.primary_portfolio_position_epoch(0), epochs[0] + 1);
+        assert_eq!(env.primary_portfolio_position_epoch(2), epochs[2] + 1);
+        assert_eq!(
+            env.svm.get_account(&env.actors[1].portfolio).unwrap(),
+            maker
+        );
+        assert_eq!(
+            env.svm.get_account(&env.actors[1].matcher_context).unwrap(),
+            matcher
+        );
+        assert_eq!([0, 1, 2].map(|actor| env.primary_portfolio_id(actor)), ids);
+        assert_eq!(
+            [0, 1].map(|asset| env.primary_market_state().1.assets[asset].market_id),
+            generations
+        );
+        assert_eq!(env.primary_market_state().1.assets[0].oi_eff_long_q, 0);
+
+        let mut fresh_winner = None;
+        for (route_index, (route, tx)) in retained.into_iter().enumerate() {
+            let mut expected = instruction(&tx);
+            let old_message = tx.message.clone();
+            assert_retained_trade_is_stale(&mut env, route, tx, "different asset and maker");
+            let fresh = build(&mut env, route, 1, 0);
+            assert_eq!(fresh.message.account_keys, old_message.account_keys);
+            assert_eq!(fresh.message.header, old_message.header);
+            assert_eq!(fresh.message.recent_blockhash, old_message.recent_blockhash);
+            let mut decoded = ProgInstruction::decode(&expected.data).unwrap();
+            match &mut decoded {
+                ProgInstruction::TradeNoCpi {
+                    account_a_position_epoch,
+                    ..
+                }
+                | ProgInstruction::BatchTradeNoCpi {
+                    account_a_position_epoch,
+                    ..
+                }
+                | ProgInstruction::TradeCpi {
+                    account_a_position_epoch,
+                    ..
+                }
+                | ProgInstruction::BatchTradeCpi {
+                    account_a_position_epoch,
+                    ..
+                } => {
+                    assert_eq!(*account_a_position_epoch, epochs[0]);
+                    *account_a_position_epoch = epochs[0] + 1;
+                }
+                _ => unreachable!("trade route"),
+            }
+            expected.data = decoded.encode();
+            assert_eq!(
+                instruction(&fresh),
+                expected,
+                "only taker episode is refreshed"
+            );
+            let before = RetainedTradeSnapshot::capture(&env);
+            env.svm
+                .simulate_transaction(fresh.clone().into())
+                .expect("refreshing only taker consent restores every route");
+            assert_eq!(RetainedTradeSnapshot::capture(&env), before);
+            if route_index == (index + 1) % DiscoveryTradeRoute::ALL.len() {
+                fresh_winner = Some(fresh);
+            }
+        }
+        peak_cu = peak_cu.max(
+            env.land_retained(fresh_winner.unwrap())
+                .unwrap()
+                .compute_units,
+        );
+        assert_eq!(env.primary_portfolio_position_epoch(0), epochs[0] + 2);
+        assert_eq!(env.primary_portfolio_position_epoch(1), epochs[1] + 1);
+        assert_eq!(env.primary_portfolio_position_epoch(2), epochs[2] + 1);
+        for asset in 0..2 {
+            let group = env.primary_market_state().1;
+            assert_eq!(group.assets[asset].oi_eff_long_q, SIZE as u128);
+            assert_eq!(group.assets[asset].oi_eff_short_q, SIZE as u128);
+        }
+        assert_eq!(env.all_token_account_data(), tokens);
+        assert_eq!(env.token_supply_observed(), supply);
+        let trace = env.finish_public_trace();
+        trace.validate_public_execution().unwrap();
+        assert_eq!(trace.out_of_band_economic_mutations, 0);
+        assert_eq!(trace.steps.iter().filter(|step| step.succeeded).count(), 2);
+        let rejected: Vec<_> = trace.steps.iter().filter(|step| !step.succeeded).collect();
+        assert_eq!(rejected.len(), 4);
+        for step in rejected {
+            assert_eq!(step.rejected_exact_writable_rollback, Some(true));
+            assert_eq!(step.rejected_no_program_lamport_delta, Some(true));
+        }
+    }
+    eprintln!("INV-004/008 taker scope: 4 worlds, 16 stale rejections, 32 successful simulations, 8 commits, peak {peak_cu} CU");
+}
+
+#[test]
 fn v16_program_trade_route_retry_sets_remain_consumed_across_fresh_episode() {
     const TAKER: usize = 0;
     const MAKER: usize = 1;
