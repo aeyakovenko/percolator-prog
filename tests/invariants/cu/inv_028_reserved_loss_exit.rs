@@ -3,6 +3,7 @@
 //! Live loss consumption leaves residual custody, realized by signed Resolved exits.
 //! Junior-first payout retains a partial receipt until historical source realization
 //! raises its rate; a keeper-only top-up must survive a rejected withdrawal suffix.
+//! Recovery also carries obsolete historical liens into the partial-receipt interval.
 
 use super::*;
 
@@ -85,6 +86,15 @@ fn assert_loss_resources(s: &ReservedExit, loss: u128) {
 
 #[test]
 fn v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit() {
+    run_reserved_loss_exit(false);
+}
+
+#[test]
+fn v16_program_recovery_force_close_preserves_historical_liens_and_partial_receipt_exit() {
+    run_reserved_loss_exit(true);
+}
+
+fn run_reserved_loss_exit(recovery: bool) {
     // Revalidate this witness locally without recertifying the older global roster.
     assert!(include_str!("../../../Cargo.lock").contains(
         "git+https://github.com/aeyakovenko/percolator?rev=4db11a8cb0053815e23a35d3a7d3edc265d8d866#\
@@ -99,9 +109,19 @@ fn v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit() 
     let mut max_cleanup = 0;
     let mut partial_receipts = 0;
     let mut keeper_topups = 0;
-    for (split, junior_first) in [(false, false), (true, false), (false, true), (true, true)] {
+    let mut force_calls = 0;
+    let mut max_force_cu = 0;
+    let cases: &[(bool, bool)] = if recovery {
+        &[(false, true), (true, true)]
+    } else {
+        &[(false, false), (true, false), (false, true), (true, true)]
+    };
+    for &(split, junior_first) in cases {
         let order = if split { [0, 1] } else { [1, 0] };
         let mut s = funded_history(order);
+        if recovery {
+            s.h.env.configure_permissionless_resolve_with_cu(1_000, 5);
+        }
         s.submit(&[s.withdraw(0, CAPITAL)], &[0], None);
         for actor in order {
             s.submit(&[s.crank(actor)], &[], None);
@@ -206,7 +226,110 @@ fn v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit() 
             );
         }
 
-        s.submit(&[s.trade(-q, PRICE - movement, split)], &[0, 1], None);
+        if recovery {
+            let portfolios = s.h.portfolios.map(|p| s.h.env.svm.get_account(&p));
+            let claims = s.claims();
+            let lien_count =
+                s.h.env
+                    .portfolio_state(s.h.portfolios[0])
+                    .source_domains
+                    .iter()
+                    .filter(|source| source.source_lien_counterparty_backing_num.get() > 0)
+                    .count();
+            assert!(
+                lien_count > 1,
+                "Recovery starts with simultaneous historical liens"
+            );
+            let admin = Keypair::from_bytes(&s.h.env.admin.to_bytes()).unwrap();
+            let cu =
+                s.h.env
+                    .try_shutdown_asset_with_authority(&admin, LIVE as u16, s.h.slot)
+                    .expect("claim-funded risk can enter Recovery");
+            assert_cu_within("reserved loss shutdown", cu, CU_LIMIT);
+            s.max_cu = s.max_cu.max(cu);
+            s.calls += 1;
+            assert_eq!(
+                s.h.portfolios.map(|p| s.h.env.svm.get_account(&p)),
+                portfolios
+            );
+            assert_eq!(
+                s.h.env.market_state().1.assets[LIVE].lifecycle,
+                AssetLifecycleV16::Recovery
+            );
+            assert_loss_resources(&s, LOSS);
+
+            s.h.slot += 5;
+            s.h.env.svm.warp_to_slot(s.h.slot);
+            let chunks: &[u128] = if split { &[10, 15] } else { &[25] };
+            let mut remaining = q as u128;
+            for &units in chunks {
+                let close_q = units * POS_SCALE;
+                let force_close = s.instruction(
+                    ProgInstruction::ForceCloseAbandonedAsset {
+                        asset_index: LIVE as u16,
+                        now_slot: s.h.slot,
+                        close_q,
+                    },
+                    vec![
+                        AccountMeta::new(s.h.env.payer.pubkey(), true),
+                        AccountMeta::new(s.h.env.market, false),
+                        AccountMeta::new(s.h.portfolios[0], false),
+                        AccountMeta::new(s.h.portfolios[1], false),
+                    ],
+                );
+                assert!(force_close
+                    .accounts
+                    .iter()
+                    .filter(|meta| meta.is_signer)
+                    .all(|meta| meta.pubkey == s.h.env.payer.pubkey()));
+                // Measure this route separately while retaining the history-wide CU peak.
+                let previous_peak = s.max_cu;
+                s.max_cu = 0;
+                s.submit(&[force_close], &[], None);
+                max_force_cu = max_force_cu.max(s.max_cu);
+                s.max_cu = s.max_cu.max(previous_peak);
+                force_calls += 1;
+                remaining -= close_q;
+                let group = s.h.env.market_state().1;
+                assert_eq!(group.assets[LIVE].lifecycle, AssetLifecycleV16::Recovery);
+                assert_eq!(group.assets[LIVE].oi_eff_long_q, remaining);
+                assert_eq!(group.assets[LIVE].oi_eff_short_q, remaining);
+                for actor in [0, 1] {
+                    let account = s.h.env.portfolio_state(s.h.portfolios[actor]);
+                    assert_eq!(has_active_leg_for_asset(&account, LIVE), remaining > 0);
+                    if remaining > 0 {
+                        assert_eq!(
+                            active_leg_for_asset(&account, LIVE).basis_pos_q,
+                            remaining as i128 * if actor == 0 { 1 } else { -1 }
+                        );
+                    }
+                }
+                assert_eq!(
+                    s.claims(),
+                    claims,
+                    "force-close preserves booked historical value"
+                );
+                assert_loss_resources(&s, LOSS);
+                if remaining > 0 {
+                    assert!(s.lien() > 0, "partial Recovery exit retains risk backing");
+                }
+                assert_eq!(
+                    [
+                        s.h.env.mint,
+                        s.h.env.vault,
+                        s.h.tokens[0],
+                        s.h.tokens[1],
+                        s.provider,
+                    ]
+                    .map(|key| s.h.env.svm.get_account(&key)),
+                    custody,
+                    "Recovery exit uses existing custody without either owner"
+                );
+            }
+            assert_eq!(remaining, 0);
+        } else {
+            s.submit(&[s.trade(-q, PRICE - movement, split)], &[0, 1], None);
+        }
         let mut cleanup = 0;
         for actor in order {
             assert_eq!(
@@ -216,30 +339,39 @@ fn v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit() 
                 0
             );
         }
-        for _ in 0..2 * LIVE {
-            let before = s.lien();
-            if before == 0 {
-                break;
+        if !recovery {
+            for _ in 0..2 * LIVE {
+                let before = s.lien();
+                if before == 0 {
+                    break;
+                }
+                s.submit(&[s.crank(0)], &[], None);
+                cleanup += 1;
+                assert!(
+                    s.lien() < before,
+                    "bounded cleanup releases obsolete reservations"
+                );
             }
-            s.submit(&[s.crank(0)], &[], None);
-            cleanup += 1;
+            assert_eq!(s.lien(), 0);
+        } else {
             assert!(
-                s.lien() < before,
-                "bounded cleanup releases obsolete reservations"
+                s.lien() > 0,
+                "obsolete Recovery liens survive into resolution"
             );
         }
-        assert_eq!(s.lien(), 0);
         max_cleanup = max_cleanup.max(cleanup);
         assert_loss_resources(&s, LOSS);
         // Provider principal was never spent: historical claim backing funded the loss.
-        for domain in 0..2 * LIVE {
-            let amount = s.provider_remaining[domain];
-            if amount > 0 {
-                s.submit(&[s.provider_withdraw(domain, amount)], &[], None);
-                s.provider_remaining[domain] = 0;
+        if !recovery {
+            for domain in 0..2 * LIVE {
+                let amount = s.provider_remaining[domain];
+                if amount > 0 {
+                    s.submit(&[s.provider_withdraw(domain, amount)], &[], None);
+                    s.provider_remaining[domain] = 0;
+                }
             }
+            assert_eq!(s.h.env.token_amount(s.provider) as u128, PROVIDER_TOTAL);
         }
-        assert_eq!(s.h.env.token_amount(s.provider) as u128, PROVIDER_TOTAL);
         assert_loss_resources(&s, LOSS);
         let cu = s.h.env.resolve();
         assert_cu_within("reserved loss resolution", cu, CU_LIMIT);
@@ -288,6 +420,11 @@ fn v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit() 
                     account
                         .source_domains
                         .iter()
+                        .map(|source| source.source_lien_counterparty_backing_num.get())
+                        .sum::<u128>(),
+                    account
+                        .source_domains
+                        .iter()
                         .filter(|source| source.is_occupied())
                         .count(),
                     account.capital.get() + account.pnl.get().max(0) as u128,
@@ -313,7 +450,7 @@ fn v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit() 
                 terminal_calls += 1;
                 assert!(
                     rank(&s) < before,
-                    "terminal exit consumes source or payment debt: actor={actor}, before={before:?}, after={:?}", rank(&s)
+                    "terminal exit consumes lien, source or payment debt: actor={actor}, before={before:?}, after={:?}", rank(&s)
                 );
                 assert_eq!(
                     [s.h.portfolios[1 - actor], s.h.tokens[1 - actor], s.provider].map(|key| s
@@ -334,7 +471,7 @@ fn v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit() 
                 };
                 assert!(u128::from(s.h.env.token_amount(s.h.tokens[actor])) <= ceiling);
             }
-            assert_eq!(rank(&s), (0, 0));
+            assert_eq!(rank(&s), (0, 0, 0));
             let receipt = resolved_receipt(&s.h.env.portfolio_state(s.h.portfolios[actor]));
             if actor == 0 {
                 assert_eq!(receipt, ResolvedPayoutReceiptV16::EMPTY);
@@ -377,6 +514,17 @@ fn v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit() 
                     (LOSS + outstanding) * BOUND_SCALE
                 );
                 if junior_first {
+                    if recovery {
+                        let account = s.h.env.portfolio_state(s.h.portfolios[0]);
+                        let liens = account
+                            .source_domains
+                            .iter()
+                            .filter(|source| source.source_lien_counterparty_backing_num.get() > 0)
+                            .count();
+                        assert!(liens > 1, "partial receipt coexists with historical liens");
+                        assert!(s.provider_remaining.iter().sum::<u128>() > 0);
+                        println!("Recovery receipt overlap: split={split}, liens={liens}, lien_num={}, paid={paid}", s.lien());
+                    }
                     assert!(!resolved_portfolio_is_terminal(&s.h.env, s.h.portfolios[1]));
                     let frame = economic_frame(&s);
                     s.submit(&[payout(&s, 1, true)], &[], None);
@@ -389,6 +537,7 @@ fn v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit() 
                 }
             }
         }
+        assert_eq!(s.lien(), 0);
         let ledger = s.h.env.market_state().1.resolved_payout_ledger;
         assert_eq!(ledger.snapshot_residual, LOSS);
         assert_eq!(ledger.terminal_claim_bound_unreceipted_num, 0);
@@ -472,6 +621,16 @@ fn v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit() 
                 .get_account(&s.h.portfolios[actor])
                 .is_none_or(|a| a.lamports == 0 && a.data.is_empty()));
         }
+        if recovery {
+            for domain in 0..2 * LIVE {
+                let amount = s.provider_remaining[domain];
+                if amount > 0 {
+                    s.submit(&[s.provider_withdraw(domain, amount)], &[], None);
+                    s.provider_remaining[domain] = 0;
+                }
+            }
+            assert_eq!(s.h.env.token_amount(s.provider) as u128, PROVIDER_TOTAL);
+        }
         assert_eq!(
             s.h.tokens.map(|t| s.h.env.token_amount(t) as u128),
             [CAPITAL + REMAINING_CLAIM, CAPITAL - REMAINING_CLAIM]
@@ -511,7 +670,8 @@ fn v16_program_admission_preserves_backing_for_loss_and_bounded_resolved_exit() 
         max_cu = max_cu.max(s.max_cu);
         max_packet = max_packet.max(s.max_packet);
     }
-    assert_eq!(rollbacks, 10);
+    assert_eq!(rollbacks, if recovery { 6 } else { 10 });
     assert_eq!((partial_receipts, keeper_topups), (2, 2));
-    println!("INV-028 reserved loss exit: worlds=4, partial_receipts={partial_receipts}, keeper_topups={keeper_topups}, suffix_calls={calls}, exact_rollbacks={rollbacks}, settlement_calls={settlement_calls}, terminal_calls={terminal_calls}, max_cu={max_cu}, headroom={}, max_packet={max_packet}, max_cleanup={max_cleanup}", CU_LIMIT - max_cu);
+    assert_eq!(force_calls, if recovery { 3 } else { 0 });
+    println!("INV-028 reserved loss exit: recovery={recovery}, worlds={}, partial_receipts={partial_receipts}, keeper_topups={keeper_topups}, force_calls={force_calls}, max_force_cu={max_force_cu}, suffix_calls={calls}, exact_rollbacks={rollbacks}, settlement_calls={settlement_calls}, terminal_calls={terminal_calls}, max_cu={max_cu}, headroom={}, max_packet={max_packet}, max_cleanup={max_cleanup}", cases.len(), CU_LIMIT - max_cu);
 }

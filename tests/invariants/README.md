@@ -59,6 +59,21 @@ Existing native repair commits separately; atomic receipt repair uses ordinary S
 New/control exact selectors pass at **339,081 / 173,615 CU** measured peaks.
 Row 417 remains OPEN; recredit, Recovery and arbitrary histories are outside this increment.
 
+## Row 423 Recovery liens during partial receipt payout (2026-09-18)
+
+[The focused note](row423_recovery_lien_receipt_20260918.md) adds one exact selector
+in [the existing reserved-loss owner](cu/inv_028_reserved_loss_exit.rs).
+Two public histories force-close claim-funded risk through Recovery, in one or two
+keeper calls, and resolve before releasing its historical liens. A 250-atom receipt
+is paid 20 while 13 peer liens still reserve 2,500 atoms. Bounded terminal calls
+release those liens and realize the peer's sources without changing the receipt;
+its exact 230-atom top-up then completes both owner exits and provider recovery.
+This adds simultaneous liens with a partial receipt after Recovery to the existing
+18-domain admission/loss witness. New/control exact selectors pass at
+**1,003,224 / 1,003,202 CU** peaks; Recovery force-close peaks at **652,021 CU**.
+Row 423 remains OPEN: this is not the full 28-domain liens/receipts/Recovery product,
+maximum active-leg/feed composition, or arbitrary future-resource history coverage.
+
 ## Row 423 partial receipt with full peer table (2026-09-18)
 
 [The focused note](row423_full_table_receipt_20260918.md) adds one selector in
