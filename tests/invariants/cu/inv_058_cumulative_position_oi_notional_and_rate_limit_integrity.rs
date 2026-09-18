@@ -542,6 +542,173 @@ fn v16_program_funding_accrual_does_not_open_shared_side_oi_headroom() {
 }
 
 #[test]
+fn v16_program_same_side_cross_zero_consumes_only_new_open_oi_headroom() {
+    const PRICE: u64 = 100;
+
+    fn check_book(env: &V16Svm, expected: [i128; PRIMARY_ACTOR_COUNT], capital: u128) {
+        let (_, group) = env.primary_market_state();
+        let asset = &group.assets[0];
+        let mut oi = [0u128; 2];
+        let mut counts = [0u64; 2];
+        assert_eq!(expected.iter().sum::<i128>(), 0);
+        for (actor, q) in expected.into_iter().enumerate() {
+            let account = env.primary_portfolio(actor);
+            let legs: Vec<_> = account
+                .legs
+                .iter()
+                .map(|leg| leg.try_to_runtime().expect("decode public leg"))
+                .filter(|leg| leg.active)
+                .collect();
+            assert_eq!(legs.len(), usize::from(q != 0), "actor {actor}");
+            assert_eq!(account.capital.get(), capital);
+            assert_eq!(account.pnl.get(), 0);
+            for leg in legs {
+                let side = usize::from(q < 0);
+                assert_eq!((leg.asset_index, leg.market_id), (0, asset.market_id));
+                assert_eq!(leg.basis_pos_q, q);
+                assert_eq!(leg.side, if q < 0 { SideV16::Short } else { SideV16::Long });
+                assert_eq!(
+                    leg.epoch_snap,
+                    if q < 0 {
+                        asset.epoch_short
+                    } else {
+                        asset.epoch_long
+                    }
+                );
+                assert_eq!(leg.a_basis, ADL_ONE);
+                oi[side] += q.unsigned_abs();
+                counts[side] += 1;
+            }
+        }
+        assert_eq!([asset.a_long, asset.a_short], [ADL_ONE; 2]);
+        assert_eq!([asset.oi_eff_long_q, asset.oi_eff_short_q], oi);
+        assert_eq!(
+            [asset.stored_pos_count_long, asset.stored_pos_count_short],
+            counts
+        );
+        assert_eq!(oi[0], oi[1]);
+        assert!(oi[0] <= percolator::MAX_OI_SIDE_Q);
+        assert_eq!(
+            [
+                asset.pending_obligation_count_long,
+                asset.pending_obligation_count_short
+            ],
+            [0; 2]
+        );
+        let total = capital * PRIMARY_ACTOR_COUNT as u128;
+        assert_eq!(
+            (
+                group.vault,
+                group.c_tot,
+                u128::from(env.token_amount(env.vault))
+            ),
+            (total, total, total)
+        );
+        assert_public_stock_census("INV-058 same-side cross-zero", env).unwrap();
+    }
+
+    let max = i128::try_from(percolator::MAX_OI_SIDE_Q).unwrap();
+    let q = max / 4;
+    assert!(q > 4);
+    let config = inv_058_max_position_config();
+    let capital = config.actor_deposits[0];
+    let mut peak = 0;
+    for route in INV_058_TRADE_ROUTES {
+        for direction in [-1i128, 1] {
+            let mut env = V16Svm::new([0x49; 32], config);
+            let tokens = env.all_token_account_data();
+            let supply = env.token_supply_observed();
+            let foreign = env.market_data(true);
+            let other_assets = env.primary_market_state().1.assets[1..].to_vec();
+            let mut positions = [0i128; PRIMARY_ACTOR_COUNT];
+            check_book(&env, positions, capital);
+            env.begin_public_trace();
+
+            // Actors 0 and 2 start on the same side. Crossing actor 0 transfers
+            // its q atoms and opens only the suffix; passive owners isolate the
+            // aggregate cap from both participants' individual position limits.
+            for (taker, maker, delta, accepted) in [
+                (0, 1, q, true),
+                (2, 1, q, true),
+                (3, 1, max - 2 * q - 3, true),
+                (0, 2, -(q + 4), false),
+                (0, 2, -(q + 3), true),
+                (0, 2, -1, false),
+                (3, 1, -1, true),
+                (0, 2, -1, true),
+                (0, 2, 4, true),
+                (2, 1, -2 * q, true),
+                (3, 1, -(max - 2 * q - 4), true),
+            ] {
+                let delta = direction * delta;
+                let mut proposed = positions;
+                proposed[taker] += delta;
+                proposed[maker] -= delta;
+                assert!(delta.unsigned_abs() < percolator::MAX_TRADE_SIZE_Q);
+                assert!(proposed
+                    .iter()
+                    .all(|q| q.unsigned_abs() < percolator::MAX_POSITION_ABS_Q));
+                if matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+                    env.ensure_primary_matcher_enabled(maker).unwrap();
+                }
+                let before = inv_058_economic_snapshot(&env);
+                let result = execute_trade_route(&mut env, route, taker, maker, 0, delta, PRICE, 0);
+                let label =
+                    format!("{route:?} direction={direction} {taker}->{maker} delta={delta}");
+                if accepted {
+                    let success = result.unwrap_or_else(|error| panic!("{label}: {error}"));
+                    peak = peak.max(success.compute_units);
+                    assert_cu_within(&label, success.compute_units, TRADE_CU_LIMIT);
+                    positions = proposed;
+                    for actor in 0..PRIMARY_ACTOR_COUNT {
+                        if actor != taker && actor != maker {
+                            assert_eq!(env.primary_portfolio_data(actor), before.portfolios[actor]);
+                        }
+                    }
+                } else {
+                    let proposed_oi: u128 = proposed
+                        .iter()
+                        .filter(|q| **q > 0)
+                        .map(|q| *q as u128)
+                        .sum();
+                    assert_eq!(proposed_oi, percolator::MAX_OI_SIDE_Q + 1);
+                    let error = result.expect_err("aggregate cap+1 must reject");
+                    assert!(
+                        error.contains("Custom(18)")
+                            || error.contains("custom program error: 0x12"),
+                        "{label}: {error}"
+                    );
+                    assert_eq!(inv_058_economic_snapshot(&env), before, "{label}");
+                }
+                check_book(&env, positions, capital);
+                assert_eq!(env.all_token_account_data(), tokens);
+                assert_eq!(env.token_supply_observed(), supply);
+                assert_eq!(env.market_data(true), foreign);
+                assert_eq!(env.primary_market_state().1.assets[1..], other_assets);
+            }
+            assert_eq!(positions, [0; PRIMARY_ACTOR_COUNT]);
+            for actor in 0..PRIMARY_ACTOR_COUNT {
+                let destination = env.actors[actor].destination_token;
+                let before = env.token_amount(destination);
+                let result = env.withdraw_primary(actor, capital).unwrap();
+                assert_cu_within(
+                    "same-side cross-zero withdrawal",
+                    result.compute_units,
+                    CUSTODY_CU_LIMIT,
+                );
+                assert_eq!(u128::from(env.token_amount(destination) - before), capital);
+            }
+            check_book(&env, positions, 0);
+            assert_eq!(env.token_supply_observed(), supply);
+            env.finish_public_trace()
+                .validate_public_execution()
+                .unwrap();
+        }
+    }
+    eprintln!("INV-058 same-side cross-zero: 8 worlds, 72 fills, 16 exact cap rollbacks, 40 withdrawals, peak_trade_cu={peak}");
+}
+
+#[test]
 fn v16_program_post_transition_caps_match_across_reduction_and_cross_zero_histories() {
     const PRICE: u64 = 100;
 
