@@ -21,16 +21,35 @@ mod native_surplus;
 
 #[test]
 fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
+    competing_insurance_recredit(false);
+}
+
+#[test]
+fn v16_program_competing_recredit_rechecks_retained_custody_repair_at_unchanged_epoch() {
+    competing_insurance_recredit(true);
+}
+
+fn competing_insurance_recredit(retire_custody: bool) {
     use inv_071_crank_progress::terminal_prefix_recredit::{fixture_with_competing_asset, GAIN};
 
+    const PREFUND: u64 = 19;
     let spent = [SPENT, GAIN - CAPITAL[2]];
-    let user_payouts = [CAPITAL[0] + 2 * GAIN, 0, 0];
+    let surplus = if retire_custody { 29 } else { 0 };
+    let user_payouts = [CAPITAL[0] + 2 * GAIN - surplus, 0, 0];
     let mut peak = 0;
     let mut commits = 0;
     let mut rollbacks = 0;
     for side in 0..2 {
-        for backing in [137u64, 207] {
-            for later_first in [false, true] {
+        for &backing in if retire_custody {
+            &[137u64][..]
+        } else {
+            &[137u64, 207][..]
+        } {
+            for &later_first in if retire_custody {
+                &[true][..]
+            } else {
+                &[false, true][..]
+            } {
                 let RecreditFixture {
                     mut env,
                     admin,
@@ -47,6 +66,12 @@ fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
                 let ledger = env.market_state().1.resolved_payout_ledger;
                 let recipients = [reserve, destination];
                 let beneficiaries = [beneficiary.pubkey(), admin.pubkey()];
+                let keeper = Keypair::new();
+                if retire_custody {
+                    env.svm.airdrop(&keeper.pubkey(), 1_000_000_000).unwrap();
+                }
+                let reserve_before = env.svm.get_account(&reserve).unwrap();
+                let keeper_before = env.svm.get_account(&keeper.pubkey());
                 let total_recovery = backing.min(spent.iter().sum());
                 let recovery = if later_first {
                     [total_recovery - spent[1], spent[1]]
@@ -62,6 +87,7 @@ fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
                     destination,
                     admin.pubkey(),
                     beneficiary.pubkey(),
+                    keeper.pubkey(),
                     solana_sdk::sysvar::clock::ID,
                 ];
                 tracked.extend(tokens);
@@ -108,32 +134,50 @@ fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
                     accounts: vec![],
                     data: vec![255],
                 };
-                let mut send = |env: &mut V16CuEnv,
-                                ix: Instruction,
-                                signers: &[&Keypair],
-                                changed: &[Pubkey],
-                                token_calls| {
-                    peak = peak.max(land(
-                        env,
-                        &[ix.clone(), bad_suffix.clone()],
-                        signers,
-                        &tracked,
-                        &[],
-                        Some((3, InstructionError::InvalidInstructionData)),
-                        (1, token_calls),
-                    ));
-                    rollbacks += 1;
-                    peak = peak.max(land(
-                        env,
-                        &[ix],
-                        signers,
-                        &tracked,
-                        changed,
-                        None,
-                        (1, token_calls),
-                    ));
-                    commits += 1;
+                let repair = Instruction {
+                    program_id: associated_token_program_id(),
+                    accounts: vec![
+                        AccountMeta::new(keeper.pubkey(), true),
+                        AccountMeta::new(reserve, false),
+                        AccountMeta::new_readonly(beneficiaries[0], false),
+                        AccountMeta::new_readonly(env.mint, false),
+                        AccountMeta::new_readonly(system_program::ID, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                        AccountMeta::new_readonly(solana_sdk::sysvar::rent::ID, false),
+                    ],
+                    data: vec![],
                 };
+                let mut send =
+                    |env: &mut V16CuEnv,
+                     ixs: &[Instruction],
+                     signers: &[&Keypair],
+                     changed: &[Pubkey],
+                     successes,
+                     rejection: Option<(u8, InstructionError)>| {
+                        let mut rejected = ixs.to_vec();
+                        if rejection.is_none() {
+                            rejected.push(bad_suffix.clone());
+                        }
+                        peak = peak.max(land(
+                            env,
+                            &rejected,
+                            signers,
+                            &tracked,
+                            &[],
+                            Some(rejection.clone().unwrap_or((
+                                (2 + ixs.len()) as u8,
+                                InstructionError::InvalidInstructionData,
+                            ))),
+                            successes,
+                        ));
+                        rollbacks += 1;
+                        if rejection.is_some() {
+                            return;
+                        }
+                        peak =
+                            peak.max(land(env, ixs, signers, &tracked, changed, None, successes));
+                        commits += 1;
+                    };
                 let check = |env: &V16CuEnv,
                              normalized: bool,
                              restored: [u64; 2],
@@ -208,13 +252,24 @@ fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
                         if normalized { u128::from(backing) } else { 0 };
                     assert_eq!(group.resolved_payout_ledger, expected_ledger);
                     assert_eq!(tokens.map(|token| env.token_amount(token)), user_payouts);
-                    assert_eq!(recipients.map(|token| env.token_amount(token)), paid);
-                    assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+                    for (token, amount) in recipients.into_iter().zip(paid) {
+                        let account = env.svm.get_account(&token).unwrap();
+                        if token == reserve && account.owner == system_program::ID {
+                            assert!(retire_custody && account.data.is_empty());
+                            assert_eq!((account.lamports, amount), (PREFUND, 0));
+                        } else {
+                            assert_eq!(env.token_amount(token), amount);
+                        }
+                    }
+                    assert_eq!(
+                        u128::from(env.token_amount(env.vault)),
+                        group.vault + u128::from(surplus)
+                    );
                     assert_eq!(
                         Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
                             .unwrap()
                             .supply,
-                        user_payouts[0] + backing
+                        user_payouts[0] + backing + surplus
                     );
                     crate::support::fuzz_model::assert_market_stock_census(
                         "competing terminal recredit",
@@ -232,9 +287,54 @@ fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
                     .unwrap();
                 };
                 let market_only = [env.market];
+                if retire_custody {
+                    let donate = spl_token::instruction::transfer(
+                        &spl_token::ID,
+                        &tokens[0],
+                        &env.vault,
+                        &owners[0].pubkey(),
+                        &[],
+                        surplus,
+                    )
+                    .unwrap();
+                    let donated = [tokens[0], env.vault];
+                    send(&mut env, &[donate], &[&owners[0]], &donated, (0, 1), None);
+                    check(&env, false, [0; 2], [0; 2], 0);
+                }
                 let ix = close(&env);
-                send(&mut env, ix, &[&admin], &market_only, 0);
+                send(&mut env, &[ix], &[&admin], &market_only, (1, 0), None);
                 check(&env, false, [0; 2], [0; 2], 2);
+                if retire_custody {
+                    let mut expected_beneficiary = env.svm.get_account(&beneficiaries[0]).unwrap();
+                    expected_beneficiary.lamports += reserve_before.lamports;
+                    let retire = spl_token::instruction::close_account(
+                        &spl_token::ID,
+                        &reserve,
+                        &beneficiaries[0],
+                        &beneficiaries[0],
+                        &[],
+                    )
+                    .unwrap();
+                    let prefund = solana_sdk::system_instruction::transfer(
+                        &keeper.pubkey(),
+                        &reserve,
+                        PREFUND,
+                    );
+                    send(
+                        &mut env,
+                        &[retire, prefund],
+                        &[&beneficiary, &keeper],
+                        &[reserve, beneficiaries[0], keeper.pubkey()],
+                        (0, 1),
+                        None,
+                    );
+                    assert_eq!(
+                        env.svm.get_account(&beneficiaries[0]),
+                        Some(expected_beneficiary)
+                    );
+                    check(&env, false, [0; 2], [0; 2], 2);
+                }
+                drop(beneficiary);
                 let before_expiry = env.svm.get_account(&env.market).unwrap();
                 env.svm.warp_to_slot(EXPIRY);
                 assert_eq!(
@@ -242,7 +342,7 @@ fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
                     Some(before_expiry.clone())
                 );
                 let ix = close(&env);
-                send(&mut env, ix, &[&admin], &market_only, 0);
+                send(&mut env, &[ix], &[&admin], &market_only, (1, 0), None);
                 check(&env, true, [0; 2], [0; 2], 0);
                 let start = MARKET_GROUP_OFF
                     + std::mem::size_of::<percolator::MarketGroupV16HeaderAccount>();
@@ -255,18 +355,71 @@ fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
 
                 let mut restored = [0; 2];
                 let mut paid = [0; 2];
+                let retained_payout = withdraw(&env, 0, spent[0]);
+                if retire_custody {
+                    // This exact repair/payment can execute before the competing withdrawal.
+                    send(
+                        &mut env,
+                        &[repair.clone(), retained_payout.clone(), bad_suffix.clone()],
+                        &[&keeper],
+                        &[],
+                        (1, 4),
+                        Some((4, InstructionError::InvalidInstructionData)),
+                    );
+                    check(&env, true, restored, paid, 0);
+                }
                 for asset in if later_first { [1, 0] } else { [0, 1] } {
+                    if retire_custody && asset == 0 {
+                        assert_eq!(env.control_sequences(0), initial_epochs[0]);
+                        assert_eq!(retained_payout, withdraw(&env, 0, spent[0]));
+                        assert!(env.token_amount(env.vault) >= spent[0]);
+                        assert!(env.market_state().1.vault < u128::from(spent[0]));
+                        // The peer consumed residual without invalidating this asset's epoch.
+                        // Rejection must undo ATA rent and tentative local recredit together.
+                        send(
+                            &mut env,
+                            &[repair.clone(), retained_payout.clone()],
+                            &[&keeper],
+                            &[],
+                            (0, 3),
+                            Some((
+                                3,
+                                InstructionError::Custom(PercolatorError::EngineLockActive as u32),
+                            )),
+                        );
+                        check(&env, true, restored, paid, 0);
+                    }
                     // A local withdrawal may claim residual first; the scanner must use only
                     // what remains when it rediscovers the competing earlier entitlement.
                     if !later_first || asset == 0 {
                         let ix = close(&env);
-                        send(&mut env, ix, &[&admin], &market_only, 0);
+                        send(&mut env, &[ix], &[&admin], &market_only, (1, 0), None);
                         restored[asset] = recovery[asset];
                         check(&env, true, restored, paid, asset as u128);
                     }
                     let ix = withdraw(&env, asset, recovery[asset]);
                     let payment = [env.market, env.vault, recipients[asset]];
-                    send(&mut env, ix, &[], &payment, 1);
+                    if retire_custody && asset == 0 {
+                        let repaired_payment = [env.market, env.vault, reserve, keeper.pubkey()];
+                        send(
+                            &mut env,
+                            &[repair.clone(), ix],
+                            &[&keeper],
+                            &repaired_payment,
+                            (1, 4),
+                            None,
+                        );
+                        let mut expected_reserve = reserve_before.clone();
+                        let mut token = TokenAccount::unpack(&expected_reserve.data).unwrap();
+                        token.amount = recovery[0];
+                        TokenAccount::pack(token, &mut expected_reserve.data).unwrap();
+                        assert_eq!(env.svm.get_account(&reserve), Some(expected_reserve));
+                        let mut expected_keeper = keeper_before.clone().unwrap();
+                        expected_keeper.lamports -= reserve_before.lamports;
+                        assert_eq!(env.svm.get_account(&keeper.pubkey()), Some(expected_keeper));
+                    } else {
+                        send(&mut env, &[ix], &[], &payment, (1, 1), None);
+                    }
                     restored[asset] = recovery[asset];
                     paid[asset] = recovery[asset];
                     check(
@@ -282,6 +435,8 @@ fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
                 let vault = env.svm.get_account(&env.vault).unwrap();
                 let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();
                 let retired = backing - total_recovery;
+                let close_successes =
+                    (1, 1 + usize::from(retired != 0) + usize::from(surplus != 0));
                 let ix = close(&env);
                 peak = peak.max(land(
                     &mut env,
@@ -290,10 +445,13 @@ fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
                     &tracked,
                     &[],
                     Some((3, InstructionError::InvalidInstructionData)),
-                    (1, 1 + usize::from(retired != 0)),
+                    close_successes,
                 ));
                 rollbacks += 1;
-                let closing = [env.market, env.vault, env.mint, admin.pubkey()];
+                let mut closing = vec![env.market, env.vault, env.mint, admin.pubkey()];
+                if surplus != 0 {
+                    closing.push(destination);
+                }
                 peak = peak.max(land(
                     &mut env,
                     &[ix],
@@ -301,7 +459,7 @@ fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
                     &tracked,
                     &closing,
                     None,
-                    (1, 1 + usize::from(retired != 0)),
+                    close_successes,
                 ));
                 commits += 1;
                 let tombstone = env.svm.get_account(&env.market).unwrap();
@@ -312,17 +470,25 @@ fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
                     .svm
                     .get_account(&env.vault)
                     .is_none_or(|a| a.lamports == 0));
-                assert_eq!(recipients.map(|token| env.token_amount(token)), recovery);
+                assert_eq!(
+                    recipients.map(|token| env.token_amount(token)),
+                    [recovery[0], recovery[1] + surplus]
+                );
                 assert_eq!(
                     Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
                         .unwrap()
                         .supply,
-                    user_payouts[0] + total_recovery
+                    user_payouts[0] + total_recovery + surplus
                 );
             }
         }
     }
-    println!("INV-070 competing residual: 8 public histories, {commits} commits, {rollbacks} complete-Account rollbacks, peak={peak} CU");
+    let histories = if retire_custody { 2 } else { 8 };
+    assert_eq!(
+        (commits, rollbacks),
+        if retire_custody { (16, 20) } else { (52, 52) }
+    );
+    println!("INV-070 competing residual: {histories} public histories, retired_custody={retire_custody}, {commits} commits, {rollbacks} complete-Account rollbacks, peak={peak} CU");
 }
 
 #[test]

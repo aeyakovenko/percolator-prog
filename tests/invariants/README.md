@@ -1,5 +1,61 @@
 # Invariant-owned test coverage
 
+## Rows 424/433 competing recredit through custody repair (2026-09-18)
+
+One new selector in [the existing scan-recredit owner](cu/inv_070_terminal_scan_recredit.rs)
+composes competing insurance with absent-beneficiary custody repair. The existing
+competition selector keeps both wallets available; the existing repair selector
+has only one recreditable asset. Neither retains a repair/payment across a peer's
+committed consumption of the same residual while its own authority epoch stays fixed.
+
+Two public LiteSVM histories cross both source sides. After 100/63 insurance atoms
+are spent and users receive 1,400, a user donates 29 unbooked atoms to vault custody.
+The scanner parks at asset 2, the first beneficiary closes its empty wallet, and a
+keeper prefunds that address with 19 lamports. Expiry releases 137 backing atoms
+and resets the cursor. A keeper-only ATA repair and 100-atom payment execute before
+a rejected suffix, restoring every tracked Account except exact transaction fees.
+Asset 1 then receives 63 without changing asset 0's control sequences. The retained
+repair/100-atom payment rejects `EngineLockActive`, rolling back rent, ATA creation
+and tentative recredit while preserving the committed peer payment. Physical
+custody is 103 but booked residual is 74, so token-balance preflight cannot mask
+the accounting guard. Scanner rediscovery and the repaired 74-atom payment exhaust
+recoverable insurance, leaving 26 spent atoms unrecovered. Retirement sends the
+separate 29-atom surplus to admin custody and refunds exact market/vault rent.
+The beneficiary key is dropped after wallet closure.
+
+The new case checks **16 commits and 20 complete-Account rollbacks**, stock and
+reservation censuses, payout ledger, control sequences, custody, mint supply and
+rent. New/competition/repair selectors pass **1/1 each**, peaking at
+**215,290 / 215,290 / 223,093 CU** (fixture construction excluded except its measured
+user cleanup). Only this README and the existing test owner change. Rows 423/424/433
+remain OPEN; this is bounded SPL evidence, not maximum-shape, pending-receipt,
+Recovery, arbitrary-history or unavailable-administrator retirement coverage.
+No production bug, engine proof, broad-suite run or status promotion is claimed.
+Scoped formatting, whitespace and protected-path checks pass.
+
+Base: `a1d33c58`; engine `4db11a8cb0053815e23a35d3a7d3edc265d8d866`.
+Private host/SBF/auth caches were copied from the preceding source-owner run.
+Locked/offline wrapper and auth-matcher rebuilds use platform-tools v1.52.
+SHA-256: wrapper `a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`,
+matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+
+```bash
+export TMPDIR=/dev/shm CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv-terminal-source-host-20260918152833
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv-terminal-source-sbf-20260918152833/deploy/percolator_prog.so
+CARGO_TARGET_DIR=/dev/shm/percolator-inv-terminal-source-sbf-20260918152833 RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/percolator-inv-terminal-source-sbf-20260918152833/deploy -- --locked
+# From tests/fixtures/auth_matcher:
+CARGO_TARGET_DIR=/dev/shm/percolator-inv-terminal-source-auth-20260918152833 RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/percolator-inv-agent-terminal-source-20260918152833/tests/fixtures/auth_matcher/target/deploy -- --locked
+# From the worktree root:
+owner=inv_070_zero_unattributed_terminal_residue_and_close_slab::terminal_scan_recredit
+cargo test --locked --offline --test v16_cu "$owner::v16_program_competing_recredit_rechecks_retained_custody_repair_at_unchanged_epoch" -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 "$owner::v16_program_terminal_scan_competing_assets_share_expired_residual_once" "$owner::v16_program_rediscovered_insurance_recreates_prefunded_beneficiary_before_retirement"
+rustfmt --check --edition 2021 --config skip_children=true tests/invariants/cu/inv_070_terminal_scan_recredit.rs
+git diff --check
+git diff --exit-code a1d33c58 -- . ':!tests/invariants/cu/inv_070_terminal_scan_recredit.rs' ':!tests/invariants/README.md'
+```
+
 ## Row 424 competing insurance after backing expiry (2026-09-18)
 
 One selector in [the scan-recredit owner](cu/inv_070_terminal_scan_recredit.rs)
