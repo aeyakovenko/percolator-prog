@@ -270,6 +270,51 @@ Row 421 remains OPEN for arbitrary histories, partial/repeated recredit, other
 assets/quote rails and unavailable-administrator normalization/retirement.
 Portfolio deletion, expiry normalization and final slab close retain their signers.
 
+## Row 421 partial recredit with unrecovered ledger principal (2026-09-18)
+
+Owner: [INV-073 insurance ledger child](cu/inv_073_insurance_loss_recredit_ledger.rs).
+One new selector reuses the full-recredit history with only 61 backing atoms.
+The funded ledger records 117 deposited, 100 lost, 61 recovered and 78 withdrawn;
+39 principal atoms remain recorded after the payable claim and vault reach zero.
+The positive domain budget equals historical spend, so its available amount is
+zero. An unsigned overclaim rejects; signed slab retirement succeeds despite
+the residual telemetry. A failing System suffix after actual vault/slab closure
+rolls back all tracked and compiled Accounts, except the exact payer fee. The
+identical close then commits with exact rent refunds and unchanged paid custody
+and ledger. Six rollbacks are checked across the complete public history.
+
+This is substantive bounded composition: the existing funded-ledger selector
+recovers all loss and ends with zero principal; the terminal progress product,
+generated terminal actionability and INV-024 raw-surplus tests already own
+partial/repeated recredit without this funded insurance ledger. They do not
+establish retirement with a retained deposit/loss/profit record and positive
+unrecovered principal. No new custody variant or generic history claim is made.
+Row 421 remains OPEN; other histories/rails/custody states and unavailable-admin
+normalization/retirement remain outside this increment. Owners still delete
+portfolios; the administrator still normalizes expiry and retires the slab.
+
+Base: `943bf8d25cfe8861d39d9aea83a465d14288cc38` from fetched `origin/main`.
+Exact selectors under `inv_073_no_permanent_user_lock::insurance_loss_recredit_ledger::`:
+
+- New: `v16_program_partially_recredited_insurance_ledger_preserves_unrecovered_principal_through_retirement_retry`.
+- Control: `v16_program_unsigned_insurance_ledger_preserves_loss_and_recredit_after_cleanup`.
+
+Both pass with `cargo test --locked --offline --test v16_cu -- --exact --nocapture
+--test-threads=1` followed by the two fully qualified selectors: **2 passed,
+0 failed**, 1.12s. Peak CU (user/rejection/payment/cleanup) is
+**222,943 / 136,613 / 134,501 / 127,067** for partial recovery and
+**218,443 / 133,616 / 131,504 / 127,067** for the full-recredit control.
+The partial case's final unsigned overclaim returns `Custom(11)` with an empty
+vault; the full-recredit control retains raw residual and returns `EngineLockActive`.
+Neither overclaim executes an SPL payment or changes the ledger.
+Default-feature SBF was rebuilt with locked offline `cargo build-sbf`, tools v1.52;
+SHA-256: `a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`.
+Worktree: `/dev/shm/percolator-row421-partial-recredit-20260918`, with private copied
+host/SBF caches at the same path plus `-host-target` and `-sbf-target`; the latter's
+`deploy/percolator_prog.so` was selected with `PERCOLATOR_FUZZ_SBF`.
+Only this README and the existing INV-073 child change. Production, Cargo inputs,
+fixtures, TSVs, support and harness registrations are untouched.
+
 ## Row 420 inverse provider expiry (2026-09-17)
 
 [The focused note](row420_inverse_provider_expiry_20260917.md) adds one selector

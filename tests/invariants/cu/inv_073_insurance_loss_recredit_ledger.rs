@@ -1,6 +1,7 @@
 //! Row 421: unsigned insurance telemetry spans a realized loss and later recredit.
 //! A funded ledger observes the loss before backing expiry, then records recovery
 //! without erasing the loss or counting the earlier payment twice. Public setup only.
+//! Partial recovery leaves unpaid principal as telemetry through retirement and retry.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -14,10 +15,8 @@ const CAPITAL: [u64; 3] = [1_000, 100, 137];
 const LOSS: u64 = 100;
 const FIRST: u64 = 17;
 const FUNDED: u64 = LOSS + FIRST;
-const BACKING: u64 = 307;
 const EXPIRY: u64 = 44;
 const PAYOUTS: [u64; 3] = [1_200, 0, 137];
-const SUPPLY: u64 = 1_000 + 100 + 137 + FUNDED + BACKING;
 
 fn payment(
     env: &V16CuEnv,
@@ -61,6 +60,20 @@ fn close(env: &V16CuEnv, destination: Pubkey) -> Instruction {
 
 #[test]
 fn v16_program_unsigned_insurance_ledger_preserves_loss_and_recredit_after_cleanup() {
+    insurance_ledger_loss_recredit(307);
+}
+
+#[test]
+fn v16_program_partially_recredited_insurance_ledger_preserves_unrecovered_principal_through_retirement_retry(
+) {
+    insurance_ledger_loss_recredit(61);
+}
+
+fn insurance_ledger_loss_recredit(backing: u64) {
+    let recovery = backing.min(LOSS);
+    let entitlement = FIRST + recovery;
+    let supply = CAPITAL.iter().sum::<u64>() + FUNDED + backing;
+    assert!(recovery > 41);
     let mut env = inv018_public_spl_market_with_params(
         0,
         V16CuMarketParams {
@@ -138,7 +151,7 @@ fn v16_program_unsigned_insurance_ledger_preserves_loss_and_recredit_after_clean
     for (token, amount) in tokens
         .into_iter()
         .zip(CAPITAL)
-        .chain([(reserve, FUNDED), (destination, BACKING)])
+        .chain([(reserve, FUNDED), (destination, backing)])
     {
         send_raw_tx(
             &mut env.svm,
@@ -213,7 +226,7 @@ fn v16_program_unsigned_insurance_ledger_preserves_loss_and_recredit_after_clean
             intent_id: 0,
             backing_fee_bps: 0,
             insurance_share_bps: 0,
-            amount: BACKING.into(),
+            amount: backing.into(),
             expiry_slot: EXPIRY,
         },
         vec![
@@ -401,17 +414,17 @@ fn v16_program_unsigned_insurance_ledger_preserves_loss_and_recredit_after_clean
             group.insurance_domain_budget_remaining_total,
             insurance.into()
         );
-        assert_eq!(group.vault, u128::from(BACKING + FIRST - paid));
+        assert_eq!(group.vault, u128::from(backing + FIRST - paid));
         assert_eq!(env.token_amount(env.vault) as u128, group.vault);
         assert_eq!(env.token_amount(reserve), paid);
         assert_eq!(tokens.map(|key| env.token_amount(key)), PAYOUTS);
         assert_eq!(env.token_amount(destination), 0);
         assert_eq!(
             env.token_amount(env.vault) + paid + PAYOUTS.iter().sum::<u64>(),
-            SUPPLY
+            supply
         );
         let mint = Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data).unwrap();
-        assert_eq!((mint.supply, mint.mint_authority), (SUPPLY, COption::None));
+        assert_eq!((mint.supply, mint.mint_authority), (supply, COption::None));
         assert_eq!(
             group.source_credit[1].provider_receivable_num,
             u128::from(LOSS) * BOUND_SCALE
@@ -520,8 +533,8 @@ fn v16_program_unsigned_insurance_ledger_preserves_loss_and_recredit_after_clean
         None,
         (1, 1),
     ));
-    check(&env, FIRST + 41, LOSS, 2);
-    let tail = payment(&env, beneficiary_key, reserve, ledger, LOSS - 41);
+    check(&env, FIRST + 41, recovery, 2);
+    let tail = payment(&env, beneficiary_key, reserve, ledger, recovery - 41);
     peaks[2] = peaks[2].max(land(
         &mut env,
         &[tail],
@@ -531,21 +544,23 @@ fn v16_program_unsigned_insurance_ledger_preserves_loss_and_recredit_after_clean
         None,
         (1, 1),
     ));
-    check(&env, FUNDED, LOSS, 3);
+    check(&env, entitlement, recovery, 3);
     let overclaim = payment(&env, beneficiary_key, reserve, ledger, 1);
+    let overclaim_error = if recovery < LOSS {
+        11
+    } else {
+        PercolatorError::EngineLockActive as u32
+    };
     peaks[1] = peaks[1].max(land(
         &mut env,
         &[overclaim],
         &[],
         &tracked,
         &[],
-        Some((
-            2,
-            InstructionError::Custom(PercolatorError::EngineLockActive as u32),
-        )),
+        Some((2, InstructionError::Custom(overclaim_error))),
         (0, 0),
     ));
-    check(&env, FUNDED, LOSS, 3);
+    check(&env, entitlement, recovery, 3);
     let paid_ledger = env.svm.get_account(&ledger);
     let paid_reserve = env.svm.get_account(&reserve);
     let tombstone_rent = env
@@ -556,6 +571,39 @@ fn v16_program_unsigned_insurance_ledger_preserves_loss_and_recredit_after_clean
         + env.svm.get_account(&env.vault).unwrap().lamports
         - tombstone_rent;
     let retire = close(&env, destination);
+    let burned = backing - recovery;
+    let close_successes = (1, 1 + usize::from(burned > 0));
+    if recovery < LOSS {
+        let (_, group) = env.market_state();
+        let unpaid = u128::from(LOSS - recovery);
+        assert!(unpaid > 0);
+        assert_eq!(group.insurance_domain_budget[0], unpaid);
+        assert_eq!(group.insurance_domain_spent[0], unpaid);
+        assert_eq!((group.insurance, group.vault), (0, 0));
+        let record = state::read_insurance_ledger(&paid_ledger.as_ref().unwrap().data).unwrap();
+        assert_eq!(record.total_principal_atoms, unpaid);
+        assert_eq!(
+            record.cumulative_loss_atoms - record.cumulative_profit_atoms,
+            unpaid
+        );
+        // Positive historical principal is not a payable claim or a retirement blocker.
+        // A failing System suffix restores the actual vault/slab close and its rent refunds.
+        let denied = system_instruction::transfer(
+            &admin.pubkey(),
+            &env.payer.pubkey(),
+            expected_admin.lamports.checked_add(1).unwrap(),
+        );
+        peaks[1] = peaks[1].max(land(
+            &mut env,
+            &[retire.clone(), denied],
+            &[&admin],
+            &tracked,
+            &[],
+            Some((3, InstructionError::Custom(1))),
+            close_successes,
+        ));
+        check(&env, entitlement, recovery, 3);
+    }
     let close_changes = [env.market, env.vault, env.mint, admin.pubkey()];
     peaks[3] = peaks[3].max(land(
         &mut env,
@@ -564,7 +612,7 @@ fn v16_program_unsigned_insurance_ledger_preserves_loss_and_recredit_after_clean
         &tracked,
         &close_changes,
         None,
-        (1, 2),
+        close_successes,
     ));
     assert_eq!(env.svm.get_account(&ledger), paid_ledger);
     assert_eq!(env.svm.get_account(&reserve), paid_reserve);
@@ -580,7 +628,8 @@ fn v16_program_unsigned_insurance_ledger_preserves_loss_and_recredit_after_clean
         Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
             .unwrap()
             .supply,
-        SUPPLY - (BACKING - LOSS)
+        supply - burned
     );
-    println!("row421 loss/recredit ledger: paid={FUNDED}, loss={LOSS}, profit={LOSS}, rollbacks=5, peak_CU(user,rejection,payment,cleanup)={peaks:?}");
+    let rollbacks = 5 + usize::from(recovery < LOSS);
+    println!("row421 loss/recredit ledger: backing={backing}, paid={entitlement}, loss={LOSS}, profit={recovery}, unpaid_principal={}, rollbacks={rollbacks}, peak_CU(user,rejection,payment,cleanup)={peaks:?}", LOSS - recovery);
 }
