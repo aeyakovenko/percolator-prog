@@ -1023,3 +1023,257 @@ fn v16_program_cold_oracle_handoff_waits_for_last_live_quantity_tick() {
     }
     eprintln!("row416 last live quantity tick: worlds=4, exact_SPL_rollbacks=4, empty_management_controls=4, exact_owner_exits=20, peak_success_cu={peak_cu}");
 }
+
+#[test]
+fn v16_program_retained_oracle_handoff_recovery_rollback_preserves_booked_claim() {
+    const COLD: usize = 2;
+    const SUCCESSOR: usize = 3;
+    const PREFIX_OWNER: usize = 4;
+    const PREFIX: u128 = 7;
+    const LOTS: i128 = 10;
+    const DELTA: u64 = INITIAL_PRICE / 20;
+    const GAIN: u128 = LOTS as u128 * DELTA as u128;
+    let mut peak_cu = 0;
+    let mut peak_preview_cu = 0;
+    for asset in [0u16, 1] {
+        for direction in [-1i128, 1] {
+            let config = MarketConfig::default();
+            let deposits = config.actor_deposits;
+            let mut env = V16Svm::new([0x4a; 32], config);
+            env.begin_public_trace();
+            env.configure_permissionless_resolve(100, 5).unwrap();
+            env.update_asset_authority_from_admin(asset, processor::ASSET_AUTH_ADMIN, COLD)
+                .unwrap();
+            env.trade_no_cpi(
+                0,
+                1,
+                asset,
+                direction * LOTS * percolator::POS_SCALE as i128,
+                INITIAL_PRICE,
+                0,
+            )
+            .unwrap();
+            for slot in [2, 3] {
+                env.warp_to_slot(slot);
+                let mark =
+                    (INITIAL_PRICE as i128 + direction * (slot - 1) as i128 * DELTA as i128) as u64;
+                let observation = env.build_retained_auth_mark(asset, mark);
+                env.land_retained(observation).unwrap();
+                env.crank(1, slot, crank_observations(asset)).unwrap();
+                if slot == 2 {
+                    env.crank(0, slot, crank_observations(asset)).unwrap();
+                }
+            }
+            let winner = env.primary_portfolio(0);
+            assert_eq!(winner.pnl.get(), GAIN as i128);
+            assert_eq!(winner.capital.get(), deposits[0]);
+            assert_eq!(
+                env.primary_portfolio(1).capital.get(),
+                deposits[1] - 2 * GAIN
+            );
+            let selected = env.primary_market_state().1.assets[asset as usize];
+            assert_ne!(
+                active_leg_for_asset(&winner, asset as usize).k_snap,
+                if direction > 0 {
+                    selected.k_long
+                } else {
+                    selected.k_short
+                },
+                "a second gain must remain unrefreshed for Recovery to forfeit"
+            );
+            let peer = (1 - asset) as usize;
+            let peer_profile = env.primary_profile(peer);
+            let peer_sequences = env.primary_control_sequences(peer);
+            let sequences = env.primary_control_sequences(asset as usize);
+            env.warp_to_slot(4);
+            let withdrawal = env.build_retained_withdrawal(PREFIX_OWNER, PREFIX);
+            let handoff = env.build_retained_asset_authority_handoff_from_admin(
+                asset,
+                processor::ASSET_AUTH_ORACLE,
+                SUCCESSOR,
+            );
+            let mark = env.build_retained_market_control_for_actor(
+                SUCCESSOR,
+                ProgInstruction::PushAuthMark {
+                    asset_index: asset,
+                    market_id: selected.market_id,
+                    now_slot: 4,
+                    mark_e6: (INITIAL_PRICE as i128 + direction * 3 * DELTA as i128) as u64,
+                    observation_sequence: sequences.oracle_observation + 1,
+                    authority_epoch: sequences.authority_epoch + 1,
+                },
+            );
+            let bundle =
+                env.bundle_retained_transactions(&[withdrawal.clone(), handoff.clone(), mark]);
+            bundle.verify().unwrap();
+            assert!(bincode::serialized_size(&bundle).unwrap() <= 1_232);
+            let preview = env.svm.simulate_transaction(bundle.clone().into()).expect(
+                "the retained SPL payout, incumbent handoff and successor mark are valid in Active",
+            );
+            peak_preview_cu = peak_preview_cu.max(preview.compute_units_consumed);
+
+            let shutdown = env.build_retained_shutdown_asset_for_actor(COLD, asset, 4);
+            env.land_retained(shutdown).unwrap();
+            let frozen = env.primary_market_state();
+            assert_eq!(frozen.1.mode, MarketModeV16::Live);
+            assert_eq!(
+                frozen.1.assets[asset as usize].lifecycle,
+                AssetLifecycleV16::Recovery
+            );
+            assert_eq!(env.primary_control_sequences(asset as usize), sequences);
+            let profile = env.primary_profile(asset as usize);
+            assert_eq!(profile.last_good_oracle_slot, 4);
+            let portfolios: Vec<_> = (0..5).map(|i| env.primary_portfolio_data(i)).collect();
+            reject(&mut env, bundle, 5, PercolatorError::EngineLockActive, 2, 1);
+            let takeover = env.build_retained_asset_authority_handoff_between_actors(
+                asset,
+                processor::ASSET_AUTH_ORACLE,
+                COLD,
+                SUCCESSOR,
+            );
+            let takeover_bundle = env.bundle_retained_transactions(&[withdrawal.clone(), takeover]);
+            reject(
+                &mut env,
+                takeover_bundle,
+                4,
+                PercolatorError::EngineLockActive,
+                1,
+                1,
+            );
+
+            env.land_retained(handoff).expect(
+                "identical incumbent consent remains usable after the Recovery suffix rolls back",
+            );
+            assert_eq!(
+                env.primary_market_state(),
+                frozen,
+                "succession moves no claim or loss"
+            );
+            assert_eq!(
+                (0..5)
+                    .map(|i| env.primary_portfolio_data(i))
+                    .collect::<Vec<_>>(),
+                portfolios
+            );
+            let mut expected_profile = profile;
+            expected_profile.oracle_authority = env.actors[SUCCESSOR].signer.pubkey().to_bytes();
+            assert_eq!(env.primary_profile(asset as usize), expected_profile);
+            let mut expected_sequences = sequences;
+            expected_sequences.authority_epoch += 1;
+            assert_eq!(
+                env.primary_control_sequences(asset as usize),
+                expected_sequences
+            );
+            env.land_retained(withdrawal).unwrap();
+
+            let check_claim = |env: &V16Svm| {
+                assert_eq!(env.primary_portfolio(0).pnl.get(), GAIN as i128);
+                assert_eq!(env.primary_portfolio(0).capital.get(), deposits[0]);
+                assert_eq!(
+                    env.primary_portfolio(1).capital.get(),
+                    deposits[1] - 2 * GAIN
+                );
+                assert_eq!(env.primary_portfolio(1).pnl.get(), 0);
+                let group = env.primary_market_state().1;
+                assert_eq!(group.pnl_pos_tot, GAIN);
+                assert_eq!(
+                    group.source_claim_bound_total_num,
+                    GAIN * percolator::BOUND_SCALE
+                );
+                assert_eq!(
+                    group.c_tot,
+                    deposits.iter().sum::<u128>() - 2 * GAIN - PREFIX
+                );
+                assert_eq!(group.vault, deposits.iter().sum::<u128>() - PREFIX);
+                assert_eq!(u128::from(env.token_amount(env.vault)), group.vault);
+                assert_eq!(env.primary_profile(asset as usize), expected_profile);
+                assert_eq!(
+                    env.primary_control_sequences(asset as usize),
+                    expected_sequences
+                );
+            };
+            check_claim(&env);
+            let order = if direction > 0 { [0, 1] } else { [1, 0] };
+            for owner in order {
+                env.forfeit_recovery_leg(owner, asset, u128::MAX).unwrap();
+                check_claim(&env);
+            }
+            let flat = env.primary_market_state().1.assets[asset as usize];
+            assert_eq!((flat.oi_eff_long_q, flat.oi_eff_short_q), (0, 0));
+            // Forfeiture can leave zero-position loss weight until its peer exits.
+            for owner in order {
+                for _ in 0..2 {
+                    if !has_active_leg_for_asset(&env.primary_portfolio(owner), asset as usize) {
+                        break;
+                    }
+                    env.crank(owner, 4, vec![]).unwrap();
+                    check_claim(&env);
+                }
+                assert!(!has_active_leg_for_asset(
+                    &env.primary_portfolio(owner),
+                    asset as usize
+                ));
+            }
+            env.resolve_market().unwrap();
+            let expected = [
+                deposits[0] + GAIN,
+                deposits[1] - 2 * GAIN,
+                deposits[2],
+                deposits[3],
+                deposits[4],
+            ];
+            let mut remaining = deposits.iter().sum::<u128>() - PREFIX;
+            for owner in [1, COLD, SUCCESSOR, PREFIX_OWNER, 0] {
+                for _ in 0..16 {
+                    if u128::from(env.token_amount(env.actors[owner].destination_token))
+                        == expected[owner]
+                    {
+                        break;
+                    }
+                    let before = (env.market_data(false), env.primary_portfolio_data(owner));
+                    env.close_resolved_primary_signed(owner).unwrap();
+                    assert_ne!(
+                        (env.market_data(false), env.primary_portfolio_data(owner)),
+                        before
+                    );
+                }
+                remaining -= expected[owner] - if owner == PREFIX_OWNER { PREFIX } else { 0 };
+                assert_eq!(
+                    u128::from(env.token_amount(env.actors[owner].destination_token)),
+                    expected[owner]
+                );
+                assert_eq!(env.primary_market_state().1.vault, remaining);
+                assert_eq!(u128::from(env.token_amount(env.vault)), remaining);
+                assert_eq!(env.token_supply_observed(), env.initial_token_supply);
+            }
+            let settled = env.primary_market_state().1;
+            assert_eq!(
+                (
+                    settled.c_tot,
+                    settled.pnl_pos_tot,
+                    settled.source_claim_bound_total_num
+                ),
+                (0, 0, 0)
+            );
+            assert_eq!(
+                remaining, GAIN,
+                "the forfeited gain is not assigned to any owner"
+            );
+            assert_eq!(env.primary_profile(peer), peer_profile);
+            assert_eq!(env.primary_control_sequences(peer), peer_sequences);
+            assert_eq!(env.mint_supply() as u128, env.initial_token_supply);
+            let trace = env.finish_public_trace();
+            trace.validate_public_execution().unwrap();
+            assert_eq!(trace.steps.iter().filter(|step| !step.succeeded).count(), 2);
+            peak_cu = peak_cu.max(
+                trace
+                    .steps
+                    .iter()
+                    .filter_map(|step| step.compute_units)
+                    .max()
+                    .unwrap(),
+            );
+        }
+    }
+    eprintln!("row416 retained oracle Recovery claim: worlds=4, exact_rejections=8, handoff_rollbacks=4, SPL_rollbacks=8, recovery_forfeits=8, exact_owner_payouts=20, peak_success_cu={peak_cu}, peak_active_preview_cu={peak_preview_cu}");
+}

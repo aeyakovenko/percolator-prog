@@ -579,6 +579,64 @@ TSVs are unchanged. Row 411 and arbitrary fee/history composition remain OPEN.
 
 ## Row 416 regression health (2026-09-17)
 
+The 2026-09-18 Recovery claim increment adds
+`v16_program_retained_oracle_handoff_recovery_rollback_preserves_booked_claim`
+in [the existing INV-005 retained-oracle owner](cu/inv_005_retained_oracle_exposure.rs).
+Four public LiteSVM worlds cross assets 0/1 and both position signs, pairing the
+signs with opposite forfeit orders. A first gain is booked; a second debtor loss
+is paid while its corresponding winner gain remains unrefreshed. A signed SPL
+withdrawal, incumbent oracle handoff and successor mark simulate successfully
+in Active. Cold-admin shutdown enters asset Recovery while the market stays
+Live and the authority/observation sequences stay unchanged. The same signed
+bundle rejects its mark with exact `EngineLockActive`, restoring the executed
+handoff and SPL payout, including complete Accounts and exact payer fees.
+A separate cold-admin oracle takeover also restores its executed SPL prefix.
+The original incumbent handoff and withdrawal then commit separately.
+
+The booked claim, debtor capital, source-claim bound, frozen oracle profile and
+custody remain exact through both owner forfeits and zero-position cleanup.
+Terminal settlement pays all five owners their input-derived entitlements:
+the winner receives its booked gain, the debtor bears both losses, and the
+forfeited gain remains in internal/SPL custody without an owner payout.
+The four worlds validate eight exact rejections, four handoff rollbacks, eight
+forfeits and twenty owner payouts. Peak successful CU is **165,260**; the Active
+bundle simulation peaks at **47,086 CU**. The nearest funded-oracle-return control
+also passes, at **213,880 CU** (simulation **50,810 CU**).
+
+This adds a retained, consensual oracle write prefix rolled back by Recovery
+admission while booked and unrefreshed gains have different dispositions.
+The existing DrainOnly retained handoff ends in a same-price live reduction;
+[INV-020's Recovery oracle test](cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs)
+owns timestamp/deadline freezing without a handoff or booked claim;
+[INV-027's Recovery forfeit test](cu/inv_027_recovery_forfeit_seniority.rs)
+owns claim/principal preservation without retained oracle authority.
+The [shutdown reserve ABA test](cu/inv_005_shutdown_reserve_aba.rs) owns insurance
+and backing payouts rather than this position-loss/claim continuation.
+Row 416 remains OPEN for market Recovery, general policy/oracle schedules,
+lossy receipts, other quote/transport rails, role coalescence and arbitrary histories.
+
+Validation base: `f45df361045e1ca05f953198c00b579ef41261e4` (`origin/main`).
+Private worktree: `/dev/shm/percolator-row416-recovery-20260918`.
+The default-feature wrapper was rebuilt locked/offline with platform-tools v1.52;
+host/SBF caches are private copies, and the ignored matcher target links to the
+base worktree's existing artifact. Wrapper SHA-256:
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`.
+Only these two exact selectors ran; no helpers, production, Cargo, tracked
+fixtures, TSVs or global harness files changed:
+
+```bash
+export TMPDIR=/dev/shm CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_TARGET_DIR=/dev/shm/percolator-row416-recovery-20260918-host-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-row416-recovery-20260918-sbf-target/deploy/percolator_prog.so
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::retained_oracle_exposure::v16_program_retained_oracle_handoff_recovery_rollback_preserves_booked_claim -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_005_authority_incarnation_binding::retained_oracle_exposure::v16_program_funded_oracle_return_rejects_retained_mark_and_preserves_value -- --exact --nocapture --test-threads=1
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_005_retained_oracle_exposure.rs
+git diff --check
+git diff --exit-code f45df361045e1ca05f953198c00b579ef41261e4 -- src Cargo.toml Cargo.lock fixtures tests/fixtures tests/support tests/v16_cu.rs scripts ':(glob)**/*.tsv'
+git show --check --oneline HEAD
+```
+
 The [last-live-tick follow-up](row416_last_live_quantity_tick_20260918.md) adds
 one exact selector in the existing retained-oracle test. Partial reduction to
 `q = 1` still blocks cold-admin oracle replacement and restores an executed SPL
