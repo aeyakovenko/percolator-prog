@@ -69,6 +69,64 @@ git diff 2e88c39b HEAD -- src Cargo.toml Cargo.lock
 git diff 6992e91f HEAD -- tests/fixtures/auth_matcher
 ```
 
+## INV-056 current Hybrid liquidation hints (2026-09-18)
+
+Classification: **nonduplicate public-route coverage** for INV-056, with
+INV-045/053/061 joins. Base `aa1cbe9e3f09629895d2613d2d7b0403a01af3a5`;
+isolated worktree `/tmp/percolator-astra-mark-20260918`. Only current-main
+sources/tests were inspected; no withheld PR data informed this change.
+
+New selector in [cu/inv_045_complete_observation_entitlement.rs](cu/inv_045_complete_observation_entitlement.rs):
+`v16_program_current_hybrid_liquidation_hints_preserve_lag_and_reward_source`.
+Three public histories observe two Hybrid feeds on a flat keeper, then refresh
+and liquidate the exposed account with full, empty, or only nonselected-asset
+hints. Both reports are current but their raw targets remain unreached. This
+exercises reward provenance lookup when the selected asset has no observation
+in the liquidation call, beyond the existing AuthMark/common-owner hint cases
+and complete-observation Hybrid partition witness.
+
+Independent input arithmetic gives prices `[1001, 2003]`, loss 24,000, lag 263,000,
+margin 600,650 and equity 586,000 atoms. Every hint variant retains the exact
+lag-adjusted certificate, closes 3,935,544,456 position quanta, charges 1,970,
+rewards 656 and retains 1,314 insurance atoms in the selected asset's domains.
+Two-stage fee rounding uses actual closed quantity and accepted price; both the
+raw target and nonselected price distinguish the oracle. Complete market state
+(only market identity normalized), target certificate, values, sizing and split
+are equal across worlds; profiles, peer and custody remain unchanged. Peak CU
+is 424,978 under this two-feed fixture's existing 650,000 ceiling. This is a
+fixed current-slot product, not arbitrary-history or whole-invariant closure.
+
+The new exact selector passes **1/1 tests, 3/3 worlds**. The existing sibling
+`v16_program_complete_observation_partitions_preserve_fractional_liquidation_entitlement`
+fails unchanged with `EngineNonProgress` (`Custom(22)`, 59,381 CU) at its first
+target refresh: at slot 4 it reuses reports last authenticated at slot 2. Its
+historical passing claims do not establish current runtime coverage. No helper,
+existing behavioral test body, production code, dependency, or invariant status is changed.
+The new test initially used the single-asset 325,000-CU limit; final validation
+uses the preexisting two-feed 650,000 limit above.
+
+The traceability row-count guard is synchronized to 36: integrated main already
+had 35 rows after the INV-062 evidence, and this evidence adds one. The
+exact traceability check passes (1/1), validating every evidence link and all
+eight columns. Scoped rustfmt and `git diff --check` pass.
+
+Reused default-feature SBF SHA-256
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`;
+its README-recorded build base `2e88c39b6bbdc57c86e7ab18548d42205ba6b831`
+has identical `src/`, `Cargo.toml` and `Cargo.lock`. No rebuild is claimed.
+Host dependencies were copied to a private target. Exact behavioral commands:
+
+```sh
+export TMPDIR=/dev/shm CARGO_TARGET_DIR=/dev/shm/astra-mark-invariants-20260918-host
+export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv077/target/deploy/percolator_prog.so
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::complete_observation_entitlement::v16_program_current_hybrid_liquidation_hints_preserve_lag_and_reward_source -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::complete_observation_entitlement::v16_program_complete_observation_partitions_preserve_fractional_liquidation_entitlement -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_program_fuzz_regressions inv_079_public_reachability_evidence::v16_traceability_gap_ledger_points_to_executable_evidence -- --exact --nocapture --test-threads=1
+rustfmt --edition 2021 --check tests/invariants/cu/inv_045_complete_observation_entitlement.rs
+git diff --check
+```
+
 ## INV-064 two-asset withdrawal rollback and retry (2026-09-18)
 
 Classification: **nonduplicative public-route coverage**, with secondary

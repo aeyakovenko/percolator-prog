@@ -4,6 +4,148 @@
 
 use super::*;
 
+#[test]
+fn v16_program_current_hybrid_liquidation_hints_preserve_lag_and_reward_source() {
+    let mut canonical = None;
+    for hints in [&[0, 1][..], &[][..], &[1][..]] {
+        let mut world = ObservationWorld::new();
+        set_test_clock(&mut world.env, 2, 101);
+        world.crank(2, &[0, 1], false).unwrap();
+        world.assert_prices(1);
+        assert_eq!(world.values(), FUNDS.map(i128::from));
+        let observed_profiles = world.profiles();
+        let foreign = [world.portfolios[1], world.env.mint, world.env.vault]
+            .map(|key| (key, world.env.svm.get_account(&key)));
+
+        // Both reports are current, but neither raw target has been reached. Omitting
+        // discovery hints must retain both lag liabilities and the selected fee source.
+        let prices = ENTRY.map(|price| price - price * 24 / 10_000);
+        let loss: u128 = (0..2)
+            .map(|i| u128::from(ENTRY[i] - prices[i]) * QUANTITY[i] / POS_SCALE)
+            .sum();
+        let lag: u128 = (0..2)
+            .map(|i| u128::from(prices[i] - REPORT[i]) * QUANTITY[i] / POS_SCALE)
+            .sum();
+        let margin: u128 = (0..2)
+            .map(|i| (u128::from(prices[i]) * QUANTITY[i] * 500).div_ceil(POS_SCALE * 10_000))
+            .sum();
+        let equity = u128::from(FUNDS[0]) - loss;
+        assert_eq!(
+            (prices, loss, lag, margin),
+            ([1_001, 2_003], 24_000, 263_000, 600_650)
+        );
+        world
+            .crank(0, hints, true)
+            .expect("current market permits local refresh");
+        let refreshed = world.env.portfolio_state(world.portfolios[0]);
+        let cert = health_cert(&refreshed);
+        assert_eq!(cert.certified_equity, equity as i128);
+        assert_eq!(cert.certified_initial_req, margin + lag);
+        assert_eq!(cert.certified_maintenance_req, margin + lag);
+        assert_eq!(cert.certified_liq_deficit, margin + lag - equity);
+        assert_eq!(
+            world.values(),
+            [equity as i128, FUNDS[1] as i128, FUNDS[2] as i128]
+        );
+        assert_eq!(world.env.market_state().1.insurance, 0);
+        for i in 0..2 {
+            assert_eq!(
+                active_leg_for_asset(&refreshed, i).basis_pos_q,
+                QUANTITY[i] as i128
+            );
+        }
+
+        world
+            .crank(0, hints, true)
+            .expect("current market permits rewarded liquidation");
+        let after = world.env.market_state().1;
+        let target = world.env.portfolio_state(world.portfolios[0]);
+        let remaining = active_leg_for_asset(&target, 0).basis_pos_q as u128;
+        let closed = QUANTITY[0] - remaining;
+        assert!(closed > 0 && remaining > 0);
+        assert_eq!(
+            active_leg_for_asset(&target, 1).basis_pos_q,
+            QUANTITY[1] as i128
+        );
+        assert_eq!(
+            [
+                after.assets[0].oi_eff_long_q,
+                after.assets[0].oi_eff_short_q
+            ],
+            [remaining; 2]
+        );
+        assert_eq!(
+            [
+                after.assets[1].oi_eff_long_q,
+                after.assets[1].oi_eff_short_q
+            ],
+            [QUANTITY[1]; 2]
+        );
+        let fee_at =
+            |price| ((closed * u128::from(price)).div_ceil(POS_SCALE) * 5).div_ceil(10_000);
+        let fee = fee_at(prices[0]);
+        let reward = fee * SHARE / 10_000;
+        assert!(reward > 0 && reward < fee);
+        assert_ne!(
+            fee,
+            fee_at(REPORT[0]),
+            "unaccepted target cannot price the fee"
+        );
+        assert_ne!(
+            fee,
+            fee_at(prices[1]),
+            "the only supplied hint must not choose the fee asset"
+        );
+        assert_eq!(
+            world.values(),
+            [
+                equity as i128 - fee as i128,
+                FUNDS[1] as i128,
+                FUNDS[2] as i128 + reward as i128,
+            ]
+        );
+        assert_eq!(after.insurance, fee - reward);
+        assert_eq!(
+            &after.insurance_domain_budget[..],
+            &[(fee - reward) / 2, (fee - reward).div_ceil(2), 0, 0]
+        );
+        assert_eq!(health_cert(&target).certified_liq_deficit, 0);
+        assert_eq!(
+            world.profiles(),
+            observed_profiles,
+            "local work cannot republish either report"
+        );
+        world.assert_prices(1);
+        for (key, account) in foreign {
+            assert_eq!(world.env.svm.get_account(&key), account);
+        }
+        let mut comparable_market = after;
+        comparable_market.market_group_id = [0; 32];
+        let outcome = (
+            comparable_market,
+            health_cert(&target),
+            world.values(),
+            closed,
+            fee,
+            reward,
+        );
+        if let Some(reference) = &canonical {
+            assert_eq!(
+                &outcome, reference,
+                "hints={hints:?}: canonical liquidation equivalence"
+            );
+        } else {
+            canonical = Some(outcome);
+        }
+        assert_cu_within(
+            "current Hybrid hint-only liquidation",
+            world.max_cu,
+            650_000,
+        );
+        println!("current Hybrid hints={hints:?}: lag={lag}, closed={closed}, fee={fee}, reward={reward}, max_cu={}", world.max_cu);
+    }
+}
+
 const ENTRY: [u64; 2] = [1_003, 2_007];
 const REPORT: [u64; 2] = [980, 1_950];
 const QUANTITY: [u128; 2] = [10_000 * POS_SCALE, 1_000 * POS_SCALE];
