@@ -23,6 +23,9 @@
 
 use super::*;
 
+#[path = "inv_018_native_reserve_swap.rs"]
+mod native_reserve_swap;
+
 fn inv018_source_defines_function(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
     source.lines().any(|line| {
