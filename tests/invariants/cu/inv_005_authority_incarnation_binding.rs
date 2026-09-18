@@ -27,6 +27,9 @@
 //! ledger-backed principal withdrawals across an incumbent backing-operator A-to-B-to-A handoff.
 //! The stale suffix rejects before token CPI and rolls back the other asset's successful SPL and
 //! ledger prefix; unrotated consent and an epoch-only replacement pay exact principal afterward.
+//! `v16_program_close_slab_aba_rejects_retained_surplus_and_rent_consent` prevalidates a
+//! signed terminal close, rejects it after the same market authority returns, and checks
+//! exact public SPL surplus and rent refunds under renewed consent.
 //! `v16_program_adversarial_role_containment_matrix_is_source_complete` separately treats every
 //! correctly authorized role as economically hostile. It source-locks all configured, matcher,
 //! delegate, and permissionless callsites to explicit maximum/forbidden effects and independent
@@ -6311,6 +6314,188 @@ fn v16_attack_non_admin_cannot_resolve_or_configure() {
         "only the legit withdraw moved funds"
     );
     let _ = cfg0;
+}
+
+#[test]
+fn v16_program_close_slab_aba_rejects_retained_surplus_and_rent_consent() {
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    const SURPLUS: u64 = 17;
+    let mut env =
+        inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market(0);
+    let authority_a = env.admin.insecure_clone();
+    let authority_b = Keypair::new();
+    env.svm.airdrop(&authority_b.pubkey(), 1_000_000).unwrap();
+    let destination = create_ata_for_test(&mut env.svm, &env.payer, authority_a.pubkey(), env.mint);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &env.mint,
+            &env.vault,
+            &authority_a.pubkey(),
+            &[],
+            SURPLUS,
+        )
+        .unwrap(),
+        &[&authority_a],
+    )
+    .unwrap();
+    let epoch = env.control_sequences(0).authority_epoch;
+    env.send(
+        ProgInstruction::ResolveMarket {
+            asset_generation_frontier: 0,
+            authority_epoch: epoch,
+        },
+        vec![
+            AccountMeta::new(authority_a.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&authority_a],
+    )
+    .unwrap();
+
+    let close = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(authority_a.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::CloseSlab {
+            authority_epoch: epoch,
+        }
+        .encode(),
+    };
+    let sign = |env: &V16CuEnv, ix| {
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), ix],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &authority_a],
+            env.svm.latest_blockhash(),
+        )
+    };
+    let retained = sign(&env, close.clone());
+    retained.verify().unwrap();
+    env.svm
+        .simulate_transaction(retained.clone().into())
+        .expect("the original signed close is executable before rotation");
+
+    for (step, from, to) in [
+        (0, &authority_a, &authority_b),
+        (1, &authority_b, &authority_a),
+    ] {
+        env.send(
+            ProgInstruction::UpdateAuthority {
+                authority_epoch: epoch + step,
+                new_pubkey: to.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new_readonly(from.pubkey(), true),
+                AccountMeta::new_readonly(to.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[from, to],
+        )
+        .unwrap();
+        assert_eq!(env.control_sequences(0).authority_epoch, epoch + step + 1);
+        assert_eq!(env.market_state().0.marketauth, to.pubkey().to_bytes());
+    }
+
+    let tracked: Vec<_> = retained
+        .message
+        .account_keys
+        .iter()
+        .copied()
+        .filter(|key| *key != env.payer.pubkey())
+        .chain([env.mint, authority_b.pubkey()])
+        .collect();
+    let before: Vec<_> = tracked.iter().map(|key| env.svm.get_account(key)).collect();
+    let mut payer = env.svm.get_account(&env.payer.pubkey()).unwrap();
+    let fee = retained.signatures.len() as u64 * FeeStructure::default().lamports_per_signature;
+    let failure = env
+        .svm
+        .send_transaction(retained)
+        .expect_err("A's old close cannot revive");
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::EngineStale as u32),
+        )
+    );
+    assert_eq!(
+        tracked
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect::<Vec<_>>(),
+        before
+    );
+    payer.lamports -= fee;
+    assert_eq!(env.svm.get_account(&env.payer.pubkey()).unwrap(), payer);
+
+    // Only the signed epoch changes. The independent payout model is minted surplus plus
+    // vault rent and slab rent above the mandatory tombstone reserve, all to A.
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let mint_before = env.svm.get_account(&env.mint).unwrap();
+    let b_before = env.svm.get_account(&authority_b.pubkey()).unwrap();
+    let mut expected_a = env.svm.get_account(&authority_a.pubkey()).unwrap();
+    let tombstone_rent = env
+        .svm
+        .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN);
+    expected_a.lamports += vault_before.lamports + market_before.lamports - tombstone_rent;
+    assert_eq!(env.token_amount(destination), 0);
+    assert_eq!(env.token_amount(env.vault), SURPLUS);
+    let fresh = sign(
+        &env,
+        Instruction {
+            data: ProgInstruction::CloseSlab {
+                authority_epoch: epoch + 2,
+            }
+            .encode(),
+            ..close
+        },
+    );
+    let result = env
+        .svm
+        .send_transaction(fresh)
+        .expect("renewed consent closes the same slab");
+    assert_cu_within(
+        "CloseSlab after A-B-A",
+        result.compute_units_consumed,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(destination), SURPLUS);
+    assert_eq!(env.svm.get_account(&env.mint).unwrap(), mint_before);
+    assert_eq!(
+        env.svm.get_account(&authority_b.pubkey()).unwrap(),
+        b_before
+    );
+    assert_eq!(
+        env.svm.get_account(&authority_a.pubkey()).unwrap(),
+        expected_a
+    );
+    payer.lamports -= fee;
+    assert_eq!(env.svm.get_account(&env.payer.pubkey()).unwrap(), payer);
+    assert!(env
+        .svm
+        .get_account(&env.vault)
+        .map_or(true, |account| account.lamports == 0
+            && account.data.is_empty()));
+    let tombstone = env.svm.get_account(&env.market).unwrap();
+    assert_closed_market_tombstone(&tombstone);
+    assert_eq!(tombstone.lamports, tombstone_rent);
+    println!(
+        "CloseSlab A-B-A: stale rollback, {SURPLUS} tokens and exact rent paid; {} CU",
+        result.compute_units_consumed
+    );
 }
 
 // security.md sweep - stale marketauth final reclaim (#6/#48): CloseSlab is the terminal authority
