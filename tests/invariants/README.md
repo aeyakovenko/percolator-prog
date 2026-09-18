@@ -24897,23 +24897,20 @@ Run a 24-hour agent loop under the scope and evidence rules in
    24-hour budget ends. Report reviewed and integrated work separately from pending agent output,
    with exact verification results and unresolved gaps; elapsed time is not completion.
 
-Active 2026-09-13 Astra/Ultra queue. The coordinator branch is
-`codex/astra-open-holdout-ledger-20260912` at `8f62a5c5`. The main checkout
-`/home/anatoly/percolator-prog` is intentionally excluded because it is on a different conflicted
-branch; all work must start from `/tmp/percolator-astra-watch.Cb2E7d` or an isolated worktree based
-on it. Three non-overlapping agents are assigned:
+Active 2026-09-18 Astra/Ultra loop. The coordinator worktree is an isolated
+`/dev/shm` checkout based on `origin/main`; the shared checkout at
+`/home/anatoly/percolator-prog` is not used for agent edits. Keep at most a few
+non-overlapping agents live at once, each on a fresh worktree and with a narrow
+write set. The current wave owns:
 
-- Scope A (`01a09c4c-71e0-7c03-ac0b-d377ccb990fa`): retained requests, authority epochs, policy
-  consent, stock-sequence replay, decoding, and rollback. Checklist rows: 410, 411, 415, 416, 428,
-  429. Primary invariants: INV-005, INV-008, INV-014 plus related INV-010/011/020/024/036/047/055/080/081.
-- Scope B (`01a09c4c-a116-7001-9daa-3162a27580d6`): entitlement, value attribution, source/backing/
-  insurance locality, mark envelopes, health certificates, and liquidation sizing. Checklist rows:
-  413, 419, 422, 423, 425, 426, 434, plus nonqualifying value rows 237, 258, 286, 370, 372, 373,
-  374, 377. Primary invariants: INV-024 through INV-062, especially INV-027/028/031/036/038/039/045/053/061.
-- Scope C (`01a09c4c-ce7b-7843-8f62-a17069ecbd90`): terminal payout completeness, close/retirement,
-  crank progress, no permanent user lock, exact rollback, and supported-shape compute. Checklist
-  rows: 417, 418, 420, 421, 424, 433, plus nonqualifying progress/CU rows 202, 204, 219, 257, 269,
-  287, 288, 297, 308. Primary invariants: INV-063 through INV-089, especially INV-063/067/070/071/073/077/078/082/086/088.
+- INV-063 row417 fixed-point classification: diagnose the existing
+  `v16_program_post_snapshot_expiry_topup_is_public_and_order_independent`
+  failure and determine whether it is stale pre-expiry expectation, missing
+  public continuation coverage, or a real public liveness issue.
+- INV-048/050/051/052/058/061 position, OI, cap, path-independence coverage:
+  look for one generic public-route gap in normal trading, cross-zero,
+  liquidation, ADL-effective reduction, rebalance/reduce, or maximum-shape exit
+  coverage without copying holdout PR tests.
 
 Open PR titles and row labels are a coverage checklist, not proof input. A row should move out of
 `missing` or `nonqualifying` only when an invariant-owned public-route generator and independent
