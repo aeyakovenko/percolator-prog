@@ -280,6 +280,156 @@ fn v16_program_split_fee_close_has_bounded_rounding_and_exact_custody() {
 }
 
 #[test]
+fn v16_program_fee_flip_partitions_preserve_economics_across_flat_boundary() {
+    const CAPITAL: u128 = 1_000_000;
+    const PRICE: u64 = 100;
+    const FEE_BPS: u64 = 333;
+    const OPEN_NOTIONAL: u128 = 100;
+    const FLIP_NOTIONAL: u128 = 300;
+
+    fn run(parts: &[u128], direction: i128) -> (TradeEconomicSnapshot, u128, u64) {
+        assert_eq!(parts.iter().sum::<u128>(), FLIP_NOTIONAL);
+        let mut env = V16CuEnv::new();
+        let owner_a = Keypair::new();
+        let owner_b = Keypair::new();
+        let account_a = env.create_portfolio(&owner_a);
+        let account_b = env.create_portfolio(&owner_b);
+        let source_a = env.deposit(&owner_a, account_a, CAPITAL);
+        let source_b = env.deposit(&owner_b, account_b, CAPITAL);
+        let custody_keys = [source_a, source_b, env.vault, env.mint];
+        let custody_before = custody_keys.map(|key| env.svm.get_account(&key).unwrap());
+        let opening_q = (OPEN_NOTIONAL * POS_SCALE / u128::from(PRICE)) as i128;
+        env.trade_asset_with_cu(
+            0,
+            &owner_a,
+            account_a,
+            &owner_b,
+            account_b,
+            direction * opening_q,
+            PRICE,
+            0,
+        );
+
+        let mut notional = 0;
+        let mut fee_per_side = 0;
+        let mut max_cu = 0;
+        for (index, &part) in parts.iter().enumerate() {
+            assert!(part > 0);
+            assert_eq!(part * POS_SCALE % u128::from(PRICE), 0);
+            env.svm.expire_blockhash();
+            let cu = env.trade_asset_with_cu(
+                0,
+                &owner_a,
+                account_a,
+                &owner_b,
+                account_b,
+                -direction * (part * POS_SCALE / u128::from(PRICE)) as i128,
+                PRICE,
+                FEE_BPS,
+            );
+            assert_cu_within("INV-052 fee flip partition", cu, TRADE_CU_LIMIT);
+            max_cu = max_cu.max(cu);
+            notional += part;
+            fee_per_side += (part * u128::from(FEE_BPS) + 9_999) / 10_000;
+            let aggregate_fee = (notional * u128::from(FEE_BPS) + 9_999) / 10_000;
+            assert!((aggregate_fee..=aggregate_fee + index as u128).contains(&fee_per_side));
+            let expected_q =
+                direction * (opening_q - (notional * POS_SCALE / u128::from(PRICE)) as i128);
+            let group = env.market_state().1;
+            for (account, sign) in [(account_a, 1), (account_b, -1)] {
+                let state = env.portfolio_state(account);
+                assert_eq!(active_basis_for_asset(&state, 0), sign * expected_q);
+                assert_eq!(
+                    percolator::active_bitmap_is_empty(active_bitmap(&state)),
+                    expected_q == 0,
+                );
+                assert_eq!(state.capital.get(), CAPITAL - fee_per_side);
+                assert_eq!(state.pnl.get(), 0);
+            }
+            assert_eq!(group.assets[0].oi_eff_long_q, expected_q.unsigned_abs());
+            assert_eq!(group.assets[0].oi_eff_short_q, expected_q.unsigned_abs());
+            assert_eq!(group.c_tot, 2 * (CAPITAL - fee_per_side));
+            assert_eq!(group.insurance, 2 * fee_per_side);
+            assert_eq!(&group.insurance_domain_budget[..2], &[fee_per_side; 2]);
+            assert_eq!(group.vault, 2 * CAPITAL);
+            assert_eq!(group.vault, group.c_tot + group.insurance);
+            assert_eq!(env.token_amount(env.vault) as u128, group.vault);
+            assert_eq!(
+                custody_keys.map(|key| env.svm.get_account(&key).unwrap()),
+                custody_before,
+            );
+        }
+
+        let group = env.market_state().1;
+        let a = env.portfolio_state(account_a);
+        let b = env.portfolio_state(account_b);
+        let final_q = -direction * (2 * POS_SCALE) as i128;
+        assert_eq!(active_basis_for_asset(&a, 0), final_q);
+        // Only the independently priced fee differs between the economic endpoints.
+        let normalized = TradeEconomicSnapshot {
+            vault: group.vault,
+            c_tot: group.c_tot + 2 * fee_per_side,
+            insurance: group.insurance - 2 * fee_per_side,
+            oi_eff_long_q: group.assets[0].oi_eff_long_q,
+            oi_eff_short_q: group.assets[0].oi_eff_short_q,
+            account_a_capital: a.capital.get() + fee_per_side,
+            account_b_capital: b.capital.get() + fee_per_side,
+            account_a_pnl: a.pnl.get(),
+            account_b_pnl: b.pnl.get(),
+            account_a_basis_q: active_basis_for_asset(&a, 0),
+            account_b_basis_q: active_basis_for_asset(&b, 0),
+        };
+        env.svm.expire_blockhash();
+        let cu = env.trade_asset_with_cu(
+            0, &owner_a, account_a, &owner_b, account_b, -final_q, PRICE, 0,
+        );
+        assert_cu_within("INV-052 fee flip exit", cu, TRADE_CU_LIMIT);
+        max_cu = max_cu.max(cu);
+        let mut withdrawn = 0;
+        for (owner, account) in [(&owner_a, account_a), (&owner_b, account_b)] {
+            let state = env.portfolio_state(account);
+            assert!(percolator::active_bitmap_is_empty(active_bitmap(&state)));
+            assert_eq!(state.pnl.get(), 0);
+            let destination = env.withdraw(owner, account, CAPITAL - fee_per_side);
+            let payout = env.token_amount(destination) as u128;
+            assert_eq!(payout + fee_per_side, CAPITAL);
+            assert_eq!(env.portfolio_state(account).capital.get(), 0);
+            withdrawn += payout;
+        }
+        let terminal = env.market_state().1;
+        assert_eq!(terminal.assets[0].oi_eff_long_q, 0);
+        assert_eq!(terminal.assets[0].oi_eff_short_q, 0);
+        assert_eq!(terminal.c_tot, 0);
+        assert_eq!(terminal.insurance, 2 * fee_per_side);
+        assert_eq!(terminal.vault, terminal.insurance);
+        assert_eq!(env.token_amount(env.vault) as u128, terminal.vault);
+        assert_eq!(withdrawn + terminal.vault, 2 * CAPITAL);
+        (normalized, fee_per_side, max_cu)
+    }
+
+    let mut max_cu = 0;
+    for direction in [-1, 1] {
+        let aggregate = run(&[FLIP_NOTIONAL], direction);
+        assert_eq!(aggregate.1, 10);
+        max_cu = max_cu.max(aggregate.2);
+        // Forward schedules visit flat; reversed schedules cross zero inside a fill.
+        for parts in [&[100, 200][..], &[99, 1, 200]] {
+            for schedule in [parts.to_vec(), parts.iter().copied().rev().collect()] {
+                let split = run(&schedule, direction);
+                assert!(split.1 > aggregate.1, "fee rounding must be nonvacuous");
+                assert!(split.1 - aggregate.1 <= schedule.len() as u128 - 1);
+                assert_eq!(
+                    split.0, aggregate.0,
+                    "fee-normalized flip differs: direction={direction}, parts={schedule:?}",
+                );
+                max_cu = max_cu.max(split.2);
+            }
+        }
+    }
+    println!("INV-052: 10 fee flip partition worlds; maximum trade CU={max_cu}");
+}
+
+#[test]
 fn v16_program_split_withdraw_matches_aggregate_withdraw_economics() {
     fn run(parts: &[u128]) -> (u128, u128, u128, u128) {
         let mut env = V16CuEnv::new();
