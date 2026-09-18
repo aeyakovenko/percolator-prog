@@ -183,6 +183,7 @@ fn run_authenticated_handoff(
     shares: &[u16],
     raw_prints: &[u64],
     terminal_order: Option<[usize; 5]>,
+    oracle_succession: bool,
 ) -> u64 {
     const ACCEPTED: u64 = ENTRY - 2_400;
     // MARK is below the accepted frontier: the premium hits the negative cap.
@@ -321,6 +322,13 @@ fn run_authenticated_handoff(
                         let publish = observe(&env, keeper, owners[4].pubkey(), Some(fresh), None);
                         peak_cu =
                             peak_cu.max(submit(&mut env, &owners[4], &[publish], &tracked, None));
+                        assert_eq!(values(&env, portfolios), expected);
+                        census(&env, portfolios);
+                    }
+                    if oracle_succession {
+                        peak_cu = peak_cu.max(rotate_funded_hybrid_oracle(
+                            &mut env, &owners[2], &owners[3], &tracked,
+                        ));
                         assert_eq!(values(&env, portfolios), expected);
                         census(&env, portfolios);
                     }
@@ -586,8 +594,134 @@ fn run_authenticated_handoff(
         fresh_prices.len() * shares.len() * raw_prints.len() * 2
     );
     assert_eq!(liquidation_rollbacks, worlds);
-    println!("authenticated handoff: max_funding={max_funding}, funding_per_lot={funding_per_lot}, worlds={worlds}, late_rollbacks={late_rejections}, liquidation_rollbacks={liquidation_rollbacks}, peak_transaction_cu={peak_cu}");
+    println!("authenticated handoff: oracle_succession={oracle_succession}, max_funding={max_funding}, funding_per_lot={funding_per_lot}, worlds={worlds}, late_rollbacks={late_rejections}, liquidation_rollbacks={liquidation_rollbacks}, peak_transaction_cu={peak_cu}");
     peak_cu
+}
+
+fn rotate_funded_hybrid_oracle(
+    env: &mut V16CuEnv,
+    cold: &Keypair,
+    successor: &Keypair,
+    tracked: &[Pubkey],
+) -> u64 {
+    let incumbent = env.admin.insecure_clone();
+    let mut peak = 0;
+    // Separate the cold admin, reject its takeover, transfer with incumbent
+    // consent, then prove the former oracle cannot transfer the role again.
+    for (from, to, kind, rejection) in [
+        (&incumbent, cold, processor::ASSET_AUTH_ADMIN, None),
+        (
+            cold,
+            successor,
+            processor::ASSET_AUTH_ORACLE,
+            Some(PercolatorError::EngineLockActive),
+        ),
+        (&incumbent, successor, processor::ASSET_AUTH_ORACLE, None),
+        (
+            &incumbent,
+            cold,
+            processor::ASSET_AUTH_ORACLE,
+            Some(PercolatorError::Unauthorized),
+        ),
+    ] {
+        let engine = env.market_state();
+        assert!(engine.1.assets[0].oi_eff_long_q > 0);
+        assert!(engine.1.assets[0].oi_eff_short_q > 0);
+        assert_ne!(
+            engine.1.assets[0].effective_price,
+            engine.1.assets[0].raw_oracle_target_price
+        );
+        let mut profile =
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+                .unwrap();
+        assert_eq!(
+            profile.effective_price_provenance,
+            percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
+        );
+        let mut sequences = env.control_sequences(0);
+        let handoff = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(from.pubkey(), true),
+                AccountMeta::new_readonly(to.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: ProgInstruction::UpdateAssetAuthority {
+                asset_index: 0,
+                market_id: env.asset_market_id(0),
+                authority_epoch: sequences.authority_epoch,
+                kind,
+                new_pubkey: to.pubkey().to_bytes(),
+            }
+            .encode(),
+        };
+        env.svm.expire_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), handoff],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, from, to],
+            env.svm.latest_blockhash(),
+        );
+        tx.verify().unwrap();
+        assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
+        let fee = u64::from(tx.message.header.num_required_signatures)
+            * FeeStructure::default().lamports_per_signature;
+        let mut keys = tracked.to_vec();
+        keys.extend(tx.message.account_keys.iter().copied());
+        keys.sort_unstable();
+        keys.dedup();
+        let frame: Vec<_> = keys
+            .iter()
+            .map(|key| (*key, env.svm.get_account(key)))
+            .collect();
+        let rejected = rejection.is_some();
+        let result = env.svm.send_transaction(tx);
+        let meta = if let Some(reason) = rejection {
+            let failure = result.expect_err("funded Hybrid authority containment");
+            assert_eq!(
+                failure.err,
+                TransactionError::InstructionError(2, InstructionError::Custom(reason as u32))
+            );
+            failure.meta
+        } else {
+            let meta = result.expect("consensual authority succession during paid-price lag");
+            if kind == processor::ASSET_AUTH_ADMIN {
+                profile.asset_admin = to.pubkey().to_bytes();
+            } else {
+                profile.oracle_authority = to.pubkey().to_bytes();
+            }
+            sequences.authority_epoch += 1;
+            meta
+        };
+        assert_eq!(env.market_state(), engine, "authority changes no economics");
+        assert_eq!(env.control_sequences(0), sequences);
+        assert_eq!(
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+                .unwrap(),
+            profile,
+            "handoff preserves the entire observation and mark-provenance profile"
+        );
+        for (key, mut before) in frame {
+            if key == env.payer.pubkey() {
+                before.as_mut().unwrap().lamports -= fee;
+            }
+            if rejected || key != env.market {
+                assert_eq!(env.svm.get_account(&key), before, "authority frame: {key}");
+            }
+        }
+        assert_cu_within(
+            "funded Hybrid oracle succession",
+            meta.compute_units_consumed,
+            CUSTODY_CU_LIMIT,
+        );
+        peak = peak.max(meta.compute_units_consumed);
+    }
+    peak
+}
+
+#[test]
+fn v16_program_funded_hybrid_oracle_succession_preserves_paid_mark_reward_provenance() {
+    run_authenticated_handoff(0, &[MARK], &[3_333], &[980_000], None, true);
 }
 
 #[test]
@@ -598,12 +732,13 @@ fn v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper
         &[3_333, 10_000],
         &[980_000, 900_000],
         None,
+        false,
     );
 }
 
 #[test]
 fn v16_program_nonzero_funding_fresh_handoff_preserves_owner_and_keeper_entitlement() {
-    run_authenticated_handoff(1_000, &[MARK], &[3_333], &[980_000], None);
+    run_authenticated_handoff(1_000, &[MARK], &[3_333], &[980_000], None, false);
 }
 
 fn redeem_unsettled_funded_handoff(
@@ -840,6 +975,7 @@ fn v16_program_unsettled_funding_handoff_preserves_retained_penalty_through_term
             &[3_333],
             &[980_000],
             Some(order),
+            false,
         ));
     }
     println!("row422 unsettled funding/terminal composition: 4 histories, peak={peak} CU");

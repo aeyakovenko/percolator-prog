@@ -936,6 +936,61 @@ rollback transactions now execute scan rediscovery and native reclassification
 through exact retirement. All three exact selectors pass. Production and status
 TSVs are unchanged; broader receipt/recredit/classification compositions stay open.
 
+## Rows 416/422 funded Hybrid oracle succession (2026-09-18)
+
+One new selector in [the existing reward-handoff owner](cu/inv_045_authenticated_reward_handoff.rs),
+`v16_program_funded_hybrid_oracle_succession_preserves_paid_mark_reward_provenance`,
+joins PR #441's funded authority boundary with PR #422's paid-price provenance.
+Two public LiteSVM histories rotate authority before/after fresh-report acceptance
+while matched Hybrid exposure remains live and the effective price lags its target.
+The incumbent first transfers its cold-admin role to a separate holder. That
+holder's oracle takeover rejects with exact `EngineLockActive`; incumbent oracle
+consent succeeds; reuse of the former oracle rejects with exact `Unauthorized`.
+All four authority rejections restore complete tracked/compiled Accounts except
+the exact payer fee. Successful changes preserve the engine, every unrelated
+tracked Account, all control sequences except the single authority-epoch increment,
+and the entire oracle profile except the transferred role key.
+
+The original input-derived reward/owner oracle then requires real liquidation,
+zero keeper reward, full retention of the penalty, exact five-owner values and
+the keeper's principal-only SPL payout. Both histories also execute the existing
+conflicting-report rollback and current-health/custody checks. The new selector
+passes with two liquidation rollbacks and peak transaction cost **298,170 CU**.
+The three existing shared-runner controls pass: 16 zero-funding histories, two
+nonzero-funding histories and four pending-funding terminal histories, with peaks
+298,170 / 301,027 / 301,027 CU respectively.
+
+This is a new authority/provenance composition: the existing INV-045 report and
+policy handoffs do not change oracle authority; INV-005's funded oracle succession
+and retained AuthMark histories do not carry Hybrid trade-derived provenance.
+The increment covers asset zero, SPL, zero funding and a flat keeper through Live
+liquidation and keeper withdrawal. Authority succession through catchup, terminal
+redemption, other assets/transports and arbitrary histories remains outside scope.
+Rows 416/422 and invariant statuses stay unchanged; no production bug is claimed.
+
+Validation base: `a657d195b3bd982e5800daddbfe235f22acc19a6`. Private copied caches;
+the default-feature wrapper was rebuilt locked/offline using platform-tools v1.52
+and engine `4db11a8cb0053815e23a35d3a7d3edc265d8d866`. SBF SHA-256:
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`.
+Only this README and the existing invariant file change. No broad suite ran.
+
+```bash
+export TMPDIR=/dev/shm CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_TARGET_DIR=/dev/shm/percolator-inv-agent-oracle-20260918151208-host-target
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv-agent-oracle-20260918151208-sbf-target/deploy/percolator_prog.so
+CARGO_TARGET_DIR=/dev/shm/percolator-inv-agent-oracle-20260918151208-sbf-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/percolator-inv-agent-oracle-20260918151208-sbf-target/deploy -- --locked
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::v16_program_funded_hybrid_oracle_succession_preserves_paid_mark_reward_provenance -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu -- --exact --nocapture --test-threads=1 \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper_exit \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::v16_program_nonzero_funding_fresh_handoff_preserves_owner_and_keeper_entitlement \
+  inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::v16_program_unsettled_funding_handoff_preserves_retained_penalty_through_terminal_orders
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_045_authenticated_reward_handoff.rs
+git diff --check
+git diff --cached --check
+git show --format= --check HEAD
+```
+
 ## Row 422 pending funding through terminal payout (2026-09-18)
 
 One new selector in [the existing handoff owner](cu/inv_045_authenticated_reward_handoff.rs)
