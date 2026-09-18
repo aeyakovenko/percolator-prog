@@ -1,5 +1,53 @@
 # Invariant-owned test coverage
 
+## INV-052 fee-adjusted owner-local withdrawal partitions (2026-09-18)
+
+Classification: **nonduplicative public-route coverage**, with INV-024/027 joins.
+Base: current `origin/main` at `4a2604e1`, isolated worktree
+`/tmp/percolator-astra-entitlement-20260918`. No open PR data was inspected.
+No production finding, invariant status promotion, or coverage-row closure.
+
+New selector in [cu/inv_052_split_merge_invariance.rs](cu/inv_052_split_merge_invariance.rs):
+`v16_program_fee_adjusted_withdraw_all_matches_owner_local_partitions`.
+Twelve histories cross common/distinct owners, both portfolio withdrawal orders,
+and gross withdraw-all versus exact net partitions `[1, 79]` and `[79, 1]`.
+Two portfolios start with 13 and 101 atoms and accrue 21 atoms of maintenance
+each. The input-only oracle clips each fee to that portfolio's principal:
+fees `[13, 21]`, payouts `[0, 80]`, insurance 34, domain budgets `[16, 18]`.
+Every withdrawal checks individual capital, fee cursors, SPL payouts, untouched
+neighbor Accounts, insurance attribution, aggregate capital and vault custody.
+Each history first rejects an 81-atom partial withdrawal with `EngineLockActive`
+and exact rollback of nine tracked economic Accounts, then succeeds with fresh
+consent. Splitting cannot recollect fees or spend a sibling's principal.
+
+The existing INV-052 split withdrawal is fee-free; INV-027 generated flat-fee
+histories exercise admission and partial withdrawals; INV-073 checks a single
+fee-adjusted withdraw-all after liquidation. This addition compares that special
+withdraw-all branch with net partitions and a clipped co-owned sibling. Initial
+account/token construction uses the existing CU fixture; no SPL mint-supply,
+junior-claim, liquidation, or terminal-recovery theorem is added.
+
+Validation: new selector **1 passed, 0 failed** (12 worlds, 12 rollback checks,
+32 successful withdrawals, peak **74,684 CU**); adjacent fee-free selector
+**1 passed, 0 failed**. Scoped rustfmt and `git diff --check` pass.
+Reused wrapper SBF SHA-256
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`;
+production sources and Cargo files match recorded main build base `2e88c39b`.
+Host artifacts were copied into a private target directory; no SBF rebuild.
+
+Exact validation commands from the isolated worktree:
+
+```sh
+export TMPDIR=/dev/shm CARGO_TARGET_DIR=/dev/shm/astra-entitlement-20260918-host
+export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export PERCOLATOR_FUZZ_SBF=/dev/shm/percolator-inv077/target/deploy/percolator_prog.so
+cargo test --locked --offline --test v16_cu inv_052_split_merge_invariance::v16_program_fee_adjusted_withdraw_all_matches_owner_local_partitions -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_052_split_merge_invariance::v16_program_split_withdraw_matches_aggregate_withdraw_economics -- --exact --nocapture --test-threads=1
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/cu/inv_052_split_merge_invariance.rs
+git diff --check
+git diff 2e88c39b HEAD -- src Cargo.toml Cargo.lock
+```
+
 ## INV-004/008 cross-asset taker consent consumption (2026-09-18)
 
 Classification: **nonduplicative public-route coverage**; no production finding or

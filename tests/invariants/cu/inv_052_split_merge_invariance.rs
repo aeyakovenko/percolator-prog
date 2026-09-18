@@ -460,6 +460,144 @@ fn v16_program_split_withdraw_matches_aggregate_withdraw_economics() {
 }
 
 #[test]
+fn v16_program_fee_adjusted_withdraw_all_matches_owner_local_partitions() {
+    const CAPITAL: [u128; 2] = [13, 101];
+    const RATE: u128 = 7;
+    const ELAPSED: u64 = 3;
+    let fees = CAPITAL.map(|capital| capital.min(RATE * u128::from(ELAPSED)));
+    let net = std::array::from_fn::<_, 2, _>(|i| CAPITAL[i] - fees[i]);
+    assert_eq!(net, [0, 80]);
+    let mut peak_cu = 0;
+
+    for common_owner in [false, true] {
+        for order in [[0, 1], [1, 0]] {
+            // Gross withdraw-all normalizes its payout; partial requests stay exact.
+            for parts in [&[CAPITAL[1]][..], &[1, 79], &[79, 1]] {
+                let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+                    maintenance_fee_per_slot: RATE,
+                    ..V16CuMarketParams::default()
+                });
+                env.svm.warp_to_slot(0);
+                let keys = [Keypair::new(), Keypair::new()];
+                let owners = [&keys[0], &keys[usize::from(!common_owner)]];
+                let portfolios = owners.map(|owner| env.create_portfolio(owner));
+                let sources = std::array::from_fn::<_, 2, _>(|i| {
+                    env.deposit(owners[i], portfolios[i], CAPITAL[i])
+                });
+                let destinations = owners.map(|owner| env.token_account(owner.pubkey(), 0));
+                for portfolio in portfolios {
+                    assert_eq!(env.portfolio_state(portfolio).last_fee_slot.get(), 0);
+                }
+                env.svm.warp_to_slot(ELAPSED);
+                let withdraw = |env: &mut V16CuEnv, i: usize, amount: u128| {
+                    env.svm.expire_blockhash();
+                    env.send(
+                        env.withdraw_ix(portfolios[i], amount),
+                        vec![
+                            AccountMeta::new(owners[i].pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(portfolios[i], false),
+                            AccountMeta::new(destinations[i], false),
+                            AccountMeta::new(env.vault, false),
+                            AccountMeta::new_readonly(env.vault_authority, false),
+                            AccountMeta::new_readonly(spl_token::ID, false),
+                        ],
+                        &[owners[i]],
+                    )
+                };
+
+                // A non-all request cannot spend the one atom owed as maintenance.
+                let tracked = [
+                    env.market,
+                    portfolios[0],
+                    portfolios[1],
+                    destinations[0],
+                    destinations[1],
+                    sources[0],
+                    sources[1],
+                    env.vault,
+                    env.mint,
+                ];
+                let before = tracked.map(|key| env.svm.get_account(&key));
+                let error =
+                    withdraw(&mut env, 1, net[1] + 1).expect_err("partial exceeds net principal");
+                assert!(
+                    error.contains(&format!(
+                        "Custom({})",
+                        PercolatorError::EngineLockActive as u32
+                    )),
+                    "unexpected partial withdrawal error: {error}"
+                );
+                assert_eq!(tracked.map(|key| env.svm.get_account(&key)), before);
+
+                let mut collected = [0; 2];
+                let mut paid = [0; 2];
+                for i in order {
+                    let requests = if i == 0 { &CAPITAL[..1] } else { parts };
+                    for &amount in requests {
+                        let neighbor = env.svm.get_account(&portfolios[1 - i]);
+                        let neighbor_token = env.svm.get_account(&destinations[1 - i]);
+                        let cu = withdraw(&mut env, i, amount).expect("owner-local withdrawal");
+                        assert_cu_within("INV-052 fee-adjusted withdrawal", cu, CUSTODY_CU_LIMIT);
+                        peak_cu = peak_cu.max(cu);
+                        collected[i] = fees[i];
+                        paid[i] += if i == 0 || parts.len() == 1 {
+                            net[i]
+                        } else {
+                            amount
+                        };
+                        assert_eq!(env.svm.get_account(&portfolios[1 - i]), neighbor);
+                        assert_eq!(env.svm.get_account(&destinations[1 - i]), neighbor_token);
+
+                        let group = env.market_state().1;
+                        for actor in 0..2 {
+                            let state = env.portfolio_state(portfolios[actor]);
+                            assert_eq!(
+                                state.capital.get(),
+                                CAPITAL[actor] - collected[actor] - paid[actor]
+                            );
+                            assert_eq!(state.pnl.get(), 0);
+                            assert_eq!(state.fee_credits.get(), 0);
+                            assert!(percolator::active_bitmap_is_empty(active_bitmap(&state)));
+                            assert_eq!(
+                                state.last_fee_slot.get(),
+                                if collected[actor] == 0 { 0 } else { ELAPSED }
+                            );
+                            assert_eq!(env.token_amount(destinations[actor]) as u128, paid[actor]);
+                            assert_eq!(env.token_amount(sources[actor]), 0);
+                        }
+                        let insurance: u128 = collected.iter().sum();
+                        let payout: u128 = paid.iter().sum();
+                        let domain_zero: u128 = collected.iter().map(|fee| fee / 2).sum();
+                        assert_eq!(group.insurance, insurance);
+                        assert_eq!(
+                            &group.insurance_domain_budget[..2],
+                            &[domain_zero, insurance - domain_zero]
+                        );
+                        assert_eq!(
+                            group.c_tot,
+                            CAPITAL.iter().sum::<u128>() - insurance - payout
+                        );
+                        assert_eq!(group.vault, group.c_tot + insurance);
+                        assert_eq!(env.token_amount(env.vault) as u128, group.vault);
+                        assert_eq!(group.vault + payout, CAPITAL.iter().sum::<u128>());
+                    }
+                }
+                assert_eq!(
+                    paid, net,
+                    "common={common_owner}, order={order:?}, parts={parts:?}"
+                );
+                assert_eq!(collected, fees);
+                assert_eq!(env.market_state().1.c_tot, 0);
+            }
+        }
+    }
+    println!(
+        "INV-052: 12 owner-local fee withdrawal worlds and rollback checks; peak CU={peak_cu}"
+    );
+}
+
+#[test]
 fn v16_program_base_unit_swap_amount_is_history_partition_invariant() {
     fn run(parts: &[u128]) -> (u64, u64, u64, u64) {
         let mut env = V16CuEnv::new();
