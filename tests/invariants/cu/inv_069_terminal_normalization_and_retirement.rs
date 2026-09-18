@@ -14,6 +14,156 @@
 
 use super::*;
 
+#[test]
+fn v16_program_price_only_indices_retire_without_stranding_flat_owner() {
+    const PRINCIPAL: u128 = 307;
+    const PRICE: u64 = 100;
+    const SLOT: u64 = 2;
+    const CU_LIMIT: u64 = 300_000;
+    let mut peak_cu = 0;
+    let mut measured = |cu| {
+        assert_cu_within("INV-069 price-only retirement", cu, CU_LIMIT);
+        peak_cu = peak_cu.max(cu);
+    };
+
+    for target in [90, 110] {
+        for shutdown in [false, true] {
+            let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+                max_portfolio_assets: 2,
+                initial_price: PRICE,
+                max_price_move_bps_per_slot: 10_000,
+                max_abs_funding_e9_per_slot: 0,
+                ..V16CuMarketParams::default()
+            });
+            measured(env.configure_permissionless_resolve_with_cu(1_000, 1));
+            let owner = Keypair::new();
+            let portfolio = env.create_portfolio(&owner);
+            env.deposit(&owner, portfolio, PRINCIPAL);
+            env.svm.warp_to_slot(1);
+            measured(env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE));
+            let custody = env.svm.get_account(&env.vault).unwrap();
+            let mint = env.svm.get_account(&env.mint).unwrap();
+            let market_id = env.asset_market_id(1);
+
+            env.svm.warp_to_slot(SLOT);
+            measured(env.push_auth_mark_for_asset_as_admin(1, SLOT, target));
+            measured(
+                env.send(
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: SLOT,
+                        observations: crank_observations(1),
+                    },
+                    vec![
+                        AccountMeta::new(env.payer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio, false),
+                    ],
+                    &[],
+                )
+                .expect("empty asset accepts public price accrual"),
+            );
+            let moved = env.market_state().1.assets[1];
+            let expected_k = (i128::from(target) - i128::from(PRICE)) * ADL_ONE as i128;
+            assert_ne!(expected_k, 0);
+            assert_eq!(
+                (moved.effective_price, moved.k_long, moved.k_short),
+                (target, expected_k, -expected_k)
+            );
+            assert_eq!((moved.oi_eff_long_q, moved.oi_eff_short_q), (0, 0));
+            let flat_owner = env.svm.get_account(&portfolio).unwrap();
+            let account = env.portfolio_state(portfolio);
+            assert_eq!((account.capital.get(), account.pnl.get()), (PRINCIPAL, 0));
+            assert!(percolator::active_bitmap_is_empty(active_bitmap(&account)));
+
+            if shutdown {
+                measured(env.update_asset_lifecycle_as_admin_with_cu(
+                    processor::ASSET_ACTION_SHUTDOWN,
+                    1,
+                    SLOT,
+                    0,
+                ));
+                assert_eq!(
+                    env.market_state().1.assets[1].lifecycle,
+                    AssetLifecycleV16::Recovery
+                );
+            }
+
+            // Count remaining exit obligations from decoded state, independently of dispatch.
+            let rank = |env: &V16CuEnv| {
+                let (_, group) = env.market_state();
+                usize::from(group.assets[1].lifecycle != AssetLifecycleV16::Retired)
+                    + usize::from(group.c_tot != 0)
+                    + group.materialized_portfolio_count as usize
+            };
+            assert_eq!(rank(&env), 3);
+            let primary = env.market_state().1.assets[0];
+            measured(env.update_asset_lifecycle_as_admin_with_cu(
+                processor::ASSET_ACTION_RETIRE,
+                1,
+                SLOT,
+                0,
+            ));
+            assert_eq!(rank(&env), 2);
+            let (cfg, group) = env.market_state();
+            let retired = group.assets[1];
+            assert_eq!(cfg.free_market_slot_count, 1);
+            assert_eq!((retired.market_id, retired.retired_slot), (market_id, SLOT));
+            assert_eq!(
+                (
+                    retired.k_long,
+                    retired.k_short,
+                    retired.f_long_num,
+                    retired.f_short_num
+                ),
+                (0, 0, 0, 0)
+            );
+            assert_eq!(group.assets[0], primary);
+            assert_eq!(
+                (group.c_tot, group.vault, group.insurance),
+                (PRINCIPAL, PRINCIPAL, 0)
+            );
+            for domain in [2, 3] {
+                assert_eq!(
+                    group.source_credit[domain],
+                    percolator::SourceCreditStateV16::EMPTY
+                );
+                assert_eq!(
+                    group.source_backing_buckets[domain],
+                    percolator::BackingBucketV16 {
+                        market_id,
+                        ..percolator::BackingBucketV16::EMPTY
+                    }
+                );
+                assert_eq!(group.insurance_domain_budget[domain], 0);
+            }
+            assert_eq!(env.svm.get_account(&portfolio), Some(flat_owner));
+            assert_eq!(env.svm.get_account(&env.vault), Some(custody));
+            assert_eq!(env.svm.get_account(&env.mint), Some(mint.clone()));
+
+            let (destination, cu) = env.withdraw_with_cu(&owner, portfolio, PRINCIPAL);
+            measured(cu);
+            assert_eq!(rank(&env), 1);
+            assert_eq!(env.token_amount(destination), PRINCIPAL as u64);
+            assert_eq!(env.token_amount(env.vault), 0);
+            let account = env.portfolio_state(portfolio);
+            assert_eq!((account.capital.get(), account.pnl.get()), (0, 0));
+            assert!(percolator::active_bitmap_is_empty(active_bitmap(&account)));
+            assert!(!resolved_receipt(&account).present);
+            measured(env.close_portfolio_with_cu(&owner, portfolio));
+            assert_eq!(rank(&env), 0);
+            assert!(env
+                .svm
+                .get_account(&portfolio)
+                .is_none_or(|a| a.lamports == 0));
+            let (_, group) = env.market_state();
+            assert_eq!((group.c_tot, group.vault, group.insurance), (0, 0, 0));
+            assert_eq!(env.token_amount(destination), PRINCIPAL as u64);
+            assert_eq!(env.svm.get_account(&env.mint), Some(mint));
+        }
+    }
+    println!("INV-069 price-only retirement: 4 histories, rank 3->2->1->0, peak_cu={peak_cu}");
+}
+
 fn inv069_source_defines_test(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
     let mut test_attribute = false;
