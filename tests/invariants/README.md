@@ -32151,6 +32151,62 @@ with these frontiers. Deeper histories, combined lifecycle/feed/authority/residu
 stale-certificate equivalence and a complete history-derived entitlement oracle remain excluded.
 Eight cases and 64 shrink iterations are smoke/minimization budgets, not saturation evidence.
 
+### INV-063 post-snapshot pre-expiry continuation (2026-09-18)
+
+At main `6992e91f` / engine `4db11a8c`, the existing
+`v16_program_post_snapshot_expiry_topup_is_public_and_order_independent` fails at
+`Before/reverse_tail=false/claim_first=false`, reporting a nonterminal fixed point at sweep 1.
+Fresh same-worktree wrapper and auth-matcher SBF reproduce it. This is an overstrong
+pre-expiry terminal expectation, with a missing later public continuation in the harness;
+it is not a demonstrated public loss-of-funds or denial-of-service counterexample.
+
+At slot 12 the backed winner has consumed 1,000 atoms, leaving 750 fresh atoms committed
+until slot 13. The original junior receipt has its immutable 1,000-atom face and 251 paid
+atoms, with no unreceipted bound remaining. Clearing that receipt would lose its future
+entitlement. The existing strict terminal predicate is therefore correct. The owner now
+separates bounded settlement at the current Clock from strict terminal drain, checks this
+exact intermediate state, and requires an early backing-hinted crank to reject with exact
+tracked economic rollback. At slot 13 a permissionless crank naming the backing asset
+releases exactly 750 atoms into the snapshot without changing tokens or the receipt.
+The same close/top-up routes then drain every account under the original predicate.
+
+All twelve existing boundary/tail/route worlds retain their boundary backing observations
+and compare boundary payouts as well as final economics. Input-derived final payouts are
+`[2000, 0, 2000, 0, 0]`, leaving one surplus atom in both vaults. Exact/late expiry remains
+equivalent; the pre-expiry control still proves nonzero fresh backing consumption. No
+production, dependency, status or traceability-row change is needed.
+
+Validation in `/home/anatoly/worktrees/astra-inv063-expiry-main-20260918`:
+
+```sh
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_TARGET_DIR=/dev/shm/percolator-main-host-target
+export PERCOLATOR_FUZZ_SBF="$PWD/target/deploy/percolator_prog.so"
+env CARGO_TARGET_DIR=/dev/shm/astra-inv063-expiry-20260918-sbf-target RUSTC=/home/anatoly/.rustup/toolchains/solana/bin/rustc cargo build-sbf --tools-version v1.52 --skip-tools-install --no-rustup-override --offline --sbf-out-dir "$PWD/target/deploy" -- --locked
+env CARGO_TARGET_DIR=/dev/shm/astra-inv063-expiry-20260918-sbf-target RUSTC=/home/anatoly/.rustup/toolchains/solana/bin/rustc cargo build-sbf --tools-version v1.52 --skip-tools-install --no-rustup-override --offline --manifest-path tests/fixtures/auth_matcher/Cargo.toml --sbf-out-dir "$PWD/tests/fixtures/auth_matcher/target/deploy" -- --locked
+cargo test --locked --offline --test v16_program_stateful_fuzz inv_063_backing_expiry_normalization::v16_program_post_snapshot_expiry_topup_is_public_and_order_independent -- --exact --nocapture
+cargo test --locked --offline --test v16_program_stateful_fuzz -- --exact --nocapture \
+  inv_063_backing_expiry_normalization::v16_program_resolved_close_normalizes_backing_at_expiry \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_program_late_unrelated_backing_cannot_outlive_and_erase_resolved_receipt \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_program_fully_receipted_claimants_survive_two_unrelated_expiry_waves \
+  inv_067_terminal_payout_completeness_and_exact_once_settlement::v16_program_fully_paid_receipts_exit_before_late_excess_backing_cleanup
+rustfmt --edition 2021 --config skip_children=true tests/invariants/stateful/inv_063_backing_expiry_normalization.rs
+rustfmt --edition 2021 --check --config skip_children=true tests/invariants/stateful/inv_063_backing_expiry_normalization.rs
+git diff --check
+```
+
+Both SBF builds pass from a fresh private build target. Wrapper SHA-256 is
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`; matcher SHA-256 is
+`50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
+Host dependencies reuse the main host cache; the test binary is rebuilt from this worktree.
+The exact selector fails before the patch and passes afterward (1/1, twelve worlds);
+the adjacent invocation passes 4/4. Scoped rustfmt and `git diff --check` pass.
+
+Remaining gaps: this repairs the existing fixed five-owner, two-asset, SPL history. It
+does not establish arbitrary-history liveness, native custody, Recovery, maximum shapes,
+portfolio deletion or slab retirement. The full invariant suite and engine proofs were
+not run; invariant statuses remain unchanged.
+
 ### INV-063 expiry/refill failure histories
 
 `stateful/inv_063_backing_expiry_normalization.rs` now owns

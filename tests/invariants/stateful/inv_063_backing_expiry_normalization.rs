@@ -34,6 +34,8 @@
 //! partial payout receipt before a second source domain expires. It advances authenticated Clock
 //! through both terminal routes, requires a value-moving payout top-up, and proves that exact/late
 //! expiry removes the lapsed backing without changing claimant-order or route-order economics.
+//! The pre-expiry control retains its paid haircut receipt until a later authenticated expiry and
+//! a permissionless backing-asset discovery crank release the remaining fresh support.
 //! `v16_program_expiry_refill_failure_histories_preserve_claim_and_senior_exit` crosses two
 //! successive expiry/refill cycles with aggregate/split refills and failed refill-plus-conversion
 //! transactions. Failed suffixes must restore the earlier token transfer, backing classification,
@@ -737,6 +739,27 @@ fn drain_inv063_resolved_accounts(
     claim_first: bool,
     label: &str,
 ) -> Result<u64, String> {
+    let payout = settle_inv063_resolved_accounts(env, actor_order, claim_first, label)?;
+    if !actor_order
+        .iter()
+        .copied()
+        .all(|actor| inv063_resolved_portfolio_is_terminal(env, actor))
+    {
+        return Err(format!(
+            "{label} terminal routes reached a nonterminal fixed point"
+        ));
+    }
+    Ok(payout)
+}
+
+// Settling at the current Clock may retain a receipt awaiting future backing expiry.
+// Callers must either require terminal accounts or check that intermediate state explicitly.
+fn settle_inv063_resolved_accounts(
+    env: &mut V16Svm,
+    actor_order: &[usize],
+    claim_first: bool,
+    label: &str,
+) -> Result<u64, String> {
     const TERMINAL_SWEEP_BOUND: usize = 32;
     let route_order = if claim_first {
         [true, false]
@@ -745,13 +768,13 @@ fn drain_inv063_resolved_accounts(
     };
     let mut claim_route_payout = 0u64;
 
-    for sweep in 0..TERMINAL_SWEEP_BOUND {
+    for _ in 0..TERMINAL_SWEEP_BOUND {
         if actor_order
             .iter()
             .copied()
             .all(|actor| inv063_resolved_portfolio_is_terminal(env, actor))
         {
-            break;
+            return Ok(claim_route_payout);
         }
         let mut sweep_mutated = false;
         for actor in actor_order.iter().copied() {
@@ -809,15 +832,8 @@ fn drain_inv063_resolved_accounts(
                 }
             }
         }
-        if !sweep_mutated
-            && !actor_order
-                .iter()
-                .copied()
-                .all(|actor| inv063_resolved_portfolio_is_terminal(env, actor))
-        {
-            return Err(format!(
-                "{label} terminal routes reached a nonterminal fixed point at sweep {sweep}"
-            ));
+        if !sweep_mutated {
+            return Ok(claim_route_payout);
         }
     }
 
@@ -1053,6 +1069,7 @@ fn v16_program_resolved_close_normalizes_backing_at_expiry() {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PostSnapshotExpiryEconomicOutcome {
+    boundary_payouts: [u64; 5],
     payouts: [u64; 5],
     bucket_status: BackingBucketStatusV16,
     fresh_unliened_backing_num: u128,
@@ -1080,6 +1097,10 @@ fn run_post_snapshot_expiry_claim_world(
     const INITIAL_PRICE: u64 = 100;
     const WINNING_MARK: u64 = 150;
     const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const WINNER_CAPITAL: u64 = 1_000;
+    const LOSER_CAPITAL: u64 = 250;
+    const CLAIM_FACE: u128 =
+        (SIZE_Q / POS_SCALE as i128) as u128 * (WINNING_MARK - INITIAL_PRICE) as u128;
     const JUNIOR_BACKING: u128 = 1;
     const BACKING: u128 = 1_500;
     const SNAPSHOT_SLOT: u64 = 12;
@@ -1102,7 +1123,13 @@ fn run_post_snapshot_expiry_claim_world(
             max_price_move_bps_per_slot: 500,
             max_accrual_dt_slots: 1,
             min_funding_lifetime_slots: 1,
-            actor_deposits: [1_000, 250, 1_000, 250, 0],
+            actor_deposits: [
+                u128::from(WINNER_CAPITAL),
+                u128::from(LOSER_CAPITAL),
+                u128::from(WINNER_CAPITAL),
+                u128::from(LOSER_CAPITAL),
+                0,
+            ],
             ..MarketConfig::default()
         },
     );
@@ -1310,15 +1337,147 @@ fn run_post_snapshot_expiry_claim_world(
             JUNIOR_WINNER,
         ]
     };
-    let claim_route_payout = drain_inv063_resolved_accounts(
+    let mut claim_route_payout = settle_inv063_resolved_accounts(
         &mut env,
         &tail_order,
         claim_first,
         &format!("post-snapshot {landing:?}"),
     )?;
+    // Preserve boundary observations before the Before control's later expiry continuation.
     let group = env.primary_market_state().1;
     let bucket = group.source_backing_buckets[BACKED_DOMAIN as usize];
     let source = group.source_credit[BACKED_DOMAIN as usize];
+    let boundary_payouts: [u64; 5] = std::array::from_fn(|actor| {
+        env.token_amount(env.actors[actor].destination_token) - destinations_before[actor]
+    });
+    if landing == BackingExpiryLanding::Before {
+        let receipt = env
+            .primary_portfolio(JUNIOR_WINNER)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .map_err(|error| format!("decode retained pre-expiry receipt: {error:?}"))?;
+        let paid = u128::from(LOSER_CAPITAL) + JUNIOR_BACKING;
+        let remaining_backing = BACKING + u128::from(LOSER_CAPITAL) - CLAIM_FACE;
+        let mut expected_receipt = first_receipt;
+        expected_receipt.paid_effective = paid;
+        assert_eq!(
+            receipt, expected_receipt,
+            "retain the original haircut face"
+        );
+        assert_eq!(receipt.terminal_positive_claim_face, CLAIM_FACE);
+        assert!(paid < CLAIM_FACE);
+        assert!(!inv063_resolved_portfolio_is_terminal(&env, JUNIOR_WINNER));
+        for actor in [JUNIOR_LOSER, BACKED_WINNER, BACKED_LOSER, PROVIDER] {
+            assert!(inv063_resolved_portfolio_is_terminal(&env, actor));
+        }
+        assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+        assert_eq!(bucket.expiry_slot, EXPIRY_SLOT);
+        assert_eq!(
+            bucket.fresh_unliened_backing_num,
+            remaining_backing * BOUND_SCALE
+        );
+        assert_eq!(
+            source.fresh_reserved_backing_num,
+            remaining_backing * BOUND_SCALE
+        );
+        assert_eq!(bucket.consumed_liened_backing_num, CLAIM_FACE * BOUND_SCALE);
+        assert_eq!(group.resolved_payout_ledger.snapshot_residual, paid);
+        assert_eq!(
+            group
+                .resolved_payout_ledger
+                .terminal_claim_bound_unreceipted_num,
+            0
+        );
+        assert_eq!(
+            group
+                .resolved_payout_ledger
+                .terminal_claim_exact_receipts_num,
+            CLAIM_FACE * BOUND_SCALE
+        );
+        assert_eq!(
+            boundary_payouts,
+            [
+                WINNER_CAPITAL + paid as u64,
+                0,
+                WINNER_CAPITAL + CLAIM_FACE as u64,
+                0,
+                0
+            ]
+        );
+
+        let before = snapshot(&env);
+        let error = env
+            .crank(
+                JUNIOR_WINNER,
+                landing_slot,
+                vec![CrankObservationHint {
+                    asset_index: BACKED_ASSET,
+                    oracle_accounts: 0,
+                }],
+            )
+            .expect_err("fresh support cannot be released before committed expiry");
+        assert!(
+            error.contains("Custom(22)"),
+            "unexpected pre-expiry error: {error}"
+        );
+        assert_eq!(snapshot(&env), before, "pre-expiry crank rollback");
+
+        env.warp_to_slot(EXPIRY_SLOT);
+        let success = env
+            .crank(
+                JUNIOR_WINNER,
+                EXPIRY_SLOT,
+                vec![CrankObservationHint {
+                    asset_index: BACKED_ASSET,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| format!("discover remaining expired support: {error}"))?;
+        assert!(success.compute_units < TX_CU_LIMIT);
+        let after_expiry = env.primary_market_state().1;
+        assert_eq!(
+            after_expiry.source_backing_buckets[BACKED_DOMAIN as usize].status,
+            BackingBucketStatusV16::Expired
+        );
+        assert_eq!(
+            after_expiry.source_backing_buckets[BACKED_DOMAIN as usize].fresh_unliened_backing_num,
+            0
+        );
+        assert_eq!(
+            after_expiry.source_credit[BACKED_DOMAIN as usize].fresh_reserved_backing_num,
+            0
+        );
+        assert_eq!(
+            after_expiry.resolved_payout_ledger.snapshot_residual,
+            paid + remaining_backing
+        );
+        assert_eq!(after_expiry.vault, group.vault);
+        assert_eq!(env.all_token_account_data(), before.tokens);
+        assert_eq!(
+            env.primary_portfolio(JUNIOR_WINNER)
+                .resolved_payout_receipt
+                .try_to_runtime()
+                .unwrap(),
+            receipt
+        );
+    }
+    let final_claim_payout = drain_inv063_resolved_accounts(
+        &mut env,
+        &tail_order,
+        claim_first,
+        &format!("post-snapshot {landing:?} final drain"),
+    )?;
+    if landing == BackingExpiryLanding::Before && claim_first {
+        assert_eq!(
+            u128::from(final_claim_payout),
+            CLAIM_FACE - u128::from(LOSER_CAPITAL) - JUNIOR_BACKING,
+            "the later expiry must enable a value-moving receipt top-up"
+        );
+    }
+    claim_route_payout = claim_route_payout
+        .checked_add(final_claim_payout)
+        .ok_or_else(|| "post-snapshot claim-route payout overflow".to_string())?;
+    let group = env.primary_market_state().1;
     let payouts: [u64; 5] = std::array::from_fn(|actor| {
         env.token_amount(env.actors[actor].destination_token)
             .checked_sub(destinations_before[actor])
@@ -1330,6 +1489,20 @@ fn run_post_snapshot_expiry_claim_world(
     let Some(payout_total) = payout_total else {
         return Err("post-snapshot payout total overflow".to_string());
     };
+    assert_eq!(
+        payouts,
+        [
+            WINNER_CAPITAL + CLAIM_FACE as u64,
+            0,
+            WINNER_CAPITAL + CLAIM_FACE as u64,
+            0,
+            0
+        ]
+    );
+    assert_eq!(
+        group.vault,
+        BACKING + JUNIOR_BACKING + 2 * u128::from(LOSER_CAPITAL) - 2 * CLAIM_FACE
+    );
     if engine_vault_at_resolution
         .checked_sub(group.vault)
         .ok_or_else(|| "post-snapshot settlement increased engine vault".to_string())?
@@ -1350,6 +1523,7 @@ fn run_post_snapshot_expiry_claim_world(
     }
     Ok((
         PostSnapshotExpiryEconomicOutcome {
+            boundary_payouts,
             payouts,
             bucket_status: bucket.status,
             fresh_unliened_backing_num: bucket.fresh_unliened_backing_num,
