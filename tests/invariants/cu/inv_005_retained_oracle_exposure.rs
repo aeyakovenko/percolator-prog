@@ -1026,6 +1026,15 @@ fn v16_program_cold_oracle_handoff_waits_for_last_live_quantity_tick() {
 
 #[test]
 fn v16_program_retained_oracle_handoff_recovery_rollback_preserves_booked_claim() {
+    recovery_handoff_claim(false);
+}
+
+#[test]
+fn v16_program_cold_oracle_handoff_waits_for_recovery_loss_cleanup() {
+    recovery_handoff_claim(true);
+}
+
+fn recovery_handoff_claim(check_zero_oi_containment: bool) {
     const COLD: usize = 2;
     const SUCCESSOR: usize = 3;
     const PREFIX_OWNER: usize = 4;
@@ -1193,13 +1202,54 @@ fn v16_program_retained_oracle_handoff_recovery_rollback_preserves_booked_claim(
                 );
             };
             check_claim(&env);
-            let order = if direction > 0 { [0, 1] } else { [1, 0] };
+            let order = if check_zero_oi_containment || direction > 0 {
+                [0, 1]
+            } else {
+                [1, 0]
+            };
             for owner in order {
                 env.forfeit_recovery_leg(owner, asset, u128::MAX).unwrap();
                 check_claim(&env);
             }
             let flat = env.primary_market_state().1.assets[asset as usize];
             assert_eq!((flat.oi_eff_long_q, flat.oi_eff_short_q), (0, 0));
+            let cleanup_handoff = if check_zero_oi_containment {
+                // Both quantities are zero, but the first forfeited owner still
+                // carries a stored loss obligation on its original side.
+                assert_eq!(
+                    (flat.stored_pos_count_long, flat.stored_pos_count_short),
+                    if direction > 0 { (1, 0) } else { (0, 1) }
+                );
+                assert_eq!(
+                    (
+                        flat.pending_obligation_count_long,
+                        flat.pending_obligation_count_short
+                    ),
+                    if direction > 0 { (1, 0) } else { (0, 1) }
+                );
+                let weight = LOTS as u128 * percolator::POS_SCALE;
+                assert_eq!(
+                    (flat.loss_weight_sum_long, flat.loss_weight_sum_short),
+                    if direction > 0 {
+                        (weight, 0)
+                    } else {
+                        (0, weight)
+                    }
+                );
+                let takeover = env.build_retained_asset_authority_handoff_between_actors(
+                    asset,
+                    processor::ASSET_AUTH_ORACLE,
+                    COLD,
+                    0,
+                );
+                let withdrawal = env.build_retained_withdrawal(PREFIX_OWNER, PREFIX);
+                let bundle = env.bundle_retained_transactions(&[withdrawal, takeover.clone()]);
+                reject(&mut env, bundle, 4, PercolatorError::EngineLockActive, 1, 1);
+                check_claim(&env);
+                Some(takeover)
+            } else {
+                None
+            };
             // Forfeiture can leave zero-position loss weight until its peer exits.
             for owner in order {
                 for _ in 0..2 {
@@ -1213,6 +1263,46 @@ fn v16_program_retained_oracle_handoff_recovery_rollback_preserves_booked_claim(
                     &env.primary_portfolio(owner),
                     asset as usize
                 ));
+            }
+            if let Some(takeover) = cleanup_handoff {
+                let clean = env.primary_market_state();
+                let selected = clean.1.assets[asset as usize];
+                assert_eq!(
+                    (
+                        selected.oi_eff_long_q,
+                        selected.oi_eff_short_q,
+                        selected.stored_pos_count_long,
+                        selected.stored_pos_count_short,
+                        selected.pending_obligation_count_long,
+                        selected.pending_obligation_count_short,
+                        selected.loss_weight_sum_long,
+                        selected.loss_weight_sum_short
+                    ),
+                    (0, 0, 0, 0, 0, 0, 0, 0)
+                );
+                assert_eq!(clean.1.mode, MarketModeV16::Live);
+                assert_eq!(selected.lifecycle, AssetLifecycleV16::Recovery);
+                check_claim(&env);
+                let portfolios: Vec<_> = (0..5).map(|i| env.primary_portfolio_data(i)).collect();
+                env.land_retained(takeover).expect(
+                    "the unchanged cold consent becomes admissible after public loss cleanup",
+                );
+                assert_eq!(env.primary_market_state(), clean);
+                assert_eq!(
+                    (0..5)
+                        .map(|i| env.primary_portfolio_data(i))
+                        .collect::<Vec<_>>(),
+                    portfolios
+                );
+                let mut released_profile = expected_profile;
+                released_profile.oracle_authority = env.actors[0].signer.pubkey().to_bytes();
+                assert_eq!(env.primary_profile(asset as usize), released_profile);
+                let mut released_sequences = expected_sequences;
+                released_sequences.authority_epoch += 1;
+                assert_eq!(
+                    env.primary_control_sequences(asset as usize),
+                    released_sequences
+                );
             }
             env.resolve_market().unwrap();
             let expected = [
@@ -1264,7 +1354,10 @@ fn v16_program_retained_oracle_handoff_recovery_rollback_preserves_booked_claim(
             assert_eq!(env.mint_supply() as u128, env.initial_token_supply);
             let trace = env.finish_public_trace();
             trace.validate_public_execution().unwrap();
-            assert_eq!(trace.steps.iter().filter(|step| !step.succeeded).count(), 2);
+            assert_eq!(
+                trace.steps.iter().filter(|step| !step.succeeded).count(),
+                if check_zero_oi_containment { 3 } else { 2 }
+            );
             peak_cu = peak_cu.max(
                 trace
                     .steps
@@ -1275,5 +1368,9 @@ fn v16_program_retained_oracle_handoff_recovery_rollback_preserves_booked_claim(
             );
         }
     }
-    eprintln!("row416 retained oracle Recovery claim: worlds=4, exact_rejections=8, handoff_rollbacks=4, SPL_rollbacks=8, recovery_forfeits=8, exact_owner_payouts=20, peak_success_cu={peak_cu}, peak_active_preview_cu={peak_preview_cu}");
+    if check_zero_oi_containment {
+        eprintln!("row416 zero-OI Recovery containment: worlds=4, exact_rejections=12, zero_OI_SPL_rollbacks=4, unchanged_handoff_releases=4, exact_owner_payouts=20, peak_success_cu={peak_cu}, peak_active_preview_cu={peak_preview_cu}");
+    } else {
+        eprintln!("row416 retained oracle Recovery claim: worlds=4, exact_rejections=8, handoff_rollbacks=4, SPL_rollbacks=8, recovery_forfeits=8, exact_owner_payouts=20, peak_success_cu={peak_cu}, peak_active_preview_cu={peak_preview_cu}");
+    }
 }
