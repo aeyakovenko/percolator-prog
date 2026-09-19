@@ -385,11 +385,10 @@ impl SharedHistory {
             .zip(self.floor[actor])
             .filter(|(a, b)| **a != *b)
             .count();
-        assert_eq!(
-            latent,
-            usize::from(materialize_only),
-            "materialization and payout phases have distinct input frontiers"
-        );
+        assert!(latent <= 1, "at most one input domain remains latent");
+        if materialize_only {
+            assert_eq!(latent, 1, "materialization-only phase has a latent input");
+        }
         let mut remaining = std::array::from_fn::<_, DOMAINS, _>(|d| {
             self.earned[actor][d] - self.redeemed[actor][d]
         });
@@ -509,6 +508,204 @@ impl SharedHistory {
         }
         calls
     }
+}
+
+#[test]
+fn v16_program_paid_claimant_preserves_peer_latent_capacity_and_late_exit() {
+    // Row 423 / INV-028: live source consumption precedes a peer's last-domain
+    // materialization; both owner orders must retain exact terminal entitlement.
+    let mut peak_cu = 0;
+    let mut peak_packet = 0;
+    let mut terminal_calls = 0;
+    for direction in [-1i128, 1] {
+        for first in [0, 1] {
+            let late = 1 - first;
+            let mut h = SharedHistory::new();
+            let expected: Claims = std::array::from_fn(|actor| {
+                std::array::from_fn(|d| {
+                    if actor == 0 {
+                        1 + (d / 2 % 3) as u128
+                    } else {
+                        4 + (d / 2 % 5) as u128
+                    }
+                })
+            });
+            for asset in 0..ASSETS {
+                let cu = h
+                    .env
+                    .push_auth_mark_for_asset_as_admin(asset as u16, h.slot, PRICE);
+                h.record(cu);
+                h.settle(DEBTOR, asset);
+                let quantities = expected
+                    .map(|claims| direction * claims[2 * asset] as i128 * POS_SCALE as i128);
+                for actor in 0..2 {
+                    h.trade(actor, asset, quantities[actor]);
+                }
+                h.mark(asset, (PRICE as i128 + direction) as u64);
+                for actor in [DEBTOR, late, first] {
+                    h.settle(actor, asset);
+                }
+                for actor in 0..2 {
+                    h.trade(actor, asset, -2 * quantities[actor]);
+                }
+                h.mark(asset, PRICE);
+                h.settle(DEBTOR, asset);
+                if asset == ASSETS - 1 {
+                    break;
+                }
+                for actor in 0..2 {
+                    h.settle(actor, asset);
+                    h.trade(actor, asset, quantities[actor]);
+                }
+            }
+            assert_eq!(h.earned, expected);
+            let latent_domain = 2 * (ASSETS - 1) + usize::from(direction < 0);
+            for actor in 0..2 {
+                let mut registered = expected[actor];
+                registered[latent_domain] = 0;
+                assert_eq!(h.claims(actor), registered);
+                let mut reserved: BTreeSet<_> =
+                    (0..DOMAINS).filter(|&d| registered[d] > 0).collect();
+                assert_eq!(reserved.len(), DOMAINS - 1);
+                reserved.extend([2 * (ASSETS - 1), 2 * (ASSETS - 1) + 1]);
+                assert_eq!(reserved.len(), DOMAINS, "27 historical + 1 latent domain");
+            }
+            let late_frame = h.env.svm.get_account(&h.portfolios[late]);
+            h.settle(first, ASSETS - 1);
+            h.trade(first, ASSETS - 1, -h.positions[first][ASSETS - 1]);
+            let gain = expected[first].iter().sum::<u128>();
+            let cu =
+                h.env
+                    .convert_released_pnl_with_cu(&h.owners[first], h.portfolios[first], gain);
+            h.record(cu);
+            h.redeemed[first] = expected[first];
+            h.check();
+            let cu = h
+                .env
+                .send(
+                    h.env.withdraw_ix(h.portfolios[first], CAPITAL + gain),
+                    vec![
+                        AccountMeta::new(h.owners[first].pubkey(), true),
+                        AccountMeta::new(h.env.market, false),
+                        AccountMeta::new(h.portfolios[first], false),
+                        AccountMeta::new(h.tokens[first], false),
+                        AccountMeta::new(h.env.vault, false),
+                        AccountMeta::new_readonly(h.env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[&h.owners[first]],
+                )
+                .expect("flat claimant converts and withdraws before peer materialization");
+            h.record(cu);
+            h.check();
+            assert_eq!(h.claims(first), [0; DOMAINS]);
+            assert_eq!(h.env.svm.get_account(&h.portfolios[late]), late_frame);
+            let peers = [h.portfolios[0], h.portfolios[1], h.tokens[0], h.tokens[1]];
+            let frames = peers.map(|key| h.env.svm.get_account(&key));
+            let cu = h.env.resolve();
+            h.record(cu);
+            h.slot = h.env.market_state().1.resolved_slot + OWNER_WINDOW;
+            h.env.svm.warp_to_slot(h.slot);
+
+            // The live claimant has consumed its share. Drain the debtor before
+            // registering the late owner's last claim against the remaining backing.
+            let cu = h
+                .env
+                .send(
+                    ProgInstruction::CloseResolved {
+                        fee_rate_per_slot: 0,
+                    },
+                    vec![
+                        AccountMeta::new_readonly(h.owners[DEBTOR].pubkey(), false),
+                        AccountMeta::new(h.env.market, false),
+                        AccountMeta::new(h.portfolios[DEBTOR], false),
+                        AccountMeta::new(h.tokens[DEBTOR], false),
+                        AccountMeta::new(h.env.vault, false),
+                        AccountMeta::new_readonly(h.env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[],
+                )
+                .expect("debtor exits while the late claimant retains a latent domain");
+            h.record(cu);
+            terminal_calls += 1;
+            h.positions[DEBTOR] = [0; ASSETS];
+            assert!(resolved_portfolio_is_terminal(&h.env, h.portfolios[DEBTOR]));
+            assert_eq!(
+                h.env.token_amount(h.tokens[DEBTOR]) as u128,
+                CAPITAL - expected.iter().flatten().sum::<u128>()
+            );
+            assert_eq!(peers.map(|key| h.env.svm.get_account(&key)), frames);
+            h.check();
+
+            assert_eq!(h.env.svm.get_account(&h.portfolios[late]), late_frame);
+            assert_eq!(h.claims(first), [0; DOMAINS]);
+            assert_eq!(h.claims(late)[latent_domain], 0);
+            assert_eq!(h.env.token_amount(h.tokens[late]), 0);
+            let group = h.env.market_state().1;
+            let late_claims = h.claims(late);
+            for d in 0..DOMAINS {
+                assert_eq!(
+                    group.source_backing_buckets[d].fresh_unliened_backing_num,
+                    expected[late][d] * BOUND_SCALE,
+                    "paid owner leaves exact backing for registered AND latent peer claims"
+                );
+                assert_eq!(
+                    group.source_credit[d].positive_claim_bound_num,
+                    late_claims[d] * BOUND_SCALE
+                );
+            }
+            assert_eq!(group.vault, CAPITAL + expected[late].iter().sum::<u128>());
+
+            let paid_frames = [
+                h.portfolios[first],
+                h.tokens[first],
+                h.portfolios[DEBTOR],
+                h.tokens[DEBTOR],
+            ];
+            let paid = paid_frames.map(|key| h.env.svm.get_account(&key));
+            // With no remaining peer leg, the first crank can materialize the
+            // last claim and realize one source in the same bounded instruction.
+            let late_calls = h.advance_claimant(late, true, false);
+            assert_eq!(late_calls, DOMAINS);
+            terminal_calls += late_calls;
+            assert_eq!(paid_frames.map(|key| h.env.svm.get_account(&key)), paid);
+            for actor in 0..2 {
+                assert_eq!(
+                    h.env.token_amount(h.tokens[actor]) as u128,
+                    CAPITAL + expected[actor].iter().sum::<u128>()
+                );
+            }
+            h.check();
+            for actor in [DEBTOR, first, late] {
+                h.env.svm.expire_blockhash();
+                let cu = h
+                    .env
+                    .close_portfolio_with_cu(&h.owners[actor], h.portfolios[actor]);
+                assert_cu_within("latent peer exit portfolio deletion", cu, CUSTODY_CU_LIMIT);
+                h.record(cu);
+            }
+            let group = h.env.market_state().1;
+            assert_eq!(
+                (
+                    group.vault,
+                    group.c_tot,
+                    group.insurance,
+                    group.materialized_portfolio_count
+                ),
+                (0, 0, 0, 0)
+            );
+            assert_eq!(h.env.token_amount(h.env.vault), 0);
+            assert!(group
+                .assets
+                .iter()
+                .all(|a| a.oi_eff_long_q == 0 && a.oi_eff_short_q == 0));
+            peak_cu = peak_cu.max(h.peak_cu);
+            peak_packet = peak_packet.max(h.peak_packet);
+        }
+    }
+    assert_eq!(terminal_calls, 4 * (DOMAINS + 1));
+    println!("INV-028 paid claimant / latent peer: worlds=4, terminal_calls={terminal_calls}, peak_cu={peak_cu}, peak_packet={peak_packet}");
 }
 
 #[test]
