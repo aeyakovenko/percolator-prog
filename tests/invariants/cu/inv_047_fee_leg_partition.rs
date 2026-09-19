@@ -865,3 +865,287 @@ fn v16_program_retained_routes_apply_current_redirect_policy_per_payer() {
     assert_eq!(fills, 16);
     println!("INV-036/047 retained redirect: 8 worlds, 16 fills, peak CU={peak_cu}");
 }
+
+#[test]
+fn v16_program_retained_resolution_routes_preserve_unsettled_fee_payouts() {
+    // INV-010/024/036/047/081: unlike the empty-market resolution pair, retain
+    // requests across mark changes, then compare latent PnL, side fees and SPL payouts.
+    // Both marks must be accrued: authority resolution may freeze the old effective
+    // price while a pushed mark is pending (INV-066's unaccrued-mark witness).
+    const MARKS: [u64; 2] = [110, 91];
+    const LOTS: [i128; 2] = [1, -2];
+    const RESOLVE_SLOT: u64 = 3;
+    let fees: [u128; 2] = core::array::from_fn(|asset| {
+        (LOTS[asset].unsigned_abs() * u128::from(PRICES[asset]) * u128::from(FEE_BPS))
+            .div_ceil(10_000)
+    });
+    let owner_fee: u128 = fees.iter().sum();
+    let gain: i128 = (0..2)
+        .map(|asset| LOTS[asset] * (i128::from(MARKS[asset]) - i128::from(PRICES[asset])))
+        .sum();
+    assert_eq!((fees, owner_fee, gain), ([2, 3], 5, 30));
+    let mut peak_cu = 0;
+    let mut payouts = 0;
+    for direction in [-1, 1] {
+        let mut reference = None;
+        for permissionless in [false, true] {
+            let mut fixture = Fixture::new();
+            fixture.env.configure_permissionless_resolve_with_cu(2, 1);
+            let empty = Keypair::from_seed(&[11; 32]).unwrap();
+            system_create_account_for_test(
+                &mut fixture.env.svm,
+                &fixture.env.payer,
+                &empty,
+                fixture.env.portfolio_account_len,
+                fixture.env.program_id,
+            );
+            let admin = fixture.env.admin.insecure_clone();
+            fixture
+                .env
+                .send(
+                    ProgInstruction::InitPortfolio,
+                    vec![
+                        AccountMeta::new(admin.pubkey(), true),
+                        AccountMeta::new(fixture.env.market, false),
+                        AccountMeta::new(empty.pubkey(), false),
+                    ],
+                    &[&admin],
+                )
+                .unwrap();
+            for asset in 0..2 {
+                fixture.env.trade_asset_with_cu(
+                    asset as u16,
+                    &fixture.owners[0],
+                    fixture.portfolios[0],
+                    &fixture.owners[1],
+                    fixture.portfolios[1],
+                    direction * LOTS[asset] * POS_SCALE as i128,
+                    PRICES[asset],
+                    FEE_BPS,
+                );
+            }
+            let mut keys = fixture.keys();
+            keys.push(empty.pubkey());
+            let mut frames = vec![fixture.frame(&keys)];
+            let resolve = Instruction {
+                program_id: fixture.env.program_id,
+                accounts: if permissionless {
+                    vec![AccountMeta::new(fixture.env.market, false)]
+                } else {
+                    vec![
+                        AccountMeta::new(admin.pubkey(), true),
+                        AccountMeta::new(fixture.env.market, false),
+                    ]
+                },
+                data: if permissionless {
+                    ProgInstruction::ResolveStalePermissionless { now_slot: 0 }
+                } else {
+                    ProgInstruction::ResolveMarket {
+                        asset_generation_frontier: fixture.env.market_state().1.next_market_id,
+                        authority_epoch: fixture.env.control_sequences(0).authority_epoch,
+                    }
+                }
+                .encode(),
+            };
+            let sign = |fixture: &mut Fixture| {
+                fixture.env.svm.expire_blockhash();
+                let mut signers = vec![&fixture.env.payer];
+                if !permissionless {
+                    signers.push(&admin);
+                }
+                Transaction::new_signed_with_payer(
+                    &[heap_ix(), cu_ix(), resolve.clone()],
+                    Some(&fixture.env.payer.pubkey()),
+                    &signers,
+                    fixture.env.svm.latest_blockhash(),
+                )
+            };
+            let retained = sign(&mut fixture);
+            retained.verify().unwrap();
+            fixture.env.svm.warp_to_slot(1);
+            for asset in 0..2 {
+                fixture
+                    .env
+                    .push_auth_mark_for_asset_as_admin(asset as u16, 1, MARKS[asset]);
+            }
+            assert_eq!(fixture.env.market_state().0.last_good_oracle_slot, 1);
+
+            // Accrue while the marks are live, before stale maturity. An empty
+            // target leaves both owners' gains/losses latent until terminal close.
+            let cu = fixture
+                .env
+                .send(
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 1,
+                        observations: crank_observations_for_assets(&[0, 1]),
+                    },
+                    vec![
+                        AccountMeta::new(fixture.env.payer.pubkey(), true),
+                        AccountMeta::new(fixture.env.market, false),
+                        AccountMeta::new(empty.pubkey(), false),
+                    ],
+                    &[],
+                )
+                .unwrap();
+            peak_cu = peak_cu.max(cu);
+            fixture.env.svm.warp_to_slot(RESOLVE_SLOT);
+            let (cfg, group) = fixture.env.market_state();
+            assert_eq!(cfg.last_good_oracle_slot, 1);
+            assert_eq!(
+                (group.vault, group.c_tot, group.insurance),
+                (2 * CAPITAL, 2 * (CAPITAL - owner_fee), 2 * owner_fee)
+            );
+            assert_eq!(
+                &group.insurance_domain_budget[..4],
+                &[fees[0], fees[0], fees[1], fees[1]]
+            );
+            for asset in 0..2 {
+                assert_eq!(group.assets[asset].slot_last, 1);
+                assert_eq!(group.assets[asset].effective_price, MARKS[asset]);
+                assert_eq!(
+                    [
+                        group.assets[asset].oi_eff_long_q,
+                        group.assets[asset].oi_eff_short_q
+                    ],
+                    [LOTS[asset].unsigned_abs() * POS_SCALE; 2]
+                );
+            }
+            for portfolio in fixture.portfolios {
+                let account = fixture.env.portfolio_state(portfolio);
+                assert_eq!(
+                    (account.capital.get(), account.pnl.get()),
+                    (CAPITAL - owner_fee, 0)
+                );
+                assert_eq!(
+                    percolator::active_bitmap_count_ones(active_bitmap(&account)),
+                    2
+                );
+            }
+
+            // Exclude only the fee payer from paired account frames, and check its
+            // route-specific signature charge separately. Economic bytes stay exact.
+            let mut payer = fixture
+                .env
+                .svm
+                .get_account(&fixture.env.payer.pubkey())
+                .unwrap();
+            payer.lamports -=
+                retained.signatures.len() as u64 * FeeStructure::default().lamports_per_signature;
+            peak_cu = peak_cu.max(
+                fixture
+                    .env
+                    .svm
+                    .send_transaction(retained)
+                    .unwrap()
+                    .compute_units_consumed,
+            );
+            assert_eq!(
+                fixture
+                    .env
+                    .svm
+                    .get_account(&fixture.env.payer.pubkey())
+                    .unwrap(),
+                payer
+            );
+            let (_, resolved) = fixture.env.market_state();
+            assert_eq!(resolved.mode, MarketModeV16::Resolved);
+            assert_eq!(resolved.resolved_slot, RESOLVE_SLOT);
+            frames.push(fixture.frame(&keys));
+            let retry = sign(&mut fixture);
+            let before = fixture.frame(&keys);
+            let error = fixture.env.svm.send_transaction(retry).unwrap_err();
+            assert_eq!(
+                error.err,
+                TransactionError::InstructionError(
+                    2,
+                    InstructionError::Custom(PercolatorError::EngineLockActive as u32)
+                )
+            );
+            peak_cu = peak_cu.max(error.meta.compute_units_consumed);
+            assert_eq!(fixture.frame(&keys), before, "resolved retry rolls back");
+
+            fixture.env.svm.warp_to_slot(RESOLVE_SLOT + 1);
+            let winner = usize::from(direction < 0);
+            for actor in [1 - winner, winner] {
+                let expected = u64::try_from(
+                    (CAPITAL - owner_fee) as i128
+                        + direction * if actor == 0 { gain } else { -gain },
+                )
+                .unwrap();
+                for _ in 0..8 {
+                    if resolved_portfolio_is_terminal(&fixture.env, fixture.portfolios[actor]) {
+                        break;
+                    }
+                    fixture.env.svm.expire_blockhash();
+                    let cu = fixture
+                        .env
+                        .send(
+                            ProgInstruction::CloseResolved {
+                                fee_rate_per_slot: 0,
+                            },
+                            vec![
+                                AccountMeta::new_readonly(fixture.owners[actor].pubkey(), false),
+                                AccountMeta::new(fixture.env.market, false),
+                                AccountMeta::new(fixture.portfolios[actor], false),
+                                AccountMeta::new(fixture.tokens[actor], false),
+                                AccountMeta::new(fixture.env.vault, false),
+                                AccountMeta::new_readonly(fixture.env.vault_authority, false),
+                                AccountMeta::new_readonly(spl_token::ID, false),
+                            ],
+                            &[],
+                        )
+                        .unwrap();
+                    peak_cu = peak_cu.max(cu);
+                    assert!(fixture.env.token_amount(fixture.tokens[actor]) <= expected);
+                }
+                assert!(resolved_portfolio_is_terminal(
+                    &fixture.env,
+                    fixture.portfolios[actor]
+                ));
+                assert_eq!(fixture.env.token_amount(fixture.tokens[actor]), expected);
+                payouts += 1;
+                frames.push(fixture.frame(&keys));
+            }
+            let (_, terminal) = fixture.env.market_state();
+            assert_eq!(
+                (terminal.vault, terminal.c_tot, terminal.insurance),
+                (2 * owner_fee, 0, 2 * owner_fee)
+            );
+            assert_eq!(
+                &terminal.insurance_domain_budget[..4],
+                &[fees[0], fees[0], fees[1], fees[1]]
+            );
+            assert_eq!(
+                u128::from(fixture.env.token_amount(fixture.env.vault)),
+                2 * owner_fee
+            );
+            assert_eq!(
+                fixture
+                    .tokens
+                    .map(|key| u128::from(fixture.env.token_amount(key)))
+                    .iter()
+                    .sum::<u128>()
+                    + terminal.vault,
+                2 * CAPITAL
+            );
+            for asset in &terminal.assets[..2] {
+                assert_eq!((asset.oi_eff_long_q, asset.oi_eff_short_q), (0, 0));
+            }
+            if let Some(expected) = &reference {
+                assert_eq!(
+                    &frames, expected,
+                    "resolution routes: direction={direction}"
+                );
+            } else {
+                reference = Some(frames);
+            }
+        }
+    }
+    assert_eq!(payouts, 8);
+    assert_cu_within(
+        "retained resolution and terminal payout",
+        peak_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    println!("INV-047 retained resolution: 4 worlds, 4 exact rollbacks, {payouts} owner payouts, peak CU={peak_cu}");
+}
