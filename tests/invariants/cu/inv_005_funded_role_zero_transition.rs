@@ -8,6 +8,9 @@ use crate::*;
 #[path = "inv_005_generated_funded_role_epochs.rs"]
 mod generated_funded_role_epochs;
 
+#[path = "inv_005_empty_domain_policy_handoff.rs"]
+mod empty_domain_policy_handoff;
+
 const BACKING: [u128; 4] = [31, 43, 59, 71];
 const INSURANCE: [u128; 4] = [17, 23, 29, 37];
 const CAPITAL: u128 = 101;
