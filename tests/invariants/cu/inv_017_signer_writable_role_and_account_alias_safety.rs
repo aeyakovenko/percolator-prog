@@ -48,6 +48,9 @@ use super::*;
 #[path = "inv_017_resolved_owner_destination_alias.rs"]
 mod resolved_owner_destination_alias;
 
+#[path = "inv_017_matcher_context_signer_alias.rs"]
+mod matcher_context_signer_alias;
+
 fn inv017_source_defines_test(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
     let mut test_attribute = false;
