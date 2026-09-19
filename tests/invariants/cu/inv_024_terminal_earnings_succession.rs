@@ -84,6 +84,9 @@ pub(crate) use dual_quote_earnings_progress::verify_dual_quote_earnings_progress
 mod recovery_reserve_cleanup;
 pub(crate) use recovery_reserve_cleanup::verify_recovery_reserve_cleanup;
 
+#[path = "inv_073_multisig_reserve_progress.rs"]
+mod multisig_reserve_progress;
+
 const CAPITAL: [u64; 2] = [52_502, 2_000_000];
 const BACKING: u64 = 100_000;
 const INSURANCE: u64 = 31;
