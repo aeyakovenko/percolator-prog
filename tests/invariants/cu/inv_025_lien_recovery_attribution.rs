@@ -1,5 +1,8 @@
 //! INV-024/025/026: stock movement, late rollback, and Recovery with a live lien.
 //! All expected value comes from public funding, quantity, price and margin inputs.
+//! INV-026/028/031/032/033: recycling surplus backing into same-domain insurance
+//! restores custody without restoring source capacity or releasing the live lien.
+//! The Live release/conversion/payout suffix does not add expiry or terminal evidence.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -20,6 +23,7 @@ struct Ledger {
     // Loss-funded source backing is attributed separately from provider SPL
     // deposits. Neither claim faces nor IM labels are additional token stock.
     loss_backing: [u128; 4],
+    consumed: [u128; 4],
 }
 
 struct World {
@@ -235,14 +239,17 @@ impl World {
                 bucket.fresh_unliened_backing_num,
                 fresh - owner_liens[domain]
             );
+            assert_eq!(source.spent_backing_num, e.consumed[domain] * SCALE);
+            assert_eq!(source.provider_receivable_num, e.consumed[domain] * SCALE);
+            assert_eq!(
+                bucket.consumed_liened_backing_num,
+                e.consumed[domain] * SCALE
+            );
             for zero in [
-                source.spent_backing_num,
-                source.provider_receivable_num,
                 source.impaired_liened_backing_num,
                 source.insurance_credit_reserved_num,
                 source.valid_liened_insurance_num,
                 source.impaired_liened_insurance_num,
-                bucket.consumed_liened_backing_num,
                 bucket.impaired_liened_backing_num,
                 bucket.utilization_fee_earnings,
             ] {
@@ -438,6 +445,269 @@ impl World {
             .collect();
         send_raw_tx(&mut self.env.svm, &self.env.payer, ix, &signers).unwrap()
     }
+}
+
+#[test]
+fn v16_program_backing_redeposited_as_insurance_preserves_live_lien_watermark() {
+    let mut peak_cu = 0;
+    let mut steps = 0;
+    for direction in [-1i128, 1] {
+        let domain = usize::from(direction > 0);
+        let adverse_domain = 2 + usize::from(direction < 0);
+        let prices = [(100 + 5 * direction) as u64, (100 - 5 * direction) as u64];
+        let mut w = World::new();
+        let mut e = Ledger {
+            cash: ENDOWMENTS,
+            ..Ledger::default()
+        };
+        macro_rules! check {
+            ($label:expr, $action:expr) => {{
+                let cu = $action;
+                assert_cu_within($label, cu, MULTI_ASSET_OPEN_TRADE_CU_LIMIT);
+                peak_cu = peak_cu.max(cu);
+                steps += 1;
+                w.check(&e, $label);
+            }};
+        }
+        w.check(&e, "public setup");
+        for asset in 0..2 {
+            check!(
+                "configure mark",
+                w.env.configure_auth_mark_for_asset_as_admin(asset, 1, 100)
+            );
+        }
+        for (actor, amount) in [(0, 313), (1, 1_000)] {
+            e.capital[actor] = amount;
+            e.cash[actor] -= amount as u64;
+            let ix = w.deposit(actor, amount);
+            check!("deposit", w.send(ix));
+        }
+        for (funded_domain, amount) in [(domain, 150), (adverse_domain, 79)] {
+            e.backing[funded_domain] = amount;
+            e.cash[3] -= amount as u64;
+            let ix = w.reserve(funded_domain as u16, amount, true);
+            check!("fund backing", w.send(ix));
+        }
+        for (asset, lots) in [(0, 20), (1, 10)] {
+            e.positions[0][asset as usize] = direction * lots;
+            e.positions[1][asset as usize] = -direction * lots;
+            let ix = w.trade(asset, direction * lots, 100);
+            check!("open", w.send(ix));
+        }
+        w.env.svm.warp_to_slot(2);
+        for asset in 0..2 {
+            check!(
+                "move mark",
+                w.env
+                    .push_auth_mark_for_asset_as_admin(asset, 2, prices[asset as usize])
+            );
+        }
+        for actor in [1, 0] {
+            let (loss, loss_domain, claim, claim_domain) = if actor == 1 {
+                (100, domain, 50, adverse_domain)
+            } else {
+                (50, adverse_domain, 100, domain)
+            };
+            e.capital[actor] -= loss;
+            e.loss_backing[loss_domain] += loss;
+            e.claims[actor][claim_domain] = claim;
+            check!(
+                "settle",
+                w.env.crank(
+                    w.portfolios[actor],
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 2,
+                        observations: crank_observations_for_assets(&[0, 1]),
+                    }
+                )
+            );
+        }
+        // Per-leg IM ceilings determine the lien; no engine output sizes the exchange.
+        let lien = (20 * u128::from(prices[0])).div_ceil(10)
+            + (12 * u128::from(prices[1])).div_ceil(10)
+            - (313 - 50);
+        assert_eq!(lien, if direction < 0 { 53 } else { 61 });
+        e.liens[0][domain] = lien;
+        e.positions[0][1] += 2 * direction;
+        e.positions[1][1] -= 2 * direction;
+        let ix = w.trade(1, 2 * direction, prices[1]);
+        check!("reserve real counterparty lien", w.send(ix));
+
+        let custody_before = w
+            .tokens
+            .into_iter()
+            .chain([w.env.vault, w.env.mint])
+            .map(|key| (key, w.env.svm.get_account(&key)))
+            .collect::<Vec<_>>();
+        let portfolios_before = w.portfolios.map(|key| w.env.svm.get_account(&key));
+        let exchange = 150 - lien;
+        e.backing[domain] -= exchange;
+        e.cash[3] += exchange as u64;
+        check!(
+            "withdraw exact backing surplus",
+            w.env.withdraw_backing_bucket_to_admin_token_with_cu(
+                w.tokens[3],
+                domain as u16,
+                exchange
+            )
+        );
+        e.insurance[domain] += exchange;
+        e.cash[3] -= exchange as u64;
+        let ix = w.reserve(domain as u16, exchange, false);
+        check!("redeposit surplus as same-domain insurance", w.send(ix));
+        for (key, before) in custody_before {
+            assert_eq!(
+                w.env.svm.get_account(&key),
+                before,
+                "equal custody after classification change"
+            );
+        }
+        assert_eq!(
+            w.portfolios.map(|key| w.env.svm.get_account(&key)),
+            portfolios_before
+        );
+
+        let probe = Instruction {
+            program_id: w.env.program_id,
+            data: ProgInstruction::WithdrawBackingBucket {
+                domain: domain as u16,
+                market_id: w.env.asset_market_id(0),
+                authority_epoch: w.env.control_sequences(0).authority_epoch,
+                amount: 1,
+            }
+            .encode(),
+            accounts: vec![
+                AccountMeta::new(w.env.admin.pubkey(), true),
+                AccountMeta::new(w.env.market, false),
+                AccountMeta::new(w.tokens[3], false),
+                AccountMeta::new(w.env.vault, false),
+                AccountMeta::new_readonly(w.env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), probe.clone()],
+            Some(&w.env.payer.pubkey()),
+            &[&w.env.payer, &w.env.admin],
+            w.env.svm.latest_blockhash(),
+        );
+        let fee = FeeStructure::default().lamports_per_signature
+            * u64::from(tx.message.header.num_required_signatures);
+        let mut keys = tx.message.account_keys.clone();
+        keys.extend(w.portfolios);
+        keys.extend(w.tokens);
+        keys.push(w.env.mint);
+        keys.sort_unstable();
+        keys.dedup();
+        let frame = keys
+            .into_iter()
+            .map(|key| (key, w.env.svm.get_account(&key)))
+            .collect::<Vec<_>>();
+        let failed = w
+            .env
+            .svm
+            .send_transaction(tx)
+            .expect_err("unreserved insurance cannot replace the one encumbered backing atom");
+        assert_eq!(
+            failed.err,
+            TransactionError::InstructionError(
+                2,
+                InstructionError::Custom(PercolatorError::EngineLockActive as u32)
+            )
+        );
+        for (key, mut before) in frame {
+            if key == w.env.payer.pubkey() {
+                before.as_mut().unwrap().lamports -= fee;
+            }
+            assert_eq!(
+                w.env.svm.get_account(&key),
+                before,
+                "classification probe rollback: {key}"
+            );
+        }
+        check!(
+            "one-atom backing rejection",
+            failed.meta.compute_units_consumed
+        );
+
+        for (asset, lots) in [(1, 12), (0, 20)] {
+            e.positions[0][asset as usize] = 0;
+            e.positions[1][asset as usize] = 0;
+            let ix = w.trade(asset, -direction * lots, prices[asset as usize]);
+            check!("flatten", w.send(ix));
+        }
+        e.liens[0][domain] = 0;
+        check!(
+            "release lien without insurance reclassification",
+            w.env.crank(
+                w.portfolios[0],
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 2,
+                    observations: crank_observations_for_assets(&[0, 1]),
+                }
+            )
+        );
+        w.env.svm.expire_blockhash();
+        e.backing[domain] -= 1;
+        e.cash[3] += 1;
+        check!("identical backing probe after release", w.send(probe));
+        check!(
+            "refresh before conversion",
+            w.env.crank(
+                w.portfolios[0],
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 2,
+                    observations: crank_observations_for_assets(&[0, 1]),
+                }
+            )
+        );
+        e.claims[0][domain] = 0;
+        e.capital[0] += 100;
+        e.loss_backing[domain] -= 100;
+        e.consumed[domain] += 100;
+        check!(
+            "consume backing once without spending insurance",
+            w.env
+                .convert_released_pnl_with_cu(&w.owners[0], w.portfolios[0], 100)
+        );
+        e.backing[domain] = 0;
+        e.cash[3] += (lien - 1) as u64;
+        check!(
+            "pay remaining released provider backing",
+            w.env.withdraw_backing_bucket_to_admin_token_with_cu(
+                w.tokens[3],
+                domain as u16,
+                lien - 1
+            )
+        );
+        e.insurance[domain] = 0;
+        e.cash[3] += exchange as u64;
+        check!(
+            "pay reclassified insurance exactly once",
+            w.env
+                .withdraw_insurance_domain_to_admin_token_with_cu(w.tokens[3], 0, exchange)
+        );
+        e.backing[adverse_domain] = 0;
+        e.cash[3] += 79;
+        check!(
+            "pay unrelated provider seed",
+            w.env.withdraw_backing_bucket_to_admin_token_with_cu(
+                w.tokens[3],
+                adverse_domain as u16,
+                79
+            )
+        );
+        for actor in [0, 1] {
+            let amount = e.capital[actor];
+            e.capital[actor] = 0;
+            e.cash[actor] += amount as u64;
+            let ix = w.withdraw(actor, amount);
+            check!("attributed owner withdrawal", w.send(ix));
+        }
+        assert_eq!(e.cash, [363, 900, 211, 500]);
+        assert_eq!(w.env.token_amount(w.env.vault), 50);
+    }
+    println!("backing-to-insurance classification: 2 source sides, {steps} checked transactions, 2 exact rollbacks, peak {peak_cu} CU");
 }
 
 #[test]
