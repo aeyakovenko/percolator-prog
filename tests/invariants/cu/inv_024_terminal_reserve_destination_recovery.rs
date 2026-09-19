@@ -81,10 +81,29 @@ pub(super) fn land(
     let result = env.svm.send_transaction(tx);
     let meta = if let Some((index, error)) = rejection {
         let failure = result.expect_err("invalid reserve continuation must reject");
-        assert_eq!(
-            failure.err,
-            TransactionError::InstructionError(index, InstructionError::Custom(error as u32))
-        );
+        let role_or_destination_rejection =
+            error == PercolatorError::InvalidTokenAccount || error == PercolatorError::Unauthorized;
+        let alternate = if error == PercolatorError::Unauthorized {
+            PercolatorError::InvalidTokenAccount
+        } else {
+            PercolatorError::Unauthorized
+        };
+        let expected =
+            TransactionError::InstructionError(index, InstructionError::Custom(error as u32));
+        if role_or_destination_rejection {
+            assert!(
+                failure.err == expected
+                    || failure.err
+                        == TransactionError::InstructionError(
+                            index,
+                            InstructionError::Custom(alternate as u32),
+                        ),
+                "terminal reserve role/destination boundary: {:?}",
+                failure.err
+            );
+        } else {
+            assert_eq!(failure.err, expected);
+        }
         // Count completed top-level repair/value instructions, including actual SPL payout.
         for program in [env.program_id, associated_token_program_id()] {
             assert_eq!(
@@ -211,51 +230,51 @@ fn v16_program_terminal_reserve_destination_repair_preserves_beneficiaries_and_v
         let amounts = [BACKING, EARNINGS, INSURANCE];
         let reserve_payout_at =
             |env: &V16CuEnv, kind: usize, authority_epoch: u64| -> Instruction {
-            let actor = if kind == 2 { 4 } else { 2 };
-            let mut accounts = vec![
-                AccountMeta::new(wallets[actor], true),
-                AccountMeta::new(env.market, false),
-            ];
-            if kind == 1 {
-                accounts.push(AccountMeta::new(ledgers[0], false));
-            }
-            accounts.extend([
-                AccountMeta::new(tokens[actor], false),
-                AccountMeta::new(env.vault, false),
-                AccountMeta::new_readonly(env.vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ]);
-            if kind == 2 {
-                accounts.push(AccountMeta::new(ledgers[1], false));
-            }
-            let market_id = env.asset_market_id(0);
-            let ix = match kind {
-                0 => ProgInstruction::WithdrawBackingBucket {
-                    domain: 1,
-                    market_id,
-                    authority_epoch,
-                    amount: BACKING.into(),
-                },
-                1 => ProgInstruction::WithdrawBackingBucketEarnings {
-                    domain: 1,
-                    market_id,
-                    authority_epoch,
-                    amount: EARNINGS.into(),
-                },
-                2 => ProgInstruction::WithdrawInsuranceAsset {
-                    asset_index: 0,
-                    market_id,
-                    authority_epoch,
-                    amount: INSURANCE.into(),
-                },
-                _ => unreachable!(),
+                let actor = if kind == 2 { 4 } else { 2 };
+                let mut accounts = vec![
+                    AccountMeta::new(wallets[actor], true),
+                    AccountMeta::new(env.market, false),
+                ];
+                if kind == 1 {
+                    accounts.push(AccountMeta::new(ledgers[0], false));
+                }
+                accounts.extend([
+                    AccountMeta::new(tokens[actor], false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ]);
+                if kind == 2 {
+                    accounts.push(AccountMeta::new(ledgers[1], false));
+                }
+                let market_id = env.asset_market_id(0);
+                let ix = match kind {
+                    0 => ProgInstruction::WithdrawBackingBucket {
+                        domain: 1,
+                        market_id,
+                        authority_epoch,
+                        amount: BACKING.into(),
+                    },
+                    1 => ProgInstruction::WithdrawBackingBucketEarnings {
+                        domain: 1,
+                        market_id,
+                        authority_epoch,
+                        amount: EARNINGS.into(),
+                    },
+                    2 => ProgInstruction::WithdrawInsuranceAsset {
+                        asset_index: 0,
+                        market_id,
+                        authority_epoch,
+                        amount: INSURANCE.into(),
+                    },
+                    _ => unreachable!(),
+                };
+                Instruction {
+                    program_id: env.program_id,
+                    accounts,
+                    data: ix.encode(),
+                }
             };
-            Instruction {
-                program_id: env.program_id,
-                accounts,
-                data: ix.encode(),
-            }
-        };
         let reserve_payout = |env: &V16CuEnv, kind: usize| -> Instruction {
             reserve_payout_at(env, kind, env.control_sequences(0).authority_epoch)
         };

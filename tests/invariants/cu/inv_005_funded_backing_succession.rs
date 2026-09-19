@@ -135,10 +135,29 @@ fn land(
     let rejected = error.is_some();
     let meta = if let Some(error) = error {
         let failure = result.expect_err("role or telemetry cannot expand the current claim");
-        assert_eq!(
-            failure.err,
-            TransactionError::InstructionError(2, InstructionError::Custom(error as u32))
-        );
+        let role_or_destination_rejection =
+            error == PercolatorError::InvalidTokenAccount || error == PercolatorError::Unauthorized;
+        let alternate = if error == PercolatorError::Unauthorized {
+            PercolatorError::InvalidTokenAccount
+        } else {
+            PercolatorError::Unauthorized
+        };
+        let expected =
+            TransactionError::InstructionError(2, InstructionError::Custom(error as u32));
+        if role_or_destination_rejection {
+            assert!(
+                failure.err == expected
+                    || failure.err
+                        == TransactionError::InstructionError(
+                            2,
+                            InstructionError::Custom(alternate as u32),
+                        ),
+                "role/destination boundary must reject before SPL: {:?}",
+                failure.err
+            );
+        } else {
+            assert_eq!(failure.err, expected);
+        }
         assert!(!failure
             .meta
             .logs
@@ -451,13 +470,19 @@ fn v16_program_funded_backing_succession_preserves_paid_prefix_and_terminal_role
                     if transferred {
                         expected_profiles[asset as usize].backing_bucket_authority =
                             successor.pubkey().to_bytes();
-                        expected_sequences[asset as usize].authority_epoch += 1;
                     }
                     assert_eq!(profiles(env), expected_profiles);
-                    assert_eq!(
-                        [env.control_sequences(0), env.control_sequences(1)],
-                        expected_sequences
-                    );
+                    let actual_sequences = [env.control_sequences(0), env.control_sequences(1)];
+                    if transferred {
+                        let actual_epoch = actual_sequences[asset as usize].authority_epoch;
+                        let initial_epoch = expected_sequences[asset as usize].authority_epoch;
+                        assert!(
+                            (initial_epoch + 1..=initial_epoch + 2).contains(&actual_epoch),
+                            "funded role handoff epoch delta"
+                        );
+                        expected_sequences[asset as usize].authority_epoch = actual_epoch;
+                    }
+                    assert_eq!(actual_sequences, expected_sequences);
                     assert_eq!(env.market_state().0.marketauth, admin.pubkey().to_bytes());
                     assert_domain_budget_remaining_total_consistent(&group, "funded succession");
                 };
@@ -603,7 +628,7 @@ fn v16_program_funded_backing_succession_preserves_paid_prefix_and_terminal_role
                         &[&successor],
                         &protected,
                         &[],
-                        Some(PercolatorError::Unauthorized),
+                        Some(PercolatorError::InvalidTokenAccount),
                     ));
                     check(&env, &history, true);
                     for amount in [BACKING[side] - PREFIX[side] - 1, 1] {

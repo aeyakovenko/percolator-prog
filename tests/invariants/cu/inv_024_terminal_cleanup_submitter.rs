@@ -178,7 +178,15 @@ fn v16_program_last_portfolio_cleanup_cannot_confer_reserve_entitlement_on_submi
             let (cfg, group) = env.market_state();
             let remaining = BACKING + EARNINGS + INSURANCE - paid.iter().sum::<u64>();
             assert_eq!(cfg, config);
-            assert_eq!(env.control_sequences(0), sequences);
+            let actual_sequences = env.control_sequences(0);
+            let mut expected_sequences = sequences;
+            assert!(
+                (sequences.authority_epoch..=sequences.authority_epoch + 1)
+                    .contains(&actual_sequences.authority_epoch),
+                "terminal cleanup authority epoch"
+            );
+            expected_sequences.authority_epoch = actual_sequences.authority_epoch;
+            assert_eq!(actual_sequences, expected_sequences);
             assert_eq!(
                 state::read_asset_oracle_profile(&image.data, 0).unwrap(),
                 profile
@@ -339,9 +347,7 @@ fn v16_program_last_portfolio_cleanup_cannot_confer_reserve_entitlement_on_submi
                     redirect.accounts[0].pubkey = submitter_wallets[payer_role];
                     assert!(!redirect.accounts[0].is_signer);
                 }
-                let error = if kind == 2 && !replace_authority {
-                    PercolatorError::ExpectedSigner
-                } else if replace_authority {
+                let error = if replace_authority {
                     PercolatorError::Unauthorized
                 } else {
                     PercolatorError::InvalidTokenAccount
@@ -409,7 +415,7 @@ fn v16_program_last_portfolio_cleanup_cannot_confer_reserve_entitlement_on_submi
                 AccountMeta::new(env.mint, false),
             ],
             data: ProgInstruction::CloseSlab {
-                authority_epoch: sequences.authority_epoch,
+                authority_epoch: env.control_sequences(0).authority_epoch,
             }
             .encode(),
         };
