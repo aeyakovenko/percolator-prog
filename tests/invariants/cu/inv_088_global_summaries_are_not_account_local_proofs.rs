@@ -848,6 +848,184 @@ fn v16_program_backing_earnings_global_summary_is_order_independent_across_domai
     }
 }
 
+#[test]
+fn v16_program_global_earnings_cannot_authorize_local_overdraw_after_other_domain_payout() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    // The existing cohort opens 200 source + 120 hedge units. Its 3,240 IM
+    // exceeds 2,600 cash by 640; the 50% fee, less 25% insurance, earns 240.
+    let lien = (200 * 105 + 120 * 95) / 10 - (3_130 - 530 - 500 + 500);
+    let fee = (lien * 5_000u128).div_ceil(10_000);
+    let earned = fee - fee * 2_500 / 10_000;
+    assert_eq!(earned, 240);
+    let mut peak_cu = 0;
+    for realization_order in [[0usize, 1], [1, 0]] {
+        for target in 0..2 {
+            let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+                4, 1_000, 1_000, 500, 530,
+            );
+            env.svm.warp_to_slot(1);
+            for asset in 0..4 {
+                env.configure_auth_mark_for_asset_as_admin(asset, 1, 100);
+            }
+            let cohorts = [
+                inv_088_setup_backing_earnings_cohort(&mut env, 0, 1, 1),
+                inv_088_setup_backing_earnings_cohort(&mut env, 2, 3, 5),
+            ];
+            env.svm.warp_to_slot(2);
+            for index in realization_order {
+                assert_eq!(
+                    inv_088_realize_backing_earnings(&mut env, &cohorts[index]),
+                    earned
+                );
+            }
+            let destinations =
+                [0, 1].map(|_| env.token_account_for_mint(env.mint, env.admin.pubkey(), 0));
+            let initial_vault = env.token_amount(env.vault);
+            let check = |env: &V16CuEnv, paid: [u128; 2]| {
+                let group = env.market_state().1;
+                for index in 0..2 {
+                    assert_eq!(
+                        group.source_backing_buckets[cohorts[index].domain as usize]
+                            .utilization_fee_earnings,
+                        earned - paid[index],
+                    );
+                    assert_eq!(
+                        u128::from(env.token_amount(destinations[index])),
+                        paid[index]
+                    );
+                }
+                inv_088_assert_backing_earnings_summary_matches_domain_scan(env, "local overdraw");
+                assert_eq!(
+                    group.backing_provider_earnings_total,
+                    2 * earned - paid.iter().sum::<u128>()
+                );
+                assert_eq!(
+                    u128::from(initial_vault - env.token_amount(env.vault)),
+                    paid.iter().sum::<u128>()
+                );
+            };
+            let withdraw = |env: &V16CuEnv, index: usize, amount| Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(cohorts[index].ledger, false),
+                    AccountMeta::new(destinations[index], false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                data: ProgInstruction::WithdrawBackingBucketEarnings {
+                    domain: cohorts[index].domain,
+                    market_id: env.asset_market_id(cohorts[index].source_asset),
+                    authority_epoch: env
+                        .control_sequences(cohorts[index].source_asset as usize)
+                        .authority_epoch,
+                    amount,
+                }
+                .encode(),
+            };
+            let mut paid = [0u128; 2];
+            check(&env, paid);
+            let cu = env.withdraw_backing_bucket_earnings_to_admin_token_with_cu(
+                cohorts[target].ledger,
+                destinations[target],
+                cohorts[target].domain,
+                earned - 1,
+            );
+            peak_cu = peak_cu.max(cu);
+            paid[target] = earned - 1;
+            check(&env, paid);
+
+            // The same authority controls both domains. A valid unrelated payout
+            // changes the last-touched bucket and aggregate before the local check.
+            let other = 1 - target;
+            let prefix = withdraw(&env, other, 1);
+            let overdraw = withdraw(&env, target, 2);
+            assert!(
+                2 < earned,
+                "even after the prefix, global earnings can fund the overdraw"
+            );
+            let keys: Vec<_> = [env.market, env.vault, env.mint, env.admin.pubkey()]
+                .into_iter()
+                .chain(destinations)
+                .chain(cohorts.iter().map(|cohort| cohort.ledger))
+                .chain(env.portfolios.iter().copied())
+                .collect();
+            let before: Vec<_> = keys.iter().map(|key| env.svm.get_account(key)).collect();
+            let tx = Transaction::new_signed_with_payer(
+                &[heap_ix(), cu_ix(), prefix.clone(), overdraw],
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &env.admin],
+                env.svm.latest_blockhash(),
+            );
+            let failure = env
+                .svm
+                .send_transaction(tx)
+                .expect_err("local earnings overdraw");
+            assert_eq!(
+                failure.err,
+                TransactionError::InstructionError(
+                    3,
+                    InstructionError::Custom(PercolatorError::EngineLockActive as u32),
+                ),
+                "{:?}",
+                failure.meta.logs
+            );
+            for program in [env.program_id, spl_token::ID] {
+                assert_eq!(
+                    failure
+                        .meta
+                        .logs
+                        .iter()
+                        .filter(|line| { **line == format!("Program {program} success") })
+                        .count(),
+                    1,
+                    "the unrelated payout must execute before rollback"
+                );
+            }
+            assert_eq!(
+                keys.iter()
+                    .map(|key| env.svm.get_account(key))
+                    .collect::<Vec<_>>(),
+                before
+            );
+            peak_cu = peak_cu.max(failure.meta.compute_units_consumed);
+            assert!(failure.meta.compute_units_consumed > 0);
+            check(&env, paid);
+
+            let tx = Transaction::new_signed_with_payer(
+                &[heap_ix(), cu_ix(), prefix, withdraw(&env, target, 1)],
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &env.admin],
+                env.svm.latest_blockhash(),
+            );
+            let success = env
+                .svm
+                .send_transaction(tx)
+                .expect("exact local boundary after identical prefix");
+            peak_cu = peak_cu.max(success.compute_units_consumed);
+            paid[other] += 1;
+            paid[target] += 1;
+            check(&env, paid);
+            for index in 0..2 {
+                let ledger = state::read_backing_domain_ledger(
+                    &env.svm.get_account(&cohorts[index].ledger).unwrap().data,
+                )
+                .unwrap();
+                assert_eq!(ledger.total_earnings_withdrawn_atoms, paid[index]);
+                assert_eq!(
+                    ledger.last_observed_bucket_earnings_atoms,
+                    earned - paid[index]
+                );
+            }
+        }
+    }
+    assert_cu_within("INV-088 cross-domain earnings boundary", peak_cu, 600_000);
+    eprintln!("INV-088 local earnings: 4 worlds, 4 exact prefix rollbacks, peak CU={peak_cu}");
+}
+
 fn inv_088_assert_resolved_blocker_summary_matches_asset_scan(env: &V16CuEnv, label: &str) {
     let group = env.market_state().1;
     let mut independent = 0u64;
