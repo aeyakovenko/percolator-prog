@@ -15,6 +15,274 @@ fn v16_program_funded_report_cadence_preserves_partial_liquidation_reward_and_cu
     run_report_cadence(1_000);
 }
 
+#[test]
+fn v16_program_paid_rediscovery_revokes_prior_reward_authentication_until_recatchup() {
+    use percolator_prog::constants::{
+        EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED, EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN,
+    };
+
+    const REPORT: u64 = 980_000;
+    const SHARE: u128 = 3_333;
+    let mut reference = None;
+    let mut peak_cu = 0;
+    for publish_first in [false, true] {
+        let mut env = inv018_public_spl_market_with_params(
+            6,
+            V16CuMarketParams {
+                max_abs_funding_e9_per_slot: 0,
+                ..production_risk_params()
+            },
+        );
+        set_test_clock(&mut env, 1, 100);
+        env.update_liquidation_fee_policy_with_cu(SHARE as u16);
+        let feed = [0x54; 32];
+        let mut report = env.set_pyth_price_with_conf(&feed, ENTRY as i64, -6, 0, 100);
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0; 32], [0; 32]],
+            &[report],
+            1,
+            100,
+            0,
+            0,
+            1,
+            0,
+        )
+        .unwrap();
+        let owners: [Keypair; 5] = std::array::from_fn(|_| Keypair::new());
+        let funded = std::array::from_fn::<_, 5, _>(|i| fund(&mut env, &owners[i], FUNDS[i]));
+        let portfolios = funded.map(|pair| pair.0);
+        let tokens = funded.map(|pair| pair.1);
+        let [target, peer, trader_a, trader_b, keeper] = portfolios;
+        env.trade_asset_with_cu(
+            0,
+            &owners[0],
+            target,
+            &owners[1],
+            peer,
+            (100 * POS_SCALE) as i128,
+            ENTRY,
+            0,
+        );
+        let profile = |env: &V16CuEnv| {
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+                .unwrap()
+        };
+        let mut tracked = vec![env.market, env.mint, env.vault, report];
+        tracked.extend(portfolios);
+        tracked.extend(tokens);
+        let custody = [env.mint, env.vault].map(|key| env.svm.get_account(&key));
+        let mut rewards = 0;
+        let mut history = Vec::new();
+
+        // A rewarded authenticated episode precedes rediscovery. Its receipt
+        // survives, but the second paid mark must revoke reward eligibility.
+        for (phase, (slot, now, fresh_price, price, authenticated)) in [
+            (9, 1_001, MARK, MARK, true),
+            (14, 2_001, REPORT, MARK - MARK * 24 / 10_000, false),
+            (30, 2_017, 960_000, 960_000, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if phase < 2 {
+                let base = if phase == 0 { ENTRY } else { MARK };
+                let discovery_slot = if phase == 0 { 5 } else { 13 };
+                set_test_clock(&mut env, discovery_slot, now - 1);
+                let clock_only = observe(&env, keeper, owners[4].pubkey(), Some(report), None);
+                peak_cu = peak_cu.max(submit(&mut env, &owners[4], &[clock_only], &tracked, None));
+                if phase == 1 {
+                    for _ in 0..6 {
+                        let current = census(&env, portfolios);
+                        if current[1..4].iter().all(|value| *value) {
+                            break;
+                        }
+                        for i in 1..4 {
+                            if !current[i] {
+                                let refresh = observe(
+                                    &env,
+                                    portfolios[i],
+                                    owners[4].pubkey(),
+                                    Some(report),
+                                    None,
+                                );
+                                peak_cu = peak_cu.max(submit(
+                                    &mut env,
+                                    &owners[4],
+                                    &[refresh],
+                                    &tracked,
+                                    None,
+                                ));
+                            }
+                        }
+                    }
+                    assert!(census(&env, portfolios)[1..4].iter().all(|value| *value));
+                }
+                assert_eq!(
+                    profile(&env).effective_price_provenance,
+                    EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED
+                );
+                let before = env.market_state().1;
+                assert_eq!(before.assets[0].effective_price, base);
+                let keeper_value = values(&env, portfolios)[4];
+                let age = discovery_slot - profile(&env).mark_ewma_last_slot;
+                assert_eq!(age, if phase == 0 { 4 } else { 8 });
+                // Rediscovery uses a reduction after liquidation's side haircut.
+                let size = if phase == 0 { 4 } else { -2 } * POS_SCALE as i128;
+                let trade_cu = env.trade_asset_with_cu(
+                    0, &owners[2], trader_a, &owners[3], trader_b, size, 900_000, 0,
+                );
+                assert_cu_within("paid rediscovery trade", trade_cu, TRADE_CU_LIMIT);
+                let after = env.market_state().1;
+                // Corroborating an unchanged mark did not reset discovery age.
+                let accepted = base - base * 24 * age / 10_000;
+                let alpha = 10_000 * age / (age + 1);
+                let mark = base - (base - accepted) * alpha / 10_000;
+                assert_eq!(after.assets[0].effective_price, base);
+                assert_eq!(after.assets[0].raw_oracle_target_price, mark);
+                assert_eq!(profile(&env).mark_ewma_e6, mark);
+                assert_eq!(
+                    profile(&env).effective_price_provenance,
+                    EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
+                );
+                assert!(after.insurance > before.insurance, "rediscovery must pay");
+                assert_eq!(values(&env, portfolios)[4], keeper_value);
+                assert_eq!(keeper_value, FUNDS[4] as i128 + rewards as i128);
+                if phase == 1 {
+                    assert!(rewards > 0, "exercise a previously rewarded market");
+                }
+            }
+
+            set_test_clock(&mut env, slot, now);
+            report = env.set_pyth_price_with_conf(&feed, fresh_price as i64, -6, 0, now);
+            let conflicting =
+                env.set_pyth_price_with_conf(&feed, fresh_price as i64 + 1, -6, 0, now);
+            tracked.extend([report, conflicting]);
+            if publish_first {
+                let before = values(&env, portfolios);
+                let publish = observe(&env, keeper, owners[4].pubkey(), Some(report), None);
+                peak_cu = peak_cu.max(submit(&mut env, &owners[4], &[publish], &tracked, None));
+                assert_eq!(values(&env, portfolios), before);
+            }
+            let valid = observe(&env, target, owners[4].pubkey(), Some(report), Some(keeper));
+            let invalid = observe(
+                &env,
+                target,
+                owners[4].pubkey(),
+                Some(conflicting),
+                Some(keeper),
+            );
+            let mut liquidated = false;
+            for _ in 0..6 {
+                let before = env.market_state().1;
+                let before_values = values(&env, portfolios);
+                let before_cert = health_cert(&env.portfolio_state(target));
+                peak_cu = peak_cu.max(submit(
+                    &mut env,
+                    &owners[4],
+                    &[valid.clone(), invalid.clone()],
+                    &tracked,
+                    Some((
+                        3,
+                        InstructionError::Custom(PercolatorError::OracleInvalid as u32),
+                    )),
+                ));
+                peak_cu = peak_cu.max(submit(
+                    &mut env,
+                    &owners[4],
+                    &[valid.clone()],
+                    &tracked,
+                    None,
+                ));
+                let after = env.market_state().1;
+                assert_eq!(after.assets[0].effective_price, price);
+                assert_eq!(after.assets[0].raw_oracle_target_price, fresh_price);
+                assert_eq!(profile(&env).last_good_oracle_slot, slot);
+                assert_eq!(
+                    profile(&env).effective_price_provenance,
+                    if authenticated {
+                        EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED
+                    } else {
+                        EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
+                    }
+                );
+                assert_eq!(
+                    [env.mint, env.vault].map(|key| env.svm.get_account(&key)),
+                    custody
+                );
+                census(&env, portfolios);
+                let closed = before.assets[0].oi_eff_long_q - after.assets[0].oi_eff_long_q;
+                if closed == 0 {
+                    assert_eq!(values(&env, portfolios)[4], before_values[4]);
+                    assert_eq!(after.insurance, before.insurance);
+                    continue;
+                }
+                assert!(before_cert.certified_liq_deficit > 0);
+                assert!(closed < before.assets[0].oi_eff_long_q);
+                let penalty = fee(closed, price, 5);
+                let potential_reward = penalty * SHARE / 10_000;
+                assert!(potential_reward > 0);
+                let reward = if authenticated { potential_reward } else { 0 };
+                if !authenticated {
+                    assert_ne!(penalty, fee(closed, fresh_price, 5));
+                }
+                let mut expected = before_values;
+                expected[0] -= penalty as i128;
+                expected[4] += reward as i128;
+                assert_eq!(values(&env, portfolios), expected);
+                assert_eq!(after.insurance, before.insurance + penalty - reward);
+                let retained = if authenticated { penalty - reward } else { 0 };
+                assert_eq!(
+                    after.insurance_domain_budget_remaining_total,
+                    before.insurance_domain_budget_remaining_total + retained
+                );
+                rewards += reward;
+                history.push((price, closed, penalty, reward, expected, after.insurance));
+                liquidated = true;
+                break;
+            }
+            assert!(liquidated, "phase {phase} must collect a positive penalty");
+        }
+        assert_eq!(history.len(), 3);
+        assert!(history[0].3 > 0 && history[1].3 == 0 && history[2].3 > 0);
+        let payout = u128::from(FUNDS[4]) + rewards;
+        let cu = env
+            .send(
+                env.withdraw_ix(keeper, payout),
+                vec![
+                    AccountMeta::new(owners[4].pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(keeper, false),
+                    AccountMeta::new(tokens[4], false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&owners[4]],
+            )
+            .unwrap();
+        assert_cu_within("rediscovery keeper payout", cu, CUSTODY_CU_LIMIT);
+        assert_eq!(u128::from(env.token_amount(tokens[4])), payout);
+        assert_eq!(
+            u128::from(env.token_amount(env.vault)) + payout,
+            FUNDS.iter().map(|value| u128::from(*value)).sum::<u128>()
+        );
+        assert_eq!(values(&env, portfolios)[4], 0);
+        census(&env, portfolios);
+        println!("rediscovery publish_first={publish_first}: {history:?}, payout={payout}, peak={peak_cu} CU");
+        if let Some(expected) = &reference {
+            assert_eq!(
+                &history, expected,
+                "publication order changed cycle economics"
+            );
+        } else {
+            reference = Some(history);
+        }
+    }
+}
+
 fn run_report_cadence(max_funding: u64) {
     const REPORT: u64 = 980_000;
     const SHARE: u128 = 3_333;
