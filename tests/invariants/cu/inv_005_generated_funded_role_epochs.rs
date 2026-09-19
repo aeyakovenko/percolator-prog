@@ -1,5 +1,6 @@
 //! INV-005/020/024/027/055/081: interleaved funded role round trips preserve
 //! unpaid entitlement, current observation scope, and independently held roles.
+//! Market-authority ABA also preserves a funded role detached during the round trip.
 
 use super::super::{handoff, land, payout, profile, set_holder, signed};
 use super::{fund_fixture, BACKING, CAPITAL, INSURANCE, SUPPLY};
@@ -488,4 +489,268 @@ fn v16_program_generated_funded_role_round_trips_preserve_entitlements_and_obser
     assert_eq!(worlds, 360);
     assert_eq!(rollbacks, 12 * worlds);
     eprintln!("INV-005 generated funded roles: {worlds} worlds, {transactions} checked transactions, {rollbacks} exact rollback/SPL prefixes, peak {peak} CU");
+}
+
+#[test]
+fn v16_program_market_authority_aba_cannot_reacquire_detached_funded_role() {
+    let mut peak = 0;
+    for role in [1, 2] {
+        let backing = role == 2;
+        let kind = if backing {
+            processor::ASSET_AUTH_BACKING_BUCKET
+        } else {
+            processor::ASSET_AUTH_INSURANCE_OPERATOR
+        };
+        let mut env = inv018_public_spl_market_with_params(
+            6,
+            V16CuMarketParams {
+                max_portfolio_assets: 2,
+                ..V16CuMarketParams::default()
+            },
+        );
+        let admin = env.admin.insecure_clone();
+        let keys: [Keypair; 5] = std::array::from_fn(|_| Keypair::new());
+        let actors = [&keys[0], &keys[1], &keys[2], &keys[3], &admin, &keys[4]];
+        let (wallets, portfolio) = fund_fixture(&mut env, &actors);
+        let market = env.market;
+        let vault = env.vault;
+        let mut tracked = vec![market, vault, env.mint, env.vault_authority, portfolio];
+        tracked.extend(wallets);
+        tracked.extend(actors.map(Signer::pubkey));
+        let mut book = Book {
+            backing: BACKING,
+            insurance: INSURANCE,
+            paid: [0; 6],
+            capital: CAPITAL,
+            profiles: [profile(&env, 0), profile(&env, 1)],
+            sequences: [env.control_sequences(0), env.control_sequences(1)],
+        };
+        book.check(&env, &wallets, portfolio);
+        let mut run = |env: &mut V16CuEnv, tx, changed: &[Pubkey], error, spl| {
+            peak = peak.max(land(env, tx, &tracked, changed, error, spl));
+            for (wallet, actor) in wallets.iter().zip(actors) {
+                let token =
+                    TokenAccount::unpack(&env.svm.get_account(wallet).unwrap().data).unwrap();
+                assert_eq!(token.owner, actor.pubkey());
+                assert_eq!(token.mint, env.mint);
+                assert_eq!(token.delegate, COption::None);
+                assert_eq!(token.close_authority, COption::None);
+            }
+            let token = TokenAccount::unpack(&env.svm.get_account(&vault).unwrap().data).unwrap();
+            assert_eq!(token.owner, env.vault_authority);
+            assert_eq!(token.mint, env.mint);
+            assert_eq!(token.delegate, COption::None);
+            assert_eq!(token.close_authority, COption::None);
+        };
+        let market_handoff = |env: &V16CuEnv, from: usize, to: usize, epoch| Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(actors[from].pubkey(), true),
+                AccountMeta::new(actors[to].pubkey(), true),
+                AccountMeta::new(market, false),
+            ],
+            data: ProgInstruction::UpdateAuthority {
+                authority_epoch: epoch,
+                new_pubkey: actors[to].pubkey().to_bytes(),
+            }
+            .encode(),
+        };
+
+        // The incumbent first consents to sharing its funded role with market authority A.
+        let ix = handoff(
+            &env,
+            0,
+            kind,
+            actors[role].pubkey(),
+            Some(admin.pubkey()),
+            book.sequences[0].authority_epoch,
+        );
+        let tx = signed(&env, &[ix], &[actors[role], &admin]);
+        run(&mut env, tx, &[market], None, 0);
+        set_holder(&mut book.profiles[0], kind, admin.pubkey());
+        book.sequences[0].authority_epoch += 1;
+        book.check(&env, &wallets, portfolio);
+
+        let peer_payout = payout(&env, actors[2].pubkey(), wallets[2], 2, true, 1);
+        let initial_handoff = market_handoff(&env, 4, 3, book.sequences[0].authority_epoch);
+        let retained = signed(
+            &env,
+            &[peer_payout.clone(), initial_handoff.clone()],
+            &[actors[2], &admin, actors[3]],
+        );
+        let before = super::super::frame(&env, &tracked);
+        env.svm
+            .simulate_transaction(retained.clone().into())
+            .expect("the retained market handoff and sibling SPL prefix are initially valid");
+        assert_eq!(super::super::frame(&env, &tracked), before);
+
+        let economy = env.market_state().1;
+        let tx = signed(&env, &[initial_handoff], &[&admin, actors[3]]);
+        run(&mut env, tx, &[market], None, 0);
+        book.profiles[0].asset_admin = actors[3].pubkey().to_bytes();
+        book.profiles[0].oracle_authority = actors[3].pubkey().to_bytes();
+        set_holder(&mut book.profiles[0], kind, actors[3].pubkey());
+        book.sequences[0].authority_epoch += 1;
+        assert_eq!(
+            env.market_state().0.marketauth,
+            actors[3].pubkey().to_bytes()
+        );
+        assert_eq!(env.market_state().1, economy);
+        book.check(&env, &wallets, portfolio);
+
+        let ix = payout(&env, actors[3].pubkey(), wallets[3], 0, backing, 3);
+        let tx = signed(&env, &[ix], &[actors[3]]);
+        run(&mut env, tx, &[market, vault, wallets[3]], None, 1);
+        book.pay(0, backing, 3, 3);
+        book.check(&env, &wallets, portfolio);
+
+        // B detaches only this role to C, retaining its market-authority role.
+        let economy = env.market_state().1;
+        let ix = handoff(
+            &env,
+            0,
+            kind,
+            actors[3].pubkey(),
+            Some(actors[role].pubkey()),
+            book.sequences[0].authority_epoch,
+        );
+        let tx = signed(&env, &[ix], &[actors[3], actors[role]]);
+        run(&mut env, tx, &[market], None, 0);
+        set_holder(&mut book.profiles[0], kind, actors[role].pubkey());
+        book.sequences[0].authority_epoch += 1;
+        assert_eq!(env.market_state().1, economy);
+        book.check(&env, &wallets, portfolio);
+
+        let ix = market_handoff(&env, 3, 4, book.sequences[0].authority_epoch);
+        let tx = signed(&env, &[ix], &[actors[3], &admin]);
+        run(&mut env, tx, &[market], None, 0);
+        book.profiles[0].asset_admin = admin.pubkey().to_bytes();
+        book.profiles[0].oracle_authority = admin.pubkey().to_bytes();
+        book.sequences[0].authority_epoch += 1;
+        assert_eq!(env.market_state().0.marketauth, admin.pubkey().to_bytes());
+        assert_eq!(env.market_state().1, economy);
+        book.check(&env, &wallets, portfolio);
+
+        run(
+            &mut env,
+            retained,
+            &[],
+            Some((3, PercolatorError::EngineStale)),
+            1,
+        );
+        book.check(&env, &wallets, portfolio);
+        let seizure = handoff(
+            &env,
+            0,
+            kind,
+            admin.pubkey(),
+            Some(actors[3].pubkey()),
+            book.sequences[0].authority_epoch,
+        );
+        let tx = signed(
+            &env,
+            &[peer_payout.clone(), seizure],
+            &[actors[2], &admin, actors[3]],
+        );
+        run(
+            &mut env,
+            tx,
+            &[],
+            Some((3, PercolatorError::EngineLockActive)),
+            1,
+        );
+        book.check(&env, &wallets, portfolio);
+        for (destination, error) in [
+            (wallets[role], PercolatorError::Unauthorized),
+            (wallets[4], PercolatorError::InvalidTokenAccount),
+        ] {
+            let theft = payout(&env, admin.pubkey(), destination, 0, backing, 1);
+            let tx = signed(&env, &[theft], &[&admin]);
+            run(&mut env, tx, &[], Some((2, error)), 0);
+            book.check(&env, &wallets, portfolio);
+        }
+
+        // Epoch-only renewal moves the surviving shared roles, never C's funded role.
+        let renewed = market_handoff(&env, 4, 3, book.sequences[0].authority_epoch);
+        let tx = signed(
+            &env,
+            &[peer_payout, renewed],
+            &[actors[2], &admin, actors[3]],
+        );
+        run(&mut env, tx, &[market, vault, wallets[2]], None, 1);
+        book.pay(2, true, 2, 1);
+        book.profiles[0].asset_admin = actors[3].pubkey().to_bytes();
+        book.profiles[0].oracle_authority = actors[3].pubkey().to_bytes();
+        book.sequences[0].authority_epoch += 1;
+        assert_eq!(
+            env.market_state().0.marketauth,
+            actors[3].pubkey().to_bytes()
+        );
+        book.check(&env, &wallets, portfolio);
+
+        for domain in 0..4 {
+            let amount = book.backing[domain];
+            let ix = payout(&env, actors[2].pubkey(), wallets[2], domain, true, amount);
+            let tx = signed(&env, &[ix], &[actors[2]]);
+            run(&mut env, tx, &[market, vault, wallets[2]], None, 1);
+            book.pay(domain, true, 2, amount);
+            book.check(&env, &wallets, portfolio);
+        }
+        for asset in 0..2 {
+            let amount = book.insurance[asset * 2] + book.insurance[asset * 2 + 1];
+            let ix = payout(
+                &env,
+                actors[1].pubkey(),
+                wallets[1],
+                asset * 2,
+                false,
+                amount,
+            );
+            let tx = signed(&env, &[ix], &[actors[1]]);
+            run(&mut env, tx, &[market, vault, wallets[1]], None, 1);
+            book.pay(asset * 2, false, 1, amount);
+            book.check(&env, &wallets, portfolio);
+        }
+        let exit = Instruction {
+            program_id: env.program_id,
+            data: env.withdraw_ix(portfolio, CAPITAL).encode(),
+            accounts: vec![
+                AccountMeta::new(actors[5].pubkey(), true),
+                AccountMeta::new(market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(wallets[5], false),
+                AccountMeta::new(vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+        };
+        let tx = signed(&env, &[exit], &[actors[5]]);
+        run(
+            &mut env,
+            tx,
+            &[market, vault, portfolio, wallets[5]],
+            None,
+            1,
+        );
+        book.capital = 0;
+        book.paid[5] = CAPITAL;
+        book.check(&env, &wallets, portfolio);
+        assert_eq!(
+            book.paid[4], 0,
+            "returned market authority acquires no principal"
+        );
+        assert_eq!(
+            book.paid[3], 3,
+            "B retains only its authorized pre-detachment payout"
+        );
+        assert_eq!(
+            book.paid[role],
+            if backing {
+                BACKING.iter().sum::<u128>() - 3
+            } else {
+                INSURANCE.iter().sum::<u128>() - 3
+            }
+        );
+    }
+    eprintln!("INV-005 market-authority ABA: 2 detached funded roles, 8 exact rejections, 4 SPL prefix rollbacks, complete reserve/user exits, peak {peak} CU");
 }
