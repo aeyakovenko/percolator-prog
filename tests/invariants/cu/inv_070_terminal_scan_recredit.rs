@@ -19,6 +19,9 @@ mod multiwave;
 #[path = "inv_070_terminal_scan_native_surplus.rs"]
 mod native_surplus;
 
+#[path = "inv_070_terminal_scan_principal_order.rs"]
+mod principal_order;
+
 #[test]
 fn v16_program_terminal_scan_competing_assets_share_expired_residual_once() {
     competing_insurance_recredit(false);
