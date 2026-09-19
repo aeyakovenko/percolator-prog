@@ -1,6 +1,8 @@
 //! INV-014: retained single-trade backing consent across matcher cap changes.
 //! Secondary INV-036/047/081: participant-local caps, provider SPL earnings,
 //! exact failed-CPI rollback, and same/cross-route retained alternatives.
+//! Base-policy repricing also turns a capital-funded increase into a source-
+//! backed increase: unused base-fee consent cannot authorize that new fee class.
 
 use crate::support::{
     fuzz_model::{assert_public_encumbrance_census, assert_public_stock_census},
@@ -352,4 +354,229 @@ fn v16_program_retained_backing_fee_caps_follow_participant_and_route_consent() 
     assert_eq!(worlds, 4);
     assert_eq!(rejections, 2);
     eprintln!("INV-014 retained backing caps: worlds={worlds}, public_txs={transactions}, exact_rollbacks={rejections}, peak_trade_cu={peak_cu}, endpoint={endpoint:?}");
+}
+
+#[test]
+fn v16_program_retained_base_fee_consent_cannot_authorize_new_backing_fees() {
+    use percolator_prog::ix::Instruction as ProgInstruction;
+    use solana_sdk::{
+        compute_budget::ComputeBudgetInstruction,
+        instruction::{AccountMeta, Instruction},
+        signature::Keypair,
+    };
+
+    const BASE_BPS: u64 = 100;
+    const MARK: u64 = 105;
+    const BACKING: u128 = 100_000;
+    let margin = ((OPEN + INCREASE) as u128 * u128::from(MARK) / POS_SCALE) / 2;
+    let deposits = [margin, DEPOSITS[1], 0, 0, 0];
+    let base_fee = ((INCREASE as u128 * u128::from(MARK)).div_ceil(POS_SCALE)
+        * u128::from(BASE_BPS))
+    .div_ceil(10_000);
+    // Capital exactly covers the enlarged position before repricing. The base
+    // fee creates the entire margin shortfall, funded from counterparty backing.
+    let source_fee = (base_fee * u128::from(RATE)).div_ceil(10_000);
+    assert_eq!((margin, base_fee, source_fee), (55_125, 53, 18));
+    let mut peak_cu = 0;
+    for fee_payer_is_lp in [false, true] {
+        let mut env = V16Svm::new(
+            [0x7d; 32],
+            MarketConfig {
+                initial_price: 100,
+                initial_margin_bps: 5_000,
+                maintenance_margin_bps: 1_000,
+                max_price_move_bps_per_slot: 500,
+                max_accrual_dt_slots: 1,
+                min_funding_lifetime_slots: 1,
+                actor_deposits: deposits,
+                ..MarketConfig::default()
+            },
+        );
+        let supply = env.token_supply_observed();
+        env.begin_public_trace();
+        env.update_asset_authority_from_admin(ASSET, ASSET_AUTH_BACKING_BUCKET, PROVIDER)
+            .unwrap();
+        env.update_backing_fee_policy(DOMAIN as u16, RATE, 0)
+            .unwrap();
+        env.top_up_backing_bucket_for_actor(PROVIDER, DOMAIN as u16, BACKING, 100)
+            .unwrap();
+        env.trade_no_cpi(0, 1, ASSET, OPEN, 100, 0).unwrap();
+        env.warp_to_slot(2);
+        env.push_auth_mark(ASSET, 2, MARK).unwrap();
+        settle(&mut env, 2);
+        let (taker, lp, size) = if fee_payer_is_lp {
+            (1, 0, -INCREASE)
+        } else {
+            (0, 1, INCREASE)
+        };
+        env.set_matcher_config_with_trade_fee_cap(lp, 1, BASE_BPS as u16)
+            .unwrap();
+        set_cap(&mut env, lp, 0);
+        let payer = Keypair::new();
+        env.svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
+        let retain = |env: &V16Svm, cap, nonce| {
+            let ix = Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(env.actors[taker].signer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(env.actors[taker].portfolio, false),
+                    AccountMeta::new(env.actors[lp].portfolio, false),
+                    AccountMeta::new_readonly(env.matcher_program, false),
+                    AccountMeta::new(env.actors[lp].matcher_context, false),
+                    AccountMeta::new_readonly(env.actors[lp].matcher_delegate, false),
+                ],
+                data: ProgInstruction::TradeCpi {
+                    account_a_portfolio_id: env.primary_portfolio_id(taker),
+                    account_a_position_epoch: env.primary_portfolio_position_epoch(taker),
+                    account_b_portfolio_id: env.primary_portfolio_id(lp),
+                    account_b_position_epoch: env.primary_portfolio_position_epoch(lp),
+                    account_b_matcher_sequence: env.primary_portfolio_matcher_sequence(lp),
+                    asset_index: ASSET,
+                    market_id: env.primary_market_state().1.assets[ASSET as usize].market_id,
+                    size_q: size,
+                    fee_bps: BASE_BPS,
+                    limit_price: MARK,
+                    backing_fee_cap_bps: cap,
+                }
+                .encode(),
+            };
+            Transaction::new_signed_with_payer(
+                &[
+                    ComputeBudgetInstruction::request_heap_frame(256 * 1024),
+                    ComputeBudgetInstruction::set_compute_unit_limit(
+                        crate::support::v16_svm::TX_CU_LIMIT as u32 - nonce,
+                    ),
+                    ix,
+                ],
+                Some(&payer.pubkey()),
+                &[&payer, &env.actors[taker].signer],
+                env.svm.latest_blockhash(),
+            )
+        };
+        let probe = retain(&env, 0, 0);
+        let retained = retain(&env, 0, 1);
+        let bytes = bincode::serialize(&retained).unwrap();
+        simulate(&mut env, &retained);
+        let epochs = [0, 1].map(|actor| env.primary_portfolio_position_epoch(actor));
+        let grant = state::read_portfolio_matcher_config(&env.primary_portfolio_data(lp)).unwrap();
+        let sequence = env.primary_portfolio_matcher_sequence(lp);
+        let policy_sequence = env.primary_control_sequences(0).trade_fee;
+        let before_tokens = env.all_token_account_data();
+        let vault = env.token_amount(env.vault);
+        assert_eq!(env.primary_portfolio(0).capital.get(), margin);
+        assert_eq!(env.primary_portfolio(0).pnl.get(), 5_000);
+        assert_eq!(env.primary_portfolio(1).capital.get(), deposits[1] - 5_000);
+        assert_eq!(env.primary_market_state().1.insurance, 0);
+        assert_eq!(
+            env.primary_market_state().1.source_backing_buckets[DOMAIN].valid_liened_backing_num,
+            0
+        );
+
+        env.update_trade_fee_policy(BASE_BPS).unwrap();
+        let before = frame(&env, Some(&probe));
+        let error = env.land_retained(probe.clone()).unwrap_err();
+        let expected = TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::Unauthorized as u32),
+        );
+        assert!(error.contains(&format!("{expected:?}")), "{error}");
+        assert!(error.contains(&format!("Program {} success", env.matcher_program)));
+        assert_eq!(frame(&env, Some(&probe)), before);
+        census(&env, supply);
+
+        // A lower base policy removes source consumption without renewing consent.
+        env.update_trade_fee_policy(0).unwrap();
+        simulate(&mut env, &retained);
+        env.update_trade_fee_policy(BASE_BPS).unwrap();
+        let selected = if fee_payer_is_lp {
+            set_cap(&mut env, lp, RATE);
+            retained.clone()
+        } else {
+            retain(&env, RATE, 1)
+        };
+        assert_eq!(bincode::serialize(&retained).unwrap(), bytes);
+        assert_eq!(env.primary_portfolio_matcher_sequence(lp), sequence);
+        assert_eq!(
+            state::read_portfolio_matcher_config(&env.primary_portfolio_data(lp)).unwrap(),
+            grant
+        );
+        let before_success = frame(&env, Some(&selected));
+        peak_cu = peak_cu.max(env.land_retained(selected).unwrap().compute_units);
+        for (key, account) in before_success {
+            if ![
+                env.market,
+                env.actors[0].portfolio,
+                env.actors[1].portfolio,
+                env.actors[lp].matcher_context,
+            ]
+            .contains(&key)
+            {
+                assert_eq!(
+                    env.svm.get_account(&key),
+                    account,
+                    "untouched account: {key}"
+                );
+            }
+        }
+        let group = env.primary_market_state().1;
+        let bucket = group.source_backing_buckets[DOMAIN];
+        assert_eq!(bucket.valid_liened_backing_num, base_fee * BOUND_SCALE);
+        assert_eq!(bucket.utilization_fee_earnings, source_fee);
+        assert_eq!(group.insurance, 2 * base_fee);
+        assert_eq!(
+            &group.insurance_domain_budget[..4],
+            &[0, 0, base_fee, base_fee]
+        );
+        assert_eq!(
+            env.primary_portfolio(0).capital.get(),
+            margin - base_fee - source_fee
+        );
+        assert_eq!(env.primary_portfolio(0).pnl.get(), 5_000);
+        assert_eq!(
+            env.primary_portfolio(1).capital.get(),
+            deposits[1] - 5_000 - base_fee
+        );
+        assert_eq!(env.primary_portfolio(1).pnl.get(), 0);
+        assert_eq!(
+            group.c_tot,
+            deposits.iter().sum::<u128>() - 5_000 - 2 * base_fee - source_fee
+        );
+        assert_eq!(
+            group.assets[ASSET as usize].oi_eff_long_q,
+            (OPEN + INCREASE) as u128
+        );
+        assert_eq!(
+            group.assets[ASSET as usize].oi_eff_short_q,
+            (OPEN + INCREASE) as u128
+        );
+        assert_eq!(
+            [0, 1].map(|actor| env.primary_portfolio_position_epoch(actor)),
+            epochs.map(|e| e + 1)
+        );
+        assert_eq!(
+            env.primary_control_sequences(0).trade_fee,
+            policy_sequence + 3
+        );
+        assert_eq!(env.all_token_account_data(), before_tokens);
+        assert_eq!(u128::from(vault), group.vault);
+        census(&env, supply);
+
+        let destination = env.actors[PROVIDER].destination_token;
+        let paid_before = env.token_amount(destination);
+        env.withdraw_backing_bucket_earnings_for_actor(PROVIDER, DOMAIN as u16, source_fee)
+            .unwrap();
+        assert_eq!(
+            env.token_amount(destination) - paid_before,
+            source_fee as u64
+        );
+        assert_eq!(vault - env.token_amount(env.vault), source_fee as u64);
+        assert_eq!(
+            env.primary_market_state().1.source_backing_buckets[DOMAIN].utilization_fee_earnings,
+            0
+        );
+        census(&env, supply);
+        checkpoint(&mut env);
+    }
+    eprintln!("INV-014 base-fee-induced backing consent: worlds=2, exact_rollbacks=2, source_fee={source_fee}, base_fee_per_owner={base_fee}, peak_CU={peak_cu}");
 }
