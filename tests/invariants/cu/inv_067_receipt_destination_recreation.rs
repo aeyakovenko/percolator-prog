@@ -402,3 +402,241 @@ fn v16_program_recreated_destination_preserves_receipt_identity_across_second_ex
     }
     println!("INV-067 destination recreation: 4 worlds, 4 paying-prefix rollbacks, 4 same-address ATA repairs, 8 second-wave top-ups; peak {peak_cu} CU");
 }
+
+#[test]
+fn v16_program_frozen_receipt_destination_keeps_unsigned_replacement_topup_live() {
+    let mut world = World::before_receipts_with_setup(|env| {
+        let mint = Keypair::new();
+        system_create_account_for_test(&mut env.svm, &env.payer, &mint, Mint::LEN, spl_token::ID);
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::initialize_mint2(
+                &spl_token::ID,
+                &mint.pubkey(),
+                &env.admin.pubkey(),
+                Some(&env.admin.pubkey()),
+                0,
+            )
+            .unwrap(),
+            &[],
+        )
+        .unwrap();
+        let admin = env.admin.insecure_clone();
+        env.send(
+            ProgInstruction::UpdateBaseUnitMints {
+                primary_mint: mint.pubkey().to_bytes(),
+                secondary_mint: env.mint.to_bytes(),
+                authority_epoch: env.control_sequences(0).authority_epoch,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new_readonly(mint.pubkey(), false),
+                AccountMeta::new_readonly(env.mint, false),
+                AccountMeta::new_readonly(env.vault, false),
+            ],
+            &[&admin],
+        )
+        .unwrap();
+        env.mint = mint.pubkey();
+        env.vault = create_ata_for_test(&mut env.svm, &env.payer, env.vault_authority, env.mint);
+    });
+    for actor in [0, 4] {
+        for _ in 0..8 {
+            if world.receipt(actor).present {
+                break;
+            }
+            world.land(&[world.payout(actor, false)], false).unwrap();
+        }
+    }
+    let original = [world.receipt(0), world.receipt(4)];
+    assert!(original.iter().all(|r| r.present && !r.finalized));
+    assert_eq!(
+        original.map(|r| r.terminal_positive_claim_face),
+        [700, 1_300]
+    );
+    assert_eq!(original.map(|r| r.paid_effective), [116, 217]);
+    let identities = [0, 4].map(|actor| {
+        state::read_portfolio_owner_preflight(
+            &world
+                .env
+                .svm
+                .get_account(&world.actors[actor].portfolio)
+                .unwrap()
+                .data,
+        )
+        .unwrap()
+    });
+    let frozen = world.actors[0].token;
+    let retained = world.payout(0, true);
+    world
+        .land(
+            &[
+                spl_token::instruction::freeze_account(
+                    &spl_token::ID,
+                    &frozen,
+                    &world.env.mint,
+                    &world.env.admin.pubkey(),
+                    &[],
+                )
+                .unwrap(),
+                spl_token::instruction::set_authority(
+                    &spl_token::ID,
+                    &world.env.mint,
+                    None,
+                    spl_token::instruction::AuthorityType::FreezeAccount,
+                    &world.env.admin.pubkey(),
+                    &[],
+                )
+                .unwrap(),
+            ],
+            true,
+        )
+        .unwrap();
+    let frozen_image = world.env.svm.get_account(&frozen).unwrap();
+    assert_eq!(
+        TokenAccount::unpack(&frozen_image.data).unwrap().state,
+        AccountState::Frozen
+    );
+    assert_eq!(
+        Mint::unpack(&world.env.svm.get_account(&world.env.mint).unwrap().data)
+            .unwrap()
+            .freeze_authority,
+        COption::None
+    );
+
+    // Expiry and the other claimant's positive payment execute before rejection.
+    world.env.svm.warp_to_slot(13);
+    let mut bundle = [world.payout(2, false), world.payout(4, true), retained];
+    let before = world.frame();
+    let mut payer = world
+        .env
+        .svm
+        .get_account(&world.env.payer.pubkey())
+        .unwrap();
+    let failure = world
+        .land(&bundle, false)
+        .expect_err("frozen receipt destination");
+    assert_eq!(
+        failure.err,
+        TransactionError::InstructionError(
+            4,
+            InstructionError::Custom(PercolatorError::InvalidTokenAccount as u32)
+        )
+    );
+    assert_eq!(successes(&failure.meta.logs, world.env.program_id), 2);
+    assert_eq!(successes(&failure.meta.logs, spl_token::ID), 1);
+    payer.lamports -= FeeStructure::default().lamports_per_signature;
+    assert_eq!(
+        world.env.svm.get_account(&world.env.payer.pubkey()),
+        Some(payer)
+    );
+    assert_eq!(world.frame(), before);
+    assert_eq!([world.receipt(0), world.receipt(4)], original);
+
+    // A keeper can create non-ATA custody owned by the absent receipt holder.
+    let replacement = Keypair::new();
+    system_create_account_for_test(
+        &mut world.env.svm,
+        &world.env.payer,
+        &replacement,
+        TokenAccount::LEN,
+        spl_token::ID,
+    );
+    world
+        .land(
+            &[spl_token::instruction::initialize_account3(
+                &spl_token::ID,
+                &replacement.pubkey(),
+                &world.env.mint,
+                &world.actors[0].owner.pubkey(),
+            )
+            .unwrap()],
+            false,
+        )
+        .unwrap();
+    bundle[2].accounts[3] = AccountMeta::new(replacement.pubkey(), false);
+    assert!(bundle
+        .iter()
+        .flat_map(|ix| &ix.accounts)
+        .all(|meta| !meta.is_signer));
+    let before = world.frame();
+    world
+        .land(&bundle, false)
+        .expect("keeper pays both retained receipts without thaw or owner signatures");
+    for (index, actor) in [0, 4].into_iter().enumerate() {
+        let face = [700, 1_300][index];
+        let expected = ResolvedPayoutReceiptV16 {
+            paid_effective: face * (501 + 350) / 3_000,
+            ..original[index]
+        };
+        assert_eq!(world.receipt(actor), expected);
+        assert_eq!(
+            state::read_portfolio_owner_preflight(
+                &world
+                    .env
+                    .svm
+                    .get_account(&world.actors[actor].portfolio)
+                    .unwrap()
+                    .data,
+            )
+            .unwrap(),
+            identities[index]
+        );
+    }
+    assert_eq!(world.env.token_amount(replacement.pubkey()), 82);
+    assert_eq!(world.env.token_amount(world.actors[4].token), 1_368);
+    assert_eq!(world.env.svm.get_account(&frozen), Some(frozen_image));
+    world.assert_frame_except(
+        &before,
+        &[
+            world.env.market,
+            world.env.vault,
+            world.actors[0].portfolio,
+            world.actors[2].portfolio,
+            world.actors[4].portfolio,
+            world.actors[4].token,
+        ],
+    );
+    let vault = world.env.token_amount(world.env.vault);
+    assert_eq!(world.env.market_state().1.vault, u128::from(vault));
+    assert_eq!(
+        vault
+            + world.env.token_amount(world.provider_token)
+            + 82
+            + world
+                .actors
+                .iter()
+                .map(|a| world.env.token_amount(a.token))
+                .sum::<u64>(),
+        3_852
+    );
+    assert_eq!(
+        world
+            .env
+            .market_state()
+            .1
+            .resolved_payout_ledger
+            .snapshot_residual,
+        851
+    );
+
+    let before = world.frame();
+    let replacement_before = world.env.svm.get_account(&replacement.pubkey());
+    world.land(&bundle[1..], false).unwrap();
+    assert_eq!(
+        world.frame(),
+        before,
+        "replacement cannot replenish either receipt"
+    );
+    assert_eq!(
+        world.env.svm.get_account(&replacement.pubkey()),
+        replacement_before
+    );
+    assert_cu_within(
+        "frozen receipt replacement and expiry",
+        world.peak_cu,
+        600_000,
+    );
+}
