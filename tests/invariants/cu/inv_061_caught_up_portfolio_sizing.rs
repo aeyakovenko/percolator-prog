@@ -2,6 +2,8 @@
 //! Linear quantity enumeration includes the untouched active leg's maintenance.
 //! Public single/batch opens and joined/partitioned observations must agree on
 //! owner value, selected-only OI changes and the keeper's actual SPL entitlement.
+//! Equal-notional legs with unequal prices/quantities additionally distinguish
+//! persisted-order selection from raw-size or price ranking, including fee rounding.
 
 use super::*;
 
@@ -349,6 +351,18 @@ fn run_caught_up(
         &initial_group.insurance_domain_spent[..2]
     );
     let accounts = portfolios.map(|key| env.portfolio_state(key));
+    for i in 0..2 {
+        for account in &accounts[..2] {
+            assert_eq!(
+                reference_current_epoch_effective_abs(
+                    &before,
+                    active_leg_for_asset(account, i + 1),
+                ),
+                q[i],
+                "refreshed exposure must match the public opening inputs"
+            );
+        }
+    }
     assert_eq!(
         (accounts[0].capital.get(), accounts[0].pnl.get()),
         (equity, 0)
@@ -389,6 +403,16 @@ fn run_caught_up(
     let after = env.market_state().1;
     let liquidated = portfolios.map(|key| env.portfolio_state(key));
     let selected_asset = selected + 1;
+    for i in 0..2 {
+        let remaining = q[i] - if i == selected { expected_close } else { 0 };
+        for account in &liquidated[..2] {
+            assert_eq!(
+                reference_current_epoch_effective_abs(&after, active_leg_for_asset(account, i + 1)),
+                remaining,
+                "both sides' independently reconstructed exposure must match the sized close"
+            );
+        }
+    }
     assert_eq!(
         active_leg_for_asset(&liquidated[0], selected_asset).basis_pos_q,
         -((q[selected] - expected_close) as i128)
@@ -536,4 +560,59 @@ fn v16_program_caught_up_multi_asset_sizing_preserves_health_and_beneficiary_val
     }
     assert!(fee_price_witnesses > 0);
     println!("INV-061 current-source catchup: {worlds} worlds, {fee_price_witnesses} fee-price witnesses, peak {peak} CU");
+}
+
+#[test]
+fn v16_program_equal_risk_unequal_price_legs_preserve_sizing_order_and_reward() {
+    let mut worlds = 0;
+    let mut peak = 0;
+    let mut fee_rounding_witnesses = 0;
+    for q in [[176, 160], [264, 240]] {
+        assert_ne!(q[0], q[1]);
+        assert_ne!(FINAL_PRICES[0], FINAL_PRICES[1]);
+        assert_eq!(
+            notional(q[0], FINAL_PRICES[0]),
+            notional(q[1], FINAL_PRICES[1])
+        );
+        assert_eq!(
+            requirement(q[0], FINAL_PRICES[0]),
+            requirement(q[1], FINAL_PRICES[1]),
+            "both fully caught-up legs must present equal maintenance risk"
+        );
+        let mut selected_outcomes = Vec::new();
+        for selected in [0, 1] {
+            let mut reference = None;
+            for batch in [false, true] {
+                for partitioned in [false, true] {
+                    for reverse in [false, true] {
+                        let (outcome, cu, fee_price_witness) =
+                            run_caught_up(q, selected, batch, partitioned, reverse);
+                        assert!(
+                            fee_price_witness,
+                            "entry-price fees must be distinguishable"
+                        );
+                        peak = peak.max(cu);
+                        if let Some(expected) = &reference {
+                            assert_eq!(expected, &outcome, "equal-risk q={q:?}, selected={selected}, batch={batch}, partitioned={partitioned}, reverse={reverse}");
+                        } else {
+                            reference = Some(outcome);
+                        }
+                        worlds += 1;
+                    }
+                }
+            }
+            selected_outcomes.push(reference.unwrap());
+        }
+        assert_ne!(
+            selected_outcomes[0].close_q, selected_outcomes[1].close_q,
+            "equal notionals at distinct prices require distinct close quantities"
+        );
+        // Equal starting risk does not imply equal rounded fees after selecting
+        // a different leg. Each outcome has already matched the independent oracle.
+        fee_rounding_witnesses +=
+            usize::from(selected_outcomes[0].values[0] != selected_outcomes[1].values[0]);
+    }
+    assert_eq!(worlds, 32);
+    assert!(fee_rounding_witnesses > 0);
+    println!("INV-061 unequal-price equal-risk sizing: {worlds} worlds, {fee_rounding_witnesses} selected-fee rounding witnesses, peak {peak} CU");
 }
