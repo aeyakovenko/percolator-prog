@@ -28,6 +28,9 @@ mod retained_mixed_route_fees;
 #[path = "inv_014_retained_round_trip_fee_consent.rs"]
 mod retained_round_trip_fee_consent;
 
+#[path = "inv_014_retained_dual_adl_fees.rs"]
+mod retained_dual_adl_fees;
+
 const DEPOSITS: [u64; 2] = [100_003, 200_007];
 const PREFIX: u64 = 113;
 const PRICE: u64 = 100;
