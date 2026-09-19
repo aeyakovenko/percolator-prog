@@ -87,6 +87,9 @@ pub(crate) use recovery_reserve_cleanup::verify_recovery_reserve_cleanup;
 #[path = "inv_073_multisig_reserve_progress.rs"]
 mod multisig_reserve_progress;
 
+#[path = "inv_073_exhausted_delegate_progress.rs"]
+mod exhausted_delegate_progress;
+
 const CAPITAL: [u64; 2] = [52_502, 2_000_000];
 const BACKING: u64 = 100_000;
 const INSURANCE: u64 = 31;
