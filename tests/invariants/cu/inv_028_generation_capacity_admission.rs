@@ -646,6 +646,215 @@ fn v16_program_used_generation_admission_reserves_latent_capacity_through_exact_
         m.transactions, m.rollbacks, m.restored_prefixes, m.terminal_calls, m.max_cu, m.max_packet);
 }
 
+// INV-089 / row 423: reuse the portfolio's released latent pair while historical
+// claims AND a sibling latent pair survive. Earlier reuse coverage retires before
+// building claims, or changes a sibling that never occupied this portfolio.
+#[test]
+fn v16_program_reactivated_latent_pair_preserves_residual_capacity_and_terminal_exit() {
+    let mut m = Measurements::default();
+    let historical_assets = ASSETS - 2;
+    let sibling = (ASSETS - 2) as u16;
+    let reused = (ASSETS - 1) as u16;
+    for direction in [-1i128, 1] {
+        let mut h = History::with_market_capacity(ASSETS + 1);
+        h.env.configure_permissionless_resolve_with_cu(1_000, 5);
+        h.slot = 1;
+        h.env.activate_asset(ASSETS as u16, h.slot, PRICE);
+        h.env
+            .configure_auth_mark_for_asset_as_admin(ASSETS as u16, h.slot, PRICE);
+        let route = AccountResidualCounterTradePath::TradeNoCpi;
+        let order = if direction > 0 { [0, 1] } else { [1, 0] };
+        let mut generations = std::array::from_fn(|a| h.env.asset_market_id(a as u16));
+        let ids = h.portfolios.map(|p| h.env.portfolio_id(p));
+        for asset in 0..historical_assets as u16 {
+            let q = (1 + i128::from(asset % 3)) * POS_SCALE as i128;
+            h.trade(route, &[(asset, q, PRICE)]);
+            h.mark_and_settle(&[(asset, PRICE + 1)], order);
+            h.trade(route, &[(asset, -2 * q, PRICE + 1)]);
+            h.mark_and_settle(&[(asset, PRICE)], order);
+            h.trade(route, &[(asset, q, PRICE)]);
+        }
+        let historical = std::array::from_fn(|d| {
+            if d / 2 < historical_assets {
+                (1 + (d / 2 % 3) as u128) * BOUND_SCALE
+            } else {
+                0
+            }
+        });
+        let old_q = direction * 6 * POS_SCALE as i128;
+        h.trade(
+            route,
+            &[(sibling, direction * 4 * POS_SCALE as i128, PRICE)],
+        );
+        h.trade(route, &[(reused, old_q, PRICE)]);
+        resources(&h, historical, &generations);
+        h.trade(route, &[(reused, -old_q, PRICE)]);
+        assert_eq!(h.source_claims(0), historical);
+        assert_eq!(historical.iter().filter(|c| **c > 0).count(), DOMAINS - 4);
+        assert_eq!(h.positions.iter().filter(|q| **q != 0).count(), 1);
+        // 24 occupied domains plus the surviving leg's two domains leave exactly
+        // two future slots. No claim conversion or account recreation frees them.
+        assert_eq!(historical_assets * 2 + 2, DOMAINS - 2);
+
+        let frame_keys = [
+            h.portfolios[0],
+            h.portfolios[1],
+            h.tokens[0],
+            h.tokens[1],
+            h.env.vault,
+            h.env.mint,
+        ];
+        let frame = frame_keys.map(|key| h.env.svm.get_account(&key));
+        let before = h.env.market_state().1;
+        let old_generation = generations[reused as usize];
+        let next = before.next_market_id;
+        for action in [
+            processor::ASSET_ACTION_RETIRE,
+            processor::ASSET_ACTION_ACTIVATE,
+        ] {
+            h.slot += 1;
+            h.env.svm.warp_to_slot(h.slot);
+            let cu = if action == processor::ASSET_ACTION_RETIRE {
+                h.env
+                    .update_asset_lifecycle_as_admin_with_cu(action, reused, h.slot, 0)
+            } else {
+                h.env.activate_asset(reused, h.slot, PRICE)
+            };
+            assert_cu_within("residual-capacity retire/reactivate", cu, CU_LIMIT);
+            m.max_cu = m.max_cu.max(cu);
+            let (config, group) = h.env.market_state();
+            let retired = action == processor::ASSET_ACTION_RETIRE;
+            assert_eq!(config.free_market_slot_count, u16::from(retired));
+            assert_eq!(group.next_market_id, next + u64::from(!retired));
+            assert_eq!(
+                group.assets[reused as usize].market_id,
+                if retired { old_generation } else { next }
+            );
+            assert_eq!(
+                group.assets[reused as usize].lifecycle,
+                if retired {
+                    AssetLifecycleV16::Retired
+                } else {
+                    AssetLifecycleV16::Active
+                }
+            );
+            assert_eq!(
+                &group.assets[..reused as usize],
+                &before.assets[..reused as usize]
+            );
+            assert_eq!(
+                &group.source_credit[..2 * reused as usize],
+                &before.source_credit[..2 * reused as usize]
+            );
+            assert_eq!(
+                &group.source_backing_buckets[..2 * reused as usize],
+                &before.source_backing_buckets[..2 * reused as usize]
+            );
+            assert_eq!(frame_keys.map(|key| h.env.svm.get_account(&key)), frame);
+            h.assert_accounting();
+        }
+        assert_ne!(next, old_generation);
+        generations[reused as usize] = next;
+        let group = h.env.market_state().1;
+        assert_eq!(
+            group.assets[reused as usize],
+            percolator::AssetStateV16 {
+                market_id: next,
+                raw_oracle_target_price: PRICE,
+                effective_price: PRICE,
+                fund_px_last: PRICE,
+                slot_last: h.slot,
+                ..percolator::AssetStateV16::default()
+            }
+        );
+        assert_eq!(
+            h.env.control_sequences(reused as usize),
+            state::AssetControlSequencesV16::default()
+        );
+        for domain in [2 * reused as usize, 2 * reused as usize + 1] {
+            assert_eq!(
+                group.source_credit[domain],
+                percolator::SourceCreditStateV16::EMPTY
+            );
+            assert_eq!(
+                group.source_backing_buckets[domain],
+                percolator::BackingBucketV16 {
+                    market_id: next,
+                    ..percolator::BackingBucketV16::EMPTY
+                }
+            );
+            assert_eq!(
+                group.insurance_credit_reservations[domain],
+                percolator::InsuranceCreditReservationV16::EMPTY
+            );
+            assert_eq!(group.insurance_domain_budget[domain], 0);
+            assert_eq!(group.insurance_domain_spent[domain], 0);
+            assert_eq!(group.pending_domain_loss_barriers[domain], 0);
+        }
+
+        let opening = [
+            (sibling, direction * 4 * POS_SCALE as i128, PRICE),
+            (reused, -direction * 7 * POS_SCALE as i128, PRICE),
+        ];
+        // Both owners and position epochs remain current. Repairing only the asset
+        // generation must turn the rejected admission into a successful public step.
+        let fresh = trade(&h, &[opening[1]], false);
+        let mut stale = fresh.clone();
+        let mut request = ProgInstruction::decode(&stale.data).unwrap();
+        match &mut request {
+            ProgInstruction::TradeNoCpi { market_id, .. } => *market_id = old_generation,
+            _ => unreachable!(),
+        }
+        stale.data = request.encode();
+        h.env.svm.expire_blockhash();
+        let tx = signed(&h, &[stale], &[0, 1]);
+        m.submit(
+            &mut h,
+            tx,
+            Some((2, PercolatorError::AssetGenerationMismatch)),
+        );
+        let tx = signed(&h, &[fresh], &[0, 1]);
+        m.submit(&mut h, tx, None);
+        h.positions[reused as usize] = opening[1].1;
+        resources(&h, historical, &generations);
+        for portfolio in h.portfolios {
+            assert_eq!(
+                active_leg_for_asset(&h.env.portfolio_state(portfolio), reused as usize).market_id,
+                next
+            );
+        }
+        // Only two active legs: this is the source limit, not the fourteen-leg cap.
+        let overflow = trade(&h, &[(ASSETS as u16, POS_SCALE as i128, PRICE)], false);
+        h.env.svm.expire_blockhash();
+        let tx = signed(&h, &[overflow], &[0, 1]);
+        m.submit(&mut h, tx, Some((2, PercolatorError::InvalidInstruction)));
+        resources(&h, historical, &generations);
+
+        // Reactivation installs a static manual price. Existing positive claims
+        // preclude oracle reconfiguration, so materialize the surviving sibling's
+        // two sides while the replacement retains its full latent reservation.
+        let (_, q, _) = opening[0];
+        let moved_price = (PRICE as i128 + direction) as u64;
+        h.mark_and_settle(&[(sibling, moved_price)], order);
+        h.trade(route, &[(sibling, -3 * q, moved_price)]);
+        h.mark_and_settle(&[(sibling, PRICE)], [order[1], order[0]]);
+        let mut expected = historical;
+        expected[2 * sibling as usize + usize::from(q > 0)] = 4 * BOUND_SCALE;
+        expected[2 * sibling as usize + usize::from(q < 0)] = 8 * BOUND_SCALE;
+        assert_eq!(expected.iter().filter(|c| **c > 0).count(), DOMAINS - 2);
+        resources(&h, expected, &generations);
+        h.trade(route, &[(sibling, 2 * q, PRICE)]);
+        resources(&h, expected, &generations);
+        h.trade(route, &[(reused, -opening[1].1, PRICE)]);
+        assert_eq!(h.source_claims(0), expected);
+        assert_eq!(h.portfolios.map(|p| h.env.portfolio_id(p)), ids);
+        terminal(&mut h, &mut m, order);
+        assert_eq!(h.env.asset_market_id(reused), next);
+    }
+    assert_eq!(m.terminal_calls, 2 * (DOMAINS - 1));
+    println!("INV-089 residual capacity: worlds=2, terminal_calls={}, exact_rollbacks={}, max_cu={}, max_packet={}", m.terminal_calls, m.rollbacks, m.max_cu, m.max_packet);
+}
+
 fn competition_resources(h: &History, claims: &[u128], positions: &[i128]) -> usize {
     let group = h.env.market_state().1;
     let market = h.env.svm.get_account(&h.env.market).unwrap();
