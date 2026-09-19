@@ -7,8 +7,22 @@ use super::*;
 
 #[test]
 fn v16_program_paid_price_catchup_report_cadence_preserves_reward_and_rejects_regression() {
+    run_report_cadence(0);
+}
+
+#[test]
+fn v16_program_funded_report_cadence_preserves_partial_liquidation_reward_and_custody() {
+    run_report_cadence(1_000);
+}
+
+fn run_report_cadence(max_funding: u64) {
     const REPORT: u64 = 980_000;
     const SHARE: u128 = 3_333;
+    // Slot 6 accrues the paid mark's negative capped premium at the accepted
+    // price. Subsequent nonnegative premiums floor to zero at this rate bound.
+    let funding_per_lot =
+        -(-i128::from(max_funding) * i128::from(ENTRY - 2_400)).div_euclid(1_000_000_000);
+    assert_eq!(funding_per_lot, i128::from(max_funding != 0));
     let mut peak_cu = 0;
     let mut liquidations = 0;
     let mut rollbacks = 0;
@@ -18,7 +32,7 @@ fn v16_program_paid_price_catchup_report_cadence_preserves_reward_and_rejects_re
             let mut env = inv018_public_spl_market_with_params(
                 6,
                 V16CuMarketParams {
-                    max_abs_funding_e9_per_slot: 0,
+                    max_abs_funding_e9_per_slot: max_funding,
                     ..production_risk_params()
                 },
             );
@@ -109,6 +123,12 @@ fn v16_program_paid_price_catchup_report_cadence_preserves_reward_and_rejects_re
                 );
                 assert_eq!(group.assets[0].raw_oracle_target_price, REPORT);
                 assert_eq!(group.assets[0].slot_last, slot);
+                let funding_index = funding_per_lot * ADL_ONE as i128;
+                assert_eq!(
+                    (group.assets[0].f_long_num, group.assets[0].f_short_num),
+                    (funding_index, -funding_index),
+                    "slot={slot}, eager={eager}: input-derived signed funding floor"
+                );
                 assert_eq!(profile.mark_ewma_e6, price);
                 assert_eq!(profile.oracle_target_publish_time, now);
                 assert_eq!(profile.last_good_oracle_slot, slot);
@@ -194,7 +214,15 @@ fn v16_program_paid_price_catchup_report_cadence_preserves_reward_and_rejects_re
                 assert_eq!(values(&env, portfolios), after_values);
                 assert_eq!(
                     after_values[0],
-                    FUNDS[0] as i128 - 100 * i128::from(ENTRY - price) - penalty as i128
+                    FUNDS[0] as i128
+                        - 100 * (i128::from(ENTRY - price) - funding_per_lot)
+                        - penalty as i128
+                );
+                let account = env.portfolio_state(target);
+                assert_eq!(account.funding_long_paid_atoms_total.get(), 0);
+                assert_eq!(
+                    account.funding_long_received_atoms_total.get(),
+                    100 * funding_per_lot as u128
                 );
                 assert_eq!(after.insurance, discovery + penalty - reward);
                 let retained = if caught_up { penalty - reward } else { 0 };
@@ -209,6 +237,30 @@ fn v16_program_paid_price_catchup_report_cadence_preserves_reward_and_rejects_re
                 break;
             }
             let result = result.expect("bounded liquidation must collect a nonzero fee");
+            // Reconcile the untouched counterparties' latent K/F through public
+            // account cranks before comparing individual economic entitlements.
+            for _ in 0..8 {
+                let current = census(&env, portfolios);
+                if current.iter().all(|value| *value) {
+                    break;
+                }
+                for i in [1, 2, 3, 0, 4] {
+                    if census(&env, portfolios)[i] {
+                        continue;
+                    }
+                    let refresh =
+                        observe(&env, portfolios[i], owners[4].pubkey(), Some(fresh), None);
+                    peak_cu = peak_cu.max(submit(&mut env, &owners[4], &[refresh], &tracked, None));
+                }
+            }
+            assert!(census(&env, portfolios).iter().all(|value| *value));
+            let loss = i128::from(ENTRY - price) - funding_per_lot;
+            expected[0] -= 100 * loss + result.1 as i128;
+            expected[1] += 100 * loss;
+            expected[2] -= loss;
+            expected[3] += loss;
+            expected[4] += result.2 as i128;
+            assert_eq!(values(&env, portfolios), expected);
             let payout = u128::from(FUNDS[4]) + result.2;
             let withdraw = env.withdraw_ix(keeper, payout);
             let cu = env
@@ -242,7 +294,7 @@ fn v16_program_paid_price_catchup_report_cadence_preserves_reward_and_rejects_re
             } else {
                 reference = Some(result);
             }
-            println!("endpoint={endpoint} eager={eager}: price={price}, liquidation={result:?}, payout={payout}");
+            println!("funding={max_funding} endpoint={endpoint} eager={eager}: price={price}, liquidation={result:?}, payout={payout}");
         }
     }
     assert_eq!(liquidations, 4);
