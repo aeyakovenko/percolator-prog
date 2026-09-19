@@ -709,6 +709,214 @@ fn v16_program_same_side_cross_zero_consumes_only_new_open_oi_headroom() {
 }
 
 #[test]
+fn v16_program_one_sided_reversal_releases_shared_cap_across_route_partitions() {
+    const PRICE: u64 = 100;
+
+    fn check_book(env: &V16Svm, expected: [i128; PRIMARY_ACTOR_COUNT]) {
+        let (_, group) = env.primary_market_state();
+        let asset = group.assets[0];
+        let mut oi = [0u128; 2];
+        let mut counts = [0u64; 2];
+        assert_eq!([asset.a_long, asset.a_short], [ADL_ONE; 2]);
+        assert_eq!(
+            [asset.mode_long, asset.mode_short],
+            [SideModeV16::Normal; 2]
+        );
+        for (actor, quantity) in expected.into_iter().enumerate() {
+            let account = env.primary_portfolio(actor);
+            let legs: Vec<_> = account
+                .legs
+                .iter()
+                .map(|leg| leg.try_to_runtime().unwrap())
+                .filter(|leg| leg.active)
+                .collect();
+            assert_eq!(legs.len(), usize::from(quantity != 0), "actor {actor}");
+            assert_eq!(
+                account.capital.get(),
+                inv_058_max_position_config().actor_deposits[actor]
+            );
+            assert_eq!(account.pnl.get(), 0);
+            for leg in legs {
+                let side = usize::from(quantity < 0);
+                assert_eq!((leg.asset_index, leg.market_id), (0, asset.market_id));
+                assert_eq!(leg.a_basis, ADL_ONE);
+                assert_eq!(leg.basis_pos_q, quantity);
+                assert_eq!(
+                    leg.side,
+                    if side == 0 {
+                        SideV16::Long
+                    } else {
+                        SideV16::Short
+                    }
+                );
+                assert_eq!(
+                    leg.epoch_snap,
+                    if side == 0 {
+                        asset.epoch_long
+                    } else {
+                        asset.epoch_short
+                    }
+                );
+                assert!(quantity.unsigned_abs() < percolator::MAX_POSITION_ABS_Q);
+                oi[side] += quantity.unsigned_abs();
+                counts[side] += 1;
+            }
+        }
+        assert_eq!(expected.iter().sum::<i128>(), 0);
+        assert_eq!([asset.oi_eff_long_q, asset.oi_eff_short_q], oi);
+        assert_eq!(
+            [asset.stored_pos_count_long, asset.stored_pos_count_short],
+            counts
+        );
+        assert_eq!(oi[0], oi[1]);
+        assert!(oi[0] <= percolator::MAX_OI_SIDE_Q);
+        assert_eq!(
+            [
+                asset.pending_obligation_count_long,
+                asset.pending_obligation_count_short
+            ],
+            [0; 2]
+        );
+        assert_public_stock_census("INV-058 one-sided reversal cap", env).unwrap();
+        assert_public_encumbrance_census("INV-058 one-sided reversal cap", env).unwrap();
+    }
+
+    let cap = i128::try_from(percolator::MAX_OI_SIDE_Q).unwrap();
+    let q = cap / 4;
+    assert!(q > 1);
+    let mut worlds = 0;
+    let mut rollbacks = 0;
+    let mut peak = 0;
+    for direction in [-1i128, 1] {
+        let mut endpoint = None;
+        for (index, route) in INV_058_TRADE_ROUTES.into_iter().enumerate() {
+            for split in [false, true] {
+                let mut env = V16Svm::new([0x58; 32], inv_058_max_position_config());
+                env.begin_public_trace();
+                let custody = env.all_token_account_data();
+                let other_assets = env.primary_market_state().1.assets[1..].to_vec();
+                let mut positions = [0; PRIMARY_ACTOR_COUNT];
+                check_book(&env, positions);
+
+                // Two disjoint pairs fill the cap. Only actor 0 reverses in the
+                // cross-pair trade with actor 3, which keeps its original side.
+                // The two uninvolved owners release one atom so both reversal
+                // directions have attach headroom. Direct and split reversals
+                // then release q atoms, not the entire q+1 traded quantity.
+                let mut steps = vec![
+                    (0, 1, TradeRoute::NoCpi, q, true),
+                    (2, 3, TradeRoute::NoCpi, cap - q, true),
+                    (4, 1, route, 1, false),
+                    (2, 1, INV_058_TRADE_ROUTES[(index + 3) % 4], -1, true),
+                ];
+                if split {
+                    steps.push((0, 3, INV_058_TRADE_ROUTES[(index + 1) % 4], -q, true));
+                    steps.push((0, 3, route, -1, true));
+                } else {
+                    steps.push((0, 3, route, -(q + 1), true));
+                }
+                let refill_route = INV_058_TRADE_ROUTES[(index + 2) % 4];
+                steps.extend([
+                    (4, 1, refill_route, q + 2, false),
+                    (4, 1, refill_route, q + 1, true),
+                    (4, 1, INV_058_TRADE_ROUTES[(index + 3) % 4], 1, false),
+                ]);
+                for (step, (taker, maker, trade_route, delta, accepted)) in
+                    steps.into_iter().enumerate()
+                {
+                    let delta = direction * delta;
+                    let mut proposed = positions;
+                    proposed[taker] += delta;
+                    proposed[maker] -= delta;
+                    let proposed_oi: u128 = proposed
+                        .iter()
+                        .filter(|v| **v > 0)
+                        .map(|v| *v as u128)
+                        .sum();
+                    assert!(delta.unsigned_abs() < percolator::MAX_TRADE_SIZE_Q);
+                    for quantity in proposed {
+                        assert!(quantity.unsigned_abs() < percolator::MAX_POSITION_ABS_Q);
+                        let product = quantity.unsigned_abs().checked_mul(PRICE as u128).unwrap();
+                        let notional = product / POS_SCALE + u128::from(product % POS_SCALE != 0);
+                        assert!(notional < percolator::MAX_ACCOUNT_NOTIONAL);
+                    }
+                    if matches!(trade_route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+                        env.ensure_primary_matcher_enabled(maker).unwrap();
+                    }
+                    let before = inv_058_economic_snapshot(&env);
+                    let result = execute_trade_route(
+                        &mut env,
+                        trade_route,
+                        taker,
+                        maker,
+                        0,
+                        delta,
+                        PRICE,
+                        0,
+                    );
+                    let label = format!("direction={direction} split={split} {trade_route:?} {taker}->{maker} delta={delta}");
+                    if accepted {
+                        assert!(proposed_oi <= cap as u128);
+                        let success = result.unwrap_or_else(|error| panic!("{label}: {error}"));
+                        peak = peak.max(success.compute_units);
+                        assert_cu_within(&label, success.compute_units, TRADE_CU_LIMIT);
+                        positions = proposed;
+                        for actor in 0..PRIMARY_ACTOR_COUNT {
+                            if actor != taker && actor != maker {
+                                assert_eq!(
+                                    env.primary_portfolio_data(actor),
+                                    before.portfolios[actor],
+                                    "{label}"
+                                );
+                            }
+                        }
+                    } else {
+                        assert_eq!(proposed_oi, (cap + 1) as u128);
+                        let error = result.expect_err(&format!(
+                            "{label} step={step}: side-OI cap must reject the final extra atom"
+                        ));
+                        let invalid_leg = PercolatorError::EngineInvalidLeg as u32;
+                        assert!(
+                            error.contains(&format!("Custom({invalid_leg})"))
+                                || error
+                                    .contains(&format!("custom program error: 0x{invalid_leg:x}")),
+                            "{label}: {error}"
+                        );
+                        assert_eq!(inv_058_economic_snapshot(&env), before, "{label}");
+                        rollbacks += 1;
+                    }
+                    check_book(&env, positions);
+                    assert_eq!(env.all_token_account_data(), custody);
+                    assert_eq!(env.primary_market_state().1.assets[1..], other_assets);
+                }
+                assert_eq!(
+                    positions,
+                    [-1, -2 * q, cap - q - 1, -(cap - 2 * q - 1), q + 1].map(|v| direction * v)
+                );
+                assert_eq!(
+                    env.primary_market_state().1.assets[0].oi_eff_long_q,
+                    cap as u128
+                );
+                let raw: Vec<_> = (0..PRIMARY_ACTOR_COUNT)
+                    .map(|actor| active_leg_for_asset(&env.primary_portfolio(actor), 0).basis_pos_q)
+                    .collect();
+                assert_eq!(
+                    *endpoint.get_or_insert(raw.clone()),
+                    raw,
+                    "direct/split reversals and all route endpoints"
+                );
+                env.finish_public_trace()
+                    .validate_public_execution()
+                    .unwrap();
+                worlds += 1;
+            }
+        }
+    }
+    assert_eq!((worlds, rollbacks), (16, 48));
+    eprintln!("INV-058 one-sided reversal cap: worlds={worlds} exact_rollbacks={rollbacks} peak_trade_cu={peak}");
+}
+
+#[test]
 fn v16_program_post_transition_caps_match_across_reduction_and_cross_zero_histories() {
     const PRICE: u64 = 100;
 
