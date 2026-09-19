@@ -27,6 +27,9 @@ mod reward_terminal_redemption;
 #[path = "inv_045_hybrid_recipient_provenance.rs"]
 mod hybrid_recipient_provenance;
 
+#[path = "inv_045_report_cadence_rewards.rs"]
+mod report_cadence_rewards;
+
 fn values(env: &V16CuEnv, portfolios: [Pubkey; 5]) -> [i128; 5] {
     portfolios.map(|key| {
         let account = env.portfolio_state(key);
