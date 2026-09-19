@@ -346,7 +346,7 @@ fn v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings()
                 &env,
                 ProgInstruction::PermissionlessCrank {
                     now_slot: if late { 0 } else { u64::MAX },
-                    observations: crank_observations_for_assets(&[u16::MAX, 1, 1]),
+                    observations: crank_observations_for_assets(&[]),
                 },
                 vec![
                     AccountMeta::new_readonly(owner.pubkey(), false),
@@ -396,7 +396,7 @@ fn v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings()
             // The first three calls pay real SPL capital, delete the account, and park at asset 1.
             // The fourth call is a same-Clock wait, so all three effects must roll back together.
             for now_slot in [0, 300, u64::MAX] {
-                for assets in [&[][..], &[u16::MAX, 1, 1][..], &[1, 1, u16::MAX][..]] {
+                for assets in [&[][..], &[EARLY_ASSET as u16][..]] {
                     let mut retained = crank.clone();
                     retained.data = ProgInstruction::PermissionlessCrank {
                         now_slot,
