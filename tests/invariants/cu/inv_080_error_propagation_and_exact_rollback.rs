@@ -28,6 +28,9 @@ mod native_deposit_sync_retry;
 #[path = "inv_080_backing_bundle_cpi_retry.rs"]
 mod backing_bundle_cpi_retry;
 
+#[path = "inv_080_reserve_swap_authority_rollback.rs"]
+mod reserve_swap_authority_rollback;
+
 fn inv080_source_defines_test(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
     let mut test_attribute = false;
