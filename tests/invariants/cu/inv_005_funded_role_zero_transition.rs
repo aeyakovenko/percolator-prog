@@ -245,6 +245,7 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
             for zero_by_cold in [false, true] {
                 let peer = 1 - asset;
                 let backing = role == 2;
+                let debit_epoch_step = u64::from(!backing);
                 let mut env = inv018_public_spl_market_with_params(
                     6,
                     V16CuMarketParams {
@@ -284,7 +285,8 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                     assert_eq!([profile(env, 0), profile(env, 1)], *profiles);
                     assert_eq!(
                         [env.control_sequences(0), env.control_sequences(1)],
-                        *sequences
+                        *sequences,
+                        "each committed insurance debit consumes one authority epoch; rejected transactions restore it"
                     );
                     assert_eq!(env.market_state().0, initial.0);
                     assert_eq!(env.market_state().1.assets, initial.1.assets);
@@ -340,6 +342,35 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                         .expect("retained funded consent is initially live");
                     assert_eq!(super::frame(&env, &keys), before);
                 }
+                // The old insurance payout consumes its epoch, so retain the later
+                // handoff/payout at the next epoch before executing either transaction.
+                let retained_pair = if backing {
+                    retained_pair
+                } else {
+                    signed(
+                        &env,
+                        &[
+                            handoff(
+                                &env,
+                                asset,
+                                ROLES[role],
+                                actors[role].pubkey(),
+                                Some(successor.pubkey()),
+                                epoch + debit_epoch_step,
+                            ),
+                            payout(
+                                &env,
+                                successor.pubkey(),
+                                wallets[3],
+                                asset,
+                                backing,
+                                5,
+                                epoch + debit_epoch_step + 1,
+                            ),
+                        ],
+                        &[actors[role], &successor],
+                    )
+                };
 
                 // The suffix observes the successor role and its already-paid partial stock.
                 // Its rejection must restore both the handoff epoch and the real SPL transfer.
@@ -350,7 +381,7 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                     ROLES[role],
                     zero_signer.pubkey(),
                     None,
-                    epoch + 1,
+                    epoch + 1 + debit_epoch_step,
                 );
                 let mut signers = vec![actors[role], &successor];
                 if zero_by_cold {
@@ -377,6 +408,7 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                     1,
                 ));
                 book.pay(asset, backing, role, 3);
+                sequences[asset].authority_epoch += debit_epoch_step;
                 check(&env, &book, &profiles, &sequences);
                 peak[2] = peak[2].max(land(
                     &mut env,
@@ -388,7 +420,7 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                 ));
                 book.pay(asset, backing, 3, 5);
                 set_holder(&mut profiles[asset], ROLES[role], successor.pubkey());
-                sequences[asset].authority_epoch += 1;
+                sequences[asset].authority_epoch += 1 + debit_epoch_step;
                 check(&env, &book, &profiles, &sequences);
 
                 // After the committed handoff, an unchanged sibling payout executes before
@@ -413,7 +445,7 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                         ROLES[role],
                         cold.pubkey(),
                         destination,
-                        epoch + 1,
+                        sequences[asset].authority_epoch,
                     );
                     let tx = signed(
                         &env,
@@ -430,15 +462,22 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                     asset,
                     backing,
                     1,
-                    epoch + 1,
+                    sequences[asset].authority_epoch,
                 );
                 let tx = signed(&env, &[old], &[actors[role]]);
+                // Insurance checks the successor-owned payout destination before the signer;
+                // backing checks the former holder's authority first.
+                let old_role_error = if backing {
+                    PercolatorError::Unauthorized
+                } else {
+                    PercolatorError::InvalidTokenAccount
+                };
                 peak[1] = peak[1].max(land(
                     &mut env,
                     tx,
                     &tracked,
                     &[],
-                    Some((2, PercolatorError::Unauthorized)),
+                    Some((2, old_role_error)),
                     0,
                 ));
                 check(&env, &book, &profiles, &sequences);
@@ -452,6 +491,7 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                     1,
                 ));
                 book.pay(peer, backing, role, 7);
+                sequences[peer].authority_epoch += debit_epoch_step;
                 check(&env, &book, &profiles, &sequences);
                 let remaining = if backing {
                     book.backing[asset * 2]
@@ -465,7 +505,7 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                     asset,
                     backing,
                     remaining,
-                    epoch + 1,
+                    sequences[asset].authority_epoch,
                 );
                 let tx = signed(&env, &[final_payout], &[&successor]);
                 peak[2] = peak[2].max(land(
@@ -477,6 +517,7 @@ fn v16_program_zero_role_suffix_restores_funded_handoff_payout_and_retained_cons
                     1,
                 ));
                 book.pay(asset, backing, 3, remaining);
+                sequences[asset].authority_epoch += debit_epoch_step;
                 check(&env, &book, &profiles, &sequences);
                 let original = if backing {
                     BACKING[asset * 2]
