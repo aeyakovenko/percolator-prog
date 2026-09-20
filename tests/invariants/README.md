@@ -1,5 +1,43 @@
 # Invariant-owned test coverage
 
+## INV-071/082 Recovery cleanup position epoch (2026-09-20)
+
+One new public LiteSVM test in
+[cu/inv_071_recovery_obligation_finalization.rs](cu/inv_071_recovery_obligation_finalization.rs)
+joins released-obligation progress with INV-004 episode invalidation. The same
+public fixture removes a zero-basis, nonzero-loss-weight leg in Live and market
+Recovery. Both calls reduce the decoded rank and preserve 1000 principal atoms,
+custody, peer Accounts and portfolio incarnation; both must advance the epoch once.
+
+**RED on base `4474d18d5760e87b2bba10b24f22d36018b7c756`:** Live advances
+`2 -> 3` (55766 CU), but market Recovery clears the leg with `2 -> 2` (46127 CU).
+The adjacent existing finalization/payout selector passes both sides, four exact
+rollbacks and two 1000-atom payouts (peak 89158 CU). Its whole-Account cleanup
+oracle preserves the old epoch; INV-004's source roster checks the later ordinary
+crank branch. Neither requires episode invalidation in the early Recovery branch.
+
+Fix: the wrapper's Recovery-mode `PermissionlessCrank` branch now snapshots the
+same position vector as the Live path and bumps `position_epoch` when the engine
+commits a position-vector mutation. Non-position Recovery steps, including final
+market resolution, keep their prior epoch behavior.
+
+The title-only audit of open #289/#382/#394/#395/#437/#438/#404 reviewed
+INV-028/037/039/057/063/067/071/073/078/080/082. Existing residual recredit,
+prior-claim floor, fragmented pair, force-close winner and init/rent witnesses
+were not duplicated. This addition isolates #437; the insurance-domain barrier
+theme remains outside this test. No issue bodies or PR diffs were inspected.
+
+Fresh default-feature SBF after the fix, engine `4db11a8c`, SHA-256
+`558778ee9b0d02ca95d9c1f430e5b0e786d1a27a02484301dd60d6489a87546c`.
+Exact selectors run with `cargo test --locked --offline --test v16_cu <selector> -- --exact --nocapture --test-threads=1`:
+
+- PASS: `inv_071_crank_progress::recovery_obligation_finalization::v16_program_released_obligation_crank_advances_epoch_in_live_and_market_recovery`
+- PASS: `inv_071_crank_progress::recovery_obligation_finalization::v16_program_recovery_releases_obligation_before_exact_finalization_and_payout`
+- PASS: `inv_004_position_episode_binding`
+
+Scoped rustfmt and `git diff --check` pass. Public System/SPL/wrapper setup only;
+no state injection, production pin/status edits, or general liveness closure claim.
+
 ## Row 433 unsigned final recredit payout and close (2026-09-20)
 
 One new public LiteSVM selector in

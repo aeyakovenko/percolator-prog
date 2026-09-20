@@ -183,7 +183,7 @@ fn v16_program_retained_position_binding_and_writer_rosters_are_source_complete(
         production_source
             .matches("state::bump_portfolio_position_epoch(")
             .count(),
-        11,
+        12,
         "position-epoch writer roster changed without INV-004 review"
     );
     assert_eq!(
@@ -195,6 +195,8 @@ fn v16_program_retained_position_binding_and_writer_rosters_are_source_complete(
     );
     let crank = function_source(&source, "handle_permissionless_crank_zero_copy", "account");
     assert!(crank.contains("let positions_before = portfolio_position_vector_view(&portfolio);"));
+    assert!(crank.contains("if group.header.mode == 2"));
+    assert!(crank.contains("if positions_before != portfolio_position_vector_view(&portfolio)"));
     assert!(crank.contains("if position_changed"));
     let position_changed = crank
         .split_once("if position_changed")

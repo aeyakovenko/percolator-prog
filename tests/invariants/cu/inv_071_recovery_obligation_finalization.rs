@@ -194,73 +194,141 @@ fn assert_market(env: &V16CuEnv, before: &Account, expected: &MarketGroupV16) {
     assert_eq!(env.svm.get_account(&env.market).unwrap(), bytes);
 }
 
-#[test]
-fn v16_program_recovery_releases_obligation_before_exact_finalization_and_payout() {
-    let mut max_cu = 0;
-    for direction in [1i128, -1] {
-        let (mut env, actors) = public_world();
-        let target = actors[0].portfolio;
-        let peer = actors[1].portfolio;
-        let debtor = actors[3].portfolio;
-        env.trade_asset_with_cu(
-            0,
-            &actors[0].owner,
-            target,
-            &actors[1].owner,
-            peer,
-            direction * POS_SCALE as i128,
-            100,
-            0,
-        );
-        env.trade_asset_with_cu(
-            1,
-            &actors[2].owner,
-            actors[2].portfolio,
-            &actors[3].owner,
-            debtor,
-            (POS_SCALE / 50) as i128,
-            100,
-            0,
-        );
-        for (slot, price) in [(1, 200), (2, 300)] {
-            env.svm.warp_to_slot(slot);
-            env.push_auth_mark_for_asset_as_admin(1, slot, price);
-            env.crank(
-                actors[2].portfolio,
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: slot,
-                    observations: crank_observations(1),
-                },
-            );
-        }
+fn released_obligation_world(direction: i128) -> (V16CuEnv, Vec<Actor>) {
+    let (mut env, actors) = public_world();
+    let target = actors[0].portfolio;
+    let peer = actors[1].portfolio;
+    let debtor = actors[3].portfolio;
+    env.trade_asset_with_cu(
+        0,
+        &actors[0].owner,
+        target,
+        &actors[1].owner,
+        peer,
+        direction * POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &actors[2].owner,
+        actors[2].portfolio,
+        &actors[3].owner,
+        debtor,
+        (POS_SCALE / 50) as i128,
+        100,
+        0,
+    );
+    for (slot, price) in [(1, 200), (2, 300)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(1, slot, price);
         env.crank(
-            debtor,
+            actors[2].portfolio,
             ProgInstruction::PermissionlessCrank {
-                now_slot: 2,
+                now_slot: slot,
                 observations: crank_observations(1),
             },
         );
-        env.svm.warp_to_slot(3);
-        let admin = Keypair::from_bytes(&env.admin.to_bytes()).unwrap();
-        for asset in [0, 1] {
-            env.try_shutdown_asset_with_authority(&admin, asset, 3)
-                .unwrap();
+    }
+    env.crank(
+        debtor,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(1),
+        },
+    );
+    env.svm.warp_to_slot(3);
+    let admin = Keypair::from_bytes(&env.admin.to_bytes()).unwrap();
+    for asset in [0, 1] {
+        env.try_shutdown_asset_with_authority(&admin, asset, 3)
+            .unwrap();
+    }
+    // At unchanged price, the first exit retains only loss weight until its peer exits.
+    env.forfeit_recovery_leg_with_cu(&actors[0].owner, target, 0, 1);
+    let obligation = active_leg_for_asset(&env.portfolio_state(target), 0);
+    assert_eq!(obligation.basis_pos_q, 0);
+    assert_eq!(obligation.loss_weight, POS_SCALE);
+    assert!(!obligation.stale && !obligation.b_stale);
+    assert_eq!(obligation.b_rem, 0);
+    env.forfeit_recovery_leg_with_cu(&actors[1].owner, peer, 0, 1);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(peer), 0));
+    env.forfeit_recovery_leg_with_cu(&actors[3].owner, debtor, 1, 1);
+    let close = close_progress(&env.portfolio_state(debtor));
+    assert!(inv071_close_pending(close));
+    assert_eq!(close.residual_remaining, 1);
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+    assert_eq!(rank(&env, target), (2, 1, 1_000));
+
+    (env, actors)
+}
+
+#[test]
+fn v16_program_released_obligation_crank_advances_epoch_in_live_and_market_recovery() {
+    for market_recovery in [false, true] {
+        let (mut env, actors) = released_obligation_world(1);
+        let target = actors[0].portfolio;
+        if market_recovery {
+            let debtor = actors[3].portfolio;
+            let expiry = close_progress(&env.portfolio_state(debtor)).max_close_slot + 1;
+            env.svm.warp_to_slot(expiry);
+            crank(&mut env, debtor, 0);
         }
-        // At unchanged price, the first exit retains only loss weight until its peer exits.
-        env.forfeit_recovery_leg_with_cu(&actors[0].owner, target, 0, 1);
+        let expected_mode = if market_recovery {
+            MarketModeV16::Recovery
+        } else {
+            MarketModeV16::Live
+        };
+        let market_before = env.market_state().1;
+        assert_eq!(market_before.mode, expected_mode);
         let obligation = active_leg_for_asset(&env.portfolio_state(target), 0);
         assert_eq!(obligation.basis_pos_q, 0);
         assert_eq!(obligation.loss_weight, POS_SCALE);
         assert!(!obligation.stale && !obligation.b_stale);
-        assert_eq!(obligation.b_rem, 0);
-        env.forfeit_recovery_leg_with_cu(&actors[1].owner, peer, 0, 1);
-        assert!(!has_active_leg_for_asset(&env.portfolio_state(peer), 0));
-        env.forfeit_recovery_leg_with_cu(&actors[3].owner, debtor, 1, 1);
+        assert_eq!(market_before.assets[0].oi_eff_long_q, 0);
+        assert_eq!(market_before.assets[0].oi_eff_short_q, 0);
+        let epoch_before = env.portfolio_position_epoch(target);
+        let incarnation = env.portfolio_id(target);
+        let rank_before = rank(&env, target);
+        let extra: Vec<_> = actors
+            .iter()
+            .flat_map(|a| [a.owner.pubkey(), a.token])
+            .chain([env.vault_authority])
+            .collect();
+        let before = inv071_continuation_frame(&env, &extra);
+
+        let cu = crank(&mut env, target, 0);
+
+        assert_eq!(env.market_state().1.mode, expected_mode);
+        assert!(!has_active_leg_for_asset(&env.portfolio_state(target), 0));
+        assert!(rank(&env, target) < rank_before);
+        assert_eq!(env.portfolio_state(target).capital.get(), 1_000);
+        assert_eq!(env.portfolio_state(target).pnl.get(), 0);
+        assert_eq!(env.portfolio_id(target), incarnation);
+        assert_eq!(env.market_state().1.c_tot, market_before.c_tot);
+        assert_eq!(env.market_state().1.vault, market_before.vault);
+        inv071_assert_continuation_frame(&env, &before, &[env.market, target]);
+        let epoch_after = env.portfolio_position_epoch(target);
+        eprintln!(
+            "released obligation: mode={expected_mode:?}, rank={rank_before:?}->{:?}, epoch={epoch_before}->{epoch_after}, CU={cu}",
+            rank(&env, target)
+        );
+        assert_eq!(
+            epoch_after,
+            epoch_before.checked_add(1).unwrap(),
+            "{expected_mode:?}: removing a released leg must invalidate the previous position episode"
+        );
+    }
+}
+
+#[test]
+fn v16_program_recovery_releases_obligation_before_exact_finalization_and_payout() {
+    let mut max_cu = 0;
+    for direction in [1i128, -1] {
+        let (mut env, actors) = released_obligation_world(direction);
+        let target = actors[0].portfolio;
+        let debtor = actors[3].portfolio;
+        let obligation = active_leg_for_asset(&env.portfolio_state(target), 0);
         let close = close_progress(&env.portfolio_state(debtor));
-        assert!(inv071_close_pending(close));
-        assert_eq!(close.residual_remaining, 1);
-        assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
-        assert_eq!(rank(&env, target), (2, 1, 1_000));
 
         let extra: Vec<_> = actors
             .iter()
@@ -349,6 +417,7 @@ fn v16_program_recovery_releases_obligation_before_exact_finalization_and_payout
         expected_target.health_cert.valid = 0;
         let mut target_bytes = target_before;
         state::write_portfolio(&mut target_bytes.data, &expected_target).unwrap();
+        state::bump_portfolio_position_epoch(&mut target_bytes.data).unwrap();
         assert_eq!(env.svm.get_account(&target).unwrap(), target_bytes);
 
         // Cleanup consumed one call without finalizing. A later Clock, not the caller slot,

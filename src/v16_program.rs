@@ -13833,6 +13833,7 @@ pub mod processor {
                     // Recovery work is entirely committed-state work. Stale Live-mode oracle hints
                     // can land after another cranker declares Recovery; ignore them and let the
                     // engine release one obligation or finalize Recovery in bounded work.
+                    let positions_before = portfolio_position_vector_view(&portfolio);
                     group
                         .permissionless_auto_crank_not_atomic(
                             &mut portfolio,
@@ -13844,6 +13845,10 @@ pub mod processor {
                         )
                         .map_err(map_v16_error)?;
                     group.validate_shape().map_err(map_v16_error)?;
+                    if positions_before != portfolio_position_vector_view(&portfolio) {
+                        drop(portfolio);
+                        state::bump_portfolio_position_epoch(&mut portfolio_data)?;
+                    }
                     return Ok(());
                 }
                 let close_ledger = portfolio
