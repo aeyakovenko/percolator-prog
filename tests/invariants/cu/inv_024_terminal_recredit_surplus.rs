@@ -409,7 +409,9 @@ fn v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback() 
                 );
             }
             for asset in [0, 1] {
-                assert_eq!(env.control_sequences(asset), sequences[asset]);
+                let mut expected = sequences[asset];
+                expected.authority_epoch += u64::from(paid && asset == 0);
+                assert_eq!(env.control_sequences(asset), expected);
                 assert_eq!(
                     state::read_asset_oracle_profile(
                         &env.svm.get_account(&env.market).unwrap().data,
@@ -506,10 +508,32 @@ fn v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback() 
         drop((provider, operator, owners, donor));
         env.svm.warp_to_slot(EXPIRY);
         let prefix = [deletion, close.clone(), withdrawal];
+        // Insurance debit consumes its authority epoch even during terminal cleanup.
+        let stale = prefix
+            .iter()
+            .cloned()
+            .chain([close.clone()])
+            .collect::<Vec<_>>();
+        peaks[1] = peaks[1].max(land(
+            &mut env,
+            &stale,
+            &[&admin, &insurer],
+            &tracked,
+            &[],
+            0,
+            None,
+            Some((5, PercolatorError::EngineStale)),
+        ));
+        check(&env, false);
+        let mut close_after_payout = close;
+        close_after_payout.data = ProgInstruction::CloseSlab {
+            authority_epoch: sequences[0].authority_epoch + 1,
+        }
+        .encode();
         let rejected = prefix
             .iter()
             .cloned()
-            .chain([close.clone(), close.clone()])
+            .chain([close_after_payout.clone(), close_after_payout.clone()])
             .collect::<Vec<_>>();
         peaks[1] = peaks[1].max(land(
             &mut env,
@@ -552,7 +576,7 @@ fn v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback() 
         let allowed = [env.market, env.vault, env.mint, role_tokens[4]];
         peaks[3] = peaks[3].max(land(
             &mut env,
-            &[close],
+            &[close_after_payout],
             &[&admin],
             &tracked,
             &allowed,
@@ -595,5 +619,5 @@ fn v16_program_terminal_recredit_excludes_raw_surplus_across_cleanup_rollback() 
     for peak in peaks {
         assert_cu_within("row410 recredit/surplus", peak, 400_000);
     }
-    eprintln!("row410 recredit/surplus: 2 histories, 2 exact final-suffix rollbacks; peak CU [settlement, rejected bundle, retry, final close]={peaks:?}");
+    eprintln!("row410 recredit/surplus: 2 histories, 2 stale-epoch and 2 final-suffix rollbacks; peak CU [settlement, rejected bundle, retry, final close]={peaks:?}");
 }

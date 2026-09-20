@@ -1,5 +1,5 @@
 //! INV-024/005/036/081, row410: spent-insurance recovery excludes earned fees
-//! and unexpired principal, for both operator and provider terminal submitters.
+//! after retained user receipts finish, for both operator and provider submitters.
 
 use super::*;
 use terminal_public_reserves::reserve_payout;
@@ -24,6 +24,7 @@ const SPENT: u64 = LOSS - (CAPITAL[0] - EARNINGS);
 const AVAILABLE: u64 = INSURANCE + INSURANCE_FEE - SPENT;
 const USER_PAID: [u64; 2] = [0, CAPITAL[1] + LOSS - SOURCE_PRINCIPAL];
 const FEE_PREFIX: u64 = 17;
+const RELEASED_LIEN: u64 = 1_050 * 105 / 2 - CAPITAL[0];
 
 #[derive(Default)]
 struct Entitlements {
@@ -32,21 +33,21 @@ struct Entitlements {
     fees_paid: u64,
     insurance_paid: u64,
     recredited: u64,
-    expired: bool,
 }
 
 impl Entitlements {
     fn check(&self, world: &TerminalEarningsWorld, ledger: Pubkey, residual: u64) {
         let env = &world.env;
         let group = env.market_state().1;
-        let remaining = BACKING + SOURCE_PRINCIPAL + PROVIDER_FEE + AVAILABLE
+        // Expiry completes the user receipt before reserve disposal.
+        let remaining = BACKING + PROVIDER_FEE + AVAILABLE
             - self.principal_paid
             - self.source_principal_paid
             - self.fees_paid
             - self.insurance_paid;
         let amounts = [
             USER_PAID[0],
-            USER_PAID[1],
+            USER_PAID[1] + SOURCE_PRINCIPAL,
             self.principal_paid + self.source_principal_paid + self.fees_paid,
             0,
             self.insurance_paid,
@@ -75,26 +76,14 @@ impl Entitlements {
             group.source_backing_buckets[1].utilization_fee_earnings,
             fees
         );
-        let principal = if self.expired {
-            0
-        } else {
-            BACKING - self.principal_paid
-        };
         assert_eq!(
             group.source_backing_buckets[1].fresh_unliened_backing_num,
-            u128::from(principal) * BOUND_SCALE
+            0
         );
-        assert_eq!(
-            group.source_credit[1].fresh_reserved_backing_num,
-            u128::from(principal) * BOUND_SCALE
-        );
+        assert_eq!(group.source_credit[1].fresh_reserved_backing_num, 0);
         assert_eq!(
             group.source_backing_buckets[1].status,
-            if self.expired {
-                BackingBucketStatusV16::Expired
-            } else {
-                BackingBucketStatusV16::Fresh
-            }
+            BackingBucketStatusV16::Expired
         );
         assert_eq!(
             group.insurance,
@@ -154,10 +143,8 @@ impl Entitlements {
             assert_eq!(record.total_earnings_withdrawn_atoms, self.fees_paid.into());
             assert_eq!(record.last_observed_bucket_earnings_atoms, fees);
         }
-        if self.expired {
-            assert_eq!(self.principal_paid, BACKING - residual);
-            assert!(self.recredited <= residual.min(SPENT));
-        }
+        assert_eq!(self.principal_paid, BACKING - residual - SOURCE_PRINCIPAL);
+        assert!(self.recredited <= residual.min(SPENT));
     }
 }
 
@@ -166,47 +153,7 @@ fn terminal_fee_loss_world() -> (TerminalEarningsWorld, Keypair, Pubkey) {
 }
 
 fn terminal_fee_loss_world_with_quote(native: bool) -> (TerminalEarningsWorld, Keypair, Pubkey) {
-    let (mut world, users) = terminal_earnings_world_with_quote(false, None, SHARE_BPS, native);
-    let insurer = Keypair::new();
-    world
-        .env
-        .svm
-        .airdrop(&insurer.pubkey(), 1_000_000_000)
-        .unwrap();
-    world
-        .env
-        .try_update_per_asset_authority_with_cu(
-            &world.admin,
-            Some(&insurer),
-            0,
-            processor::ASSET_AUTH_INSURANCE,
-            insurer.pubkey().to_bytes(),
-        )
-        .unwrap();
-    let admin_token = world.tokens[4];
-    world.wallets[4] = insurer.pubkey();
-    world.tokens[4] = create_ata_for_test(
-        &mut world.env.svm,
-        &world.env.payer,
-        insurer.pubkey(),
-        world.env.mint,
-    );
-    // Public authenticated observations make the former winner insolvent;
-    // the existing utilization charge remains split between its two roles.
-    for price in (51..105).rev() {
-        let slot = 107 - price;
-        world.env.svm.warp_to_slot(slot);
-        world.env.push_auth_mark_for_asset_as_admin(0, slot, price);
-        world.env.crank(
-            world.portfolios[1],
-            ProgInstruction::PermissionlessCrank {
-                now_slot: slot,
-                observations: crank_observations(0),
-            },
-        );
-    }
-    world.env.resolve();
-    world.env.svm.warp_to_slot(61);
+    let (mut world, users, insurer, admin_token) = terminal_fee_loss_prefix(native, None);
     for _ in 0..8 {
         for actor in [0, 1] {
             if !resolved_portfolio_is_terminal(&world.env, world.portfolios[actor]) {
@@ -255,17 +202,286 @@ fn terminal_fee_loss_world_with_quote(native: bool) -> (TerminalEarningsWorld, K
     (world, insurer, admin_token)
 }
 
+fn terminal_fee_loss_prefix(
+    native: bool,
+    residual: Option<u64>,
+) -> (TerminalEarningsWorld, [Keypair; 2], Keypair, Pubkey) {
+    let (mut world, users) = terminal_earnings_world_with_quote(false, None, SHARE_BPS, native);
+    let insurer = Keypair::new();
+    world
+        .env
+        .svm
+        .airdrop(&insurer.pubkey(), 1_000_000_000)
+        .unwrap();
+    world
+        .env
+        .try_update_per_asset_authority_with_cu(
+            &world.admin,
+            Some(&insurer),
+            0,
+            processor::ASSET_AUTH_INSURANCE,
+            insurer.pubkey().to_bytes(),
+        )
+        .unwrap();
+    let admin_token = world.tokens[4];
+    world.wallets[4] = insurer.pubkey();
+    world.tokens[4] = create_ata_for_test(
+        &mut world.env.svm,
+        &world.env.payer,
+        insurer.pubkey(),
+        world.env.mint,
+    );
+    // Public authenticated observations make the former winner insolvent;
+    // the existing utilization charge remains split between its two roles.
+    for price in (51..105).rev() {
+        let slot = 107 - price;
+        world.env.svm.warp_to_slot(slot);
+        world.env.push_auth_mark_for_asset_as_admin(0, slot, price);
+        world.env.crank(
+            world.portfolios[1],
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+        if price == 100 {
+            if let Some(residual) = residual {
+                // Release the former winner's lien while solvent, then withdraw
+                // free principal before resolution locks reserves behind receipts.
+                world.env.crank(
+                    world.portfolios[0],
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: crank_observations(0),
+                    },
+                );
+                world
+                    .env
+                    .send(
+                        ProgInstruction::WithdrawBackingBucket {
+                            domain: 1,
+                            market_id: world.env.asset_market_id(0),
+                            authority_epoch: world.env.control_sequences(0).authority_epoch,
+                            amount: u128::from(BACKING - residual - SOURCE_PRINCIPAL),
+                        },
+                        vec![
+                            AccountMeta::new_readonly(world.wallets[2], true),
+                            AccountMeta::new(world.env.market, false),
+                            AccountMeta::new(world.tokens[2], false),
+                            AccountMeta::new(world.env.vault, false),
+                            AccountMeta::new_readonly(world.env.vault_authority, false),
+                            AccountMeta::new_readonly(spl_token::ID, false),
+                        ],
+                        &[&world.incumbent],
+                    )
+                    .expect("live principal withdrawal after source-claim release");
+            }
+        }
+    }
+    world.env.resolve();
+    world.env.svm.warp_to_slot(61);
+    (world, users, insurer, admin_token)
+}
+
+fn terminal_fee_loss_after_receipt_expiry(
+    residual: u64,
+) -> (TerminalEarningsWorld, Keypair, Pubkey) {
+    let (mut world, users, insurer, admin_token) = terminal_fee_loss_prefix(false, Some(residual));
+    let payout = |world: &TerminalEarningsWorld, actor, instruction: ProgInstruction| Instruction {
+        program_id: world.env.program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(world.wallets[actor], false),
+            AccountMeta::new(world.env.market, false),
+            AccountMeta::new(world.portfolios[actor], false),
+            AccountMeta::new(world.tokens[actor], false),
+            AccountMeta::new(world.env.vault, false),
+            AccountMeta::new_readonly(world.env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: instruction.encode(),
+    };
+    let tracked = [
+        world.env.market,
+        world.env.vault,
+        world.env.mint,
+        admin_token,
+    ]
+    .into_iter()
+    .chain(world.wallets)
+    .chain(world.tokens)
+    .chain(world.portfolios)
+    .collect::<Vec<_>>();
+    for _ in 0..8 {
+        for actor in [0, 1] {
+            if resolved_portfolio_is_terminal(&world.env, world.portfolios[actor])
+                || resolved_receipt(&world.env.portfolio_state(world.portfolios[actor])).present
+            {
+                continue;
+            }
+            let ix = payout(
+                &world,
+                actor,
+                ProgInstruction::CloseResolved {
+                    fee_rate_per_slot: 0,
+                },
+            );
+            let allowed = [
+                world.env.market,
+                world.env.vault,
+                world.portfolios[actor],
+                world.tokens[actor],
+            ];
+            land(
+                &mut world.env,
+                &[ix],
+                &[],
+                &tracked,
+                &allowed,
+                0,
+                None,
+                None,
+            );
+        }
+    }
+    let group = world.env.market_state().1;
+    assert_eq!(
+        group.source_credit[1].fresh_reserved_backing_num,
+        u128::from(residual + SOURCE_PRINCIPAL + RELEASED_LIEN) * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_credit[1].provider_receivable_num,
+        u128::from(PROFIT - RELEASED_LIEN) * BOUND_SCALE
+    );
+    assert_eq!(
+        world.tokens.map(|key| world.env.token_amount(key)),
+        [
+            0,
+            USER_PAID[1] - RELEASED_LIEN,
+            BACKING - residual - SOURCE_PRINCIPAL,
+            0,
+            0,
+        ]
+    );
+    let receipt = resolved_receipt(&world.env.portfolio_state(world.portfolios[1]));
+    assert!(receipt.present && !receipt.finalized);
+    assert_eq!(
+        receipt.terminal_positive_claim_face,
+        u128::from(SOURCE_FACE - SOURCE_PAID)
+    );
+    assert_eq!(
+        receipt.terminal_positive_claim_face - receipt.paid_effective,
+        u128::from(SOURCE_PRINCIPAL + RELEASED_LIEN)
+    );
+    let retry = payout(
+        &world,
+        1,
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+    );
+    land(
+        &mut world.env,
+        &[retry],
+        &[],
+        &tracked,
+        &[],
+        0,
+        None,
+        Some((2, PercolatorError::EngineNonProgress)),
+    );
+    // A discovery hint cannot expire fresh backing before authenticated time.
+    let expiry = payout(
+        &world,
+        1,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 100,
+            observations: crank_observations(0),
+        },
+    );
+    land(
+        &mut world.env,
+        &[expiry.clone()],
+        &[],
+        &tracked,
+        &[],
+        0,
+        None,
+        Some((2, PercolatorError::EngineNonProgress)),
+    );
+    world.env.svm.warp_to_slot(100);
+    let allowed = [world.env.market];
+    land(
+        &mut world.env,
+        &[expiry],
+        &[],
+        &tracked,
+        &allowed,
+        0,
+        None,
+        None,
+    );
+    assert_eq!(
+        resolved_receipt(&world.env.portfolio_state(world.portfolios[1])),
+        receipt
+    );
+    assert_eq!(
+        world.env.market_state().1.backing_provider_earnings_total,
+        u128::from(PROVIDER_FEE)
+    );
+    let topup = payout(&world, 1, ProgInstruction::ClaimResolvedPayoutTopup);
+    let allowed = [
+        world.env.market,
+        world.env.vault,
+        world.portfolios[1],
+        world.tokens[1],
+    ];
+    land(
+        &mut world.env,
+        &[topup.clone()],
+        &[],
+        &tracked,
+        &allowed,
+        0,
+        None,
+        None,
+    );
+    let final_receipt = resolved_receipt(&world.env.portfolio_state(world.portfolios[1]));
+    assert!(final_receipt.present && final_receipt.finalized);
+    assert_eq!(
+        final_receipt.paid_effective,
+        receipt.terminal_positive_claim_face
+    );
+    // Paid receipts cannot pay a second time.
+    land(&mut world.env, &[topup], &[], &tracked, &[], 0, None, None);
+    for actor in 0..2 {
+        assert!(resolved_portfolio_is_terminal(
+            &world.env,
+            world.portfolios[actor]
+        ));
+        assert_eq!(
+            world.env.token_amount(world.tokens[actor]),
+            USER_PAID[actor] + if actor == 1 { SOURCE_PRINCIPAL } else { 0 }
+        );
+        world
+            .env
+            .close_portfolio_with_cu(&users[actor], world.portfolios[actor]);
+    }
+    (world, insurer, admin_token)
+}
+
 #[test]
 fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_orders() {
     assert_eq!((PROVIDER_FEE, SPENT, AVAILABLE), (657, 73, 176));
     assert_eq!((SOURCE_PAID, SOURCE_PRINCIPAL), (51_626, 1));
+    assert_eq!(RELEASED_LIEN, 2_623);
     let mut peak = 0;
     for residual in [17, SPENT, 101] {
         for (fees_first, payer_role) in [false, true]
             .into_iter()
             .flat_map(|first| [2, 3].map(|role| (first, role)))
         {
-            let (mut world, insurer, admin_token) = terminal_fee_loss_world();
+            let (mut world, insurer, admin_token) =
+                terminal_fee_loss_after_receipt_expiry(residual);
             let ledger = Keypair::new();
             system_create_account_for_test(
                 &mut world.env.svm,
@@ -320,7 +536,9 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
             let check = |world: &TerminalEarningsWorld, book: &Entitlements| {
                 book.check(world, ledger, residual);
                 assert_eq!(world.env.market_state().0, config);
-                assert_eq!(world.env.control_sequences(0), sequences);
+                let mut expected_sequences = sequences;
+                expected_sequences.authority_epoch += u64::from(book.insurance_paid != 0);
+                assert_eq!(world.env.control_sequences(0), expected_sequences);
                 assert_eq!(
                     state::read_asset_oracle_profile(
                         &world.env.svm.get_account(&world.env.market).unwrap().data,
@@ -342,7 +560,10 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
                     assert_eq!(world.env.svm.get_account(&ledger), initial_ledger);
                 }
             };
-            let mut book = Entitlements::default();
+            let mut book = Entitlements {
+                principal_paid: BACKING - residual - SOURCE_PRINCIPAL,
+                ..Entitlements::default()
+            };
             check(&world, &book);
             let payout = |world: &TerminalEarningsWorld, kind, amount| {
                 let mut ix = reserve_payout(
@@ -379,34 +600,8 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
             ));
             book.source_principal_paid = SOURCE_PRINCIPAL;
             check(&world, &book);
-            for (kind, amount) in [(0, BACKING - residual), (2, AVAILABLE)] {
-                let ix = payout(&world, kind, amount);
-                let recipient = world.tokens[if kind == 2 { 4 } else { 2 }];
-                let allowed = [world.env.market, world.env.vault, recipient];
-                let signers = if kind == 2 {
-                    vec![&insurer]
-                } else {
-                    Vec::new()
-                };
-                peak = peak.max(land(
-                    &mut world.env,
-                    &[ix],
-                    &signers,
-                    &tracked,
-                    &allowed,
-                    0,
-                    None,
-                    None,
-                ));
-                if kind == 0 {
-                    book.principal_paid += amount;
-                } else {
-                    book.insurance_paid += amount;
-                }
-                check(&world, &book);
-            }
             assert_eq!(world.env.svm.get_account(&ledger), initial_ledger);
-            let close = Instruction {
+            let mut close = Instruction {
                 program_id: world.env.program_id,
                 accounts: vec![
                     AccountMeta::new(world.admin.pubkey(), true),
@@ -424,10 +619,10 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
             };
             let recovery = residual.min(SPENT);
             let fees = payout(&world, 1, FEE_PREFIX);
-            let premature = payout(&world, 2, 1);
+            let overdraw = payout(&world, 2, AVAILABLE + recovery + 1);
             peak = peak.max(land(
                 &mut world.env,
-                &[fees.clone(), premature],
+                &[fees.clone(), overdraw],
                 &[&insurer],
                 &tracked,
                 &[],
@@ -436,49 +631,39 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
                 Some((3, PercolatorError::EngineLockActive)),
             ));
             check(&world, &book);
-            assert_eq!(world.env.svm.get_account(&ledger), initial_ledger);
-            world.env.svm.warp_to_slot(100);
-            let overdraw = payout(&world, 2, recovery + 1);
-            peak = peak.max(land(
-                &mut world.env,
-                &[close.clone(), fees.clone(), overdraw],
-                &[&world.admin, &insurer],
-                &tracked,
-                &[],
-                0,
-                None,
-                Some((4, PercolatorError::EngineLockActive)),
-            ));
-            check(&world, &book);
             let mut other_role = payout(&world, 2, recovery);
             other_role.accounts[0] = AccountMeta::new_readonly(world.wallets[payer_role], true);
             other_role.accounts[2].pubkey = world.tokens[payer_role];
             peak = peak.max(land(
                 &mut world.env,
-                &[close.clone(), fees, other_role],
-                &[&world.admin],
+                &[fees.clone(), other_role],
+                &[],
                 &tracked,
                 &[],
                 0,
                 None,
-                Some((4, PercolatorError::Unauthorized)),
+                Some((3, PercolatorError::Unauthorized)),
             ));
             check(&world, &book);
-            let allowed = [world.env.market];
+            let allowed = [world.env.market, world.env.vault, world.tokens[2], ledger];
             peak = peak.max(land(
                 &mut world.env,
-                &[close.clone()],
-                &[&world.admin],
+                &[fees],
+                &[],
                 &tracked,
                 &allowed,
                 0,
                 None,
                 None,
             ));
-            book.expired = true;
+            book.fees_paid = FEE_PREFIX;
             check(&world, &book);
             for kind in if fees_first { [1, 2] } else { [2, 1] } {
-                let amount = if kind == 1 { PROVIDER_FEE } else { recovery };
+                let amount = if kind == 1 {
+                    PROVIDER_FEE - FEE_PREFIX
+                } else {
+                    AVAILABLE + recovery
+                };
                 let ix = payout(&world, kind, amount);
                 let recipient = world.tokens[if kind == 2 { 4 } else { 2 }];
                 let allowed = [world.env.market, world.env.vault, recipient]
@@ -501,7 +686,7 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
                     None,
                 ));
                 if kind == 1 {
-                    book.fees_paid = amount;
+                    book.fees_paid += amount;
                 } else {
                     book.insurance_paid += amount;
                     book.recredited = recovery;
@@ -525,6 +710,33 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
                     check(&world, &book);
                 }
             }
+            peak = peak.max(land(
+                &mut world.env,
+                &[close.clone()],
+                &[&world.admin],
+                &tracked,
+                &[],
+                0,
+                None,
+                Some((2, PercolatorError::EngineStale)),
+            ));
+            check(&world, &book);
+            close.data = ProgInstruction::CloseSlab {
+                authority_epoch: sequences.authority_epoch + 1,
+            }
+            .encode();
+            // Final retirement, mint burn and rent refund must all roll back together.
+            peak = peak.max(land(
+                &mut world.env,
+                &[close.clone(), close.clone()],
+                &[&world.admin],
+                &tracked,
+                &[],
+                0,
+                None,
+                Some((3, PercolatorError::InvalidAccountLen)),
+            ));
+            check(&world, &book);
             let tokens = world.tokens.map(|key| world.env.svm.get_account(&key));
             let ledger_frame = world.env.svm.get_account(&ledger);
             let rent = world
@@ -584,5 +796,5 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
             );
         }
     }
-    eprintln!("row410 fee-protected recredit: 12 histories, 42 exact rollbacks, peak_CU={peak}");
+    eprintln!("row410 fee-protected recredit: 12 histories, 78 exact rollbacks, peak_CU={peak}");
 }
