@@ -3,6 +3,8 @@
 //! without erasing the loss or counting the earlier payment twice. Public setup only.
 //! Partial recovery leaves unpaid principal as telemetry through retirement and retry.
 //! Two expiry waves retain the same funded ledger and cap cumulative recovery at loss.
+//! Early expiry instead runs during unsigned user settlement, before reserve admission;
+//! its first insurance payment recovers the loss before optional telemetry observes it.
 //! INV-081 additionally composes scan-prefix invalidation, expiry, recredit, ledger update and
 //! SPL payout in one successful transaction, with independent value/custody/authority checks.
 //! This bounded two-asset SPL history leaves general INV-081 success-state validity open.
@@ -83,7 +85,26 @@ fn v16_program_terminal_expiry_recredit_payout_bundle_preserves_success_state() 
     insurance_ledger_loss_recredit(&[(2, 37, EXPIRY), (3, 107, EXPIRY + 4)], true);
 }
 
+#[test]
+fn v16_program_expiry_before_user_exit_preserves_unsigned_insurance_recredit_and_close() {
+    for actor in [1, 0] {
+        insurance_ledger_loss_recredit_at(&[(0, 307, EXPIRY)], false, Some(actor));
+    }
+}
+
 fn insurance_ledger_loss_recredit(waves: &[(u16, u64, u64)], bundle_expiry: bool) {
+    insurance_ledger_loss_recredit_at(waves, bundle_expiry, None);
+}
+
+fn insurance_ledger_loss_recredit_at(
+    waves: &[(u16, u64, u64)],
+    bundle_expiry: bool,
+    expiry_before_actor: Option<usize>,
+) {
+    if expiry_before_actor.is_some() {
+        assert_eq!(waves, &[(0, 307, EXPIRY)]);
+        assert!(!bundle_expiry);
+    }
     let backing = waves.iter().map(|(_, amount, _)| amount).sum::<u64>();
     let assets = if waves.len() == 2 { 2 } else { 1 };
     let recovery = backing.min(LOSS);
@@ -339,10 +360,28 @@ fn insurance_ledger_loss_recredit(waves: &[(u16, u64, u64)], bundle_expiry: bool
         locked.clone(),
         (0, 0),
     );
+    let mut early_expiry_seen = false;
     for actor in [1, 0, 2] {
+        if expiry_before_actor == Some(actor) {
+            let spent = if actor == 1 { 0 } else { LOSS };
+            assert_eq!(env.market_state().1.insurance_domain_spent[0], spent.into());
+            assert_eq!(env.market_state().1.insurance, u128::from(FUNDED - spent));
+            let market_before = env.svm.get_account(&env.market);
+            env.svm.warp_to_slot(EXPIRY);
+            assert_eq!(env.svm.get_account(&env.market), market_before);
+            assert_eq!(
+                env.market_state().1.source_backing_buckets[0].status,
+                BackingBucketStatusV16::Fresh
+            );
+            assert!(!resolved_portfolio_is_terminal(&env, portfolios[0]));
+        }
         let mut calls = 0;
         while !resolved_portfolio_is_terminal(&env, portfolios[actor]) {
             assert!(calls < 8);
+            let before = [env.market, portfolios[actor]].map(|key| env.svm.get_account(&key));
+            let fresh_before = expiry_before_actor.is_some()
+                && env.market_state().1.source_backing_buckets[0].status
+                    == BackingBucketStatusV16::Fresh;
             let payout = wrap(
                 &env,
                 ProgInstruction::CloseResolved {
@@ -359,6 +398,7 @@ fn insurance_ledger_loss_recredit(waves: &[(u16, u64, u64)], bundle_expiry: bool
                 ],
             );
             // User settlement may be a bookkeeping step or a real token payment.
+            env.svm.expire_blockhash();
             let cu = env
                 .send(
                     ProgInstruction::CloseResolved {
@@ -371,13 +411,53 @@ fn insurance_ledger_loss_recredit(waves: &[(u16, u64, u64)], bundle_expiry: bool
             assert_cu_within("row421 user settlement", cu, 400_000);
             peaks[0] = peaks[0].max(cu);
             calls += 1;
+            assert_ne!(
+                [env.market, portfolios[actor]].map(|key| env.svm.get_account(&key)),
+                before,
+                "each keeper call advances user settlement or backing expiry"
+            );
             assert_eq!(env.svm.get_account(&ledger), Some(funded_ledger.clone()));
+            if fresh_before
+                && env.market_state().1.source_backing_buckets[0].status
+                    == BackingBucketStatusV16::Expired
+            {
+                assert!(!early_expiry_seen);
+                early_expiry_seen = true;
+                assert_eq!(env.token_amount(tokens[0]), 0);
+                assert!(!resolved_portfolio_is_terminal(&env, portfolios[0]));
+                assert_eq!(env.market_state().1.materialized_portfolio_count, 3);
+            }
         }
         assert_eq!(env.token_amount(tokens[actor]), PAYOUTS[actor]);
+        if expiry_before_actor.is_some() {
+            peaks[1] = peaks[1].max(land(
+                &mut env,
+                &[first.clone()],
+                &[],
+                &tracked,
+                &[],
+                locked.clone(),
+                (0, 0),
+            ));
+            assert_eq!(env.token_amount(reserve), 0);
+            assert_eq!(env.market_state().1.insurance_domain_spent[0], LOSS.into());
+        }
     }
     assert_eq!(env.market_state().1.c_tot, 0);
     assert_eq!(env.market_state().1.materialized_portfolio_count, 3);
     assert_eq!(env.market_state().1.insurance_domain_spent[0], LOSS.into());
+    if expiry_before_actor.is_some() {
+        assert!(
+            early_expiry_seen,
+            "expiry must execute while the winner is unpaid"
+        );
+        assert_eq!(
+            env.market_state().1.source_backing_buckets[0].status,
+            BackingBucketStatusV16::Expired
+        );
+        assert_eq!(env.market_state().1.insurance, FIRST.into());
+        assert_eq!(env.svm.get_account(&ledger), Some(funded_ledger.clone()));
+    }
     peaks[1] = peaks[1].max(land(
         &mut env,
         &[first.clone()],
@@ -478,8 +558,16 @@ fn insurance_ledger_loss_recredit(waves: &[(u16, u64, u64)], bundle_expiry: bool
         let expected = state::InsuranceLedgerAccountV16 {
             total_principal_atoms: u128::from(FUNDED - paid),
             total_withdrawn_atoms: paid.into(),
-            cumulative_loss_atoms: LOSS.into(),
-            cumulative_profit_atoms: recovered.into(),
+            cumulative_loss_atoms: if expiry_before_actor.is_some() {
+                0
+            } else {
+                LOSS.into()
+            },
+            cumulative_profit_atoms: if expiry_before_actor.is_some() {
+                0
+            } else {
+                recovered.into()
+            },
             last_observed_insurance_atoms: insurance.into(),
             ..funded_record
         };
@@ -503,28 +591,59 @@ fn insurance_ledger_loss_recredit(waves: &[(u16, u64, u64)], bundle_expiry: bool
         view.validate_shape().unwrap();
     };
     let changed = [env.market, env.vault, reserve, ledger];
+    if expiry_before_actor.is_some() {
+        let mut denied_close = close(&env, destination);
+        denied_close.accounts[0].is_signer = false;
+        peaks[1] = peaks[1].max(land(
+            &mut env,
+            &[first.clone(), denied_close],
+            &[],
+            &tracked,
+            &[],
+            Some((
+                3,
+                InstructionError::Custom(PercolatorError::ExpectedSigner as u32),
+            )),
+            (1, 1),
+        ));
+        assert_eq!(env.svm.get_account(&ledger), Some(funded_ledger.clone()));
+        assert_eq!(env.market_state().1.insurance_domain_spent[0], LOSS.into());
+        assert_eq!(env.token_amount(reserve), 0);
+    }
     peaks[2] = land(&mut env, &[first], &[], &tracked, &changed, None, (1, 1));
-    check(&env, FIRST, 0, 1);
+    // Early expiry is normalized by user progress. The first admitted insurance
+    // payment then restores the loss before this optional ledger observes it.
+    let mut recovered = if expiry_before_actor.is_some() {
+        recovery
+    } else {
+        0
+    };
+    check(&env, FIRST, recovered, 1);
     assert_eq!(
         env.market_state().1.source_backing_buckets[usize::from(waves[0].0)].status,
-        BackingBucketStatusV16::Fresh
+        if expiry_before_actor.is_some() {
+            BackingBucketStatusV16::Expired
+        } else {
+            BackingBucketStatusV16::Fresh
+        }
     );
-    let premature = payment(&env, beneficiary_key, reserve, ledger, 1);
-    peaks[1] = peaks[1].max(land(
-        &mut env,
-        &[premature],
-        &[],
-        &tracked,
-        &[],
-        Some((
-            2,
-            InstructionError::Custom(PercolatorError::EngineLockActive as u32),
-        )),
-        (0, 0),
-    ));
-    check(&env, FIRST, 0, 1);
+    if expiry_before_actor.is_none() {
+        let premature = payment(&env, beneficiary_key, reserve, ledger, 1);
+        peaks[1] = peaks[1].max(land(
+            &mut env,
+            &[premature],
+            &[],
+            &tracked,
+            &[],
+            Some((
+                2,
+                InstructionError::Custom(PercolatorError::EngineLockActive as u32),
+            )),
+            (0, 0),
+        ));
+        check(&env, FIRST, 0, 1);
+    }
     let mut paid = FIRST;
-    let mut recovered = 0;
     let mut payments = 1;
     let mut retained_prefix: Option<Instruction> = None;
     for (wave, &(domain, amount, expiry)) in waves.iter().enumerate() {
@@ -544,7 +663,7 @@ fn insurance_ledger_loss_recredit(waves: &[(u16, u64, u64)], bundle_expiry: bool
         }
         env.svm.warp_to_slot(expiry);
         let normalize = close(&env, destination);
-        if !bundle_expiry {
+        if !bundle_expiry && expiry_before_actor.is_none() {
             peaks[3] = peaks[3].max(land(
                 &mut env,
                 &[normalize.clone()],
@@ -750,6 +869,9 @@ fn insurance_ledger_loss_recredit(waves: &[(u16, u64, u64)], bundle_expiry: bool
             .supply,
         supply - burned
     );
-    let rollbacks = 5 + usize::from(recovery < LOSS) + 2 * (waves.len() - 1);
-    println!("row421/INV-081 loss/recredit ledger: bundle_expiry={bundle_expiry}, waves={}, backing={backing}, paid={entitlement}, loss={LOSS}, profit={recovery}, unpaid_principal={}, rollbacks={rollbacks}, peak_CU(user,rejection,payment,cleanup)={peaks:?}", waves.len(), LOSS - recovery);
+    let rollbacks = 5
+        + usize::from(recovery < LOSS)
+        + 2 * (waves.len() - 1)
+        + 3 * usize::from(expiry_before_actor.is_some());
+    println!("row421/INV-081 loss/recredit ledger: bundle_expiry={bundle_expiry}, expiry_before_actor={expiry_before_actor:?}, waves={}, backing={backing}, paid={entitlement}, loss={LOSS}, recovered={recovery}, unpaid_principal={}, rollbacks={rollbacks}, peak_CU(user,rejection,payment,cleanup)={peaks:?}", waves.len(), LOSS - recovery);
 }

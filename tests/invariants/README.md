@@ -1,5 +1,63 @@
 # Invariant-owned test coverage
 
+## Row 421 expiry during unsigned user settlement (2026-09-20)
+
+One new public LiteSVM selector in
+[cu/inv_073_insurance_loss_recredit_ledger.rs](cu/inv_073_insurance_loss_recredit_ledger.rs):
+`inv_073_no_permanent_user_lock::insurance_loss_recredit_ledger::v16_program_expiry_before_user_exit_preserves_unsigned_insurance_recredit_and_close`.
+
+Two histories cross the 307-atom backing bucket's expiry at slot 44, either before
+invoking the debtor's insurance-consuming close or between that close and the
+winner's payout. Both
+insurance keys are dropped before trading. A keeper-only `CloseResolved` must
+actually normalize the bucket while the winner is still unpaid and all three
+portfolios remain materialized. Every user continuation changes economic state
+within the existing eight-call bound; payouts remain exactly `[1200, 0, 137]`.
+Attempts to withdraw insurance after each user exit reject atomically, preserving
+the 100 spent atoms until every portfolio has been deleted by its owner.
+
+The first admitted unsigned insurance payment implicitly recovers those 100 atoms
+and pays 17. Its optional funded ledger has not observed the intervening loss, so
+it records no spurious loss/profit pair: deposits remain 117, withdrawals advance
+17/58/117, and observed stock and principal finish at zero. A rejected unsigned
+`CloseSlab` suffix rolls back the first actual recredit/payment and the funded
+ledger in full, before identical retry. A later payment prefix also rolls back;
+all eight rejections per history restore tracked and compiled Accounts except the
+exact payer fee. Final signed retirement burns only the 207 residual backing
+atoms and preserves paid user/insurance custody, the ledger, and exact rent.
+
+Inventory before adding the selector covered the row421/INV-073 README notes and
+these existing owners; only the open finding's row/title supplied the withheld
+theme, and no PR diff was inspected:
+
+| Existing owner | Duplicate boundary |
+| --- | --- |
+| [Recredited quote rails](cu/inv_073_recredited_insurance_quote_rails.rs), [missing insurance wallets](cu/inv_073_missing_insurance_wallet_recredit.rs), [native recredit custody](cu/inv_073_native_recredit_custody.rs) | User settlement precedes expiry/recredit, followed by rail switching or custody repair. |
+| [Native insurance ledger](cu/inv_073_native_insurance_ledger_progress.rs), [frozen paid insurance](cu/inv_073_frozen_insurance_remainder.rs) | Unspent insurance, native identity/redemption or frozen paid custody. |
+| [Insurance loss/recredit ledger](cu/inv_073_insurance_loss_recredit_ledger.rs) | The four prior selectors settle users before partial/full/repeated expiry and before the expiry/recredit/payment bundle. |
+| [Terminal progress product](cu/inv_073_terminal_progress_product.rs), [generated reserve wallets](cu/inv_073_generated_reserve_wallets.rs) | Reserve-order/expiry products begin after user settlement and deletion. |
+| [Delayed terminal submitters](cu/inv_024_delayed_terminal_submitter.rs) | `v16_program_delayed_terminal_cleanup_preserves_earned_fees_across_submitter_changes` already expires backing during user settlement, but never consumes or recredits insurance. |
+
+The net-new relation is **expiry during unpaid user settlement followed by
+insurance-loss recovery without either insurance signature**, including the first
+ledger observation after recovery. It is not another reserve payment order,
+wallet, rail or repeated-recredit variant. This is one bounded classic-SPL
+asset-0 history pair, not arbitrary receipt, Recovery, partial-loss,
+multi-asset or absent-administrator retirement evidence. Portfolio deletion and
+final slab close retain their existing signers.
+
+Validation: the new selector and all four adjacent exact selectors pass. All
+names below share
+`inv_073_no_permanent_user_lock::insurance_loss_recredit_ledger::`:
+
+- `v16_program_expiry_before_user_exit_preserves_unsigned_insurance_recredit_and_close`: two histories, peak user/rejection/payment/cleanup **216918 / 132116 / 130004 / 127067 CU**.
+- `v16_program_unsigned_insurance_ledger_preserves_loss_and_recredit_after_cleanup`.
+- `v16_program_partially_recredited_insurance_ledger_preserves_unrecovered_principal_through_retirement_retry`.
+- `v16_program_funded_insurance_ledger_accumulates_two_recredits_without_replaying_paid_prefix`.
+- `v16_program_terminal_expiry_recredit_payout_bundle_preserves_success_state`.
+
+No production change, no state injection, and no status TSV edit.
+
 ## Row 422 collectible liquidation reward (2026-09-20)
 
 One new public LiteSVM selector in
