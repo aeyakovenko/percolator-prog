@@ -320,6 +320,194 @@ fn advance(world: &mut FundedWorld, actor: usize, use_crank: bool) -> Result<u64
 }
 
 #[test]
+fn v16_program_fragmented_stale_winners_force_close_and_reach_exact_keeper_payouts() {
+    const EXTRA_UNITS: u128 = 3;
+    const GAIN_PER_UNIT: u128 = 5;
+    let total_units = UNITS[0] + EXTRA_UNITS;
+    let expected = [
+        PRINCIPAL[0] + UNITS[0] * GAIN_PER_UNIT,
+        PRINCIPAL[1] - total_units * GAIN_PER_UNIT,
+        PRINCIPAL[2],
+        PRINCIPAL[3] + EXTRA_UNITS * GAIN_PER_UNIT,
+    ];
+    for order in [[0usize, 3], [3, 0]] {
+        let mut world = public_world(0, 100);
+        world.env.trade_asset_with_cu(
+            0,
+            &world.owners[3],
+            world.portfolios[3],
+            &world.owners[1],
+            world.portfolios[1],
+            (EXTRA_UNITS * POS_SCALE) as i128,
+            100,
+            0,
+        );
+        world.env.svm.warp_to_slot(2);
+        world.env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+        world.env.crank(
+            world.portfolios[1],
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+        assert_eq!(
+            world.env.portfolio_state(world.portfolios[1]).capital.get(),
+            expected[1]
+        );
+        for actor in [0, 3] {
+            let account = world.env.portfolio_state(world.portfolios[actor]);
+            assert_eq!(account.pnl.get(), 0);
+            assert!(account
+                .source_domains
+                .iter()
+                .all(|source| !source.is_occupied()));
+            assert!(
+                active_leg_for_asset(&account, 0).k_snap
+                    < world.env.market_state().1.assets[0].k_long
+            );
+        }
+        world.env.svm.warp_to_slot(3);
+        world.env.update_asset_lifecycle_as_admin_with_cu(
+            processor::ASSET_ACTION_SHUTDOWN,
+            0,
+            3,
+            0,
+        );
+
+        // Neither winning fragment is refreshed before the keeper closes it at the frozen mark.
+        // The independent live leg remains until the subsequent permissionless terminal suffix.
+        world.env.svm.warp_to_slot(6);
+        let mut remaining = total_units * POS_SCALE;
+        let mut max_cu = 0;
+        for actor in order {
+            let units = if actor == 0 { UNITS[0] } else { EXTRA_UNITS };
+            let before = economic_frame(&world);
+            let env = &mut world.env;
+            env.svm.expire_blockhash();
+            let cu = env
+                .send(
+                    ProgInstruction::ForceCloseAbandonedAsset {
+                        asset_index: 0,
+                        now_slot: 0,
+                        close_q: units * POS_SCALE,
+                    },
+                    vec![
+                        AccountMeta::new_readonly(env.payer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(world.portfolios[1], false),
+                        AccountMeta::new(world.portfolios[actor], false),
+                    ],
+                    &[],
+                )
+                .expect("each stale fragment has a keeper-only force-close");
+            assert_cu_within(
+                "INV-073 fragmented stale winner force-close",
+                cu,
+                MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+            );
+            max_cu = max_cu.max(cu);
+            let group = env.market_state().1;
+            assert_eq!(group.mode, MarketModeV16::Live);
+            assert_eq!(group.assets[0].lifecycle, AssetLifecycleV16::Recovery);
+            assert_eq!(group.assets[0].effective_price, 105);
+            assert_eq!(group.assets[0].oi_eff_long_q, remaining - units * POS_SCALE);
+            assert_eq!(
+                group.assets[0].oi_eff_short_q,
+                remaining - units * POS_SCALE
+            );
+            assert!(group.assets[0].oi_eff_long_q < remaining);
+            remaining -= units * POS_SCALE;
+            let winner = env.portfolio_state(world.portfolios[actor]);
+            assert!(!has_active_leg_for_asset(&winner, 0));
+            assert_eq!(winner.capital.get(), PRINCIPAL[actor]);
+            assert_eq!(winner.pnl.get(), (units * GAIN_PER_UNIT) as i128);
+            assert_eq!(
+                state::portfolio_source_domain(&winner, 1)
+                    .source_claim_bound_num
+                    .get(),
+                units * GAIN_PER_UNIT * BOUND_SCALE
+            );
+            for (key, account) in before {
+                if ![env.market, world.portfolios[1], world.portfolios[actor]].contains(&key) {
+                    assert_eq!(
+                        env.svm.get_account(&key),
+                        account,
+                        "force-close frame {key}"
+                    );
+                }
+            }
+            assert_custody(&world);
+        }
+        assert_eq!(remaining, 0);
+        assert!(!has_active_leg_for_asset(
+            &world.env.portfolio_state(world.portfolios[1]),
+            0
+        ));
+        assert!(has_active_leg_for_asset(
+            &world.env.portfolio_state(world.portfolios[0]),
+            1
+        ));
+        world.env.svm.warp_to_slot(RESOLVE_SLOT);
+        let market = world.env.market;
+        let cu = world
+            .env
+            .send(
+                ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+                vec![AccountMeta::new(market, false)],
+                &[],
+            )
+            .expect("stale resolution remains available after fragmented cleanup");
+        assert_cu_within("INV-073 fragmented recovery resolution", cu, CRANK_CU_LIMIT);
+        max_cu = max_cu.max(cu);
+        assert_eq!(world.env.market_state().1.mode, MarketModeV16::Resolved);
+        assert_eq!(world.env.market_state().1.resolved_slot, RESOLVE_SLOT);
+        world.env.svm.warp_to_slot(PAYOUT_SLOT);
+        let mut calls = [0; 4];
+        // Settle the remaining live pair before paying the entirely flat claimant.
+        for actor in [2, 1, 0, 3] {
+            while !resolved_portfolio_is_terminal(&world.env, world.portfolios[actor]) {
+                assert!(
+                    calls[actor] < CALL_BOUND,
+                    "actor {actor} exceeded the terminal call bound"
+                );
+                let cu = advance(&mut world, actor, calls[actor] % 2 == 0)
+                    .expect("flat winner claims retain a rank-decreasing keeper exit");
+                max_cu = max_cu.max(cu);
+                calls[actor] += 1;
+            }
+            assert_eq!(
+                u128::from(world.env.token_amount(world.tokens[actor])),
+                expected[actor]
+            );
+            let before = economic_frame(&world);
+            let error =
+                keeper_call(&mut world, actor, true).expect_err("terminal retry cannot pay twice");
+            assert!(
+                error.contains(&format!(
+                    "Custom({})",
+                    PercolatorError::EngineNonProgress as u32
+                )),
+                "{error}"
+            );
+            assert_eq!(economic_frame(&world), before);
+        }
+        let terminal = world.env.market_state().1;
+        assert_eq!(terminal.c_tot, 0);
+        assert_eq!(terminal.vault, BACKING.iter().sum::<u128>());
+        for asset in &terminal.assets[..2] {
+            assert_eq!((asset.oi_eff_long_q, asset.oi_eff_short_q), (0, 0));
+            assert_eq!(
+                (asset.stored_pos_count_long, asset.stored_pos_count_short),
+                (0, 0)
+            );
+        }
+        assert_custody(&world);
+        eprintln!("INV-073 fragmented stale winners: order={order:?} calls={calls:?} payouts={expected:?} max_cu={max_cu}");
+    }
+}
+
+#[test]
 fn v16_program_recovery_claim_and_deferred_liability_preserve_keeper_exit() {
     let gains = UNITS.map(|units| units * (105 - 100));
     let total_gain = gains.iter().sum::<u128>();
