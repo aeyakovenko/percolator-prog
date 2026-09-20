@@ -395,6 +395,189 @@ fn v16_top_up_sequences_reuse_the_existing_zero_copy_tail_without_growth() {
 }
 
 #[test]
+fn v16_backing_replay_across_sides_preserves_independent_insurance_retry() {
+    use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
+    use solana_sdk::{
+        fee::FeeStructure, instruction::InstructionError, transaction::TransactionError,
+    };
+
+    // INV-008: backing sides share consumption, but an insurance prefix rolled back by
+    // a stale backing suffix keeps its independent intent live and spends exactly once.
+    const BACKING: u64 = 37;
+    const INSURANCE: u64 = 41;
+    const FUNDING: u64 = 4 * BACKING + 3 * INSURANCE;
+    for first_domain in [0usize, 1] {
+        let mut env = inv018_public_spl_market(6);
+        let source = create_ata_for_test(&mut env.svm, &env.payer, env.admin.pubkey(), env.mint);
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &source,
+                &env.admin.pubkey(),
+                &[],
+                FUNDING,
+            )
+            .unwrap(),
+            &[&env.admin],
+        )
+        .unwrap();
+        let controls = env.control_sequences(0);
+        assert_eq!(controls.backing_top_up, controls.insurance_top_up);
+        let intent_id = next_control_sequence(controls.backing_top_up);
+        let market_id = env.asset_market_id(0);
+        let program_id = env.program_id;
+        let accounts = vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        let backing = |domain, intent_id| Instruction {
+            program_id,
+            accounts: accounts.clone(),
+            data: ProgInstruction::TopUpBackingBucket {
+                authority_epoch: controls.authority_epoch,
+                market_id,
+                domain,
+                intent_id,
+                backing_fee_bps: 0,
+                insurance_share_bps: 0,
+                amount: BACKING.into(),
+                expiry_slot: 100,
+            }
+            .encode(),
+        };
+        let retained = [backing(0, intent_id), backing(1, intent_id)];
+        let insurance = Instruction {
+            program_id,
+            accounts: accounts.clone(),
+            data: ProgInstruction::TopUpInsuranceDomain {
+                authority_epoch: controls.authority_epoch,
+                market_id,
+                domain: (1 - first_domain) as u16,
+                intent_id,
+                amount: INSURANCE.into(),
+            }
+            .encode(),
+        };
+        let mint_before = env.svm.get_account(&env.mint);
+        let check_value = |env: &V16CuEnv, backing: [u64; 2], insurance: u64| {
+            let total = backing.iter().sum::<u64>() + insurance;
+            assert_eq!(env.token_amount(source), FUNDING - total);
+            assert_eq!(env.token_amount(env.vault), total);
+            assert_eq!(env.svm.get_account(&env.mint), mint_before);
+            let group = env.market_state().1;
+            assert_eq!(
+                (group.vault, group.c_tot, group.insurance),
+                (total.into(), 0, insurance.into())
+            );
+            for domain in 0..2 {
+                assert_eq!(
+                    group.source_backing_buckets[domain].fresh_unliened_backing_num,
+                    u128::from(backing[domain]) * BOUND_SCALE,
+                );
+                assert_eq!(
+                    group.insurance_domain_budget[domain],
+                    if domain == first_domain {
+                        0
+                    } else {
+                        insurance.into()
+                    },
+                );
+            }
+        };
+        let execute = |env: &mut V16CuEnv,
+                       instructions: &[Instruction],
+                       stale_index: Option<u8>| {
+            // Bypass send_tx's guard rebinding and the transaction signature cache.
+            env.svm.expire_blockhash();
+            let mut message = vec![heap_ix(), cu_ix()];
+            message.extend_from_slice(instructions);
+            let tx = Transaction::new_signed_with_payer(
+                &message,
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &env.admin],
+                env.svm.latest_blockhash(),
+            );
+            let fee = FeeStructure::default().lamports_per_signature
+                * u64::from(tx.message.header.num_required_signatures);
+            let keys = tx.message.account_keys.clone();
+            let mut before: Vec<_> = keys.iter().map(|key| env.svm.get_account(key)).collect();
+            let result = env.svm.send_transaction(tx);
+            let meta = if let Some(index) = stale_index {
+                let error = result.expect_err("consumed backing or insurance intent must reject");
+                assert_eq!(
+                    error.err,
+                    TransactionError::InstructionError(
+                        index,
+                        InstructionError::Custom(PercolatorError::EngineStale as u32),
+                    )
+                );
+                if index == 3 {
+                    assert!(
+                        error
+                            .meta
+                            .logs
+                            .iter()
+                            .any(|line| line == &format!("Program {program_id} success")),
+                        "insurance must succeed before the stale backing suffix"
+                    );
+                }
+                for (key, account) in keys.iter().zip(&mut before) {
+                    if *key == env.payer.pubkey() {
+                        account.as_mut().unwrap().lamports -= fee;
+                    }
+                    assert_eq!(env.svm.get_account(key), *account, "exact rollback: {key}");
+                }
+                error.meta
+            } else {
+                result.expect("unconsumed intent remains live")
+            };
+            assert_cu_within(
+                "backing/insurance intent isolation",
+                meta.compute_units_consumed,
+                CUSTODY_CU_LIMIT,
+            );
+        };
+
+        execute(&mut env, &[retained[first_domain].clone()], None);
+        let mut expected_backing = [0; 2];
+        expected_backing[first_domain] = BACKING;
+        check_value(&env, expected_backing, 0);
+        execute(
+            &mut env,
+            &[insurance.clone(), retained[1 - first_domain].clone()],
+            Some(3),
+        );
+        check_value(&env, expected_backing, 0);
+        assert_eq!(
+            env.control_sequences(0).insurance_top_up,
+            controls.insurance_top_up
+        );
+        execute(&mut env, &[insurance.clone()], None);
+        check_value(&env, expected_backing, INSURANCE);
+        execute(
+            &mut env,
+            &[backing((1 - first_domain) as u16, intent_id + 1)],
+            None,
+        );
+        check_value(&env, [BACKING; 2], INSURANCE);
+        for stale in [&retained[0], &retained[1], &insurance] {
+            execute(&mut env, std::slice::from_ref(stale), Some(2));
+            check_value(&env, [BACKING; 2], INSURANCE);
+        }
+        let mut expected_controls = controls;
+        expected_controls.backing_top_up = intent_id + 1;
+        expected_controls.insurance_top_up = intent_id;
+        assert_eq!(env.control_sequences(0), expected_controls);
+    }
+}
+
+#[test]
 fn v16_insurance_failed_bundle_retry_stays_consumed_after_alternate_route() {
     use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 
