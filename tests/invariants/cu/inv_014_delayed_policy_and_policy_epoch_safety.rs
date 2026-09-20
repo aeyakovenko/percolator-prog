@@ -169,7 +169,7 @@ fn inv014_validate_mounted_witness(
 
 #[test]
 fn v16_program_retained_fee_consent_witness_roster_is_source_complete() {
-    const ENGINE_PIN: &str = "94979ede7db934545e53a8f210dd063a9ea3ea63";
+    const ENGINE_PIN: &str = "4db11a8cb0053815e23a35d3a7d3edc265d8d866";
     const WITNESSES: &[Inv014RetainedFeeWitness] = &[
         Inv014RetainedFeeWitness {
             path: "tests/invariants/cu/inv_014_delayed_policy_and_policy_epoch_safety.rs",
@@ -204,6 +204,12 @@ fn v16_program_retained_fee_consent_witness_roster_is_source_complete() {
             path: "tests/invariants/cu/inv_014_retained_policy_route_budgets.rs",
             modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_policy_route_budgets",
             function: "v16_retained_policy_route_budgets_bound_each_committed_prefix",
+        },
+        Inv014RetainedFeeWitness {
+            path: "tests/invariants/cu/inv_014_retained_policy_route_budgets.rs",
+            modules: "inv_014_delayed_policy_and_policy_epoch_safety::retained_single_cpi_policy_history::retained_policy_route_budgets",
+            function:
+                "v16_retained_mixed_routes_cannot_exchange_fee_headroom_for_slippage_or_quantity",
         },
         Inv014RetainedFeeWitness {
             path: "tests/invariants/cu/inv_014_retained_mixed_route_fees.rs",
@@ -285,7 +291,7 @@ fn v16_program_retained_fee_consent_witness_roster_is_source_complete() {
         })
         .unwrap_or_else(|error| panic!("INV-014 {}#{}: {error}", witness.path, witness.function));
     }
-    assert_eq!(seen.len(), 13, "retained-fee witness roster drift");
+    assert_eq!(seen.len(), 14, "retained-fee witness roster drift");
 }
 
 #[test]

@@ -598,3 +598,267 @@ fn v16_retained_policy_route_budgets_bound_each_committed_prefix() {
     assert_eq!((worlds, commits, rejections), (32, 80, 120));
     eprintln!("INV-014 row 411 policy route budgets: worlds={worlds}, committed_prefixes={commits}, exact_rollbacks={rejections}, executed_legs=96, peak_CU={peak_cu}");
 }
+
+#[test]
+fn v16_retained_mixed_routes_cannot_exchange_fee_headroom_for_slippage_or_quantity() {
+    fn spread(w: &mut World, bps: u64, nonce: u32) -> u64 {
+        let mut data = vec![4];
+        data.extend_from_slice(&bps.to_le_bytes());
+        data.extend_from_slice(&bps.to_le_bytes());
+        let tx = w.sign(
+            &[Instruction {
+                program_id: w.matcher,
+                accounts: vec![
+                    AccountMeta::new_readonly(w.owners[1].pubkey(), true),
+                    AccountMeta::new(w.context, false),
+                ],
+                data,
+            }],
+            nonce,
+        );
+        w.deliver(tx, false, &[w.context], [0, 0, 1])
+    }
+
+    const SIGNED_BPS: u64 = LP_CAP_BPS as u64;
+    const LOWER_BPS: u64 = 7;
+    let matcher = std::fs::read(auth_matcher_program_path()).unwrap();
+    let (mut worlds, mut fills, mut rollbacks, mut peak_cu) = (0, 0, 0, 0);
+    for direction in [-1, 1] {
+        for route in Route::ALL {
+            let mut w = World::with_assets(&matcher, 3);
+            peak_cu = peak_cu.max(w.policy(SIGNED_BPS, 1));
+            peak_cu = peak_cu.max(spread(&mut w, 500, 2));
+            let first = Leg {
+                asset: 2,
+                size: direction * (111 * POS_SCALE + 1) as i128,
+                bps: SIGNED_BPS,
+            };
+            let q = (100 * POS_SCALE + 1) as i128;
+            let rest = [
+                Leg {
+                    asset: 0,
+                    size: direction * q,
+                    bps: SIGNED_BPS,
+                },
+                Leg {
+                    asset: 1,
+                    size: -direction * 3 * q,
+                    bps: SIGNED_BPS,
+                },
+            ];
+            let signed = budget(&[vec![first], rest.to_vec()].concat(), None);
+            let suffix_budget = budget(&rest, None);
+            let worse_price = |leg: &Leg| if leg.size > 0 { 106 } else { 94 };
+            let worse_slippage: u128 = rest
+                .iter()
+                .map(|leg| leg.amounts(worse_price(leg), LOWER_BPS)[2])
+                .sum();
+            let lower_fee = budget(&rest, Some(LOWER_BPS))[3];
+            assert!(worse_slippage > suffix_budget[2]);
+            assert!(lower_fee < suffix_budget[3]);
+            assert!(
+                worse_slippage + lower_fee < suffix_budget[2] + suffix_budget[3],
+                "pooling fee and slippage allowances would wrongly accept this suffix"
+            );
+
+            let epochs = w.portfolios.map(|key| w.env.portfolio_position_epoch(key));
+            let controls = w.env.control_sequences(0);
+            let grant = w.env.portfolio_matcher_config(w.portfolios[1]);
+            let mut requests = w.env.market_state().0.matcher_req_seq;
+            let first_ix = instruction(&w, Route::SingleDirect, &[first], 0, Bound::Exact);
+            let mut prefix = funded(&w, first_ix.clone(), PREFIX, 0);
+            // The bilateral prefix revokes delegation. Its owner signs the next
+            // episode's renewal together with the delayed direct/CPI alternatives.
+            prefix.push(Instruction {
+                program_id: w.env.program_id,
+                accounts: vec![
+                    AccountMeta::new(w.owners[1].pubkey(), true),
+                    AccountMeta::new_readonly(w.env.market, false),
+                    AccountMeta::new(w.portfolios[1], false),
+                    AccountMeta::new_readonly(w.matcher, false),
+                    AccountMeta::new_readonly(w.context, false),
+                    AccountMeta::new_readonly(w.delegate, false),
+                ],
+                data: ProgInstruction::SetMatcherConfig {
+                    portfolio_id: w.env.portfolio_id(w.portfolios[1]),
+                    expected_sequence: w.env.portfolio_matcher_sequence(w.portfolios[1]),
+                    position_epoch: epochs[1] + 1,
+                    asset_generation_frontier: w.env.market_state().1.next_market_id,
+                    enabled: 1,
+                    trade_fee_cap_bps: LP_CAP_BPS,
+                    expiry_slot: w.env.portfolio_matcher_expiry(w.portfolios[1]),
+                }
+                .encode(),
+            });
+            let mut batch_ix = instruction(&w, Route::BatchCpi, &rest, 1, Bound::Exact);
+            let mut batch = ProgInstruction::decode(&batch_ix.data).unwrap();
+            let ProgInstruction::BatchTradeCpi {
+                account_b_matcher_sequence,
+                legs,
+                ..
+            } = &mut batch
+            else {
+                unreachable!()
+            };
+            *account_b_matcher_sequence += 1;
+            // Per-leg limits permit the later prints; only the independent aggregate
+            // slippage cap must reject despite the larger unused fee allowance.
+            for (leg, input) in legs.iter_mut().zip(&rest) {
+                leg.limit_price = worse_price(input);
+            }
+            batch_ix.data = batch.encode();
+            let mut mixed = prefix.clone();
+            mixed.push(batch_ix.clone());
+            let retained = w.sign(&mixed, 10);
+            let retained_prefix = w.sign(&prefix, 11);
+            let consumed = [w.sign(&[first_ix], 12), w.sign(&[batch_ix.clone()], 13)];
+            let mut wider = batch.clone();
+            let ProgInstruction::BatchTradeCpi {
+                max_slippage_atoms, ..
+            } = &mut wider
+            else {
+                unreachable!()
+            };
+            *max_slippage_atoms = worse_slippage;
+            let mut wider_mixed = mixed.clone();
+            wider_mixed.last_mut().unwrap().data = wider.encode();
+            let exact_wider = w.sign(&wider_mixed, 14);
+            let chunks = if route.batch() {
+                vec![rest.to_vec()]
+            } else {
+                rest.iter().map(|leg| vec![*leg]).collect()
+            };
+            let alternatives: Vec<_> = chunks
+                .iter()
+                .enumerate()
+                .map(|(index, legs)| {
+                    let mut ix = if route == Route::BatchCpi {
+                        batch_ix.clone()
+                    } else {
+                        instruction(&w, route, legs, 1 + index as u64, Bound::Exact)
+                    };
+                    if route == Route::SingleCpi {
+                        let mut request = ProgInstruction::decode(&ix.data).unwrap();
+                        let ProgInstruction::TradeCpi {
+                            account_b_matcher_sequence,
+                            ..
+                        } = &mut request
+                        else {
+                            unreachable!()
+                        };
+                        *account_b_matcher_sequence += 1;
+                        ix.data = request.encode();
+                    }
+                    w.sign(&[ix], 20 + index as u32)
+                })
+                .collect();
+            let retained_all: Vec<_> = [&retained, &retained_prefix, &exact_wider]
+                .into_iter()
+                .chain(consumed.iter())
+                .chain(alternatives.iter())
+                .collect();
+            let wires: Vec<_> = retained_all
+                .iter()
+                .map(|tx| bincode::serialize(tx).unwrap())
+                .collect();
+            let mut ledger = Ledger::default();
+            peak_cu = peak_cu.max(w.simulate(&retained));
+            ledger.check(&w, signed, epochs, requests);
+
+            peak_cu = peak_cu.max(w.policy(LOWER_BPS, 30));
+            peak_cu = peak_cu.max(spread(&mut w, 600, 31));
+            ledger.check(&w, signed, epochs, requests);
+            peak_cu = peak_cu.max(w.deliver_with_error(
+                retained.clone(),
+                Some((
+                    5,
+                    InstructionError::Custom(PercolatorError::InvalidInstruction as u32),
+                )),
+                &[],
+                [3, 1, 1],
+            ));
+            rollbacks += 1;
+            ledger.check(&w, signed, epochs, requests);
+            // Changing just the signed slippage cap admits the exact same public state.
+            peak_cu = peak_cu.max(w.simulate(&exact_wider));
+            ledger.check(&w, signed, epochs, requests);
+
+            let meta = commit(&mut w, retained_prefix.clone(), Route::SingleDirect, PREFIX);
+            peak_cu = peak_cu.max(meta.compute_units_consumed);
+            ledger.commit(&[first], PREFIX, budget(&[first], None));
+            fills += 1;
+            ledger.check(&w, signed, epochs, requests);
+            if route.cpi() {
+                peak_cu = peak_cu.max(spread(&mut w, 500, 32));
+            }
+            for (tx, signed_legs) in alternatives.iter().zip(&chunks) {
+                assert_eq!(
+                    tx.message.header.num_required_signatures,
+                    if route.cpi() { 2 } else { 3 }
+                );
+                let executed: Vec<_> = signed_legs
+                    .iter()
+                    .map(|leg| Leg {
+                        bps: if route.cpi() { LOWER_BPS } else { SIGNED_BPS },
+                        ..*leg
+                    })
+                    .collect();
+                let meta = commit(&mut w, tx.clone(), route, 0);
+                peak_cu = peak_cu.max(meta.compute_units_consumed);
+                ledger.commit(&executed, 0, observe(&w, route, &executed, &meta));
+                requests += u64::from(route.cpi());
+                fills += 1;
+                ledger.check(&w, signed, epochs, requests);
+            }
+            assert_eq!(ledger.sizes, [rest[0].size, rest[1].size, first.size]);
+            assert_eq!(&ledger.amounts[..3], &signed[..3]);
+            assert_eq!(
+                ledger.amounts[3],
+                budget(&[first], None)[3]
+                    + if route.cpi() {
+                        lower_fee
+                    } else {
+                        suffix_budget[3]
+                    }
+            );
+
+            peak_cu = peak_cu.max(w.policy(SIGNED_BPS, 40));
+            if !route.cpi() {
+                peak_cu = peak_cu.max(spread(&mut w, 500, 41));
+            }
+            let mut expected_controls = controls;
+            expected_controls.trade_fee += 2;
+            assert_eq!(w.env.control_sequences(0), expected_controls);
+            let mut expected_grant = grant;
+            expected_grant
+                .set_position_epoch(epochs[1] + ledger.instructions)
+                .unwrap();
+            expected_grant.set_enabled(u8::from(route.cpi())).unwrap();
+            assert_eq!(
+                w.env.portfolio_matcher_config(w.portfolios[1]),
+                expected_grant
+            );
+            ledger.check(&w, signed, epochs, requests);
+            for tx in &consumed {
+                peak_cu = peak_cu.max(w.deliver_with_error(
+                    tx.clone(),
+                    Some((
+                        2,
+                        InstructionError::Custom(PercolatorError::EngineStale as u32),
+                    )),
+                    &[],
+                    [0, 0, 0],
+                ));
+                rollbacks += 1;
+                ledger.check(&w, signed, epochs, requests);
+            }
+            for (tx, bytes) in retained_all.iter().zip(wires) {
+                tx.verify().unwrap();
+                assert_eq!(bincode::serialize(tx).unwrap(), bytes);
+            }
+            worlds += 1;
+        }
+    }
+    assert_eq!((worlds, fills, rollbacks), (8, 20, 24));
+    eprintln!("INV-014 fee/slippage separation: worlds={worlds}, fills={fills}, exact_rollbacks={rollbacks}, peak_CU={peak_cu}");
+}
