@@ -1,5 +1,24 @@
 # Invariant-owned test coverage
 
+## Row 433 unsigned final recredit payout and close (2026-09-20)
+
+One new public LiteSVM selector in
+[cu/inv_073_insurance_loss_recredit_ledger.rs](cu/inv_073_insurance_loss_recredit_ledger.rs):
+`inv_073_no_permanent_user_lock::insurance_loss_recredit_ledger::v16_program_unsigned_final_recredit_payout_and_slab_close_retry_preserves_paid_prefix`.
+
+The selector composes the second backing expiry, implicit insurance recredit,
+final unsigned insurance payout, funded-ledger update, and actual `CloseSlab`
+into one terminal transaction. A late failing System suffix must roll back the
+expiry, payout, ledger mutation, vault/slab close, and rent refund before the
+identical bundle retries successfully.
+
+The coverage is distinct from the existing recredit tests because those either
+close separately after all payouts or stop at a missing-signer close suffix
+before the actual close executes. This selector keeps beneficiary and operator
+signatures absent for the final payout, preserves the paid prefix, and checks the
+exact post-close ledger, reserve token image, tombstone, mint supply, and admin
+rent refund. No production change and no state injection.
+
 ## Row 421 expiry during unsigned user settlement (2026-09-20)
 
 One new public LiteSVM selector in
