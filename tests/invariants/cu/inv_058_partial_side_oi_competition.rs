@@ -83,6 +83,155 @@ fn checkpoint(w: &World, headroom: u128) {
 }
 
 #[test]
+fn v16_program_partial_cross_zero_hands_off_fee_bearing_side_oi_to_disjoint_pairs() {
+    let max = i128::try_from(percolator::MAX_OI_SIDE_Q).unwrap();
+    let q = RELEASE_Q as i128;
+    let requested = 9 * q + 2;
+    let executed = requested / 3;
+    let residual = requested - executed;
+    let initial = [q, max / 3, max - q - max / 3];
+    assert_eq!(executed, 3 * q);
+    assert!(requested.unsigned_abs() < percolator::MAX_TRADE_SIZE_Q);
+    assert!((requested - q).unsigned_abs() < percolator::MAX_POSITION_ABS_Q);
+    assert!(notional(requested) < percolator::MAX_ACCOUNT_NOTIONAL);
+    assert!(notional(requested) < CAPITAL);
+    assert!(initial[1] > 2 * q + residual);
+    assert!((initial[2] + q + 1).unsigned_abs() < percolator::MAX_POSITION_ABS_Q);
+    assert_eq!(
+        [executed, residual, requested]
+            .map(|amount| ceil_ratio(notional(amount) * u128::from(FEE_BPS), 10_000)),
+        [3, 6, 9],
+    );
+    let mut peaks = [0; 3];
+    let mut max_bytes = 0;
+    let mut worlds = 0;
+    let mut rollbacks = 0;
+    for direction in [-1i128, 1] {
+        for residual_route in INV_058_TRADE_ROUTES {
+            let mut w = World::new();
+            for (pair, amount) in initial.into_iter().enumerate() {
+                fill(
+                    &mut w,
+                    2 * pair,
+                    TradeRoute::NoCpi,
+                    direction * amount,
+                    0,
+                    &mut max_bytes,
+                );
+            }
+            install_partial_matcher(&mut w);
+            control(&mut w, vec![11, 19, 85]);
+            w.env.update_trade_fee_policy_with_cu(FEE_BPS);
+            checkpoint(&w, 0);
+
+            let retained =
+                w.instructions(0, TradeRoute::Cpi, &[(0, -direction * requested)], FEE_BPS);
+            packet(&mut w, &retained, &mut max_bytes);
+            w.reject(&retained, PercolatorError::EngineInvalidLeg as u32, 0, 1);
+            rollbacks += 1;
+            checkpoint(&w, 0);
+
+            // The actual third-fill flips q to -2q. Release enough for both
+            // the final OI increase and the new-side attachment during the flip.
+            fill(
+                &mut w,
+                2,
+                TradeRoute::BatchNoCpi,
+                -direction * 2 * q,
+                FEE_BPS,
+                &mut max_bytes,
+            );
+            checkpoint(&w, (2 * q) as u128);
+            let mut late =
+                w.instructions(4, TradeRoute::NoCpi, &[(0, direction * (q + 1))], FEE_BPS);
+            late.extend(retained.clone());
+            assert_eq!(max - 2 * q + (q + 1) + (executed - 2 * q), max + 1);
+            packet(&mut w, &late, &mut max_bytes);
+            w.reject(&late, PercolatorError::EngineInvalidLeg as u32, 1, 1);
+            rollbacks += 1;
+            checkpoint(&w, (2 * q) as u128);
+            assert_eq!(w.fees, [0, 0, 2, 2, 0, 0]);
+
+            w.accept(&retained, &[0]);
+            let context = w.env.svm.get_account(&w.matchers[0].1).unwrap();
+            let ret = read_matcher_return(&context.data[..64]).unwrap();
+            assert_eq!(ret.exec_size, -direction * executed);
+            assert_eq!(ret.exec_price_e6, PRICE);
+            assert_ne!(ret.flags & FLAG_PARTIAL_OK, 0);
+            w.record(0, &[(0, -direction * executed)], FEE_BPS, 1);
+            checkpoint(&w, q as u128);
+            assert_eq!(w.positions[0][0], -direction * 2 * q);
+            assert_eq!(w.positions[1][0], direction * 2 * q);
+            assert_eq!(w.fees, [3, 3, 2, 2, 0, 0]);
+
+            control(&mut w, vec![11, 9, 0]);
+            let remaining =
+                w.instructions(0, residual_route, &[(0, -direction * residual)], FEE_BPS);
+            packet(&mut w, &remaining, &mut max_bytes);
+            fill(
+                &mut w,
+                4,
+                TradeRoute::NoCpi,
+                direction * q,
+                FEE_BPS,
+                &mut max_bytes,
+            );
+            checkpoint(&w, 0);
+            let cpis = usize::from(matches!(
+                residual_route,
+                TradeRoute::Cpi | TradeRoute::BatchCpi
+            ));
+            w.reject(
+                &remaining,
+                PercolatorError::EngineInvalidLeg as u32,
+                0,
+                cpis,
+            );
+            rollbacks += 1;
+            checkpoint(&w, 0);
+
+            fill(
+                &mut w,
+                2,
+                TradeRoute::BatchNoCpi,
+                -direction * residual,
+                FEE_BPS,
+                &mut max_bytes,
+            );
+            checkpoint(&w, residual as u128);
+            // The newly signed residual uses the post-flip side and epoch;
+            // disjoint cap competition cannot consume its fee or matcher state.
+            w.accept(&remaining, &[0]);
+            w.record(0, &[(0, -direction * residual)], FEE_BPS, 1);
+            checkpoint(&w, 0);
+            assert_eq!(w.positions[0][0], direction * (q - requested));
+            assert_eq!(w.fees, [9, 9, 8, 8, 2, 2]);
+            assert_eq!(w.domains, [19, 19, 0, 0]);
+
+            w.env.update_trade_fee_policy_with_cu(0);
+            for pair in [4, 0, 2] {
+                let close = -w.positions[pair][0];
+                fill(
+                    &mut w,
+                    pair,
+                    TradeRoute::BatchNoCpi,
+                    close,
+                    0,
+                    &mut max_bytes,
+                );
+            }
+            assert_eq!(w.positions, [[0; ASSETS]; ACTORS]);
+            for (peak, observed) in peaks.iter_mut().zip(w.peak) {
+                *peak = (*peak).max(observed);
+            }
+            worlds += 1;
+        }
+    }
+    assert_eq!((worlds, rollbacks), (8, 24));
+    println!("INV-058 partial cross-zero handoff: {worlds} worlds, {rollbacks} exact rollbacks; peak CU [reject, trade, custody]={peaks:?}; max packet bytes={max_bytes}");
+}
+
+#[test]
 fn v16_program_shared_maker_partial_handoff_retries_at_exact_side_oi_cap() {
     let request = |w: &World, taker: usize, q: i128, maker_prefixes: u64| {
         let (program, context, delegate) = w.matchers[0];
