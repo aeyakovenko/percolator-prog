@@ -9,6 +9,9 @@ use solana_sdk::{
     transaction::TransactionError,
 };
 
+#[path = "inv_005_detached_live_oracle.rs"]
+mod detached_live_oracle;
+
 #[test]
 fn v16_program_retained_empty_oracle_handoff_rechecks_exposure_before_payout() {
     const COLD: usize = 0;
