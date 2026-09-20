@@ -1,5 +1,75 @@
 # Invariant-owned test coverage
 
+## Row 422 collectible liquidation reward (2026-09-20)
+
+One new public LiteSVM selector in
+[cu/inv_045_clipped_liquidation_reward.rs](cu/inv_045_clipped_liquidation_reward.rs)
+crosses paid-price lag versus fresh authenticated catchup with publication on the
+keeper versus the target. Base: `415a499ca5ed939522cc3ba15db39dee04b36125`
+(`origin/main`), isolated at `/dev/shm/percolator-inv045-row422-20260920` on
+`codex/inv045-row422-reward-provenance-20260920`.
+
+The public 100-lot opening and 23 elapsed slots independently imply price 944800
+and a 5520000-atom loss, leaving exactly 100 capital atoms. Every nonflat remainder
+requires at least 599 maintenance atoms, so the oracle requires a full close
+without deriving quantity from the observed liquidation. The nominal 47240-atom
+fee can collect only 100. Paid-price lag must retain all 100 with zero reward and
+zero domain budget; authenticated catchup may reward only `floor(100 * 3333 /
+10000) = 33`, leaving budgets `[33, 34]`. The old 1540072-atom discovery reserve
+cannot enter either split. Both orders require keeper SPL payouts of exactly
+1000/1033, conserved custody, unchanged absent peers, current-certificate and
+stock censuses, complete Account rollback after a conflicting-report suffix,
+and an exact nonprogress retry after liquidation.
+
+Inventory before implementation covered the INV-045 selectors under `tests/`,
+the root README's optional reward-tail contract, and this README's row-422
+entries. Closest existing selectors (names are exact leaf selectors):
+
+| Existing owner | Covered selectors and boundary |
+| --- | --- |
+| `cu/inv_045_report_cadence_rewards.rs` | `v16_program_paid_price_catchup_report_cadence_preserves_reward_and_rejects_regression`, `v16_program_funded_report_cadence_preserves_partial_liquidation_reward_and_custody`, `v16_program_paid_rediscovery_revokes_prior_reward_authentication_until_recatchup`: cadence, funding and paid rediscovery with fully collected partial-close penalties. |
+| `cu/inv_045_authenticated_reward_handoff.rs` | `v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper_exit`, `v16_program_nonzero_funding_fresh_handoff_preserves_owner_and_keeper_entitlement`: fresh handoff, funded owner value and keeper exit. |
+| `cu/inv_045_corroborated_mark_fees.rs` | `v16_program_corroborated_paid_mark_only_distributes_new_liquidation_fees`: old discovery reserve exclusion and common ownership, with an unclipped new fee. |
+| `cu/inv_045_retained_penalty_handoff.rs` | `v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup`: old retained penalties across later episodes. |
+| `cu/inv_045_accepted_price_reward.rs` | `v16_program_fresh_report_liquidation_rewards_follow_accepted_price_through_spl_exit`: accepted-price attribution across transports and ownership. |
+| `cu/inv_045_reward_catchup_order.rs` | `v16_program_reward_price_tracks_actual_catchup_across_report_and_crank_orders`: actual catchup and report renewal. |
+| `cu/inv_061_caught_up_portfolio_sizing.rs` | `v16_program_equal_risk_unequal_price_legs_preserve_sizing_order_and_reward`: independent AuthMark sizing with unequal prices. |
+| `cu/inv_061_nonunit_fee_boundary_sizing.rs` | `v16_program_nonunit_liquidation_fee_boundaries_match_exhaustive_oracle_and_exit`: nonunit AuthMark fee boundaries; rewards derive from fully collected fees. |
+
+The increment is the **collectible-fee boundary joined with price provenance**,
+including independently forced full sizing and a positive clipped-reward control.
+It adds no paid rediscovery, funded cadence, reward revocation, reward handoff,
+unequal-price equal-risk, one-sided reversal, zero/extreme execution-envelope or
+oracle-trust-only test. All protocol accounts use public System/SPL/wrapper
+instructions; Clock and external report accounts are harness inputs. No open PR
+data was inspected. Production, dependencies, and invariant/row statuses are
+unchanged; row 422 remains OPEN. Arbitrary histories and other fee sources are
+outside this finite witness.
+
+Validation: the new exact selector passes four worlds in 2.04s, peak transaction
+255303 CU; adjacent cadence passes four worlds in 2.25s, peak 349571 CU.
+A development fixture using a
+40-slot accrual horizon rejected at market initialization; the committed fixture
+uses the production 20-slot horizon and bounded public catchup. The initial
+debug-info host build was interrupted and replaced with the debug-free command
+below. Neither event is a production finding.
+
+The default-feature wrapper was rebuilt from this checkout with platform-tools
+v1.52 and engine `4db11a8cb0053815e23a35d3a7d3edc265d8d866`; SBF SHA-256:
+`a17c5dfa31c081067bdb7bdaab0543e25cf5563cf727762c41b9287d78bc8628`.
+Exact successful commands from the isolated worktree:
+
+```sh
+env CARGO_TARGET_DIR=/dev/shm/percolator-inv045-row422-20260920-target RUSTC=/home/anatoly/.cache/solana/v1.52/platform-tools/rust/bin/rustc cargo build-sbf --tools-version v1.52 --no-rustup-override --offline --sbf-out-dir /dev/shm/percolator-inv045-row422-20260920-target/deploy -- --locked
+export TMPDIR=/dev/shm CARGO_TARGET_DIR=/dev/shm/percolator-inv045-row422-20260920-target
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+export PERCOLATOR_FUZZ_SBF="$CARGO_TARGET_DIR/deploy/percolator_prog.so"
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::clipped_liquidation_reward::v16_program_fresh_report_rewards_only_collectible_full_close_penalty -- --exact --nocapture --test-threads=1
+cargo test --locked --offline --test v16_cu inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::report_cadence_rewards::v16_program_paid_price_catchup_report_cadence_preserves_reward_and_rejects_regression -- --exact --nocapture --test-threads=1
+rustfmt --edition 2021 --config skip_children=true --check tests/invariants/cu/inv_045_authenticated_reward_handoff.rs tests/invariants/cu/inv_045_clipped_liquidation_reward.rs
+git diff --check
+```
+
 ## INV-067 returned receipt payments remain raw surplus (2026-09-18)
 
 Classification: **nonduplicative public-route coverage**, primary INV-067/068,

@@ -30,6 +30,9 @@ mod hybrid_recipient_provenance;
 #[path = "inv_045_report_cadence_rewards.rs"]
 mod report_cadence_rewards;
 
+#[path = "inv_045_clipped_liquidation_reward.rs"]
+mod clipped_liquidation_reward;
+
 fn values(env: &V16CuEnv, portfolios: [Pubkey; 5]) -> [i128; 5] {
     portfolios.map(|key| {
         let account = env.portfolio_state(key);
