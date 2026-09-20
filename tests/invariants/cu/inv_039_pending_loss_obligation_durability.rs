@@ -57,6 +57,9 @@ mod resolved_histories;
 #[path = "inv_039_pending_loss_terminal_fees.rs"]
 mod terminal_fees;
 
+#[path = "inv_040_maintenance_reduction_retry.rs"]
+mod maintenance_reduction_retry;
+
 #[path = "inv_039_pending_loss_shared_holder.rs"]
 mod shared_holder;
 

@@ -1,5 +1,45 @@
 # Invariant-owned test coverage
 
+## Clipped maintenance before a retained reduction retry (2026-09-20)
+
+Title-only audit of open #386/#389 at `b40ffbd8`; no issue bodies or PR diffs read.
+Existing coverage inspected (source evidence, not additional test runs):
+
+| Owner | Existing selector / boundary |
+| --- | --- |
+| INV-036 | `v16_program_signed_direction_route_matrix_preserves_side_attribution_and_terminal_value`: trade fees by side and route; `v16_program_retained_redirect_bundle_preserves_fee_rounding_and_policy_order`: retained redirect policy. |
+| INV-039 | `v16_program_pending_cohort_terminal_fees_stop_at_resolution_and_reach_insurance_exit`: pending debt, terminal maintenance and payout rollback. |
+| INV-040 | `v16_program_clipped_maintenance_refill_retries_cannot_recharge_or_redirect`: clipped fees, refill and recipient-switch retry. |
+| INV-052 | `v16_program_maintenance_fee_cadence_is_conservative_and_value_exact`: reward rounding and aggregate domain budgets, not side-specific cadence equivalence. |
+| INV-059 | `v16_program_public_maintenance_episode_fragmentation`: fee partitions, recipient changes, aborted prefixes and terminal payout. |
+| INV-060 | `v16_program_fee_and_target_lag_compose_exactly_once_in_health_lanes`: fee/equity and lag/requirement decomposition. |
+| INV-064 | `v16_program_live_and_resolved_insurance_withdrawals_share_one_finite_budget`: finite allowance across routes and mode changes. |
+| INV-080 | `v16_program_dispatch_and_entrypoints_preserve_every_handler_error`: error propagation; the INV-059 history also checks fee-prefix rollback. |
+
+The INV-008 `v16_program_retry_operation_matrix_rejects_every_stale_retry` uses
+zero maintenance fees for `RebalanceReduce`. The new
+[focused test](cu/inv_040_maintenance_reduction_retry.rs) retains fee-bumped reduction
+bytes before a partial consumes their epoch, then prepends collectible maintenance.
+Four public System/SPL/ATA/wrapper histories cross both position sides and self/keeper
+rewards. A 4000-atom nominal fee clips to 3000, with exactly 999 reward and 2001
+retained insurance. Standalone and late bundled retries reject with provenance
+mismatch and complete Account rollback except exact signature/priority fees.
+Renewing only the position epoch admits the identical fee prefix, final reduction
+and exact 999/6999-atom recipient payout. Side budgets, untouched peers and custody
+are checked independently. The INV-039 module hosts this test solely to reuse its
+public fixture; no new pending-loss or cross-slot cadence guarantee is claimed.
+In particular this does not close #386's chosen-side cadence/payout question.
+
+Fresh default SBF, engine `4db11a8c`, SHA-256
+`558778ee9b0d02ca95d9c1f430e5b0e786d1a27a02484301dd60d6489a87546c`.
+Both exact selectors pass with `cargo test --locked --offline --test v16_cu <selector> -- --exact --nocapture`:
+
+- `inv_039_pending_loss_obligation_durability::maintenance_reduction_retry::v16_program_fee_bumped_reduction_retry_restores_clipped_maintenance_and_reward` (4 worlds, 8 rollbacks, 4 payouts; peak 267490 CU).
+- `inv_040_no_fee_seniority::v16_program_clipped_maintenance_refill_retries_cannot_recharge_or_redirect` (adjacent control).
+
+Scoped rustfmt and `git diff --check` pass. No state injection, production changes,
+dependency changes or status promotion.
+
 ## INV-071/082 Recovery cleanup position epoch (2026-09-20)
 
 One new public LiteSVM test in
