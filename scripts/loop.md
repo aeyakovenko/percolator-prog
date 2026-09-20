@@ -69,6 +69,15 @@ Keep a probe only when it uses public instructions and normal account constructi
 - No hand-mutating portfolio or market bytes to create an impossible state unless the test is explicitly classed as defense-in-depth and is not merged as a real LoF / DoS / CU bug.
 - The failing transaction must be reproducible with LiteSVM against the wrapper API.
 
+## Blind Invariant-Worker Requirement
+
+Use `scripts/worker_blind.md` as the briefing for Astra/invariant workers. The open
+issue/PR set is a withheld validation dataset, not worker context. Do not include
+issue numbers, PR numbers, titles, branch names, repro summaries, or bug-shaped
+hints in worker prompts. The coordinator may evaluate the frozen invariant suite
+against the holdout set in a separate verification worktree after worker output is
+reviewed.
+
 ## Trading Liveness Requirement
 
 Valid trading should not be blocked solely to avoid a CU cliff. Users must be able to find a market and get out of positions when the engine has a valid progress path.

@@ -25627,11 +25627,14 @@ write set. The current wave owns:
   liquidation, ADL-effective reduction, rebalance/reduce, or maximum-shape exit
   coverage without copying holdout PR tests.
 
-Open PR titles and row labels are a coverage checklist, not proof input. A row should move out of
-`missing` or `nonqualifying` only when an invariant-owned public-route generator and independent
-oracle covers the omitted route/lifecycle/order/boundary cell without copying the row-specific
-patch or test. Finding-specific red/green TDD remains useful, but it is tracked separately from
-generic invariant coverage.
+Open PR titles, issue titles, row labels, branches, diffs, fixes, tests, and repro summaries are
+coordinator-only holdout data. They are not worker prompts and not proof input. Astra workers must
+not inspect GitHub PRs/issues, holdout branches, `traceability_gaps.tsv`, finding-specific audit
+notes, or README sections that name holdout rows. A row should move out of `missing` or
+`nonqualifying` only when a frozen invariant-owned public-route generator and independent oracle
+covers the omitted route/lifecycle/order/boundary cell without consuming row-specific metadata.
+Finding-specific red/green TDD remains useful, but it is tracked separately from generic invariant
+coverage and is run by the coordinator after the blind suite is frozen.
 
 Reuse pinned engine-owned proofs and contracts instead of duplicating engine-proof work. Wrapper
 coverage owns authentication, routing, account validation, CPI/token/oracle behavior, and
@@ -25640,13 +25643,15 @@ composition with those engine contracts; make their assumptions explicit. Do not
 below. Bounded exploration, passing test counts, and leaf proofs remain scoped evidence with
 explicit partitions, assumptions, and uncovered routes.
 
-Open security PRs are a sealed holdout dataset. During invariant development, do not inspect or
-cherry-pick their branches, diffs, fixes, tests, titles, or issue-specific reproductions. Freeze the
-finding-blind invariant suite first, then evaluate it against the holdout roster. A holdout finding
-counts as independently covered only when a generic invariant-owned generator and oracle discover
-the same public-interface violation without consuming finding metadata. PR- or issue-named tests
-remain useful direct regressions, but they cannot satisfy independent-discovery or invariant-
-coverage completion by themselves.
+Open security PRs and issues are a sealed holdout dataset. During invariant development, workers do
+not inspect or cherry-pick their branches, diffs, fixes, tests, titles, comments, or
+issue-specific reproductions. They receive only invariant IDs, public route families, source/test
+paths, and the generic oracle they are extending. The coordinator freezes the finding-blind
+invariant suite first, then evaluates it against the holdout roster in a separate verification
+worktree. A holdout finding counts as independently covered only when a generic invariant-owned
+generator and oracle discover the same public-interface violation without consuming finding
+metadata. PR- or issue-named tests remain useful direct regressions, but they cannot satisfy
+independent-discovery or invariant-coverage completion by themselves.
 
 Former red witness now mounted on current main: the generic
 `inv_076_close_drift_residual_durability_and_finalization_atomicity::v16_program_resolved_close_order_preserves_pending_obligation_attribution`
