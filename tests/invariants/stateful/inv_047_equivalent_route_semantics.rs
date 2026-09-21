@@ -316,6 +316,192 @@ fn v16_program_nonzero_fee_trade_routes_are_byte_exact_after_transport_normaliza
     }
 }
 
+#[test]
+fn v16_program_fractional_close_partitions_preserve_double_ceil_fees_and_owner_payouts() {
+    use crate::support::fuzz_model::{
+        assert_public_encumbrance_census, assert_public_stock_census,
+    };
+
+    const PRICE: u64 = 100;
+    const FEE_BPS: u64 = 3_334;
+    const DEPOSITS: [u128; 5] = [101, 107, 1, 1, 1];
+    let part_q = POS_SCALE / 50 + 1;
+    let total_q = 2 * part_q;
+    let fee = |q: u128| {
+        (q * u128::from(PRICE))
+            .div_ceil(POS_SCALE)
+            .checked_mul(u128::from(FEE_BPS))
+            .unwrap()
+            .div_ceil(10_000)
+    };
+    // Both notionals lie just above two atoms. Rounding notional before fees
+    // makes the split cost four atoms per owner, versus two for one exact close.
+    assert_ne!(part_q * u128::from(PRICE) % POS_SCALE, 0);
+    assert_eq!((fee(total_q), 2 * fee(part_q)), (2, 4));
+    let total_deposit: u128 = DEPOSITS.iter().sum();
+    let mut peak_cu = 0;
+
+    for direction in [-1i128, 1] {
+        let mut common_initial = None;
+        for parts in [vec![total_q], vec![part_q, part_q]] {
+            let expected_fee: u128 = parts.iter().map(|&q| fee(q)).sum();
+            assert_eq!(expected_fee - fee(total_q), 2 * (parts.len() as u128 - 1));
+            let mut common_prefixes = None;
+            for route in ROUTES {
+                let label = format!("direction={direction}, parts={parts:?}, route={route:?}");
+                let mut env = V16Svm::new(
+                    [0x5c; 32],
+                    MarketConfig {
+                        initial_price: PRICE,
+                        actor_deposits: DEPOSITS,
+                        ..MarketConfig::default()
+                    },
+                );
+                env.begin_public_trace();
+                env.trade_no_cpi(TAKER, MAKER, 0, direction * total_q as i128, PRICE, 0)
+                    .unwrap();
+                env.update_trade_fee_policy(FEE_BPS).unwrap();
+                env.set_matcher_config_with_trade_fee_cap(MAKER, 1, FEE_BPS as u16)
+                    .unwrap();
+                let initial = normalized_trade_route_frame(&env).unwrap();
+                if let Some(expected) = &common_initial {
+                    assert_eq!(
+                        &initial, expected,
+                        "identical public starting state: {label}"
+                    );
+                } else {
+                    common_initial = Some(initial);
+                }
+                let tokens_before = env.all_token_account_data();
+                let supply_before = env.token_supply_observed();
+                let passive = [2, 3, 4].map(|actor| env.primary_portfolio_data(actor));
+                let mut prefixes = Vec::new();
+                let mut remaining = total_q;
+                let mut charged = 0;
+                let mut payouts = [0u128; 2];
+                let check = |env: &V16Svm, remaining: u128, charged: u128, payouts: [u128; 2]| {
+                    let group = env.primary_market_state().1;
+                    for actor in [TAKER, MAKER] {
+                        let account = env.primary_portfolio(actor);
+                        assert_eq!(
+                            account.capital.get(),
+                            DEPOSITS[actor] - charged - payouts[actor],
+                            "{label}: owner {actor}"
+                        );
+                        assert_eq!(account.pnl.get(), 0, "{label}: owner {actor}");
+                        let legs: Vec<_> = account
+                            .legs
+                            .iter()
+                            .map(|leg| leg.try_to_runtime().unwrap())
+                            .filter(|leg| leg.active)
+                            .collect();
+                        assert_eq!(legs.len(), usize::from(remaining != 0), "{label}");
+                        if remaining != 0 {
+                            assert_eq!(legs[0].asset_index, 0);
+                            assert_eq!(
+                                legs[0].basis_pos_q,
+                                direction
+                                    * if actor == TAKER {
+                                        remaining as i128
+                                    } else {
+                                        -(remaining as i128)
+                                    }
+                            );
+                        }
+                        assert_eq!(
+                            u128::from(env.token_amount(env.actors[actor].destination_token)),
+                            payouts[actor],
+                            "{label}: payout {actor}"
+                        );
+                    }
+                    assert_eq!(group.assets[0].oi_eff_long_q, remaining, "{label}");
+                    assert_eq!(group.assets[0].oi_eff_short_q, remaining, "{label}");
+                    assert_eq!(group.insurance, 2 * charged, "{label}");
+                    assert_eq!(
+                        &group.insurance_domain_budget[..2],
+                        &[charged; 2],
+                        "{label}"
+                    );
+                    assert_eq!(
+                        group.c_tot,
+                        total_deposit - 2 * charged - payouts.iter().sum::<u128>(),
+                        "{label}"
+                    );
+                    assert_eq!(
+                        group.vault,
+                        total_deposit - payouts.iter().sum::<u128>(),
+                        "{label}"
+                    );
+                    assert_eq!(group.vault, group.c_tot + group.insurance, "{label}");
+                    assert_eq!(
+                        u128::from(env.token_amount(env.vault)),
+                        group.vault,
+                        "{label}"
+                    );
+                    assert_eq!(env.token_supply_observed(), supply_before, "{label}");
+                    assert_eq!(
+                        [2, 3, 4].map(|actor| env.primary_portfolio_data(actor)),
+                        passive,
+                        "{label}"
+                    );
+                    assert_public_stock_census(&label, env).unwrap();
+                    assert_public_encumbrance_census(&label, env).unwrap();
+                };
+                check(&env, remaining, charged, payouts);
+                for &q in &parts {
+                    let landed = execute_trade_route(
+                        &mut env,
+                        route,
+                        TAKER,
+                        MAKER,
+                        0,
+                        -direction * q as i128,
+                        PRICE,
+                        FEE_BPS,
+                    )
+                    .unwrap_or_else(|error| panic!("{label}: {error}"));
+                    peak_cu = peak_cu.max(landed.compute_units);
+                    remaining -= q;
+                    charged += fee(q);
+                    check(&env, remaining, charged, payouts);
+                    assert_eq!(
+                        env.all_token_account_data(),
+                        tokens_before,
+                        "close custody: {label}"
+                    );
+                    prefixes.push(normalized_trade_route_frame(&env).unwrap());
+                }
+                assert_eq!(remaining, 0);
+                assert_eq!(charged, expected_fee);
+                for actor in [TAKER, MAKER] {
+                    let amount = DEPOSITS[actor] - expected_fee;
+                    let landed = env.withdraw_primary(actor, amount).unwrap();
+                    peak_cu = peak_cu.max(landed.compute_units);
+                    payouts[actor] = amount;
+                    check(&env, 0, charged, payouts);
+                    prefixes.push(normalized_trade_route_frame(&env).unwrap());
+                }
+                assert_eq!(
+                    payouts.map(|amount| amount + expected_fee),
+                    [DEPOSITS[0], DEPOSITS[1]]
+                );
+                if let Some(expected) = &common_prefixes {
+                    assert_eq!(&prefixes, expected, "route economics and payouts: {label}");
+                } else {
+                    common_prefixes = Some(prefixes);
+                }
+                let trace = env.finish_public_trace();
+                trace.validate_public_execution().unwrap();
+                assert_eq!(trace.out_of_band_economic_mutations, 0, "{label}");
+                assert_eq!(trace.steps.len(), 5 + parts.len(), "{label}");
+                assert!(trace.steps.iter().all(|step| step.succeeded), "{label}");
+            }
+        }
+    }
+    assert!(peak_cu < TX_CU_LIMIT);
+    println!("INV-024/047/052: 16 fractional close worlds, exact owner payouts; peak CU={peak_cu}");
+}
+
 #[derive(Clone, Copy, Debug)]
 enum RefreshHistory {
     DirectTrade,
