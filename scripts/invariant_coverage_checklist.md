@@ -38,7 +38,7 @@ formal proof, `F` stateful/property fuzzing, `I` SVM integration, `M` metamorphi
 | INV-005 | TODO | | | |
 | INV-006 | TODO | | | |
 | INV-007 | TODO | | | |
-| INV-008 | TODO | | | |
+| INV-008 | PARTIAL | P,F,I,M | `v16_backing_replay_across_sides_preserves_independent_insurance_retry` | Durable expiry and arbitrary retained-intent histories remain |
 | INV-009 | TODO | | | |
 | INV-010 | TODO | | | |
 | INV-011 | TODO | | | |
@@ -65,7 +65,7 @@ formal proof, `F` stateful/property fuzzing, `I` SVM integration, `M` metamorphi
 | INV-032 | TODO | | | |
 | INV-033 | TODO | | | |
 | INV-034 | TODO | | | |
-| INV-035 | TODO | | | |
+| INV-035 | PARTIAL | P,F,I,M | `v16_program_domain_local_b_composition_is_source_complete` | Full public transition recertification remains |
 | INV-036 | TODO | | | |
 | INV-037 | TODO | | | |
 | INV-038 | TODO | | | |
@@ -77,12 +77,12 @@ formal proof, `F` stateful/property fuzzing, `I` SVM integration, `M` metamorphi
 | INV-044 | TODO | | | |
 | INV-045 | TODO | | | |
 | INV-046 | TODO | | | |
-| INV-047 | TODO | | | |
+| INV-047 | PARTIAL | F,I,M | `v16_program_fractional_close_partitions_preserve_double_ceil_fees_and_owner_payouts` | Seven/eight-leg four-route matrix remains |
 | INV-048 | TODO | | | |
 | INV-049 | TODO | | | |
 | INV-050 | TODO | | | |
 | INV-051 | TODO | | | |
-| INV-052 | TODO | | | |
+| INV-052 | PARTIAL | F,I,M | `v16_program_fractional_close_partitions_preserve_double_ceil_fees_and_owner_payouts` | Non-integral split/merge families remain |
 | INV-053 | TODO | | | |
 | INV-054 | TODO | | | |
 | INV-055 | TODO | | | |
@@ -111,12 +111,12 @@ formal proof, `F` stateful/property fuzzing, `I` SVM integration, `M` metamorphi
 | INV-078 | TODO | | | |
 | INV-079 | TODO | | | |
 | INV-080 | TODO | | | |
-| INV-081 | TODO | | | |
+| INV-081 | PARTIAL | P,F,I | `v16_program_success_state_validity_composition_is_source_complete` | Whole-route transition execution remains |
 | INV-082 | TODO | | | |
-| INV-083 | TODO | | | |
+| INV-083 | PARTIAL | P,F,I,C | `v16_program_maintenance_u128_product_boundary_preserves_bounded_owner_exit` | Maximum-shape product families remain |
 | INV-084 | TODO | | | |
 | INV-085 | TODO | | | |
-| INV-086 | TODO | | | |
+| INV-086 | PARTIAL | P,F,I,M,R | `v16_program_reference_model_dimension_composition_is_source_complete` | Current-pin public sequence equivalence remains |
 | INV-087 | TODO | | | |
 | INV-088 | TODO | | | |
 | INV-089 | TODO | | | |
