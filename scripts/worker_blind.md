@@ -7,6 +7,9 @@ This file is the only briefing to give invariant-coverage subagents.
 Extend public-route invariant coverage from the normative charter in `INVARIANTS.md`.
 Work from source code, existing generic tests, and public API behavior. Add only
 net-useful invariant tests, oracles, and minimal supporting fixtures.
+Use `scripts/invariant_coverage_checklist.md` for the evidence gates. Do not mark
+an invariant complete from a leaf test alone; record the public route, independent
+oracle, boundary classes, rollback behavior, exact selector, and remaining scope.
 
 ## Withheld Data Boundary
 
