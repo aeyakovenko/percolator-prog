@@ -24,6 +24,9 @@ use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
+#[path = "inv_083_maintenance_product_boundary.rs"]
+mod maintenance_product_boundary;
+
 // Keep the exact caller fields: send_tx intentionally refreshes generation/intent guards.
 fn inv083_boundary_transaction(env: &V16CuEnv, instruction: Instruction) -> Transaction {
     let tx = Transaction::new_signed_with_payer(
