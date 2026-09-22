@@ -22369,6 +22369,212 @@ fn v16_bpf_tradecpi_permissionless_lp_fill_does_not_need_lp_owner_signature() {
 }
 
 #[test]
+fn v16_bpf_portfolio_recreation_requires_fresh_matcher_authorization() {
+    let mut env = V16CuEnv::new();
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    let fresh_lp = env.svm.get_account(&lp).unwrap();
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let (matcher_program, ctx, delegate) =
+        auth_matcher_for_lp_via_system_create(&mut env, &lp_owner, lp);
+    let authorized = env.portfolio_matcher_config(lp);
+    assert_eq!(authorized.enabled, 1);
+    let size_q = (5 * POS_SCALE) as i128;
+
+    // Exercise the grant before closing, leaving a real matcher response in the context.
+    for size in [size_q, -size_q] {
+        env.svm.expire_blockhash();
+        env.try_trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            ctx,
+            delegate,
+            0,
+            size,
+            0,
+        )
+        .expect("the old incarnation's authorized matcher opens and closes the position");
+    }
+    for portfolio in [taker, lp] {
+        let account = env.portfolio_state(portfolio);
+        assert_eq!(account.capital.get(), 1_000_000);
+        assert_eq!(account.pnl.get(), 0);
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(&account)));
+    }
+    assert_eq!(env.market_state().0.matcher_req_seq, 2);
+    let old_ctx = env.svm.get_account(&ctx).unwrap();
+    assert_eq!(
+        u64::from_le_bytes(old_ctx.data[32..40].try_into().unwrap()),
+        2
+    );
+    let old_payout = env.withdraw(&lp_owner, lp, 1_000_000);
+    assert_eq!(env.token_amount(old_payout), 1_000_000);
+    assert_eq!(env.token_amount(env.vault), 1_000_000);
+    assert_eq!(env.portfolio_state(lp).capital.get(), 0);
+    assert_eq!(env.portfolio_matcher_config(lp), authorized);
+    let (cfg_before, group_before) = env.market_state();
+    assert_eq!(group_before.materialized_portfolio_count, 2);
+    assert_eq!(group_before.c_tot, 1_000_000);
+    assert_eq!(group_before.vault, 1_000_000);
+    assert_eq!(group_before.insurance, 0);
+    assert_eq!(group_before.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group_before.assets[0].oi_eff_short_q, 0);
+    let market_lamports = env.svm.get_account(&env.market).unwrap().lamports;
+    let lp_lamports = env.svm.get_account(&lp).unwrap().lamports;
+    let taker_before = env.svm.get_account(&taker).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let lifecycle_accounts = vec![
+        AccountMeta::new(lp_owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(lp, false),
+    ];
+
+    // Refund in the close transaction so the address survives account reclamation.
+    // Keeping the owner and matcher tuple identical isolates the lifetime of the grant.
+    env.svm.expire_blockhash();
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: lifecycle_accounts.clone(),
+                data: ProgInstruction::ClosePortfolio.encode(),
+            },
+            system_instruction::transfer(&env.payer.pubkey(), &lp, lp_lamports),
+            Instruction {
+                program_id: env.program_id,
+                accounts: lifecycle_accounts,
+                data: ProgInstruction::InitPortfolio.encode(),
+            },
+        ],
+        &[&lp_owner],
+    )
+    .expect("public close, refund and re-init of the same portfolio must succeed");
+    assert_eq!(
+        env.svm.get_account(&lp).unwrap(),
+        fresh_lp,
+        "recreation must restore every portfolio byte and its rent to the fresh state"
+    );
+    assert_eq!(
+        env.portfolio_matcher_config(lp),
+        state::PortfolioMatcherConfigV16::default(),
+        "the previous incarnation's matcher authorization must be cleared"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports + lp_lamports,
+        "close sweeps the old rent exactly once even when the address is refunded"
+    );
+    let (cfg_after, group_after) = env.market_state();
+    assert_eq!(cfg_after.matcher_req_seq, cfg_before.matcher_req_seq);
+    assert_eq!(group_after.materialized_portfolio_count, 2);
+    assert_eq!(group_after.c_tot, 1_000_000);
+    assert_eq!(group_after.vault, 1_000_000);
+    assert_eq!(group_after.insurance, 0);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), old_ctx);
+
+    let source = env.deposit(&lp_owner, lp, 1_000_000);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault), 2_000_000);
+    assert_eq!(env.portfolio_state(lp).capital.get(), 1_000_000);
+    assert_eq!(env.market_state().1.c_tot, 2_000_000);
+    assert_eq!(env.market_state().1.vault, 2_000_000);
+    let matcher_accounts = vec![
+        AccountMeta::new(taker_owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(taker, false),
+        AccountMeta::new(lp, false),
+        AccountMeta::new_readonly(matcher_program, false),
+        AccountMeta::new(ctx, false),
+        AccountMeta::new_readonly(delegate, false),
+    ];
+    let fills = [
+        (
+            "TradeCpi",
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q,
+                fee_bps: 0,
+                limit_price: 0,
+            },
+        ),
+        (
+            "BatchTradeCpi",
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+        ),
+    ];
+    let before_rejected = [
+        ("market", env.market),
+        ("taker", taker),
+        ("recreated LP", lp),
+        ("retained matcher context", ctx),
+        ("vault", env.vault),
+        ("fresh deposit source", source),
+        ("old withdrawal destination", old_payout),
+        ("LP owner", lp_owner.pubkey()),
+    ]
+    .map(|(label, key)| (label, key, env.svm.get_account(&key).unwrap()));
+    for (route, instruction) in &fills {
+        env.svm.expire_blockhash();
+        let err = env
+            .send(instruction.clone(), matcher_accounts.clone(), &[&taker_owner])
+            .expect_err("an old matcher grant must not authorize the recreated portfolio");
+        assert!(err.contains("Custom(8)"), "{route}: expected Unauthorized: {err}");
+        for (label, key, before) in &before_rejected {
+            assert_eq!(
+                env.svm.get_account(key).as_ref(),
+                Some(before),
+                "{route}: stale authorization must preserve the entire {label} account"
+            );
+        }
+    }
+
+    env.set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 1);
+    assert_eq!(env.portfolio_matcher_config(lp), authorized);
+    for (index, (route, instruction)) in fills.into_iter().enumerate() {
+        env.svm.expire_blockhash();
+        env.send(instruction, matcher_accounts.clone(), &[&taker_owner])
+            .unwrap_or_else(|err| panic!("{route}: fresh owner authorization must permit the fill: {err}"));
+        let expected_size = size_q * (index as i128 + 1);
+        let (cfg, group) = env.market_state();
+        assert_eq!(cfg.matcher_req_seq, 3 + index as u64);
+        assert_eq!(group.materialized_portfolio_count, 2);
+        assert_eq!(group.assets[0].oi_eff_long_q, expected_size as u128);
+        assert_eq!(group.assets[0].oi_eff_short_q, expected_size as u128);
+        assert_eq!(group.vault, 2_000_000);
+        assert_eq!(group.c_tot, 2_000_000);
+        assert_eq!(group.insurance, 0);
+        for (portfolio, position) in [(taker, expected_size), (lp, -expected_size)] {
+            let account = env.portfolio_state(portfolio);
+            assert_eq!(active_leg_for_asset(&account, 0).basis_pos_q, position);
+            assert_eq!(account.capital.get(), 1_000_000);
+            assert_eq!(account.pnl.get(), 0);
+        }
+        assert_eq!(env.token_amount(env.vault), 2_000_000);
+        assert_eq!(env.token_amount(source), 0);
+        assert_eq!(env.token_amount(old_payout), 1_000_000);
+    }
+}
+
+#[test]
 fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
@@ -22473,6 +22679,167 @@ fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
         active_leg_for_asset(&env.portfolio_state(taker), 0).basis_pos_q,
         (5 * POS_SCALE) as i128
     );
+}
+
+#[test]
+fn v16_bpf_matcher_context_rejects_cross_portfolio_rebinding() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp_a = env.create_portfolio(&lp_owner);
+    let lp_b = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp_a, 1_000_000);
+    env.deposit(&lp_owner, lp_b, 1_000_000);
+    let (ctx_a, delegate_a, _) =
+        env.init_auth_matcher_context_via_system_create(matcher_program, &lp_owner, lp_a);
+    let (ctx_b, delegate_b, _) =
+        env.init_auth_matcher_context_via_system_create(matcher_program, &lp_owner, lp_b);
+    let config_a = env.portfolio_matcher_config(lp_a);
+    let config_b = env.portfolio_matcher_config(lp_b);
+    let size_q = (5 * POS_SCALE) as i128;
+    env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp_a,
+        matcher_program,
+        ctx_a,
+        delegate_a,
+        0,
+        size_q,
+        0,
+    )
+    .expect("portfolio A's matcher context executes with its original delegate");
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(lp_a), 0).basis_pos_q,
+        -size_q
+    );
+
+    // Give B a valid wrapper config and PDA for A's context; only the context binding differs.
+    let rebound_delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_b,
+        &lp_owner.pubkey(),
+        &matcher_program,
+        &ctx_a,
+    );
+    assert_ne!(rebound_delegate, delegate_a);
+    env.set_matcher_config(matcher_program, &lp_owner, lp_b, ctx_a, rebound_delegate, 1);
+    assert_eq!(
+        env.portfolio_matcher_config(lp_b),
+        state::PortfolioMatcherConfigV16 {
+            matcher_program: matcher_program.to_bytes(),
+            matcher_context: ctx_a.to_bytes(),
+            matcher_delegate: rebound_delegate.to_bytes(),
+            enabled: 1,
+        }
+    );
+    assert_eq!(env.portfolio_matcher_config(lp_a), config_a);
+    assert_eq!(
+        &env.svm.get_account(&ctx_a).unwrap().data[65..97],
+        delegate_a.as_ref(),
+        "registering the context on B must not rewrite the matcher's original binding"
+    );
+    let routes = [
+        (
+            "TradeCpi",
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q,
+                fee_bps: 0,
+                limit_price: 0,
+            },
+        ),
+        (
+            "BatchTradeCpi",
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+        ),
+    ];
+    let send_fill = |env: &mut V16CuEnv, ix: ProgInstruction, ctx: Pubkey, delegate: Pubkey| {
+        env.svm.expire_blockhash();
+        env.send(
+            ix,
+            vec![
+                AccountMeta::new(taker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker, false),
+                AccountMeta::new(lp_b, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker_owner],
+        )
+    };
+    let watched = [
+        env.market,
+        taker,
+        lp_a,
+        lp_b,
+        ctx_a,
+        ctx_b,
+        delegate_a,
+        delegate_b,
+        rebound_delegate,
+        env.vault,
+        taker_owner.pubkey(),
+        lp_owner.pubkey(),
+    ];
+    for (label, ix) in &routes {
+        let before = watched.map(|key| (key, env.svm.get_account(&key)));
+        let err = send_fill(&mut env, ix.clone(), ctx_a, rebound_delegate)
+            .expect_err("portfolio A's context must reject portfolio B's signed delegate");
+        assert!(
+            err.contains("InstructionError(2, InvalidAccountData)")
+                && err.contains(&format!("Program {matcher_program} invoke [2]")),
+            "{label}: valid wrapper authorization must reach the matcher scope check: {err}"
+        );
+        for (key, account) in before {
+            assert_eq!(
+                env.svm.get_account(&key),
+                account,
+                "{label}: rejection must roll back the request sequence and all accounts: {key}"
+            );
+        }
+    }
+
+    env.set_matcher_config(matcher_program, &lp_owner, lp_b, ctx_b, delegate_b, 1);
+    assert_eq!(env.portfolio_matcher_config(lp_b), config_b);
+    let lp_a_before = env.svm.get_account(&lp_a).unwrap();
+    let ctx_a_before = env.svm.get_account(&ctx_a).unwrap();
+    let seq_before = env.market_state().0.matcher_req_seq;
+    for (i, (label, ix)) in routes.into_iter().enumerate() {
+        let ok = send_fill(&mut env, ix, ctx_b, delegate_b);
+        assert!(ok.is_ok(), "{label}: portfolio B's own context must execute: {ok:?}");
+        let expected_b_size = (i as i128 + 1) * size_q;
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(taker), 0).basis_pos_q,
+            size_q + expected_b_size
+        );
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(lp_b), 0).basis_pos_q,
+            -expected_b_size
+        );
+        assert_eq!(env.svm.get_account(&lp_a).unwrap(), lp_a_before);
+        assert_eq!(env.svm.get_account(&ctx_a).unwrap(), ctx_a_before);
+        assert_eq!(
+            env.market_state().0.matcher_req_seq,
+            seq_before + i as u64 + 1
+        );
+    }
 }
 
 #[test]
