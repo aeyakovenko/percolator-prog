@@ -51693,6 +51693,186 @@ fn v16_bpf_batch_trade_executes_mixed_direction_spread() {
     assert_eq!(active_leg_for_asset(&t, 1).basis_pos_q, -sz);
 }
 
+// Individually valid fills must respect the accumulated position cap in either direction.
+// A later over-cap leg rolls back the whole batch; reaching the cap succeeds exactly once.
+#[test]
+fn v16_bpf_batch_trade_final_position_cap_survives_split_and_retry() {
+    const PRICE: u64 = 100;
+    const FEE_BPS: u64 = 100;
+    let cap = percolator::MAX_POSITION_ABS_Q as i128;
+    let unit = POS_SCALE as i128;
+    let deposit = 2 * percolator::MAX_POSITION_ABS_Q * PRICE as u128 / POS_SCALE;
+    assert!(POS_SCALE + 1 <= percolator::MAX_TRADE_SIZE_Q);
+
+    for use_cpi in [false, true] {
+        for sign in [-1i128, 1] {
+            let label = format!("cpi={use_cpi}, sign={sign}");
+            let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 500);
+            env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+            env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
+            let taker = Keypair::new();
+            let lp = Keypair::new();
+            let ta = env.create_portfolio(&taker);
+            let la = env.create_portfolio(&lp);
+            let taker_tokens = env.deposit(&taker, ta, deposit);
+            let lp_tokens = env.deposit(&lp, la, deposit);
+            let mut checked_keys = vec![
+                env.market,
+                ta,
+                la,
+                env.vault,
+                taker_tokens,
+                lp_tokens,
+                taker.pubkey(),
+                lp.pubkey(),
+            ];
+            let matcher = if use_cpi {
+                let program = Pubkey::new_unique();
+                env.svm.add_program(
+                    program,
+                    &std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF"),
+                );
+                let (ctx, delegate, _) = env.init_auth_matcher_context(program, &lp, la);
+                checked_keys.extend([ctx, delegate]);
+                Some((program, ctx, delegate))
+            } else {
+                None
+            };
+
+            env.trade_asset_with_cu(1, &taker, ta, &lp, la, sign * (cap - unit), PRICE, 0);
+            assert_eq!(
+                active_leg_for_asset(&env.portfolio_state(ta), 1).basis_pos_q,
+                sign * (cap - unit),
+                "{label}: public seed fill leaves exactly one unit of position capacity"
+            );
+            assert_eq!(
+                active_leg_for_asset(&env.portfolio_state(la), 1).basis_pos_q,
+                -sign * (cap - unit)
+            );
+            let seeded_market = env.market_state().1;
+
+            let send_batch = |env: &mut V16CuEnv, add_q: i128| {
+                let legs = [(0, -sign * unit), (1, sign * add_q)];
+                env.svm.expire_blockhash();
+                if let Some((program, ctx, delegate)) = matcher {
+                    env.send(
+                        ProgInstruction::BatchTradeCpi {
+                            legs: legs
+                                .iter()
+                                .map(|&(asset_index, size_q)| BatchTradeCpiLeg {
+                                    asset_index,
+                                    size_q,
+                                    fee_bps: FEE_BPS,
+                                    limit_price: PRICE,
+                                })
+                                .collect(),
+                        },
+                        vec![
+                            AccountMeta::new(taker.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(ta, false),
+                            AccountMeta::new(la, false),
+                            AccountMeta::new_readonly(program, false),
+                            AccountMeta::new(ctx, false),
+                            AccountMeta::new_readonly(delegate, false),
+                        ],
+                        &[&taker],
+                    )
+                } else {
+                    env.send(
+                        ProgInstruction::BatchTradeNoCpi {
+                            legs: legs
+                                .iter()
+                                .map(|&(asset_index, size_q)| BatchTradeLeg {
+                                    asset_index,
+                                    size_q,
+                                    exec_price: PRICE,
+                                    fee_bps: FEE_BPS,
+                                })
+                                .collect(),
+                        },
+                        vec![
+                            AccountMeta::new(taker.pubkey(), true),
+                            AccountMeta::new(lp.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(ta, false),
+                            AccountMeta::new(la, false),
+                        ],
+                        &[&taker, &lp],
+                    )
+                }
+            };
+
+            // The first batch exceeds the final cap by one quantum. The same valid batch
+            // is then submitted twice with fresh blockhashes, so the retry reaches the engine.
+            for (phase, add_q, succeeds) in [
+                ("one quantum over cap", unit + 1, false),
+                ("exact cap", unit, true),
+                ("retry at cap", unit, false),
+            ] {
+                let before: Vec<_> = checked_keys
+                    .iter()
+                    .map(|&key| (key, env.svm.get_account(&key).unwrap()))
+                    .collect();
+                let result = send_batch(&mut env, add_q);
+                if !succeeds {
+                    let err = result.expect_err(&format!("{label}, {phase}: must reject"));
+                    let invalid_leg =
+                        percolator_prog::error::PercolatorError::EngineInvalidLeg as u32;
+                    assert!(
+                        err.contains(&format!("InstructionError(2, Custom({invalid_leg}))")),
+                        "{label}, {phase}: must reject at the final position bound: {err}"
+                    );
+                    for (key, account) in before {
+                        assert_eq!(
+                            env.svm.get_account(&key).unwrap(),
+                            account,
+                            "{label}, {phase}: account {key} must roll back, including balances"
+                        );
+                    }
+                    continue;
+                }
+
+                let cu = result.expect(&format!("{label}: exact-cap control must execute"));
+                assert_cu_within(&label, cu, 1_400_000);
+                let t = env.portfolio_state(ta);
+                let l = env.portfolio_state(la);
+                let group = env.market_state().1;
+                for (asset_index, position) in [(0, -sign * unit), (1, sign * cap)] {
+                    assert_eq!(active_leg_for_asset(&t, asset_index).basis_pos_q, position);
+                    assert_eq!(active_leg_for_asset(&l, asset_index).basis_pos_q, -position);
+                    assert_eq!(
+                        group.assets[asset_index].oi_eff_long_q,
+                        position.unsigned_abs()
+                    );
+                    assert_eq!(
+                        group.assets[asset_index].oi_eff_short_q,
+                        position.unsigned_abs()
+                    );
+                }
+                assert_eq!(percolator::active_bitmap_count_ones(active_bitmap(&t)), 2);
+                assert_eq!(percolator::active_bitmap_count_ones(active_bitmap(&l)), 2);
+                let fee_per_side = 2 * PRICE as u128 * FEE_BPS as u128 / 10_000;
+                assert_eq!(t.capital.get(), deposit - fee_per_side);
+                assert_eq!(l.capital.get(), deposit - fee_per_side);
+                assert_eq!(t.pnl.get(), 0);
+                assert_eq!(l.pnl.get(), 0);
+                assert_eq!(group.c_tot, 2 * (deposit - fee_per_side));
+                assert_eq!(group.insurance, seeded_market.insurance + 2 * fee_per_side);
+                assert_eq!(group.vault, seeded_market.vault);
+                assert_eq!(group.c_tot + group.insurance, group.vault);
+                assert_domain_budget_remaining_total_consistent(&group, &label);
+                for (key, account) in before {
+                    if key == env.vault || key == taker_tokens || key == lp_tokens {
+                        assert_eq!(env.svm.get_account(&key).unwrap(), account);
+                    }
+                }
+                assert_eq!(env.token_amount(env.vault) as u128, group.vault);
+            }
+        }
+    }
+}
+
 // security.md sweep - duplicate asset legs in a batch (#22/#33): batch fee/accounting reconstruction
 // is per-asset, so a batch must not contain two legs for the same asset. Both the direct and matcher-CPI
 // batch paths reject duplicates atomically, then accept the same setup with distinct asset legs.
