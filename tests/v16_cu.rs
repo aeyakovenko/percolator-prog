@@ -8176,6 +8176,74 @@ fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
 }
 
 #[test]
+fn v16_bpf_sync_maintenance_zero_share_routes_are_equivalent() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let payer_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+    env.update_maintenance_fee_policy_with_cu(0);
+
+    let account_keys = [env.market, payer_portfolio, cranker_portfolio, env.vault];
+    let accounts_before = account_keys.map(|key| env.svm.get_account(&key).unwrap());
+    let mut expected_accounts = None;
+    env.svm.warp_to_slot(10);
+
+    // With no reward share, each optional-cranker route must retain the entire fee in insurance.
+    // Restore identical accounts before each route so complete account equality is meaningful.
+    for (label, cranker) in [
+        ("no cranker", None),
+        ("self cranker", Some(payer_portfolio)),
+        ("distinct cranker", Some(cranker_portfolio)),
+    ] {
+        for (key, account) in account_keys.iter().zip(accounts_before.iter()) {
+            env.svm.set_account(*key, account.clone()).unwrap();
+        }
+        env.svm.expire_blockhash();
+        let cu = env.sync_maintenance_fee_with_cu(payer_portfolio, cranker, 10);
+        println!("v16 SyncMaintenanceFee zero share, {label} CU: {cu}");
+        assert_cu_within(label, cu, CUSTODY_CU_LIMIT);
+
+        let payer = env.portfolio_state(payer_portfolio);
+        let (_, group) = env.market_state();
+        assert_eq!(payer.last_fee_slot.get(), 10, "{label}: fee slot advances");
+        assert_eq!(
+            payer.capital.get(),
+            100_000_000 - 580,
+            "{label}: the full maintenance fee is charged"
+        );
+        assert_eq!(group.c_tot, 100_000_000 - 580, "{label}: capital total");
+        assert_eq!(group.insurance, 580, "{label}: the full fee is retained");
+        assert_eq!(
+            group.insurance_domain_budget_remaining_total, 580,
+            "{label}: the retained fee is credited to domain budgets"
+        );
+        assert_domain_budget_remaining_total_consistent(&group, label);
+
+        let accounts_after = account_keys.map(|key| env.svm.get_account(&key).unwrap());
+        assert_eq!(
+            accounts_after[2], accounts_before[2],
+            "{label}: the distinct cranker account is unchanged"
+        );
+        assert_eq!(
+            accounts_after[3], accounts_before[3],
+            "{label}: vault custody is unchanged"
+        );
+        if let Some(expected) = &expected_accounts {
+            assert_eq!(
+                &accounts_after, expected,
+                "{label}: all accounts match the no-cranker route exactly"
+            );
+        } else {
+            expected_accounts = Some(accounts_after);
+        }
+    }
+}
+
+#[test]
 fn v16_attack_sync_maintenance_bad_cranker_rolls_back_fee() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 58,
@@ -38002,6 +38070,106 @@ fn funded_no_cpi_reported_price_pair(
     env.deposit(&owner_a, account_a, deposit);
     env.deposit(&owner_b, account_b, deposit);
     (owner_a, account_a, owner_b, account_b)
+}
+
+// Replay each transition from identical accounts: single and one-leg batch routes must agree
+// on all persisted state, including fee rounding and leg cleanup, in either signed direction.
+#[test]
+fn v16_bpf_nocpi_single_and_batch_lifecycle_state_equivalence() {
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 1_000_000;
+    let unit_q = (POS_SCALE / 4 + 1) as i128;
+
+    for direction in [1i128, -1] {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            trade_fee_base_bps: 137,
+            ..V16CuMarketParams::default()
+        });
+        env.configure_auth_mark_with_cu(0, PRICE);
+        let (owner_a, account_a, owner_b, account_b) =
+            funded_no_cpi_reported_price_pair(&mut env, DEPOSIT);
+        let protocol_keys = [env.market, account_a, account_b];
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+        // Fractional notionals round the per-account fees to 2, 1, 1, and 1 atoms.
+        for (phase, delta_q, remaining_q, fee) in [
+            ("open", 3 * unit_q, 3 * unit_q, 2u128),
+            ("increase", unit_q, 4 * unit_q, 1),
+            ("partial close", -2 * unit_q, 2 * unit_q, 1),
+            ("full close", -2 * unit_q, 0, 1),
+        ] {
+            let before = protocol_keys.map(|key| env.svm.get_account(&key).unwrap());
+            let insurance_before = env.market_state().1.insurance;
+            let mut single_after = None;
+            for path in [
+                NoCpiReportedPricePath::Single,
+                NoCpiReportedPricePath::Batch,
+            ] {
+                for (&key, account) in protocol_keys.iter().zip(before.iter()) {
+                    env.svm.set_account(key, account.clone()).unwrap();
+                }
+                env.svm.expire_blockhash();
+                try_no_cpi_reported_price_trade_with_cu(
+                    &mut env,
+                    path,
+                    &owner_a,
+                    account_a,
+                    &owner_b,
+                    account_b,
+                    direction * delta_q,
+                    PRICE,
+                    0,
+                )
+                .unwrap_or_else(|err| {
+                    panic!("{path:?} {phase} direction={direction} must execute: {err}")
+                });
+
+                let after = protocol_keys.map(|key| env.svm.get_account(&key).unwrap());
+                if let Some(expected) = &single_after {
+                    for ((&key, actual), expected) in
+                        protocol_keys.iter().zip(after.iter()).zip(expected)
+                    {
+                        assert_eq!(
+                            actual, expected,
+                            "{phase} direction={direction}: route state differs for {key}"
+                        );
+                    }
+                } else {
+                    single_after = Some(after);
+                }
+            }
+
+            let group = env.market_state().1;
+            assert_eq!(group.insurance - insurance_before, 2 * fee, "{phase}");
+            assert_eq!(
+                group.assets[0].oi_eff_long_q, remaining_q as u128,
+                "{phase}"
+            );
+            assert_eq!(
+                group.assets[0].oi_eff_short_q, remaining_q as u128,
+                "{phase}"
+            );
+            assert_eq!(group.vault, 2 * DEPOSIT);
+            assert_eq!(group.vault, group.c_tot + group.insurance);
+            assert_domain_budget_remaining_total_consistent(&group, phase);
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+            for (key, expected_q) in [
+                (account_a, direction * remaining_q),
+                (account_b, -direction * remaining_q),
+            ] {
+                let portfolio = env.portfolio_state(key);
+                if expected_q == 0 {
+                    assert_eq!(
+                        percolator::active_bitmap_count_ones(active_bitmap(&portfolio)),
+                        0
+                    );
+                    assert!(!has_active_leg_for_asset(&portfolio, 0));
+                } else {
+                    assert_eq!(active_leg_for_asset(&portfolio, 0).basis_pos_q, expected_q);
+                }
+            }
+        }
+    }
 }
 
 fn assert_zero_reported_price_rejects_atomically(
