@@ -8262,6 +8262,107 @@ fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
 }
 
 #[test]
+fn v16_bpf_maintenance_fee_partition_rounding_preserves_insurance_residue() {
+    const DEPOSIT: u128 = 1_000;
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 3,
+    );
+    let payer_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    let source = env.deposit(&payer_owner, payer_portfolio, DEPOSIT);
+    env.update_maintenance_fee_policy_with_cu(5_000);
+    assert_eq!(env.portfolio_state(payer_portfolio).last_fee_slot.get(), 0);
+    assert_eq!(env.portfolio_state(cranker_portfolio).capital.get(), 0);
+
+    let keys = [env.market, payer_portfolio, cranker_portfolio, env.vault, source];
+    let before = keys.map(|key| env.svm.get_account(&key).unwrap());
+    let clock_before = env.svm.get_sysvar::<Clock>();
+
+    // Checkpoints are (slot, cumulative reward, insurance, [long budget, short budget]).
+    // The aggregate control divides exactly at both stages. Two-slot partitions isolate the
+    // domain remainder; one-slot partitions leave the fractional reward in insurance instead.
+    for (label, checkpoints) in [
+        ("aggregate control", &[(4, 6, 6, [3, 3])][..]),
+        (
+            "two-slot partitions",
+            &[(2, 3, 3, [1, 2]), (4, 6, 6, [2, 4])][..],
+        ),
+        (
+            "one-slot partitions",
+            &[
+                (1, 1, 2, [1, 1]),
+                (2, 2, 4, [2, 2]),
+                (3, 3, 6, [3, 3]),
+                (4, 4, 8, [4, 4]),
+            ][..],
+        ),
+    ] {
+        for (&key, account) in keys.iter().zip(before.iter()) {
+            env.svm.set_account(key, account.clone()).unwrap();
+        }
+        env.svm.set_sysvar(&clock_before);
+        for &(slot, reward, insurance, budgets) in checkpoints {
+            env.svm.warp_to_slot(slot);
+            env.svm.expire_blockhash();
+            let cu =
+                env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), slot);
+            assert_cu_within(label, cu, CUSTODY_CU_LIMIT);
+
+            let payer = env.portfolio_state(payer_portfolio);
+            let cranker = env.portfolio_state(cranker_portfolio);
+            let (_, group) = env.market_state();
+            let charged = 3 * slot as u128;
+            assert_eq!(payer.last_fee_slot.get(), slot, "{label}");
+            assert_eq!(payer.capital.get(), DEPOSIT - charged, "{label}");
+            assert_eq!(cranker.capital.get(), reward, "{label} slot {slot}");
+            assert_eq!(cranker.last_fee_slot.get(), 0, "{label}");
+            assert_eq!(payer.pnl.get(), 0, "{label}");
+            assert_eq!(cranker.pnl.get(), 0, "{label}");
+            assert_eq!(group.c_tot, DEPOSIT - charged + reward, "{label}");
+            assert_eq!(group.c_tot, payer.capital.get() + cranker.capital.get());
+            assert_eq!(group.insurance, insurance, "{label} slot {slot}");
+            assert_eq!(
+                group.insurance_domain_budget.as_slice(),
+                &budgets,
+                "{label} slot {slot}: an odd retained atom belongs to the short domain"
+            );
+            assert_eq!(group.insurance_domain_spent.as_slice(), &[0, 0], "{label}");
+            assert_eq!(
+                group.insurance_domain_budget_remaining_total, insurance,
+                "{label}: all retained fee atoms remain budgeted insurance"
+            );
+            assert_domain_budget_remaining_total_consistent(&group, label);
+            assert_eq!(
+                reward + insurance,
+                charged,
+                "{label}: fee partitioning conserves every charged atom"
+            );
+            assert_eq!(group.pnl_pos_tot, 0, "{label}");
+            assert_eq!(group.pnl_matured_pos_tot, 0, "{label}");
+            assert_eq!(group.materialized_portfolio_count, 2, "{label}");
+            assert_eq!(group.vault, DEPOSIT, "{label}");
+            assert_eq!(group.vault, group.c_tot + group.insurance, "{label}");
+            assert_eq!(env.token_amount(env.vault) as u128, DEPOSIT, "{label}");
+            assert_eq!(env.token_amount(source), 0, "{label}");
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), before[3], "{label}");
+            assert_eq!(env.svm.get_account(&source).unwrap(), before[4], "{label}");
+        }
+
+        // A new transaction in the final slot cannot reclaim either rounding remainder.
+        let settled = keys.map(|key| env.svm.get_account(&key).unwrap());
+        env.svm.expire_blockhash();
+        env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 4);
+        assert_eq!(
+            keys.map(|key| env.svm.get_account(&key).unwrap()),
+            settled,
+            "{label}: the final-slot retry must preserve all balances and counters"
+        );
+    }
+}
+
+#[test]
 fn v16_bpf_sync_maintenance_zero_share_routes_are_equivalent() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
         1, 10_000, 10_000, 10_000, 58,
@@ -46438,6 +46539,119 @@ fn v16_attack_deposit_wrong_mint_source_rejects() {
         cap0 + 500,
         "correct-mint deposit credits capital"
     );
+}
+
+// Deposit must validate a frozen funding source even when a zero amount would skip the token CPI.
+// Public SPL freeze/thaw instructions isolate the account state from its owner, mint and balance.
+#[test]
+fn v16_bpf_deposit_frozen_source_preserves_accounts_until_thaw() {
+    use percolator_prog::error::PercolatorError;
+
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    let source = env.token_account(owner.pubkey(), 600);
+    let source_before_freeze = env.svm.get_account(&source).unwrap();
+
+    // Give the fixture mint a freeze authority; all token-state transitions use SPL instructions.
+    let mut mint_account = env.svm.get_account(&env.mint).unwrap();
+    let mut mint = Mint::unpack(&mint_account.data).unwrap();
+    mint.freeze_authority = COption::Some(env.admin.pubkey());
+    Mint::pack(mint, &mut mint_account.data).unwrap();
+    env.svm.set_account(env.mint, mint_account).unwrap();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::freeze_account(
+            &spl_token::ID,
+            &source,
+            &env.mint,
+            &env.admin.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&env.admin],
+    )
+    .expect("freeze the funded deposit source through SPL Token");
+    assert_eq!(
+        TokenAccount::unpack(&env.svm.get_account(&source).unwrap().data)
+            .unwrap()
+            .state,
+        AccountState::Frozen
+    );
+
+    let deposit = |env: &mut V16CuEnv, amount: u128| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::Deposit { amount },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+    };
+    let before = [
+        ("market", env.market),
+        ("portfolio", portfolio),
+        ("source", source),
+        ("vault", env.vault),
+        ("mint", env.mint),
+        ("owner", owner.pubkey()),
+        ("freeze authority", env.admin.pubkey()),
+    ]
+    .map(|(label, key)| (label, key, env.svm.get_account(&key).unwrap()));
+    for amount in [400, 0] {
+        let rejected = deposit(&mut env, amount).expect_err("frozen deposit source must reject");
+        assert!(
+            rejected.contains(&format!(
+                "InstructionError(2, Custom({}))",
+                PercolatorError::InvalidTokenAccount as u32
+            )),
+            "amount {amount}: wrapper must reject the frozen source: {rejected}"
+        );
+        // The separate payer absorbs transaction fees; every account below must be unchanged.
+        for (label, key, account) in &before {
+            assert_eq!(
+                env.svm.get_account(key).as_ref(),
+                Some(account),
+                "amount {amount}: rejected deposit must preserve the entire {label} account"
+            );
+        }
+    }
+
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::thaw_account(
+            &spl_token::ID,
+            &source,
+            &env.mint,
+            &env.admin.pubkey(),
+            &[],
+        )
+        .unwrap(),
+        &[&env.admin],
+    )
+    .expect("thaw the same deposit source through SPL Token");
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        source_before_freeze,
+        "freeze and thaw change only the source state"
+    );
+    deposit(&mut env, 400).expect("same deposit succeeds after the source is thawed");
+    assert_eq!(env.token_amount(source), 200);
+    assert_eq!(env.token_amount(env.vault), 1_400);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 1_400);
+    let (_, group) = env.market_state();
+    assert_eq!(group.c_tot, 1_400);
+    assert_eq!(group.vault, env.token_amount(env.vault) as u128);
+    assert_eq!(group.insurance, 0);
 }
 
 // security.md sweep — withdraw rejects a vault with a delegate/close_authority (#44 defense-in-depth):
