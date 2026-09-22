@@ -14924,6 +14924,194 @@ fn v16_bpf_recovery_unilateral_forfeits_unlock_withdrawal_and_retirement() {
     assert_eq!(env.svm.get_account(&env.vault).unwrap().lamports, 0);
 }
 
+// Forfeiting an unsettled gain before or after the counterparty settles its loss must
+// preserve each terminal payout, recoverable provider stock, and the retained loss.
+#[test]
+fn v16_bpf_terminal_recovery_forfeit_close_order_preserves_payouts_and_residual() {
+    const CAPITAL: u128 = 1_000;
+    const BACKING: u128 = 37;
+    const INSURANCE: u128 = 23;
+    const OPEN_PRICE: u64 = 100;
+    const RECOVERY_PRICE: u64 = 95;
+    const SIZE: u128 = 20;
+    const LOSS: u128 = SIZE * (OPEN_PRICE - RECOVERY_PRICE) as u128;
+    const FUNDED: u128 = 2 * CAPITAL + BACKING + INSURANCE;
+
+    let outcomes = [[0usize, 1usize], [1, 0]].map(|order| {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+        env.configure_permissionless_resolve_with_cu(100, 5);
+        env.configure_auth_mark_with_cu(0, OPEN_PRICE);
+        let backing_source = env.top_up_backing_bucket(0, BACKING, 100);
+        let insurance_source = env.top_up_insurance(INSURANCE);
+        let owners = [Keypair::new(), Keypair::new()];
+        let portfolios = owners.each_ref().map(|owner| env.create_portfolio(owner));
+        for (owner, portfolio) in owners.iter().zip(portfolios) {
+            let source = env.deposit(owner, portfolio, CAPITAL);
+            assert_eq!(env.token_amount(source), 0);
+        }
+        env.trade_with_cu(
+            &owners[0],
+            portfolios[0],
+            &owners[1],
+            portfolios[1],
+            (SIZE * POS_SCALE) as i128,
+            OPEN_PRICE,
+            0,
+        );
+        assert_eq!(env.token_amount(backing_source), 0);
+        assert_eq!(env.token_amount(insurance_source), 0);
+        assert_eq!(env.token_amount(env.vault) as u128, FUNDED);
+        let before_observation = portfolios.map(|key| env.svm.get_account(&key).unwrap());
+        let observer_owner = env.payer.insecure_clone();
+        let observer = env.create_portfolio(&observer_owner);
+
+        // Observe on a flat account so neither exit can take the zero-delta forfeit path.
+        env.svm.warp_to_slot(1);
+        env.push_auth_mark_with_cu(1, RECOVERY_PRICE);
+        let cu = env.crank(
+            observer,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+        );
+        assert_cu_within("forfeit order observe loss", cu, CRANK_CU_LIMIT);
+        env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 0, 1, 0);
+        for (portfolio, before) in portfolios.iter().zip(before_observation) {
+            assert_eq!(env.svm.get_account(portfolio).unwrap(), before);
+        }
+        let (_, recovery) = env.market_state();
+        assert_eq!(recovery.assets[0].lifecycle, AssetLifecycleV16::Recovery);
+        assert_eq!(recovery.assets[0].effective_price, RECOVERY_PRICE);
+        assert_eq!(recovery.assets[0].oi_eff_long_q, SIZE * POS_SCALE);
+        assert_eq!(recovery.assets[0].oi_eff_short_q, SIZE * POS_SCALE);
+        assert_eq!(recovery.c_tot, 2 * CAPITAL);
+        for (index, k_target) in [recovery.assets[0].k_long, recovery.assets[0].k_short]
+            .into_iter()
+            .enumerate()
+        {
+            let account = env.portfolio_state(portfolios[index]);
+            assert_eq!(account.capital.get(), CAPITAL);
+            assert_eq!(account.pnl.get(), 0);
+            assert_ne!(
+                active_leg_for_asset(&account, 0).k_snap,
+                k_target,
+                "both forfeits must settle a nonzero price delta"
+            );
+        }
+        env.close_portfolio_with_cu(&observer_owner, observer);
+        env.resolve();
+        env.svm.warp_to_slot(6);
+
+        let expected_payouts = [CAPITAL - LOSS, CAPITAL];
+        let mut payouts = [0u128; 2];
+        for (completed, index) in order.into_iter().enumerate() {
+            let other = portfolios[1 - index];
+            let other_before = env.svm.get_account(&other).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            let cu = env.forfeit_recovery_leg_with_cu(&owners[index], portfolios[index], 0, 1);
+            assert_cu_within("terminal order forfeit", cu, CUSTODY_CU_LIMIT);
+            let forfeited = env.portfolio_state(portfolios[index]);
+            assert!(percolator::active_bitmap_is_empty(active_bitmap(
+                &forfeited
+            )));
+            assert_eq!(forfeited.capital.get(), expected_payouts[index]);
+            assert_eq!(forfeited.pnl.get(), 0);
+            assert_eq!(close_progress(&forfeited).residual_remaining, 0);
+            assert!(!resolved_receipt(&forfeited).present);
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+            let (dest, cu) = env.close_resolved_with_cu(&owners[index], portfolios[index]);
+            assert_cu_within("terminal order payout", cu, CUSTODY_CU_LIMIT);
+            payouts[index] = env.token_amount(dest) as u128;
+            assert_eq!(payouts[index], expected_payouts[index], "order {order:?}");
+            let paid = env.portfolio_state(portfolios[index]);
+            assert_eq!(paid.capital.get(), 0);
+            assert_eq!(paid.pnl.get(), 0);
+            assert!(!resolved_receipt(&paid).present);
+            let cu = env.close_portfolio_with_cu(&owners[index], portfolios[index]);
+            assert_cu_within("terminal order dematerialize", cu, CUSTODY_CU_LIMIT);
+            assert_eq!(env.svm.get_account(&portfolios[index]).unwrap().lamports, 0);
+            assert_eq!(
+                env.svm.get_account(&other).unwrap(),
+                other_before,
+                "order {order:?}: one owner's forfeit and payout cannot settle the other"
+            );
+            let (_, group) = env.market_state();
+            assert_eq!(group.materialized_portfolio_count, 1 - completed as u64);
+            assert_eq!(group.vault, FUNDED - payouts.iter().sum::<u128>());
+            assert_eq!(env.token_amount(env.vault) as u128, group.vault);
+        }
+
+        let (_, wound_down) = env.market_state();
+        assert_eq!(wound_down.mode, MarketModeV16::Resolved);
+        assert_eq!(wound_down.c_tot, 0);
+        assert_eq!(wound_down.pnl_pos_tot, 0);
+        assert_eq!(wound_down.pnl_pos_bound_tot_num, 0);
+        assert_eq!(wound_down.negative_pnl_account_count, 0);
+        assert_eq!(wound_down.assets[0].oi_eff_long_q, 0);
+        assert_eq!(wound_down.assets[0].oi_eff_short_q, 0);
+        assert_eq!(wound_down.assets[0].stored_pos_count_long, 0);
+        assert_eq!(wound_down.assets[0].stored_pos_count_short, 0);
+        assert_eq!(wound_down.insurance, INSURANCE);
+        assert_eq!(
+            wound_down.source_backing_buckets[0].fresh_unliened_backing_num,
+            BACKING * BOUND_SCALE
+        );
+        assert_eq!(
+            wound_down.source_backing_buckets[0].valid_liened_backing_num,
+            0
+        );
+        assert_eq!(
+            wound_down.source_backing_buckets[0].consumed_liened_backing_num,
+            0
+        );
+        assert_eq!(wound_down.vault, BACKING + INSURANCE + LOSS);
+
+        let admin = env.admin.insecure_clone();
+        let backing_dest = env.token_account(admin.pubkey(), 0);
+        let cu = env.withdraw_backing_bucket_to_admin_token_with_cu(backing_dest, 0, BACKING);
+        assert_cu_within("forfeit order backing recovery", cu, CUSTODY_CU_LIMIT);
+        let (insurance_dest, cu) =
+            env.withdraw_terminal_insurance_with_authority(&admin, INSURANCE);
+        assert_cu_within("forfeit order insurance recovery", cu, CUSTODY_CU_LIMIT);
+        let backing_paid = env.token_amount(backing_dest) as u128;
+        let insurance_paid = env.token_amount(insurance_dest) as u128;
+        assert_eq!(backing_paid, BACKING);
+        assert_eq!(insurance_paid, INSURANCE);
+        let (_, terminal) = env.market_state();
+        let residual = env.token_amount(env.vault) as u128;
+        assert_eq!(
+            terminal.vault, LOSS,
+            "order {order:?}: loss remains as residual stock"
+        );
+        assert_eq!(residual, terminal.vault);
+        assert_eq!(terminal.insurance, 0);
+        assert_eq!(
+            terminal.source_backing_buckets[0].fresh_unliened_backing_num,
+            0
+        );
+        assert_domain_budget_remaining_total_consistent(&terminal, "forfeit order terminal stock");
+        assert_eq!(
+            payouts.iter().sum::<u128>() + backing_paid + insurance_paid + residual,
+            FUNDED,
+            "order {order:?}: actual SPL payouts plus residual conserve all funded tokens"
+        );
+        (
+            payouts,
+            backing_paid,
+            insurance_paid,
+            residual,
+            terminal.vault,
+        )
+    });
+    assert_eq!(
+        outcomes[0], outcomes[1],
+        "reversing recovery forfeits and immediate terminal closes preserves every payout and residual"
+    );
+}
+
 // A full portfolio can settle each recovery leg's loss and exit without refreshing
 // the other legs or requiring the counterparty account in any exit transaction.
 #[test]
