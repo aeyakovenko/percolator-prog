@@ -16167,6 +16167,136 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
     );
 }
 
+#[test]
+fn v16_bpf_multi_asset_b_cleanup_handoff_is_bounded_and_allows_stale_exit() {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        public_b_chunk_atoms: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    let owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    env.deposit(&owner, portfolio, 1_000_000);
+    env.deposit(&counterparty_owner, counterparty, 1_000_000);
+
+    // Reverse asset order so the selected leg slot is not the asset index.
+    for (asset_index, size_q) in [(1, -(POS_SCALE as i128)), (0, POS_SCALE as i128)] {
+        env.trade_asset_with_cu(
+            asset_index,
+            &owner,
+            portfolio,
+            &counterparty_owner,
+            counterparty,
+            size_q,
+            100,
+            0,
+        );
+    }
+    let before = env.portfolio_state(portfolio);
+    assert_eq!(leg(&before, 0).asset_index, 1);
+    assert_eq!(leg(&before, 1).asset_index, 0);
+    for asset_index in 0..2 {
+        let active = active_leg_for_asset(&before, asset_index);
+        assert_eq!(active.b_snap, 0);
+        assert!(active.loss_weight > 0);
+    }
+    env.mark_b_stale_gap(portfolio, 1, 2);
+    env.mark_b_stale_gap(portfolio, 0, 3);
+    let group_before = env.market_state().1;
+    assert_eq!(group_before.b_stale_account_count, 1);
+    let counterparty_before = env.svm.get_account(&counterparty).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    let cranker = Keypair::new();
+    env.ensure_signer_account(cranker.pubkey());
+    env.svm.warp_to_slot(40);
+    let cfg = env.market_state().0;
+    assert!(oracle_v16::permissionless_stale_matured(&cfg, 40));
+
+    // Each instruction must finish one chunk, then hand off to the other leg.
+    for (step, expected_snaps) in [[0, 1], [0, 2], [1, 2], [2, 2], [3, 2]]
+        .into_iter()
+        .enumerate()
+    {
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 40,
+                    close_q: 0,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new_readonly(cranker.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[],
+            )
+            .unwrap_or_else(|err| panic!("oracle-free B cleanup step {step}: {err}"));
+        assert_cu_within("multi-asset B cleanup chunk", cu, CRANK_CU_LIMIT);
+
+        let account = env.portfolio_state(portfolio);
+        for (asset_index, target_b) in [3, 2].into_iter().enumerate() {
+            let active = active_leg_for_asset(&account, asset_index);
+            assert_eq!(active.b_snap, expected_snaps[asset_index], "step {step}");
+            assert_eq!(active.b_stale, active.b_snap < target_b, "step {step}");
+            assert_eq!(
+                active.basis_pos_q,
+                active_leg_for_asset(&before, asset_index).basis_pos_q,
+                "B cleanup must preserve exposure"
+            );
+        }
+        let pending = expected_snaps != [3, 2];
+        assert_eq!(account.b_stale_state != 0, pending, "step {step}");
+        let group = env.market_state().1;
+        assert_eq!(group.b_stale_account_count, u64::from(pending), "step {step}");
+        assert_eq!(group.mode, MarketModeV16::Live);
+        assert_eq!(group.assets[0].b_long_num, 3);
+        assert_eq!(group.assets[1].b_short_num, 2);
+        assert_eq!(group.vault, group_before.vault);
+        assert_eq!(group.c_tot, group_before.c_tot);
+        assert_eq!(group.insurance, group_before.insurance);
+        assert_eq!(account.capital.get(), before.capital.get());
+        assert_eq!(account.pnl.get(), before.pnl.get());
+        assert_eq!(
+            env.svm.get_account(&counterparty).unwrap(),
+            counterparty_before
+        );
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    }
+
+    let resolve_cu = env.resolve_stale_permissionless_with_cu(40);
+    assert_cu_within(
+        "resolve after multi-asset B cleanup",
+        resolve_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    // The close helper is unsigned; let the owner-only exit window expire.
+    env.svm.warp_to_slot(46);
+    for (exit_owner, exit_portfolio) in [(&owner, portfolio), (&counterparty_owner, counterparty)] {
+        let (dest, cu) = env.close_resolved_with_cu(exit_owner, exit_portfolio);
+        assert_cu_within(
+            "resolved exit after multi-asset B cleanup",
+            cu,
+            CUSTODY_CU_LIMIT,
+        );
+        assert_eq!(env.token_amount(dest), 1_000_000);
+        let account = env.portfolio_state(exit_portfolio);
+        assert_eq!(account.capital.get(), 0);
+        assert_eq!(active_bitmap(&account), percolator::active_bitmap_empty());
+    }
+    let final_group = env.market_state().1;
+    assert_eq!(final_group.b_stale_account_count, 0);
+    assert_eq!(final_group.c_tot, 0);
+    assert_eq!(final_group.vault, 0);
+    assert_eq!(env.token_amount(env.vault), 0);
+}
+
 // Auto-crank liveness: an expired close-progress ledger selects DeclareRecovery, which the
 // engine proves needs no oracle observation. The wrapper must not pre-block that path on a
 // stale price-managed oracle; otherwise the public crank loses the engine's no-DoS guarantee.
@@ -37000,6 +37130,138 @@ fn v16_attack_close_slab_requires_secondary_vault_recovery() {
             .all(|b| *b == 0),
         "market reclaimed only after both vaults close"
     );
+}
+
+// A late secondary SPL failure must roll back the successful primary dust transfer and vault close,
+// including the rent credited to the admin. The overflowing balance is a synthetic CPI failure fixture.
+#[test]
+fn v16_bpf_close_slab_secondary_transfer_failure_rolls_back_primary_close() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.resolve();
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), u64::MAX);
+    let before = [
+        ("market", env.market),
+        ("primary vault", env.vault),
+        ("secondary vault", secondary_vault),
+        ("primary destination", primary_dest),
+        ("secondary destination", secondary_dest),
+        ("admin rent recipient", admin.pubkey()),
+    ]
+    .map(|(label, key)| (label, key, env.svm.get_account(&key).unwrap()));
+    let admin_lamports_before = env.svm.get_account(&admin.pubkey()).unwrap().lamports;
+    let reclaim_lamports: u64 = [env.market, env.vault, secondary_vault]
+        .iter()
+        .map(|key| env.svm.get_account(key).unwrap().lamports)
+        .sum();
+
+    let close_slab = |env: &mut V16CuEnv| {
+        env.svm.expire_blockhash();
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(primary_dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new(secondary_dest, false),
+            ],
+            data: ProgInstruction::CloseSlab.encode(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &admin],
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx)
+    };
+    let failed = close_slab(&mut env).expect_err("secondary destination amount must overflow");
+    assert_eq!(
+        failed.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(spl_token::error::TokenError::Overflow as u32),
+        ),
+        "CloseSlab must reach the secondary SPL overflow: {failed:?}"
+    );
+    let token_success = format!("Program {} success", spl_token::ID);
+    let token_failure = format!(
+        "Program {} failed: custom program error: {:#x}",
+        spl_token::ID,
+        spl_token::error::TokenError::Overflow as u32,
+    );
+    let token_trace: Vec<&str> = failed
+        .meta
+        .logs
+        .iter()
+        .map(String::as_str)
+        .filter(|line| {
+            line.starts_with("Program log: Instruction:")
+                || *line == token_success
+                || *line == token_failure
+        })
+        .collect();
+    assert_eq!(
+        token_trace,
+        vec![
+            "Program log: Instruction: Transfer",
+            token_success.as_str(),
+            "Program log: Instruction: CloseAccount",
+            token_success.as_str(),
+            "Program log: Instruction: Transfer",
+            token_failure.as_str(),
+        ],
+        "primary transfer and close must succeed before secondary transfer fails: {failed:?}"
+    );
+    // The distinct transaction payer pays fees; every writable instruction account must roll back.
+    for (label, key, account) in &before {
+        assert_eq!(
+            env.svm.get_account(key).as_ref(),
+            Some(account),
+            "failed CloseSlab must restore the entire {label} account"
+        );
+    }
+
+    env.set_token_account_amount(secondary_dest, secondary_mint, admin.pubkey(), 0);
+    close_slab(&mut env).expect("CloseSlab succeeds after correcting only the secondary balance");
+    assert_eq!(env.token_amount(primary_dest), 7);
+    assert_eq!(env.token_amount(secondary_dest), 50);
+    assert_eq!(
+        env.svm.get_account(&admin.pubkey()).unwrap().lamports,
+        admin_lamports_before + reclaim_lamports,
+        "successful retry reclaims both vaults and market rent exactly once"
+    );
+    for vault in [env.vault, secondary_vault] {
+        if let Some(account) = env.svm.get_account(&vault) {
+            assert_eq!(account.lamports, 0, "successful retry closes both vaults");
+        }
+    }
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|b| *b == 0));
 }
 
 // full-interface sweep (cron32): CloseSlab's optional secondary vault must be bound to the current
