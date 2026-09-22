@@ -37205,6 +37205,217 @@ fn v16_attack_live_insurance_asset_withdraw_uniform_for_asset0_and_permissionles
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
 
+// A live withdrawal and both resolved routes must debit one remaining budget and ledger.
+// Resolution changes the signing key and requires full wind-down; switching routes cannot
+// restore withdrawn principal or draw on another authority's insurance.
+#[test]
+fn v16_bpf_insurance_withdraw_route_switch_preserves_budget_and_authority() {
+    use percolator_prog::error::PercolatorError;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let authority = Keypair::new();
+    let operator = Keypair::new();
+    env.ensure_signer_account(operator.pubkey());
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        authority.pubkey(),
+        operator.pubkey(),
+        admin.pubkey(),
+        admin.pubkey(),
+    );
+    let ledger = env.insurance_ledger_account();
+    let (source, _) =
+        env.top_up_insurance_domain_with_authority_ledger_and_cu(&authority, ledger, 2, 100);
+    let other_source = env.top_up_insurance_domain_with_authority(&admin, 0, 77);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(other_source), 0);
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let operator_dest = env.token_account(operator.pubkey(), 0);
+    let authority_dest = env.token_account(authority.pubkey(), 0);
+
+    let withdraw = |env: &mut V16CuEnv,
+                    ix: ProgInstruction,
+                    signer: &Keypair,
+                    dest: Pubkey,
+                    with_ledger: bool| {
+        let mut accounts = vec![
+            AccountMeta::new(signer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        if with_ledger {
+            accounts.push(AccountMeta::new(ledger, false));
+        }
+        env.svm.expire_blockhash();
+        env.send(ix, accounts, &[signer])
+    };
+    let asset_withdraw = |amount| ProgInstruction::WithdrawInsuranceAsset {
+        asset_index: 1,
+        amount,
+    };
+    let terminal_withdraw = |amount| ProgInstruction::WithdrawInsurance { amount };
+    let watched = [
+        env.market,
+        env.vault,
+        ledger,
+        operator_dest,
+        authority_dest,
+        operator.pubkey(),
+        authority.pubkey(),
+        portfolio,
+    ];
+    let snapshot = |env: &V16CuEnv| -> Vec<_> {
+        watched
+            .iter()
+            .map(|key| env.svm.get_account(key))
+            .collect()
+    };
+    let reject = |env: &mut V16CuEnv,
+                  ix: ProgInstruction,
+                  signer: &Keypair,
+                  dest: Pubkey,
+                  with_ledger: bool,
+                  expected: PercolatorError,
+                  label: &str| {
+        let before = snapshot(env);
+        let error = withdraw(env, ix, signer, dest, with_ledger).expect_err(label);
+        assert!(
+            error.contains(&format!("Custom({})", expected as u32)),
+            "{label}: unexpected error: {error}"
+        );
+        assert_eq!(snapshot(env), before, "{label}: full account rollback");
+    };
+    let assert_state = |env: &V16CuEnv,
+                        mode: MarketModeV16,
+                        portfolios: u64,
+                        operator_paid: u128,
+                        authority_paid: u128| {
+        let withdrawn = operator_paid + authority_paid;
+        let remaining = 100 - withdrawn;
+        let (_, group) = env.market_state();
+        assert_eq!(group.mode, mode);
+        assert_eq!(group.materialized_portfolio_count, portfolios);
+        assert_eq!(group.c_tot, 0);
+        assert_eq!(&group.insurance_domain_budget[..], &[77, 0, remaining, 0]);
+        assert_eq!(&group.insurance_domain_spent[..], &[0, 0, 0, 0]);
+        assert_eq!(group.insurance_domain_budget_remaining_total, 77 + remaining);
+        assert_domain_budget_remaining_total_consistent(&group, "insurance route switching");
+        assert_eq!(group.insurance, 77 + remaining);
+        assert_eq!(group.vault, 77 + remaining);
+        assert_eq!(env.token_amount(env.vault) as u128, 77 + remaining);
+        assert_eq!(env.token_amount(operator_dest) as u128, operator_paid);
+        assert_eq!(env.token_amount(authority_dest) as u128, authority_paid);
+        assert_eq!(group.vault + withdrawn, 177);
+        assert_eq!(
+            state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap(),
+            state::InsuranceLedgerAccountV16 {
+                market_group: env.market.to_bytes(),
+                authority: authority.pubkey().to_bytes(),
+                total_principal_atoms: remaining,
+                total_deposited_atoms: 100,
+                total_withdrawn_atoms: withdrawn,
+                cumulative_profit_atoms: 0,
+                cumulative_loss_atoms: 0,
+                last_observed_insurance_atoms: remaining,
+            }
+        );
+    };
+
+    assert_state(&env, MarketModeV16::Live, 1, 0, 0);
+    withdraw(&mut env, asset_withdraw(60), &operator, operator_dest, true)
+        .expect("live operator withdraws 60 of the authority's 100 atoms");
+    assert_state(&env, MarketModeV16::Live, 1, 60, 0);
+    env.resolve();
+    assert_state(&env, MarketModeV16::Resolved, 1, 60, 0);
+
+    // Zero capital alone is insufficient: the empty portfolio still blocks both routes.
+    for ix in [asset_withdraw(20), terminal_withdraw(20)] {
+        reject(
+            &mut env,
+            ix,
+            &authority,
+            authority_dest,
+            true,
+            PercolatorError::EngineLockActive,
+            "resolved insurance remains locked while a portfolio is materialized",
+        );
+    }
+    env.close_portfolio_with_cu(&owner, portfolio);
+    assert_state(&env, MarketModeV16::Resolved, 0, 60, 0);
+
+    // Omit the ledger so its cold-key binding cannot mask a stale operator authorization.
+    for (ix, expected) in [
+        (asset_withdraw(20), PercolatorError::Unauthorized),
+        (terminal_withdraw(20), PercolatorError::EngineCounterUnderflow),
+    ] {
+        reject(
+            &mut env,
+            ix,
+            &operator,
+            operator_dest,
+            false,
+            expected,
+            "the former live operator has no resolved insurance authority",
+        );
+    }
+
+    // Each overdraw fits in the real vault, but exceeds this authority's remaining budget.
+    // The terminal scan can debit the matching domain before discovering the shortfall.
+    for (asset_route, remaining, amount, authority_paid) in [
+        (true, 40, 20, 20),
+        (false, 20, 10, 30),
+        (true, 10, 10, 40),
+    ] {
+        let (too_much, valid, expected) = if asset_route {
+            (
+                asset_withdraw(remaining + 1),
+                asset_withdraw(amount),
+                PercolatorError::EngineLockActive,
+            )
+        } else {
+            (
+                terminal_withdraw(remaining + 1),
+                terminal_withdraw(amount),
+                PercolatorError::EngineCounterUnderflow,
+            )
+        };
+        reject(
+            &mut env,
+            too_much,
+            &authority,
+            authority_dest,
+            true,
+            expected,
+            "switching routes cannot restore already withdrawn insurance",
+        );
+        withdraw(&mut env, valid, &authority, authority_dest, true)
+            .expect("cold authority can withdraw within the shared remaining budget");
+        assert_state(&env, MarketModeV16::Resolved, 0, 60, authority_paid);
+    }
+    for (ix, expected) in [
+        (asset_withdraw(1), PercolatorError::EngineLockActive),
+        (terminal_withdraw(1), PercolatorError::EngineCounterUnderflow),
+    ] {
+        reject(
+            &mut env,
+            ix,
+            &authority,
+            authority_dest,
+            true,
+            expected,
+            "neither exhausted route can consume the other authority's 77 atoms",
+        );
+    }
+    assert_state(&env, MarketModeV16::Resolved, 0, 60, 40);
+}
+
 // security.md sweep — removed live-insurance policy tags (#6/#23): live insurance withdrawal is now
 // uniformly asset-scoped through tag 57. The old asset-0-only rate-limit tag and its policy-update tag
 // must reject raw instruction bytes without mutating state.
@@ -53342,6 +53553,96 @@ fn v16_attack_batch_tradecpi_configured_leg_cap_rejects_before_hostile_matcher_c
         ctx_before,
         "over-cap preflight never gives the hostile matcher a writable context"
     );
+}
+
+// A complete first leg cannot execute when the declared second leg is missing or partial.
+#[test]
+fn v16_bpf_batch_decode_truncated_second_leg_rejects_without_mutation() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+
+    let size_q = (5 * POS_SCALE) as i128;
+    let data = ProgInstruction::BatchTradeNoCpi {
+        legs: vec![
+            BatchTradeLeg {
+                asset_index: 0,
+                size_q,
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            BatchTradeLeg {
+                asset_index: 1,
+                size_q: -size_q,
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        ],
+    }
+    .encode();
+    let accounts = vec![
+        AccountMeta::new(taker.pubkey(), true),
+        AccountMeta::new(lp.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(ta, false),
+        AccountMeta::new(la, false),
+    ];
+    let before: Vec<_> = [taker.pubkey(), lp.pubkey(), env.market, ta, la, env.vault]
+        .into_iter()
+        .map(|key| (key, env.svm.get_account(&key).unwrap()))
+        .collect();
+
+    const LEG_WIRE_LEN: usize = 2 + 16 + 8 + 8;
+    assert_eq!(data.len(), 2 + 2 * LEG_WIRE_LEN);
+    assert_eq!(data[1], 2, "the wire count must still declare both legs");
+    for len in (2 + LEG_WIRE_LEN)..data.len() {
+        let err = send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            Instruction {
+                program_id: env.program_id,
+                accounts: accounts.clone(),
+                data: data[..len].to_vec(),
+            },
+            &[&taker, &lp],
+        )
+        .expect_err("a partial second leg must reject before executing the first");
+        assert!(
+            err.contains("InstructionError(2, InvalidInstructionData)"),
+            "length {len} must reject in public instruction decode: {err}"
+        );
+        for (key, account) in &before {
+            assert_eq!(
+                &env.svm.get_account(key).unwrap(),
+                account,
+                "length {len} must leave account {key} exactly unchanged"
+            );
+        }
+    }
+
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        Instruction {
+            program_id: env.program_id,
+            accounts,
+            data,
+        },
+        &[&taker, &lp],
+    )
+    .expect("the complete batch must execute with the same accounts and signatures");
+    let t = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+    let l = state::read_portfolio(&env.svm.get_account(&la).unwrap().data).unwrap();
+    assert_eq!(active_leg_for_asset(&t, 0).basis_pos_q, size_q);
+    assert_eq!(active_leg_for_asset(&t, 1).basis_pos_q, -size_q);
+    assert_eq!(active_leg_for_asset(&l, 0).basis_pos_q, -size_q);
+    assert_eq!(active_leg_for_asset(&l, 1).basis_pos_q, size_q);
 }
 
 // DoS sweep: batch instruction decoding used to allocate the caller-declared leg vector before any
