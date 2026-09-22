@@ -17694,6 +17694,197 @@ fn v16_attack_convert_released_pnl_respects_caller_cap() {
     );
 }
 
+// Converting each closed trade's profit or retaining it through the next trade must produce
+// the same economic state and token payouts once the combined released PnL is converted.
+#[test]
+fn v16_bpf_released_pnl_incremental_and_aggregate_conversion_equivalence() {
+    const DEPOSIT: u128 = 1_000_000;
+    const TOTAL_PNL: u128 = 56;
+    let size_q = (3 * POS_SCALE + POS_SCALE / 2) as i128;
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loser = env.create_portfolio(&loser_owner);
+    env.deposit(&winner_owner, winner, DEPOSIT);
+    env.deposit(&loser_owner, loser, DEPOSIT);
+
+    let keys = [env.market, winner, loser, env.vault];
+    let before = keys.map(|key| env.svm.get_account(&key).unwrap());
+    let clock_before = env.svm.get_sysvar::<Clock>();
+    let mut expected_economics = None;
+    let mut expected_payouts = None;
+    for incremental in [true, false] {
+        let label = if incremental {
+            "incremental"
+        } else {
+            "aggregate"
+        };
+        for (&key, account) in keys.iter().zip(before.iter()) {
+            env.svm.set_account(key, account.clone()).unwrap();
+        }
+        env.svm.set_sysvar(&clock_before);
+        env.svm.expire_blockhash();
+        let mut converted = 0;
+        for (slot, open_price, close_price, cumulative_pnl) in
+            [(1, 100, 106, 21u128), (2, 106, 116, TOTAL_PNL)]
+        {
+            env.trade_asset_with_cu(
+                0, &winner_owner, winner, &loser_owner, loser, size_q, open_price, 0,
+            );
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_with_cu(slot, close_price);
+            for portfolio in [loser, winner] {
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        close_q: 0,
+                        observations: crank_observations(0),
+                    },
+                );
+            }
+            env.trade_asset_with_cu(
+                0,
+                &winner_owner,
+                winner,
+                &loser_owner,
+                loser,
+                -size_q,
+                close_price,
+                0,
+            );
+
+            let pending = cumulative_pnl - converted;
+            let account = env.portfolio_state(winner);
+            assert!(percolator::active_bitmap_is_empty(active_bitmap(&account)));
+            assert_eq!(account.capital.get(), DEPOSIT + converted, "{label}");
+            assert_eq!(account.pnl.get(), pending as i128, "{label} slot {slot}");
+            assert_eq!(
+                env.market_state().1.source_credit[1].positive_claim_bound_num,
+                pending * BOUND_SCALE,
+                "{label}: the unconverted profit retains a source claim"
+            );
+            assert_eq!(
+                env.portfolio_state(loser).capital.get(),
+                DEPOSIT - cumulative_pnl,
+                "{label}: the counterparty funds both gains"
+            );
+            if incremental || slot == 2 {
+                env.svm.expire_blockhash();
+                env.convert_released_pnl_with_cu(&winner_owner, winner, pending);
+                converted += pending;
+                assert_eq!(env.portfolio_state(winner).pnl.get(), 0, "{label}");
+                assert_eq!(
+                    env.portfolio_state(winner).capital.get(),
+                    DEPOSIT + cumulative_pnl,
+                    "{label}: each conversion pays exactly the released profit"
+                );
+            }
+        }
+        assert_eq!(converted, TOTAL_PNL, "{label}");
+
+        let group = env.market_state().1;
+        let portfolios = [winner, loser].map(|key| {
+            let account = env.portfolio_state(key);
+            assert!(percolator::active_bitmap_is_empty(active_bitmap(&account)));
+            assert!(account
+                .source_domains
+                .iter()
+                .all(|domain| !domain.is_occupied()));
+            (
+                account.capital.get(),
+                account.pnl.get(),
+                account.reserved_pnl.get(),
+            )
+        });
+        // Later losses refill consumed backing history only after an earlier conversion.
+        // Normalize that history, health certificates, and epochs; compare current claims/support.
+        let source_amounts = group
+            .source_credit
+            .iter()
+            .zip(group.source_backing_buckets.iter())
+            .map(|(source, bucket)| {
+                assert_eq!(
+                    source.provider_receivable_num, bucket.consumed_liened_backing_num,
+                    "{label}: consumed backing history stays consistent"
+                );
+                assert!(source.provider_receivable_num <= source.spent_backing_num);
+                [
+                    source.positive_claim_bound_num,
+                    source.exact_positive_claim_num,
+                    source.fresh_reserved_backing_num,
+                    source.spent_backing_num,
+                    source.valid_liened_backing_num,
+                    source.impaired_liened_backing_num,
+                    source.insurance_credit_reserved_num,
+                    source.valid_liened_insurance_num,
+                    source.impaired_liened_insurance_num,
+                    source.credit_rate_num,
+                    bucket.fresh_unliened_backing_num,
+                    bucket.valid_liened_backing_num,
+                    bucket.impaired_liened_backing_num,
+                    bucket.utilization_fee_earnings,
+                ]
+            })
+            .collect::<Vec<_>>();
+        let economics = (
+            portfolios,
+            [
+                group.vault,
+                group.c_tot,
+                group.insurance,
+                group.pnl_pos_tot,
+                group.pnl_matured_pos_tot,
+            ],
+            group.insurance_domain_budget.clone(),
+            group.insurance_domain_spent.clone(),
+            source_amounts,
+        );
+        assert_eq!(group.assets[0].oi_eff_long_q, 0, "{label}");
+        assert_eq!(group.assets[0].oi_eff_short_q, 0, "{label}");
+        assert_eq!(group.vault, 2 * DEPOSIT, "{label}");
+        assert_eq!(group.vault, group.c_tot + group.insurance, "{label}");
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            before[3],
+            "{label}"
+        );
+        assert_domain_budget_remaining_total_consistent(&group, label);
+        if let Some(expected) = &expected_economics {
+            assert_eq!(
+                &economics, expected,
+                "conversion schedule changes economic state"
+            );
+        } else {
+            expected_economics = Some(economics);
+        }
+
+        let winner_dest = env.withdraw(&winner_owner, winner, DEPOSIT + TOTAL_PNL);
+        let loser_dest = env.withdraw(&loser_owner, loser, DEPOSIT - TOTAL_PNL);
+        let payouts = [env.token_amount(winner_dest), env.token_amount(loser_dest)];
+        assert_eq!(
+            payouts,
+            [(DEPOSIT + TOTAL_PNL) as u64, (DEPOSIT - TOTAL_PNL) as u64]
+        );
+        if let Some(expected) = expected_payouts {
+            assert_eq!(payouts, expected, "conversion schedule changes SPL payouts");
+        } else {
+            expected_payouts = Some(payouts);
+        }
+        let final_group = env.market_state().1;
+        assert_eq!(env.token_amount(env.vault), 0, "{label}: no stranded tokens");
+        assert_eq!(final_group.vault, 0, "{label}");
+        assert_eq!(final_group.c_tot, 0, "{label}");
+        assert_eq!(final_group.pnl_pos_tot, 0, "{label}");
+        for portfolio in [winner, loser] {
+            assert_eq!(env.portfolio_state(portfolio).capital.get(), 0, "{label}");
+            assert_eq!(env.portfolio_state(portfolio).pnl.get(), 0, "{label}");
+        }
+    }
+}
+
 // security.md sweep - ConvertReleasedPnl market isolation (#2/#33/#44): owner authorization alone is not
 // enough. A market-A portfolio with released source-backed PnL must not be convertible through market B's
 // accounting slab, where it could consume B backing or corrupt B's senior capital counters.
