@@ -46908,6 +46908,182 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
     assert_eq!(prof(&env, 0).asset_admin, [0u8; 32], "asset-0 admin burned");
 }
 
+// With the asset admin burned, insurance self-rotation A -> B -> A must transfer policy control
+// each time without granting rotation rights over another asset or authority kind.
+#[test]
+fn v16_bpf_insurance_authority_roundtrip_after_admin_burn_is_scoped() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let authority_a = Keypair::new();
+    let authority_b = Keypair::new();
+    let candidate = Keypair::new();
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        authority_a.pubkey(),
+        admin.pubkey(),
+        admin.pubkey(),
+        admin.pubkey(),
+    );
+    for signer in [&authority_a, &authority_b, &candidate] {
+        env.ensure_signer_account(signer.pubkey());
+    }
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        None,
+        1,
+        processor::ASSET_AUTH_ADMIN,
+        [0; 32],
+    )
+    .expect("burn asset-1 admin before insurance self-rotation");
+
+    let profile = |env: &V16CuEnv, asset_index: usize| {
+        state::read_asset_oracle_profile(
+            &env.svm.get_account(&env.market).unwrap().data,
+            asset_index,
+        )
+        .unwrap()
+    };
+    assert_eq!(profile(&env, 1).asset_admin, [0; 32]);
+    let asset0_before = profile(&env, 0);
+    let update_policy = |env: &mut V16CuEnv, signer: &Keypair, fee_bps: u16| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::UpdateBackingFeePolicy {
+                domain: 2,
+                fee_bps,
+                insurance_share_bps: 5_000,
+            },
+            vec![
+                AccountMeta::new(signer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[signer],
+        )
+    };
+    update_policy(&mut env, &authority_a, 50)
+        .expect("initial insurance holder can set policy after admin burn");
+    assert_eq!(profile(&env, 1).backing_trade_fee_bps_long, 50);
+
+    // Snapshot every writable instruction account and the vault; the separate payer pays fees.
+    let watched = [
+        env.market,
+        env.vault,
+        admin.pubkey(),
+        authority_a.pubkey(),
+        authority_b.pubkey(),
+        candidate.pubkey(),
+    ];
+    let snapshot = |env: &V16CuEnv| -> Vec<(Pubkey, Account)> {
+        watched
+            .iter()
+            .map(|key| (*key, env.svm.get_account(key).unwrap()))
+            .collect()
+    };
+    let assert_rejected_unchanged = |env: &V16CuEnv,
+                                     result: Result<u64, String>,
+                                     before: &[(Pubkey, Account)],
+                                     label: &str| {
+        let error = result.expect_err(label);
+        assert!(
+            error.contains("Custom(8)"),
+            "{label}: expected Unauthorized, got {error}"
+        );
+        for (key, account) in before {
+            assert_eq!(
+                env.svm.get_account(key).unwrap(),
+                *account,
+                "{label}: rejected attempt mutated {key}"
+            );
+        }
+    };
+
+    for (stale, current, fee_bps) in [
+        (&authority_a, &authority_b, 75),
+        (&authority_b, &authority_a, 100),
+    ] {
+        let mut expected_profile = profile(&env, 1);
+        assert_eq!(expected_profile.insurance_authority, stale.pubkey().to_bytes());
+        env.svm.expire_blockhash();
+        env.try_update_per_asset_authority_with_cu(
+            stale,
+            Some(current),
+            1,
+            processor::ASSET_AUTH_INSURANCE,
+            current.pubkey().to_bytes(),
+        )
+        .expect("current insurance holder can co-sign a self-rotation after admin burn");
+        expected_profile.insurance_authority = current.pubkey().to_bytes();
+        assert_eq!(
+            bytemuck::bytes_of(&profile(&env, 1)),
+            bytemuck::bytes_of(&expected_profile),
+            "self-rotation changes only the asset's insurance authority"
+        );
+
+        let before = snapshot(&env);
+        for (signer, asset_index, kind, label) in [
+            (
+                stale,
+                1,
+                processor::ASSET_AUTH_INSURANCE,
+                "stale insurance holder cannot rekey",
+            ),
+            (
+                &admin,
+                1,
+                processor::ASSET_AUTH_INSURANCE,
+                "burned admin cannot override the insurance holder",
+            ),
+            (
+                current,
+                0,
+                processor::ASSET_AUTH_INSURANCE,
+                "current insurance holder cannot rekey another asset",
+            ),
+            (
+                current,
+                1,
+                processor::ASSET_AUTH_INSURANCE_OPERATOR,
+                "current insurance holder cannot rekey another authority kind",
+            ),
+        ] {
+            env.svm.expire_blockhash();
+            let rejected = env.try_update_per_asset_authority_with_cu(
+                signer,
+                Some(&candidate),
+                asset_index,
+                kind,
+                candidate.pubkey().to_bytes(),
+            );
+            assert_rejected_unchanged(&env, rejected, &before, label);
+        }
+        let rejected = update_policy(&mut env, stale, fee_bps);
+        assert_rejected_unchanged(
+            &env,
+            rejected,
+            &before,
+            "stale insurance holder cannot update its former domain's fee policy",
+        );
+        update_policy(&mut env, current, fee_bps)
+            .expect("current insurance holder can update the same domain's fee policy");
+        expected_profile.backing_trade_fee_bps_long = fee_bps;
+        assert_eq!(
+            bytemuck::bytes_of(&profile(&env, 1)),
+            bytemuck::bytes_of(&expected_profile),
+            "policy control follows the current holder while the admin remains burned"
+        );
+        assert_eq!(
+            bytemuck::bytes_of(&profile(&env, 0)),
+            bytemuck::bytes_of(&asset0_before),
+            "asset-1 rotation and policy updates leave asset 0 unchanged"
+        );
+        let (cfg, _) = env.market_state();
+        assert_eq!(cfg.marketauth, admin.pubkey().to_bytes());
+        assert_eq!(cfg.backing_trade_fee_policy_count, 1);
+    }
+}
+
 // security.md sweep — zero required authority anti-brick (#6/#30/#48): activation rejects zero domain
 // authorities because they can strand domain funds or oracle liveness during terminal wind-down.
 // UpdateAssetAuthority must preserve that invariant too: an admin/operator cannot burn the
@@ -48333,6 +48509,175 @@ fn v16_attack_permissionless_append_invalid_price_rolls_back_realloc_and_fee() {
     assert_eq!(group_after.assets[1].lifecycle, AssetLifecycleV16::Active);
     assert_eq!(group_after.assets[1].effective_price, 100);
     assert_eq!(env.token_amount(valid_source), 0);
+}
+
+// Permissionless append grows the market, installs the asset and credits insurance before its fee
+// CPI. A funded source with a short self-delegation passes wrapper checks but fails in SPL Token.
+#[test]
+fn v16_bpf_permissionless_append_fee_cpi_failure_rolls_back_activation_and_custody() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    const FEE: u64 = 40;
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE as u128);
+    let creator = Keypair::new();
+    let portfolio = env.create_portfolio(&creator);
+    let deposit_source = env.deposit(&creator, portfolio, 1_000);
+    let source = env.token_account(creator.pubkey(), FEE);
+    env.svm.warp_to_slot(1);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::approve(
+            &spl_token::ID,
+            &source,
+            &creator.pubkey(),
+            &creator.pubkey(),
+            &[],
+            FEE - 1,
+        )
+        .unwrap(),
+        &[&creator],
+    )
+    .expect("creator publicly approves a self-delegation below the init fee");
+    let source_state = TokenAccount::unpack(&env.svm.get_account(&source).unwrap().data).unwrap();
+    assert_eq!(source_state.amount, FEE);
+    assert_eq!(source_state.delegate, COption::Some(creator.pubkey()));
+    assert_eq!(source_state.delegated_amount, FEE - 1);
+    let before = [
+        ("market", env.market),
+        ("portfolio", portfolio),
+        ("deposit source", deposit_source),
+        ("fee source", source),
+        ("vault", env.vault),
+        ("mint", env.mint),
+        ("creator", creator.pubkey()),
+        ("admin", env.admin.pubkey()),
+    ]
+    .map(|(label, key)| (label, key, env.svm.get_account(&key).unwrap()));
+    let (_, group_before) = env.market_state();
+    assert_eq!(group_before.config.max_market_slots, 1);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data.len(),
+        state::market_account_len_for_capacity(1).unwrap(),
+        "activation must grow the market account before the fee CPI"
+    );
+
+    let append = |env: &mut V16CuEnv| {
+        env.svm.expire_blockhash();
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: ProgInstruction::UpdateAssetLifecycle {
+                action: processor::ASSET_ACTION_ACTIVATE,
+                asset_index: 1,
+                now_slot: 1,
+                initial_price: 100,
+                insurance_authority: creator.pubkey().to_bytes(),
+                insurance_operator: creator.pubkey().to_bytes(),
+                backing_bucket_authority: creator.pubkey().to_bytes(),
+                oracle_authority: creator.pubkey().to_bytes(),
+            }
+            .encode(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &creator],
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx)
+    };
+    let failed = append(&mut env).expect_err("SPL fee transfer must reject the short allowance");
+    assert_eq!(
+        failed.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(spl_token::error::TokenError::InsufficientFunds as u32),
+        ),
+        "activation must reach the SPL allowance failure: {failed:?}"
+    );
+    let token_invoke = format!("Program {} invoke [2]", spl_token::ID);
+    let token_failure = format!(
+        "Program {} failed: custom program error: {:#x}",
+        spl_token::ID,
+        spl_token::error::TokenError::InsufficientFunds as u32,
+    );
+    assert!(
+        failed.meta.logs.iter().any(|line| line == &token_invoke)
+            && failed
+                .meta
+                .logs
+                .iter()
+                .any(|line| line == "Program log: Instruction: Transfer")
+            && failed.meta.logs.iter().any(|line| line == &token_failure),
+        "rejection must come from the fee CPI after activation checks: {failed:?}"
+    );
+    // The separate transaction payer absorbs fees; all program and custody accounts must roll back.
+    for (label, key, account) in &before {
+        assert_eq!(
+            env.svm.get_account(key).as_ref(),
+            Some(account),
+            "failed fee collection must restore the entire {label} account"
+        );
+    }
+    assert_eq!(env.token_amount(source), FEE);
+    assert_eq!(env.token_amount(deposit_source), 0);
+    assert_eq!(env.token_amount(env.vault), 1_000);
+
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::revoke(&spl_token::ID, &source, &creator.pubkey(), &[]).unwrap(),
+        &[&creator],
+    )
+    .expect("creator publicly revokes the short self-delegation");
+    append(&mut env).expect("same activation succeeds after revoking only the source delegation");
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault), 1_000 + FEE);
+    let market_after = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(
+        market_after.data.len(),
+        state::market_account_len_for_capacity(2).unwrap()
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.config.max_market_slots, 2);
+    assert_eq!(group_after.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(group_after.assets[1].effective_price, 100);
+    let profile = state::read_asset_oracle_profile(&market_after.data, 1).unwrap();
+    assert_eq!(profile.asset_admin, creator.pubkey().to_bytes());
+    assert_eq!(profile.insurance_authority, creator.pubkey().to_bytes());
+    assert_eq!(profile.insurance_operator, creator.pubkey().to_bytes());
+    assert_eq!(profile.backing_bucket_authority, creator.pubkey().to_bytes());
+    assert_eq!(profile.oracle_authority, creator.pubkey().to_bytes());
+    assert_eq!(group_after.vault, group_before.vault + FEE as u128);
+    assert_eq!(group_after.insurance, group_before.insurance + FEE as u128);
+    assert_eq!(group_after.c_tot, group_before.c_tot);
+    assert_eq!(
+        group_after.insurance_domain_budget[0] + group_after.insurance_domain_budget[1],
+        group_before.insurance_domain_budget[0]
+            + group_before.insurance_domain_budget[1]
+            + FEE as u128,
+        "retry credits the init fee to asset-0 insurance exactly once"
+    );
+    assert_eq!(group_after.insurance_domain_budget[2], 0);
+    assert_eq!(group_after.insurance_domain_budget[3], 0);
+    assert_domain_budget_remaining_total_consistent(&group_after, "fee CPI rollback retry");
+    for (label, key, account) in &before {
+        if ![env.market, source, env.vault].contains(key) {
+            assert_eq!(
+                env.svm.get_account(key).as_ref(),
+                Some(account),
+                "successful retry preserves the entire {label} account"
+            );
+        }
+    }
 }
 
 // security.md sweep — permissionless create fee funds asset-0 insurance (#5 / README L59): the fee a
