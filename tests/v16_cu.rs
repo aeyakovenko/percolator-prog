@@ -14681,6 +14681,163 @@ fn v16_bpf_recovery_and_reset_tags_are_bounded_and_update_state() {
     assert_eq!(group.assets[0].mode_long, SideModeV16::Normal);
 }
 
+// A shutdown owner can exit without a matching counterparty. The resulting one-sided OI must
+// block retirement atomically, while the remaining owner retains a bounded exit route.
+#[test]
+fn v16_bpf_recovery_unilateral_forfeits_unlock_withdrawal_and_retirement() {
+    const CAPITAL: u128 = 10_000;
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.activate_asset(1, 1, 100);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, CAPITAL);
+    env.deposit(&short_owner, short, CAPITAL);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 1, 2, 0);
+    let (_, shutdown) = env.market_state();
+    assert_eq!(shutdown.mode, MarketModeV16::Live);
+    assert_eq!(shutdown.assets[1].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(shutdown.assets[1].oi_eff_long_q, POS_SCALE);
+    assert_eq!(shutdown.assets[1].oi_eff_short_q, POS_SCALE);
+    let short_before = env.svm.get_account(&short).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    let forfeit_cu = env.forfeit_recovery_leg_with_cu(&long_owner, long, 1, 1);
+    assert_cu_within(
+        "unilateral recovery long forfeit",
+        forfeit_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let long_after = env.portfolio_state(long);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&long_after)));
+    assert_eq!(long_after.capital.get(), CAPITAL);
+    assert_eq!(long_after.pnl.get(), 0);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let (_, one_sided) = env.market_state();
+    assert_eq!(one_sided.assets[1].oi_eff_long_q, 0);
+    assert_eq!(one_sided.assets[1].oi_eff_short_q, POS_SCALE);
+    assert_eq!(one_sided.assets[1].stored_pos_count_long, 0);
+    assert_eq!(one_sided.assets[1].stored_pos_count_short, 1);
+
+    let (long_dest, withdraw_cu) = env.withdraw_with_cu(&long_owner, long, CAPITAL);
+    assert_cu_within(
+        "unilateral recovery long withdrawal",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(long_dest) as u128, CAPITAL);
+    assert_eq!(env.market_state().1.c_tot, CAPITAL);
+    assert_eq!(env.market_state().1.vault, CAPITAL);
+    assert_eq!(env.token_amount(env.vault) as u128, CAPITAL);
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "the first owner can forfeit and withdraw without touching the counterparty"
+    );
+
+    let admin = env.admin.insecure_clone();
+    let retire_ix = ProgInstruction::UpdateAssetLifecycle {
+        action: processor::ASSET_ACTION_RETIRE,
+        asset_index: 1,
+        now_slot: 2,
+        initial_price: 0,
+        insurance_authority: admin.pubkey().to_bytes(),
+        insurance_operator: admin.pubkey().to_bytes(),
+        backing_bucket_authority: admin.pubkey().to_bytes(),
+        oracle_authority: admin.pubkey().to_bytes(),
+    };
+    let retire_metas = vec![
+        AccountMeta::new(admin.pubkey(), true),
+        AccountMeta::new(env.market, false),
+    ];
+    let snapshots = [env.market, long, short, env.vault, long_dest, admin.pubkey()]
+        .map(|key| (key, env.svm.get_account(&key).unwrap()));
+    let err = env
+        .send(retire_ix.clone(), retire_metas.clone(), &[&admin])
+        .expect_err("one remaining recovery leg must block retirement");
+    assert!(
+        err.contains("Custom(21)"),
+        "retirement with one-sided OI must reject as EngineLockActive: {err}"
+    );
+    for (key, before) in snapshots {
+        assert_eq!(
+            env.svm.get_account(&key).unwrap(),
+            before,
+            "rejected one-sided retirement must preserve the entire account {key}"
+        );
+    }
+
+    let long_before = env.svm.get_account(&long).unwrap();
+    let forfeit_cu = env.forfeit_recovery_leg_with_cu(&short_owner, short, 1, 1);
+    assert_cu_within(
+        "unilateral recovery short forfeit",
+        forfeit_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let short_after = env.portfolio_state(short);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&short_after)));
+    assert_eq!(short_after.capital.get(), CAPITAL);
+    assert_eq!(short_after.pnl.get(), 0);
+    let (short_dest, withdraw_cu) = env.withdraw_with_cu(&short_owner, short, CAPITAL);
+    assert_cu_within(
+        "unilateral recovery short withdrawal",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(short_dest) as u128, CAPITAL);
+    assert_eq!(env.svm.get_account(&long).unwrap(), long_before);
+    let (_, empty) = env.market_state();
+    assert_eq!(empty.assets[1].oi_eff_long_q, 0);
+    assert_eq!(empty.assets[1].oi_eff_short_q, 0);
+    assert_eq!(empty.assets[1].stored_pos_count_long, 0);
+    assert_eq!(empty.assets[1].stored_pos_count_short, 0);
+    assert_eq!(empty.c_tot, 0);
+    assert_eq!(empty.insurance, 0);
+    assert_eq!(empty.vault, 0);
+    assert_eq!(env.token_amount(env.vault), 0);
+
+    env.svm.expire_blockhash();
+    let retire_cu = env
+        .send(retire_ix, retire_metas, &[&admin])
+        .expect("the same retirement succeeds after the remaining owner exits");
+    assert_cu_within(
+        "retirement after unilateral recovery exits",
+        retire_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (cfg, retired) = env.market_state();
+    assert_eq!(retired.mode, MarketModeV16::Live);
+    assert_eq!(retired.assets[0].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(retired.assets[1].lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(cfg.free_market_slot_count, 1);
+
+    for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+        let cu = env.close_portfolio_with_cu(owner, portfolio);
+        assert_cu_within("dematerialize recovery exit", cu, CUSTODY_CU_LIMIT);
+    }
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 0);
+    let resolve_cu = env.resolve();
+    assert_cu_within("resolve after recovery exits", resolve_cu, CUSTODY_CU_LIMIT);
+    let close_cu = env.close_slab_with_cu();
+    assert_cu_within("CloseSlab after recovery exits", close_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, 0);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap().lamports, 0);
+}
+
 #[test]
 fn v16_bpf_resolved_payout_tags_are_bounded_and_update_state() {
     let mut claim_env = V16CuEnv::new();
@@ -36651,6 +36808,138 @@ fn v16_attack_swap_secondary_unauthorized_and_bounded() {
         0,
         "secondary reserve fully drained, not more"
     );
+}
+
+// Swap privilege checks must reject before either token transfer, preserving both reserves and claims.
+#[test]
+fn v16_bpf_swap_secondary_signer_and_writable_boundaries_are_atomic() {
+    use percolator_prog::error::PercolatorError;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    let depositor = Keypair::new();
+    let portfolio = env.create_portfolio(&depositor);
+    env.deposit(&depositor, portfolio, 1_000);
+
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let accounts = vec![
+        AccountMeta::new_readonly(admin.pubkey(), true),
+        AccountMeta::new_readonly(env.market, false),
+        AccountMeta::new(primary_source, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new(secondary_dest, false),
+        AccountMeta::new(secondary_vault, false),
+        AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    // The separate payer absorbs transaction fees without promoting any tested account's privileges.
+    let before = [
+        ("authority", admin.pubkey()),
+        ("market", env.market),
+        ("portfolio", portfolio),
+        ("primary mint", env.mint),
+        ("secondary mint", secondary_mint),
+        ("primary source", primary_source),
+        ("primary vault", env.vault),
+        ("secondary destination", secondary_dest),
+        ("secondary vault", secondary_vault),
+        ("vault authority", env.vault_authority),
+    ]
+    .map(|(label, key)| (label, key, env.svm.get_account(&key)));
+    let swap = |env: &mut V16CuEnv, accounts: Vec<AccountMeta>| {
+        env.svm.expire_blockhash();
+        let mut signers = vec![&env.payer];
+        if accounts[0].is_signer {
+            signers.push(&admin);
+        }
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts,
+            data: ProgInstruction::SwapSecondaryForPrimary { amount: 10 }.encode(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &signers,
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx)
+    };
+
+    for (case, index, expected_error) in [
+        ("unsigned authority", 0, PercolatorError::ExpectedSigner),
+        ("readonly primary source", 2, PercolatorError::ExpectedWritable),
+        ("readonly primary vault", 3, PercolatorError::ExpectedWritable),
+        (
+            "readonly secondary destination",
+            4,
+            PercolatorError::ExpectedWritable,
+        ),
+        ("readonly secondary vault", 5, PercolatorError::ExpectedWritable),
+    ] {
+        let mut rejected_accounts = accounts.clone();
+        if index == 0 {
+            rejected_accounts[index].is_signer = false;
+        } else {
+            rejected_accounts[index].is_writable = false;
+        }
+        let failed = swap(&mut env, rejected_accounts)
+            .expect_err("swap must reject a missing required privilege");
+        assert_eq!(
+            failed.err,
+            TransactionError::InstructionError(2, InstructionError::Custom(expected_error as u32)),
+            "{case}: wrapper must reject the missing privilege: {failed:?}"
+        );
+        let token_invoke = format!("Program {} invoke", spl_token::ID);
+        assert!(
+            !failed
+                .meta
+                .logs
+                .iter()
+                .any(|line| line.starts_with(&token_invoke)),
+            "{case}: neither SPL transfer may run before privilege rejection: {failed:?}"
+        );
+        for (label, key, account) in &before {
+            assert_eq!(
+                env.svm.get_account(key).as_ref(),
+                account.as_ref(),
+                "{case}: the entire {label} account must remain unchanged"
+            );
+        }
+    }
+
+    swap(&mut env, accounts)
+        .expect("swap succeeds with a readonly signer, readonly market and writable token accounts");
+    assert_eq!(env.token_amount(primary_source), 0);
+    assert_eq!(env.token_amount(env.vault), 1_010);
+    assert_eq!(env.token_amount(secondary_dest), 10);
+    assert_eq!(env.token_amount(secondary_vault), 40);
+    for (label, key, account) in &before {
+        if ![primary_source, env.vault, secondary_dest, secondary_vault].contains(key) {
+            assert_eq!(
+                env.svm.get_account(key).as_ref(),
+                account.as_ref(),
+                "successful swap preserves the entire {label} account"
+            );
+        }
+    }
 }
 
 // security.md sweep - SwapSecondaryForPrimary account aliasing (#26/#35/#44): the primary source must
