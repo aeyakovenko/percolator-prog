@@ -44655,6 +44655,111 @@ fn v16_attack_crank_oracle_regressed_publish_time_rejects_even_when_fresh() {
     assert_eq!(group.assets[0].raw_oracle_target_price, 210_000);
 }
 
+// A newer composite timestamp must not hide a regressed later leg or persist earlier leg updates.
+#[test]
+fn v16_bpf_composite_crank_rejects_regressed_leg_despite_newer_aggregate_time() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let feeds = [[0x7bu8; 32], [0x7cu8; 32], [0x7du8; 32]];
+    let initial = [
+        env.set_pyth_price_with_conf(&feeds[0], 6_000_000, -6, 0, 100),
+        env.set_pyth_price_with_conf(&feeds[1], 2_000_000, -6, 0, 100),
+        env.set_pyth_price_with_conf(&feeds[2], 3_000_000, -6, 0, 100),
+    ];
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        3,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        feeds,
+        &initial,
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure three-leg composite oracle");
+
+    let cranker_owner = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&cranker_portfolio).unwrap();
+    let profile_before = state::read_asset_oracle_profile(&market_before.data, 0).unwrap();
+    assert_eq!(profile_before.oracle_leg_publish_times, [100, 100, 100]);
+    assert_eq!(profile_before.oracle_target_publish_time, 100);
+    assert_eq!(profile_before.last_good_oracle_slot, 1);
+    assert_eq!(env.market_state().1.assets[0].effective_price, 1_000_000);
+
+    set_test_clock(&mut env, 2, 102);
+    // All legs are within the 60-second age limit. The first two advance before the last regresses.
+    let advanced_leg0 = env.set_pyth_price_with_conf(&feeds[0], 12_000_000, -6, 0, 102);
+    let advanced_leg1 = env.set_pyth_price_with_conf(&feeds[1], 2_000_000, -6, 0, 101);
+    let regressed_leg2 = env.set_pyth_price_with_conf(&feeds[2], 4_000_000, -6, 0, 99);
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 3),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(cranker_portfolio, false),
+            AccountMeta::new_readonly(advanced_leg0, false),
+            AccountMeta::new_readonly(advanced_leg1, false),
+            AccountMeta::new_readonly(regressed_leg2, false),
+        ],
+        &[],
+    );
+    let err = rejected.expect_err("a newer aggregate timestamp must not hide a regressed leg");
+    assert!(
+        err.contains("Custom(27)"),
+        "regressed composite leg must reject as OracleStale (Custom 27), got: {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejection must roll back earlier leg updates, freshness, and market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranker_portfolio).unwrap(),
+        portfolio_before,
+        "rejected composite observation must preserve the entire cranker portfolio"
+    );
+
+    // Change only the final leg's timestamp; asynchronous but individually advancing legs are valid.
+    let current_leg2 = env.set_pyth_price_with_conf(&feeds[2], 4_000_000, -6, 0, 101);
+    env.crank_with_oracle_tail(
+        cranker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+        &[advanced_leg0, advanced_leg1, current_leg2],
+    );
+    let market_after = env.svm.get_account(&env.market).unwrap();
+    let profile_after = state::read_asset_oracle_profile(&market_after.data, 0).unwrap();
+    assert_eq!(profile_after.oracle_leg_publish_times, [102, 101, 101]);
+    assert_eq!(
+        profile_after.oracle_leg_prices_e6,
+        [12_000_000, 2_000_000, 4_000_000]
+    );
+    assert_eq!(profile_after.oracle_target_publish_time, 102);
+    assert_eq!(profile_after.last_good_oracle_slot, 2);
+    assert_eq!(profile_after.oracle_target_price_e6, 1_500_000);
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.last_good_oracle_slot, 2);
+    assert_eq!(cfg.oracle_target_price_e6, 1_500_000);
+    assert_eq!(group.assets[0].raw_oracle_target_price, 1_500_000);
+    assert_eq!(
+        group.assets[0].effective_price, 1_500_000,
+        "the unexposed market accepts the exact composite price 12 / (2 * 4)"
+    );
+}
+
 // security.md sweep — malformed oracle config rejects cleanly (#37/#44 robustness): a hybrid oracle
 // declaring N legs but supplied with fewer oracle accounts must reject WITHOUT partially configuring or
 // corrupting the market (no out-of-bounds read, no half-written oracle profile). Protection: the runtime
