@@ -5850,11 +5850,17 @@ pub mod processor {
                 outcome.fee_a,
                 outcome.fee_b,
             )?;
+            let actual_fee_paid = outcome
+                .fee_a
+                .checked_add(outcome.fee_b)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            let post_trade_mark_e6 =
+                fee_supported_post_trade_mark_view(&oracle_profile, fee_quote, actual_fee_paid)?;
             update_hybrid_mark_after_trade_view(
                 &mut oracle_profile,
                 &group,
                 asset_index as usize,
-                fee_quote.post_trade_mark_e6,
+                post_trade_mark_e6,
             )?;
             write_oracle_profile_to_view(&mut group, asset_index as usize, &oracle_profile)?;
             if asset_index == 0 && oracle_v16::profile_is_price_managed(&oracle_profile) {
@@ -6068,28 +6074,43 @@ pub mod processor {
             // aggregate or we refuse the batch (no silent mis-accounting).
             let mut reconstructed_total: u128 = 0;
             let mut cfg_dirty = false;
+            let engine_total = outcome
+                .fee_a
+                .checked_add(outcome.fee_b)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            let single_leg_batch = leg_ctx.len() == 1;
             for (asset_index, oracle_profile, fee_basis_price, fee_quote, abs_size) in
                 leg_ctx.iter_mut()
             {
                 let fee_leg = batch_leg_fee(*abs_size, *fee_basis_price, fee_quote.fee_bps)?;
+                let (fee_a, fee_b, actual_fee_total) = if single_leg_batch {
+                    (outcome.fee_a, outcome.fee_b, engine_total)
+                } else {
+                    let total_fee_leg = fee_leg
+                        .checked_add(fee_leg)
+                        .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                    (fee_leg, fee_leg, total_fee_leg)
+                };
                 credit_trade_fees_to_market_budgets_view(
                     &cfg,
                     &mut group,
                     *asset_index,
-                    fee_leg,
-                    fee_leg,
+                    fee_a,
+                    fee_b,
                 )?;
-                let total_fee_leg = fee_leg
-                    .checked_add(fee_leg)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                 reconstructed_total = reconstructed_total
-                    .checked_add(total_fee_leg)
+                    .checked_add(actual_fee_total)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                let post_trade_mark_e6 = fee_supported_post_trade_mark_view(
+                    oracle_profile,
+                    *fee_quote,
+                    actual_fee_total,
+                )?;
                 update_hybrid_mark_after_trade_view(
                     oracle_profile,
                     &group,
                     *asset_index,
-                    fee_quote.post_trade_mark_e6,
+                    post_trade_mark_e6,
                 )?;
                 write_oracle_profile_to_view(&mut group, *asset_index, oracle_profile)?;
                 if *asset_index == 0 && oracle_v16::profile_is_price_managed(oracle_profile) {
@@ -6098,10 +6119,6 @@ pub mod processor {
                     cfg_dirty = true;
                 }
             }
-            let engine_total = outcome
-                .fee_a
-                .checked_add(outcome.fee_b)
-                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
             if reconstructed_total != engine_total {
                 return Err(PercolatorError::EngineArithmeticOverflow.into());
             }
@@ -11423,7 +11440,9 @@ pub mod processor {
     #[derive(Clone, Copy)]
     struct HybridTradeFeeQuote {
         fee_bps: u64,
+        base_fee: u128,
         post_trade_mark_e6: u64,
+        mark_externality_notional: u128,
     }
 
     fn two_sided_trade_fee_paid_view(notional: u128, fee_bps: u64) -> Result<u128, ProgramError> {
@@ -11538,13 +11557,17 @@ pub mod processor {
         if !oracle_v16::profile_is_price_managed(profile) {
             return Ok(HybridTradeFeeQuote {
                 fee_bps: base,
+                base_fee: 0,
                 post_trade_mark_e6: 0,
+                mark_externality_notional: 0,
             });
         }
         if oracle_v16::profile_is_auth_mark(profile) {
             return Ok(HybridTradeFeeQuote {
                 fee_bps: base,
+                base_fee: 0,
                 post_trade_mark_e6: 0,
+                mark_externality_notional: 0,
             });
         }
         let now_slot = authenticated_market_slot_or_fallback_view(group);
@@ -11553,7 +11576,9 @@ pub mod processor {
         {
             return Ok(HybridTradeFeeQuote {
                 fee_bps: base,
+                base_fee: 0,
                 post_trade_mark_e6: 0,
+                mark_externality_notional: 0,
             });
         }
         if asset_index >= group.header.config.max_market_slots.get() as usize
@@ -11561,7 +11586,9 @@ pub mod processor {
         {
             return Ok(HybridTradeFeeQuote {
                 fee_bps: base,
+                base_fee: 0,
                 post_trade_mark_e6: 0,
+                mark_externality_notional: 0,
             });
         }
         let asset = group.markets[asset_index].engine.asset;
@@ -11634,7 +11661,9 @@ pub mod processor {
         )?;
         Ok(HybridTradeFeeQuote {
             fee_bps,
+            base_fee: base_fee_paid,
             post_trade_mark_e6,
+            mark_externality_notional,
         })
     }
 
@@ -11782,6 +11811,34 @@ pub mod processor {
             profile.mark_ewma_last_slot = now_slot;
         }
         Ok(())
+    }
+
+    fn fee_supported_post_trade_mark_view(
+        profile: &state::AssetOracleProfileV16,
+        quote: HybridTradeFeeQuote,
+        actual_fee_paid: u128,
+    ) -> Result<u64, ProgramError> {
+        if quote.post_trade_mark_e6 == 0 || quote.mark_externality_notional == 0 {
+            return Ok(quote.post_trade_mark_e6);
+        }
+        let quoted_move_bps =
+            policy_v16::price_move_bps_ceil(profile.mark_ewma_e6, quote.post_trade_mark_e6)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        // Match the quote's base-plus-externality accounting even when collection is partial.
+        let paid_move_bps = actual_fee_paid
+            .saturating_sub(quote.base_fee)
+            .checked_mul(10_000)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?
+            .checked_div(quote.mark_externality_notional)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let paid_move_bps = u64::try_from(paid_move_bps).unwrap_or(u64::MAX);
+        let supported_move_bps = core::cmp::min(quoted_move_bps, paid_move_bps);
+        Ok(oracle_v16::clamp_toward_engine_dt(
+            profile.mark_ewma_e6,
+            quote.post_trade_mark_e6,
+            supported_move_bps,
+            1,
+        ))
     }
 
     fn derive_matcher_delegate(
