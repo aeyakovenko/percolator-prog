@@ -14924,6 +14924,133 @@ fn v16_bpf_recovery_unilateral_forfeits_unlock_withdrawal_and_retirement() {
     assert_eq!(env.svm.get_account(&env.vault).unwrap().lamports, 0);
 }
 
+// A full portfolio can settle each recovery leg's loss and exit without refreshing
+// the other legs or requiring the counterparty account in any exit transaction.
+#[test]
+fn v16_bpf_full_leg_recovery_forfeits_settle_losses_and_unlock_withdrawal() {
+    const N: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const CAPITAL: u128 = 10_000;
+    const OPEN_PRICE: u64 = 100;
+    const RECOVERY_PRICE: u64 = 95;
+    const LOSS_PER_LEG: u128 = (OPEN_PRICE - RECOVERY_PRICE) as u128;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(N, 10_000, 10_000, 10_000);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    for asset_index in 0..N {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, OPEN_PRICE);
+    }
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let observer = env.create_portfolio(&env.payer.insecure_clone());
+    env.deposit(&long_owner, long, CAPITAL);
+    env.deposit(&short_owner, short, CAPITAL);
+    for asset_index in 0..N {
+        env.trade_asset_with_cu(
+            asset_index,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            POS_SCALE as i128,
+            OPEN_PRICE,
+            0,
+        );
+    }
+    for portfolio in [long, short] {
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(portfolio))),
+            N as u32,
+            "setup must publicly fill every supported portfolio leg"
+        );
+    }
+    let long_before = env.svm.get_account(&long).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    // Observe the loss on a separate flat account so every exit leg retains its old K snapshot.
+    env.svm.warp_to_slot(1);
+    for asset_index in 0..N {
+        env.push_auth_mark_for_asset_as_admin(asset_index, 1, RECOVERY_PRICE);
+        let cu = env.crank(
+            observer,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                close_q: 0,
+                observations: crank_observations(asset_index),
+            },
+        );
+        assert_cu_within("full-leg recovery observe loss", cu, CRANK_CU_LIMIT);
+        let cu = env.update_asset_lifecycle_as_admin_with_cu(
+            processor::ASSET_ACTION_SHUTDOWN,
+            asset_index,
+            1,
+            0,
+        );
+        assert_cu_within("full-leg recovery shutdown", cu, CUSTODY_CU_LIMIT);
+    }
+    assert_eq!(env.svm.get_account(&long).unwrap(), long_before);
+    assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
+    let (_, recovery) = env.market_state();
+    assert_eq!(recovery.mode, MarketModeV16::Live);
+    for asset in recovery.assets.iter().take(N as usize) {
+        assert_eq!(asset.lifecycle, AssetLifecycleV16::Recovery);
+        assert_eq!(asset.effective_price, RECOVERY_PRICE);
+        assert_eq!(asset.oi_eff_long_q, POS_SCALE);
+        assert_eq!(asset.oi_eff_short_q, POS_SCALE);
+    }
+
+    let mut max_forfeit_cu = 0;
+    for (completed, asset_index) in (0..N).rev().enumerate() {
+        let cu = env.forfeit_recovery_leg_with_cu(&long_owner, long, asset_index, 1);
+        assert!(
+            cu < 1_400_000,
+            "full-leg recovery loss forfeit CU {cu} must fit the tx limit"
+        );
+        max_forfeit_cu = max_forfeit_cu.max(cu);
+        let account = env.portfolio_state(long);
+        let remaining_capital = CAPITAL - (completed as u128 + 1) * LOSS_PER_LEG;
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&account)),
+            N as u32 - completed as u32 - 1,
+            "each bounded call must detach exactly one leg"
+        );
+        assert!(!has_active_leg_for_asset(&account, asset_index as usize));
+        assert_eq!(account.capital.get(), remaining_capital);
+        assert_eq!(account.pnl.get(), 0, "the detached leg's loss is settled");
+        assert_eq!(close_progress(&account).residual_remaining, 0);
+        let (_, group) = env.market_state();
+        let asset = &group.assets[asset_index as usize];
+        assert_eq!(asset.oi_eff_long_q, 0);
+        assert_eq!(asset.stored_pos_count_long, 0);
+        assert_eq!(asset.oi_eff_short_q, POS_SCALE);
+        assert_eq!(asset.stored_pos_count_short, 1);
+        assert_eq!(group.c_tot, CAPITAL + remaining_capital);
+        assert_eq!(group.vault, 2 * CAPITAL);
+        assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    }
+
+    let remaining_capital = CAPITAL - N as u128 * LOSS_PER_LEG;
+    let (dest, withdraw_cu) = env.withdraw_with_cu(&long_owner, long, remaining_capital);
+    assert_cu_within(
+        "full-leg recovery withdrawal",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest) as u128, remaining_capital);
+    assert_eq!(env.portfolio_state(long).capital.get(), 0);
+    let (_, group) = env.market_state();
+    assert_eq!(group.c_tot, CAPITAL);
+    assert_eq!(group.vault, 2 * CAPITAL - remaining_capital);
+    assert_eq!(env.token_amount(env.vault) as u128, group.vault);
+    assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
+    println!(
+        "v16 full-leg recovery max forfeit CU: {max_forfeit_cu}; withdrawal CU: {withdraw_cu}"
+    );
+}
+
 #[test]
 fn v16_bpf_resolved_payout_tags_are_bounded_and_update_state() {
     let mut claim_env = V16CuEnv::new();
