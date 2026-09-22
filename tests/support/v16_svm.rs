@@ -580,6 +580,7 @@ pub struct V16Svm {
     pub foreign_actor: ForeignActor,
     pub initial_token_supply: u128,
     pub loaded_program_hash: Hash,
+    asset_count: usize,
     payer: Keypair,
     admin: Keypair,
     foreign_admin: Keypair,
@@ -590,6 +591,14 @@ pub struct V16Svm {
 
 impl V16Svm {
     pub fn new(seed: [u8; 32], config: MarketConfig) -> Self {
+        Self::new_with_asset_count(seed, config, ASSET_COUNT)
+    }
+
+    pub fn new_with_asset_count(seed: [u8; 32], config: MarketConfig, asset_count: usize) -> Self {
+        assert!(
+            (1..=percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize)
+                .contains(&asset_count)
+        );
         let mut svm = LiteSVM::new();
         let program_id = percolator_prog::id();
         let program_bytes =
@@ -627,7 +636,7 @@ impl V16Svm {
         }
 
         let portfolio_len =
-            state::portfolio_account_len_for_market_slots(ASSET_COUNT).expect("portfolio len");
+            state::portfolio_account_len_for_market_slots(asset_count).expect("portfolio len");
         let mut actors = Vec::with_capacity(PRIMARY_ACTOR_COUNT);
         let mut token_accounts = vec![vault, foreign_vault];
         let mut token_supply = 0u128;
@@ -762,13 +771,13 @@ impl V16Svm {
             &mut svm,
             market,
             program_id,
-            state::market_account_len_for_capacity(ASSET_COUNT).expect("market len"),
+            state::market_account_len_for_capacity(asset_count).expect("market len"),
         );
         set_program_account(
             &mut svm,
             foreign_market,
             program_id,
-            state::market_account_len_for_capacity(ASSET_COUNT).expect("foreign market len"),
+            state::market_account_len_for_capacity(asset_count).expect("foreign market len"),
         );
 
         let mut out = Self {
@@ -790,6 +799,7 @@ impl V16Svm {
             foreign_actor,
             initial_token_supply: token_supply,
             loaded_program_hash,
+            asset_count,
             payer,
             admin,
             foreign_admin,
@@ -839,7 +849,7 @@ impl V16Svm {
             &mut self.svm,
             portfolio,
             self.program_id,
-            state::portfolio_account_len_for_market_slots(ASSET_COUNT).expect("portfolio len"),
+            state::portfolio_account_len_for_market_slots(self.asset_count).expect("portfolio len"),
         );
         set_token_account(
             &mut self.svm,
@@ -899,7 +909,7 @@ impl V16Svm {
         self.init_market(false, config);
         self.init_market(true, config);
         self.warp_to_slot(1);
-        for asset_index in 0..ASSET_COUNT as u16 {
+        for asset_index in 0..self.asset_count as u16 {
             self.configure_auth_mark(false, asset_index, 1, config.initial_price)
                 .expect("configure primary AuthMark");
             self.configure_auth_mark(true, asset_index, 1, config.initial_price)
@@ -926,7 +936,7 @@ impl V16Svm {
         };
         self.send_program(
             ProgInstruction::InitMarket {
-                max_portfolio_assets: ASSET_COUNT as u16,
+                max_portfolio_assets: self.asset_count as u16,
                 h_min: 0,
                 h_max: config.h_max,
                 initial_price: config.initial_price,
@@ -1644,7 +1654,7 @@ impl V16Svm {
         let admin = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::InitMarket {
-                max_portfolio_assets: ASSET_COUNT as u16,
+                max_portfolio_assets: self.asset_count as u16,
                 h_min: 0,
                 h_max: config.h_max,
                 initial_price: config.initial_price,

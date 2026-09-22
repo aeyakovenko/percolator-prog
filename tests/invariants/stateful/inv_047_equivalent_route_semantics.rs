@@ -33,7 +33,8 @@
 use super::env_usize;
 use crate::support::{
     fuzz_model::{
-        assert_current_certificate_matches_snapshot_full_refresh, execute_trade_route, TradeRoute,
+        assert_current_certificate_matches_snapshot_full_refresh, execute_trade_route,
+        independent_health_certificate, TradeRoute,
     },
     v16_svm::{snapshot_engine_full_refresh, MarketConfig, V16Svm, INITIAL_PRICE, TX_CU_LIMIT},
 };
@@ -889,6 +890,367 @@ fn v16_program_stale_liability_hint_histories_preserve_trade_route_admission() {
     println!(
         "INV-047/056 hint-history product: worlds={worlds}, successful_public_txs={successes}, exact_rejections={rejections}, peak_cu={peak_cu}, peak_trade_cu={peak_trade_cu}"
     );
+}
+
+// INVARIANTS.md: INV-047 Equivalent-route semantics; INV-053 Full-health recertification
+// equivalence; INV-054 Certificate epoch completeness; INV-057 Risk-reduction availability.
+// Non-redundancy: the three-asset hint and structural-delta matrices cannot reach the wrapper's
+// eight-cached-leg currentness gate. This public I/M/R/C matrix crosses seven/eight active legs,
+// either/both stale participants, both signs, and reductions of 1, Q-1, Q and Q+1 (cross-zero).
+// All worlds allocate eight assets; the last active, nontraded leg retains adverse target lag.
+// Oracle: independent raw-state health, cloned full refresh, raw positions/OI and exact Account
+// frames. Transport normalization is the same checked normalization used above, never SVM writes.
+// Exact selector: cargo test --offline --locked --features test-sbf --test v16_program_stateful_fuzz
+// inv_047_equivalent_route_semantics::v16_program_eight_asset_stale_routes_refresh_and_reduce
+// -- --exact --nocapture
+// Program source: 9c67c1e1b49a8ce24f4b6adbf61736de2dc68094; engine: 4db11a8c.
+// SBF: default features, platform-tools v1.52; artifact hash and peak CU printed by this test.
+// Scope: healthy Live/AuthMark, unit ADL, zero funding/fees/liens/pending obligations, fixed slot
+// and authorized bilateral counterparties. Other epoch writers, expiry, 9..14 legs, multi-fill
+// batches and drain/reset/recovery/resolved or counterparty-free exits remain separate evidence.
+#[test]
+fn v16_program_eight_asset_stale_routes_refresh_and_reduce() {
+    const PRICE: u64 = 100;
+    const SLOT: u64 = 2;
+    const CAPITAL: u128 = 2_000;
+    const Q: i128 = POS_SCALE as i128;
+    const REFRESH_BOUND: usize = 3;
+
+    let current = |env: &V16Svm, actor, label: &str| {
+        assert_current_certificate_matches_snapshot_full_refresh(
+            label,
+            &env.market_data(false),
+            &env.primary_portfolio_data(actor),
+        )
+        .unwrap_or_else(|error| panic!("{label}: {error}"))
+    };
+    let raw_health = |env: &V16Svm, actor, label: &str| {
+        let group = env.primary_market_state().1;
+        let account = env.primary_portfolio(actor);
+        let independent = independent_health_certificate(label, &group, &account).unwrap();
+        let full = snapshot_engine_full_refresh(
+            &env.market_data(false),
+            &env.primary_portfolio_data(actor),
+        )
+        .unwrap()
+        .0;
+        assert_eq!(full, independent, "{label}: independent raw-state health");
+        assert_eq!(independent.certified_equity, CAPITAL as i128, "{label}");
+        assert_eq!(independent.certified_liq_deficit, 0, "{label}");
+        independent
+    };
+    let hints = |count: u16| {
+        (0..count)
+            .map(|asset_index| CrankObservationHint {
+                asset_index,
+                oracle_accounts: 0,
+            })
+            .collect::<Vec<_>>()
+    };
+    let refresh = |env: &mut V16Svm, actor, count, label: &str| {
+        let mut calls = 0;
+        while !current(env, actor, label) && calls < REFRESH_BOUND {
+            env.crank(actor, SLOT, hints(count))
+                .unwrap_or_else(|error| panic!("{label}: public refresh {calls}: {error}"));
+            calls += 1;
+        }
+        assert!(
+            current(env, actor, label),
+            "{label}: refresh bound exhausted"
+        );
+        let raw = raw_health(env, actor, label);
+        assert_eq!(
+            env.primary_portfolio(actor)
+                .health_cert
+                .try_to_runtime()
+                .unwrap(),
+            raw,
+            "{label}: public certificate must include every active leg"
+        );
+        calls
+    };
+
+    let (mut worlds, mut stale_rejections, mut inline_fills, mut reducing_fills) = (0, 0, 0, 0);
+    let (mut peak_cu, mut max_refresh_calls) = (0, 0);
+    let mut program_hash = None;
+    for count in [7u16, 8] {
+        for sign in [-1i128, 1] {
+            for stale_mask in [1u8, 2, 3] {
+                for reduction in [1, Q - 1, Q, Q + 1] {
+                    let mut expected_before = None;
+                    let mut expected_after = None;
+                    for route in ROUTES {
+                        let label = format!(
+                            "legs={count}/sign={sign}/stale={stale_mask}/reduce={reduction}/{route:?}"
+                        );
+                        let mut config = MarketConfig {
+                            initial_price: PRICE,
+                            // At price 100 the one-bps movement rounds to zero. Raw target lag
+                            // changes health without K/F settlement or a loss-stale ADL gate.
+                            max_price_move_bps_per_slot: 1,
+                            max_accrual_dt_slots: 1,
+                            min_funding_lifetime_slots: 1,
+                            ..MarketConfig::default()
+                        };
+                        config.actor_deposits[TAKER] = CAPITAL;
+                        config.actor_deposits[MAKER] = CAPITAL;
+                        let mut env = V16Svm::new_with_asset_count([0x57; 32], config, 8);
+                        if let Some(hash) = program_hash {
+                            assert_eq!(env.loaded_program_hash, hash);
+                        } else {
+                            program_hash = Some(env.loaded_program_hash);
+                        }
+                        env.begin_public_trace();
+                        assert_eq!(env.primary_market_state().1.assets.len(), 8);
+                        for asset in 0..count {
+                            env.trade_no_cpi(TAKER, MAKER, asset, sign * Q, PRICE, 0)
+                                .unwrap_or_else(|error| {
+                                    panic!("{label}: open asset {asset}: {error}")
+                                });
+                        }
+                        env.ensure_primary_matcher_enabled(MAKER).unwrap();
+                        let cached = [TAKER, MAKER].map(|actor| {
+                            assert!(current(&env, actor, &label));
+                            let cert = raw_health(&env, actor, &label);
+                            assert_eq!(cert.certified_initial_req, u128::from(count) * 100);
+                            assert_eq!(
+                                cert.active_bitmap_at_cert
+                                    .iter()
+                                    .map(|word| word.count_ones())
+                                    .sum::<u32>(),
+                                u32::from(count)
+                            );
+                            cert
+                        });
+                        env.warp_to_slot(SLOT);
+                        for asset in 0..count {
+                            let price = if asset == count - 1 {
+                                (i128::from(PRICE) - sign) as u64
+                            } else {
+                                PRICE
+                            };
+                            env.push_auth_mark(asset, SLOT, price).unwrap();
+                        }
+                        env.crank(4, SLOT, hints(count)).unwrap();
+                        let group = env.primary_market_state().1;
+                        assert_eq!(group.assets[usize::from(count - 1)].effective_price, PRICE);
+                        assert_eq!(
+                            group.assets[usize::from(count - 1)].raw_oracle_target_price,
+                            (i128::from(PRICE) - sign) as u64
+                        );
+                        for actor in [TAKER, MAKER] {
+                            assert_eq!(
+                                env.primary_portfolio(actor)
+                                    .health_cert
+                                    .try_to_runtime()
+                                    .unwrap(),
+                                cached[actor],
+                                "{label}: observer must leave the account cache untouched"
+                            );
+                            assert!(
+                                cached[actor].cert_oracle_epoch < group.oracle_epoch,
+                                "{label}"
+                            );
+                            assert!(!current(&env, actor, &label));
+                            let fresh = raw_health(&env, actor, &label);
+                            let penalty = u128::from(actor == TAKER);
+                            assert_eq!(
+                                fresh.certified_initial_req,
+                                cached[actor].certified_initial_req + penalty
+                            );
+                            assert_eq!(
+                                fresh.certified_maintenance_req,
+                                cached[actor].certified_maintenance_req + penalty
+                            );
+                            assert_eq!(
+                                fresh.certified_worst_case_loss,
+                                cached[actor].certified_worst_case_loss + penalty
+                            );
+                            if stale_mask & (1 << actor) == 0 {
+                                refresh(&mut env, actor, count, &label);
+                            }
+                        }
+                        for actor in [TAKER, MAKER] {
+                            assert_eq!(
+                                current(&env, actor, &label),
+                                stale_mask & (1 << actor) == 0
+                            );
+                        }
+                        let before = hint_route_accounts(&env, false);
+                        if let Some(expected) = &expected_before {
+                            assert!(
+                                &before == expected,
+                                "{label}: routes need identical raw prestates"
+                            );
+                        } else {
+                            expected_before = Some(before.clone());
+                        }
+                        let tokens = env.all_token_account_data();
+                        let attempt = execute_trade_route(
+                            &mut env,
+                            route,
+                            TAKER,
+                            MAKER,
+                            0,
+                            -sign * reduction,
+                            PRICE,
+                            0,
+                        );
+                        if count == 8 {
+                            let error =
+                                attempt.expect_err("eight-leg stale account must require refresh");
+                            assert!(
+                                error.contains(&format!(
+                                    "Custom({})",
+                                    PercolatorError::EngineStale as u32
+                                )),
+                                "{label}: wrong stale error: {error}"
+                            );
+                            assert!(
+                                hint_route_accounts(&env, false) == before,
+                                "{label}: exact stale rollback"
+                            );
+                            stale_rejections += 1;
+                            let calls: usize = [TAKER, MAKER]
+                                .into_iter()
+                                .map(|actor| refresh(&mut env, actor, count, &label))
+                                .sum();
+                            assert!(calls > 0 && calls <= 2 * REFRESH_BOUND, "{label}");
+                            max_refresh_calls = max_refresh_calls.max(calls);
+                            execute_trade_route(
+                                &mut env,
+                                route,
+                                TAKER,
+                                MAKER,
+                                0,
+                                -sign * reduction,
+                                PRICE,
+                                0,
+                            )
+                            .unwrap_or_else(|error| {
+                                panic!("{label}: refreshed retry failed: {error}")
+                            });
+                        } else {
+                            attempt.unwrap_or_else(|error| {
+                                panic!("{label}: seven-leg inline refresh: {error}")
+                            });
+                            inline_fills += 1;
+                        }
+                        let after_group = env.primary_market_state().1;
+                        for (actor, actor_sign) in [(TAKER, sign), (MAKER, -sign)] {
+                            assert!(current(&env, actor, &label));
+                            let cert = raw_health(&env, actor, &label);
+                            let account = env.primary_portfolio(actor);
+                            assert_eq!(
+                                account.health_cert.try_to_runtime().unwrap(),
+                                cert,
+                                "{label}"
+                            );
+                            let mut positions = std::collections::BTreeMap::new();
+                            for encoded in account.legs {
+                                let leg = encoded.try_to_runtime().unwrap();
+                                if leg.active {
+                                    assert!(positions
+                                        .insert(leg.asset_index, leg.basis_pos_q)
+                                        .is_none());
+                                }
+                            }
+                            assert_eq!(
+                                positions.len(),
+                                usize::from(count) - usize::from(reduction == Q)
+                            );
+                            for asset in 0..u32::from(count) {
+                                let q = if asset == 0 {
+                                    actor_sign * (Q - reduction)
+                                } else {
+                                    actor_sign * Q
+                                };
+                                assert_eq!(
+                                    positions.get(&asset).copied().unwrap_or(0),
+                                    q,
+                                    "{label}: actor={actor}/asset={asset}"
+                                );
+                                assert_eq!(
+                                    after_group.assets[asset as usize].oi_eff_long_q,
+                                    q.unsigned_abs()
+                                );
+                                assert_eq!(
+                                    after_group.assets[asset as usize].oi_eff_short_q,
+                                    q.unsigned_abs()
+                                );
+                            }
+                            assert!((Q - reduction).unsigned_abs() < Q as u128);
+                        }
+                        reducing_fills += 1;
+                        assert_eq!(env.all_token_account_data(), tokens, "{label}: SPL frame");
+                        assert_eq!(env.token_supply_observed(), env.initial_token_supply);
+                        assert_eq!(u128::from(env.token_amount(env.vault)), after_group.vault);
+                        assert_eq!(after_group.vault, after_group.c_tot + after_group.insurance);
+                        for (key, account) in before {
+                            if ![
+                                env.market,
+                                env.actors[TAKER].portfolio,
+                                env.actors[MAKER].portfolio,
+                                env.actors[MAKER].matcher_context,
+                            ]
+                            .contains(&key)
+                            {
+                                assert_eq!(
+                                    env.svm.get_account(&key).unwrap(),
+                                    account,
+                                    "{label}: unrelated {key}"
+                                );
+                            }
+                        }
+                        let cpi = matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi);
+                        let maker = env.primary_portfolio_data(MAKER);
+                        assert_eq!(
+                            state::read_portfolio_matcher_config(&maker)
+                                .unwrap()
+                                .enabled(),
+                            u64::from(cpi)
+                        );
+                        assert_eq!(
+                            state::read_portfolio_matcher_expiry(&maker).unwrap(),
+                            if cpi { u64::MAX } else { 0 }
+                        );
+                        assert_eq!(env.primary_market_state().0.matcher_req_seq, u64::from(cpi));
+                        let normalized = hint_route_accounts(&env, true);
+                        if let Some(expected) = &expected_after {
+                            assert!(
+                                &normalized == expected,
+                                "{label}: equivalent route poststate"
+                            );
+                        } else {
+                            expected_after = Some(normalized);
+                        }
+                        let trace = env.finish_public_trace();
+                        trace.validate_public_execution().unwrap();
+                        assert_eq!(trace.out_of_band_economic_mutations, 0, "{label}");
+                        assert_eq!(
+                            trace.steps.iter().filter(|step| !step.succeeded).count(),
+                            usize::from(count == 8)
+                        );
+                        peak_cu = peak_cu.max(
+                            trace
+                                .steps
+                                .iter()
+                                .filter_map(|step| step.compute_units)
+                                .max()
+                                .unwrap(),
+                        );
+                        worlds += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        (worlds, stale_rejections, inline_fills, reducing_fills),
+        (192, 96, 96, 192)
+    );
+    assert!(peak_cu < TX_CU_LIMIT);
+    println!("INV-047/053/054/057: {worlds} worlds, {stale_rejections} exact stale rollbacks, {inline_fills} inline refreshes, {reducing_fills} reducing fills; max refresh calls={max_refresh_calls}, peak CU={peak_cu}, SBF SHA256={}", program_hash.unwrap());
 }
 
 proptest! {
