@@ -55417,6 +55417,129 @@ fn v16_bpf_switchboard_oracle_feed_read_and_applied() {
     );
 }
 
+// Re-reading an unchanged observation may advance a clamped mark, but must not postpone recovery.
+#[test]
+fn v16_bpf_switchboard_replay_advances_effective_price_without_renewing_freshness() {
+    const INITIAL_MARK: u64 = 1_000_000;
+    const TARGET_MARK: u64 = 1_100_000;
+    const SB_SCALE: i128 = 1_000_000_000_000;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 100);
+    set_test_clock(&mut env, 1, 100);
+    let feed = env.set_switchboard_price(INITIAL_MARK as i128 * SB_SCALE, 1, 100);
+    env.try_configure_hybrid_with_cu(
+        1,
+        0,
+        [feed.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[feed],
+        1,
+        100,
+        0,
+        0,
+        2,
+    )
+    .expect("configure Switchboard hybrid oracle");
+    env.configure_permissionless_resolve_with_cu(3, 1);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_portfolio = env.create_portfolio(&long_owner);
+    let short_portfolio = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_portfolio, 100_000_000);
+    env.deposit(&short_owner, short_portfolio, 100_000_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_portfolio,
+        &short_owner,
+        short_portfolio,
+        POS_SCALE as i128,
+        INITIAL_MARK,
+        0,
+    );
+    assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, POS_SCALE);
+
+    let mut observation = env.svm.get_account(&feed).unwrap();
+    observation.data = make_switchboard_data(
+        &[0xABu8; 32],
+        TARGET_MARK as i128 * SB_SCALE,
+        1,
+        101,
+        3,
+        1,
+        2,
+    );
+    env.svm.set_account(feed, observation.clone()).unwrap();
+
+    // Only slot 2 sees a new publication. Later cranks reuse exactly the same account.
+    for (slot, expected_price) in [(2, 1_010_000), (3, 1_020_100), (4, 1_030_301)] {
+        set_test_clock(&mut env, slot, 99 + slot as i64);
+        env.crank_with_oracle_tail(
+            long_portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                close_q: 0,
+                observations: crank_observations_with_accounts(0, 1),
+            },
+            &[feed],
+        );
+        let (cfg, group) = env.market_state();
+        let profile = state::read_asset_oracle_profile(
+            &env.svm.get_account(&env.market).unwrap().data,
+            0,
+        )
+        .unwrap();
+        assert_eq!(group.current_slot, slot, "crank uses the authenticated slot");
+        assert_eq!(group.assets[0].slot_last, slot);
+        assert_eq!(group.assets[0].raw_oracle_target_price, TARGET_MARK);
+        assert_eq!(
+            group.assets[0].effective_price, expected_price,
+            "the exposed mark catches up by exactly 100 bps per authenticated slot"
+        );
+        assert_eq!(cfg.last_good_oracle_slot, 2, "replay must not renew freshness");
+        assert_eq!(profile.last_good_oracle_slot, 2);
+        assert_eq!(profile.oracle_leg_publish_times[0], 101);
+        assert_eq!(profile.oracle_leg_prices_e6[0], TARGET_MARK);
+        assert_eq!(env.svm.get_account(&feed).unwrap(), observation);
+    }
+
+    // The publication is still within the 60-second parser window when slot freshness expires.
+    set_test_clock(&mut env, 5, 104);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&long_portfolio).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_portfolio, false),
+            AccountMeta::new_readonly(feed, false),
+        ],
+        &[],
+    );
+    let err = rejected.expect_err("unchanged observations must not extend the stale deadline");
+    assert!(
+        err.contains("Custom(27)"),
+        "expected OracleStale at the authenticated stale deadline, got: {err}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&long_portfolio).unwrap(), portfolio_before);
+
+    env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    )
+    .expect("repeated observations must leave permissionless resolution available");
+    let (_, resolved) = env.market_state();
+    assert_eq!(resolved.mode, MarketModeV16::Resolved);
+    assert_eq!(resolved.resolved_slot, 5);
+}
+
 // Switchboard staleness gate: a feed whose last_update_timestamp is far in the past must be rejected
 // (read_switchboard_price_e6: age > max_staleness_secs -> OracleStale), same as the Pyth path.
 #[test]
@@ -55676,6 +55799,78 @@ fn v16_attack_switchboard_owner_and_key_binding_reject_spoofed_feed() {
         100,
         "valid Switchboard owner/key pair seeds the expected mark"
     );
+}
+
+// A correctly owned, key-bound Switchboard feed still needs the PullFeed discriminator and
+// complete account layout. Removing only the last byte leaves all parsed price fields intact.
+#[test]
+fn v16_attack_switchboard_bad_discriminator_or_short_account_rejected() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 10, 1_000);
+    let feed = env.set_switchboard_price(100 * 1_000_000_000_000, 1, 1_000);
+    let valid = env.svm.get_account(&feed).unwrap();
+    let feeds = [feed.to_bytes(), [0u8; 32], [0u8; 32]];
+    let configure = |env: &mut V16CuEnv| {
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            feeds,
+            &[feed],
+            10,
+            1_000,
+            0,
+            0,
+            3,
+            100,
+        )
+    };
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let admin_before = env.svm.get_account(&env.admin.pubkey()).unwrap();
+    let mut bad_discriminator = valid.clone();
+    bad_discriminator.data[0] ^= 0xff;
+    let mut short = valid.clone();
+    short.data.truncate(valid.data.len() - 1);
+
+    for (label, malformed, expected_error) in [
+        ("bad discriminator", bad_discriminator, "Custom(26)"),
+        ("one byte short", short, "InvalidAccountData"),
+    ] {
+        env.svm.set_account(feed, malformed.clone()).unwrap();
+        env.svm.expire_blockhash();
+        let err = configure(&mut env).expect_err(label);
+        assert!(
+            err.contains(expected_error),
+            "Switchboard {label} must reject as {expected_error}, got: {err}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "Switchboard {label} rejection must preserve the entire market account"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.admin.pubkey()).unwrap(),
+            admin_before,
+            "Switchboard {label} rejection must preserve the admin account"
+        );
+        assert_eq!(
+            env.svm.get_account(&feed).unwrap(),
+            malformed,
+            "Switchboard {label} rejection must preserve the malformed feed account"
+        );
+    }
+
+    env.svm.set_account(feed, valid).unwrap();
+    env.svm.expire_blockhash();
+    configure(&mut env).expect("restored full-length PullFeed configures through the same route");
+    let (cfg, group) = env.market_state();
+    assert_eq!(
+        cfg.oracle_mode,
+        percolator_prog::constants::ORACLE_MODE_HYBRID_AFTER_HOURS
+    );
+    assert_eq!(cfg.oracle_leg_feeds, feeds);
+    assert_eq!(cfg.oracle_target_price_e6, 100);
+    assert_eq!(group.assets[0].effective_price, 100);
 }
 
 // Fee-RATE evasion: execute_trade floors the caller-supplied fee_bps to the config base
