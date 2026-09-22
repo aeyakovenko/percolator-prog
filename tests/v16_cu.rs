@@ -4427,6 +4427,92 @@ fn v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
     assert_eq!(group.c_tot, 600);
 }
 
+// Retain the signed transaction itself: retrying it must not execute Withdraw twice,
+// even while the portfolio and vault can fund another withdrawal of the same amount.
+#[test]
+fn v16_bpf_retained_signed_withdraw_executes_at_most_once() {
+    use solana_sdk::transaction::TransactionError;
+
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    let dest = env.token_account(owner.pubkey(), 0);
+    let instruction = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::Withdraw { amount: 400 }.encode(),
+    };
+    let retained = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), instruction.clone()],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &owner],
+        env.svm.latest_blockhash(),
+    );
+    env.svm
+        .send_transaction(retained.clone())
+        .expect("first submission of the signed withdrawal succeeds");
+    assert_eq!(env.token_amount(dest), 400);
+    assert_eq!(env.token_amount(env.vault), 600);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 600);
+    let (_, after_first) = env.market_state();
+    assert_eq!(after_first.vault, 600);
+    assert_eq!(after_first.c_tot, 600);
+
+    let before_replay = [
+        ("market", env.market),
+        ("portfolio", portfolio),
+        ("destination", dest),
+        ("vault", env.vault),
+        ("owner", owner.pubkey()),
+        ("payer", env.payer.pubkey()),
+    ]
+    .map(|(label, key)| (label, key, env.svm.get_account(&key).unwrap()));
+    assert_eq!(
+        retained.message.recent_blockhash,
+        env.svm.latest_blockhash(),
+        "the retained transaction is still within its blockhash lifetime"
+    );
+    let replay = env
+        .svm
+        .send_transaction(retained.clone())
+        .expect_err("an identical signed withdrawal must not execute twice");
+    assert_eq!(replay.err, TransactionError::AlreadyProcessed);
+    assert_eq!(replay.meta.compute_units_consumed, 0);
+    assert!(
+        replay.meta.logs.is_empty(),
+        "duplicate rejection must precede program execution: {replay:?}"
+    );
+    for (label, key, before) in &before_replay {
+        assert_eq!(
+            env.svm.get_account(key).as_ref(),
+            Some(before),
+            "retained withdrawal replay must preserve the entire {label} account"
+        );
+    }
+
+    // Fresh authorization of the identical instruction remains valid on the same accounts.
+    env.svm.expire_blockhash();
+    assert_ne!(retained.message.recent_blockhash, env.svm.latest_blockhash());
+    send_raw_tx(&mut env.svm, &env.payer, instruction, &[&owner])
+        .expect("same withdrawal succeeds with a fresh blockhash and signatures");
+    assert_eq!(env.token_amount(dest), 800);
+    assert_eq!(env.token_amount(env.vault), 200);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 200);
+    let (_, after_fresh) = env.market_state();
+    assert_eq!(after_fresh.vault, 200);
+    assert_eq!(after_fresh.c_tot, 200);
+    assert_eq!(after_fresh.insurance, 0);
+}
+
 #[test]
 fn v16_bpf_failed_deposit_spl_transfer_rolls_back_engine_credit() {
     let mut env = V16CuEnv::new();
