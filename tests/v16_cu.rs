@@ -37825,6 +37825,120 @@ fn v16_attack_close_slab_requires_secondary_vault_recovery() {
     );
 }
 
+// CloseSlab must keep the two mint-specific payout destinations distinct before sweeping dust
+// or reclaiming either vault. Correcting only the secondary destination must allow full cleanup.
+#[test]
+fn v16_bpf_close_slab_rejects_shared_primary_secondary_destination() {
+    use percolator_prog::error::PercolatorError;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.resolve();
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let before = [
+        ("market", env.market),
+        ("primary vault", env.vault),
+        ("secondary vault", secondary_vault),
+        ("primary destination", primary_dest),
+        ("secondary destination", secondary_dest),
+        ("admin rent recipient", admin.pubkey()),
+    ]
+    .map(|(label, key)| (label, key, env.svm.get_account(&key).unwrap()));
+    let admin_lamports_before = env.svm.get_account(&admin.pubkey()).unwrap().lamports;
+    let reclaim_lamports: u64 = [env.market, env.vault, secondary_vault]
+        .iter()
+        .map(|key| env.svm.get_account(key).unwrap().lamports)
+        .sum();
+
+    let close_slab = |env: &mut V16CuEnv, secondary_destination: Pubkey| {
+        env.svm.expire_blockhash();
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(primary_dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new(secondary_destination, false),
+            ],
+            data: ProgInstruction::CloseSlab.encode(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &admin],
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx)
+    };
+    let failed = close_slab(&mut env, primary_dest)
+        .expect_err("CloseSlab must reject a shared primary and secondary destination");
+    assert_eq!(
+        failed.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::InvalidVaultAccount as u32),
+        ),
+        "the destination alias guard must reject before secondary mint validation: {failed:?}"
+    );
+    let token_invoke = format!("Program {} invoke", spl_token::ID);
+    assert!(
+        !failed
+            .meta
+            .logs
+            .iter()
+            .any(|line| line.starts_with(&token_invoke)),
+        "aliased destinations must reject before any SPL transfer or close: {failed:?}"
+    );
+    // Transaction fees are paid separately; all writable instruction accounts must roll back.
+    for (label, key, account) in &before {
+        assert_eq!(
+            env.svm.get_account(key).as_ref(),
+            Some(account),
+            "aliased CloseSlab must preserve the entire {label} account"
+        );
+    }
+
+    close_slab(&mut env, secondary_dest)
+        .expect("CloseSlab succeeds after changing only the secondary destination account");
+    assert_eq!(env.token_amount(primary_dest), 7);
+    assert_eq!(env.token_amount(secondary_dest), 50);
+    assert_eq!(
+        env.svm.get_account(&admin.pubkey()).unwrap().lamports,
+        admin_lamports_before + reclaim_lamports,
+        "successful close reclaims both vaults and market rent exactly once"
+    );
+    for vault in [env.vault, secondary_vault] {
+        if let Some(account) = env.svm.get_account(&vault) {
+            assert_eq!(account.lamports, 0, "successful close reclaims both vaults");
+        }
+    }
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|b| *b == 0));
+}
+
 // A late secondary SPL failure must roll back the successful primary dust transfer and vault close,
 // including the rent credited to the admin. The overflowing balance is a synthetic CPI failure fixture.
 #[test]
@@ -49140,6 +49254,148 @@ fn v16_attack_base_unit_mints_changeable_only_when_empty() {
         new_secondary.to_bytes(),
         "secondary mint unchanged while funded"
     );
+}
+
+// A signed primary deposit can be overtaken by an empty-market mint change.
+// Even when the old primary becomes the secondary, it must not credit new primary capital.
+#[test]
+fn v16_bpf_delayed_deposit_rejects_after_primary_mint_change() {
+    use percolator_prog::error::PercolatorError;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let old_source = env.token_account(owner.pubkey(), 1_000);
+    let new_primary = env.create_mint();
+    let new_source = env.token_account_for_mint(new_primary, owner.pubkey(), 1_000);
+    let new_vault = canonical_vault_ata(env.vault_authority, new_primary);
+    env.svm
+        .set_account(
+            new_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(new_primary, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let delayed = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(old_source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                data: ProgInstruction::Deposit { amount: 400 }.encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &owner],
+        env.svm.latest_blockhash(),
+    );
+    env.svm
+        .simulate_transaction(delayed.clone().into())
+        .expect("the signed deposit is valid before the primary mint changes");
+    assert_eq!(env.token_amount(old_source), 1_000);
+    assert_eq!(env.token_amount(env.vault), 0);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+    let (cfg_before, group_before) = env.market_state();
+    assert_eq!(cfg_before.collateral_mint, env.mint.to_bytes());
+    assert_eq!(group_before.vault, 0);
+    assert_eq!(group_before.c_tot, 0);
+    assert_eq!(group_before.insurance, 0);
+
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: new_primary.to_bytes(),
+            secondary_mint: env.mint.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(new_primary, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(env.vault, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("empty market can change primary mint with a deposit still pending");
+    let (cfg_after, _) = env.market_state();
+    assert_eq!(cfg_after.collateral_mint, new_primary.to_bytes());
+    assert_eq!(cfg_after.secondary_collateral_mint, env.mint.to_bytes());
+    assert_eq!(
+        delayed.message.recent_blockhash,
+        env.svm.latest_blockhash(),
+        "the delayed deposit still has a valid blockhash"
+    );
+
+    let before_delayed = [
+        ("market", env.market),
+        ("portfolio", portfolio),
+        ("old source", old_source),
+        ("old vault", env.vault),
+        ("new source", new_source),
+        ("new vault", new_vault),
+        ("owner", owner.pubkey()),
+    ]
+    .map(|(label, key)| (label, key, env.svm.get_account(&key).unwrap()));
+    let rejected = env
+        .svm
+        .send_transaction(delayed)
+        .expect_err("the old primary deposit must reject after the mint change");
+    assert_eq!(
+        rejected.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::InvalidMint as u32),
+        ),
+        "the deposit must reach the program and reject the obsolete mint: {rejected:?}"
+    );
+    for (label, key, before) in &before_delayed {
+        assert_eq!(
+            env.svm.get_account(key).as_ref(),
+            Some(before),
+            "rejected delayed deposit must preserve the entire {label} account"
+        );
+    }
+
+    env.send(
+        ProgInstruction::Deposit { amount: 400 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(new_source, false),
+            AccountMeta::new(new_vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    )
+    .expect("a current-primary deposit succeeds on the same portfolio");
+    assert_eq!(env.token_amount(old_source), 1_000);
+    assert_eq!(env.token_amount(env.vault), 0);
+    assert_eq!(env.token_amount(new_source), 600);
+    assert_eq!(env.token_amount(new_vault), 400);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 400);
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.vault, 400);
+    assert_eq!(group_after.c_tot, 400);
+    assert_eq!(group_after.insurance, 0);
+    assert_eq!(group_after.vault, env.token_amount(new_vault) as u128);
 }
 
 // security.md sweep — base-unit reserve liveness (#44/#48): accounting-empty is not enough to
