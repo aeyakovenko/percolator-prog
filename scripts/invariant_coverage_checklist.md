@@ -77,17 +77,17 @@ formal proof, `F` stateful/property fuzzing, `I` SVM integration, `M` metamorphi
 | INV-044 | TODO | | | |
 | INV-045 | TODO | | | |
 | INV-046 | TODO | | | |
-| INV-047 | PARTIAL | F,I,M | `v16_program_fractional_close_partitions_preserve_double_ceil_fees_and_owner_payouts` | Seven/eight-leg four-route matrix remains |
+| INV-047 | PARTIAL | F,I,M,C | `v16_program_eight_asset_stale_routes_refresh_and_reduce`; `v16_program_fractional_close_partitions_preserve_double_ceil_fees_and_owner_payouts` | Healthy Live/AuthMark, 7/8 legs, four routes; other lifecycle modes, 9-14 legs and multi-fill batches remain |
 | INV-048 | TODO | | | |
 | INV-049 | TODO | | | |
 | INV-050 | TODO | | | |
 | INV-051 | TODO | | | |
 | INV-052 | PARTIAL | F,I,M | `v16_program_fractional_close_partitions_preserve_double_ceil_fees_and_owner_payouts` | Non-integral split/merge families remain |
-| INV-053 | TODO | | | |
-| INV-054 | TODO | | | |
+| INV-053 | PARTIAL | F,I,R,C | `v16_program_eight_asset_stale_routes_refresh_and_reduce` | Independent full-health oracle covers healthy Live/AuthMark at 7/8 legs; other modes and 9-14 legs remain |
+| INV-054 | PARTIAL | F,I,C | `v16_program_eight_asset_stale_routes_refresh_and_reduce` | AuthMark oracle epoch invalidation at 7/8 legs; other certificate-bound inputs/epochs remain |
 | INV-055 | TODO | | | |
 | INV-056 | TODO | | | |
-| INV-057 | TODO | | | |
+| INV-057 | PARTIAL | F,I,C | `v16_program_eight_asset_stale_routes_refresh_and_reduce` | Owner exit from stale healthy Live/AuthMark accounts; recovery/resolved/drain and counterparty-free cases remain |
 | INV-058 | TODO | | | |
 | INV-059 | TODO | | | |
 | INV-060 | TODO | | | |
