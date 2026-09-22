@@ -19394,6 +19394,240 @@ fn v16_attack_resolved_payout_replay_extracts_nothing() {
     );
 }
 
+// A receipt paid at a provisional rate must survive zero-value claim/close retries. A later
+// source-backed close refines the remaining bound and makes a new top-up payable exactly once,
+// including when that close and a rejected top-up must roll back together.
+#[test]
+fn v16_bpf_resolved_receipt_rate_change_claim_order_is_atomic_and_exact_once() {
+    const CAPITAL: u128 = 1_000;
+    const FACE: u128 = 100;
+    const RESIDUAL: u128 = 40;
+    const INSURANCE: u128 = 23;
+    const FUNDED: u128 = 2 * CAPITAL + RESIDUAL + FACE + INSURANCE;
+
+    let mut env = V16CuEnv::new();
+    let early_owner = Keypair::new();
+    let late_owner = Keypair::new();
+    let early = env.create_portfolio(&early_owner);
+    let late = env.create_portfolio(&late_owner);
+    env.deposit(&early_owner, early, CAPITAL);
+    env.deposit(&late_owner, late, CAPITAL);
+    env.top_up_insurance(INSURANCE);
+    env.top_up_backing_bucket(0, RESIDUAL, 1);
+    env.top_up_backing_bucket(1, FACE, 100);
+    env.add_source_positive_pnl(early, 0, FACE);
+    env.add_source_positive_pnl(late, 1, FACE);
+    assert_eq!(env.token_amount(env.vault) as u128, FUNDED);
+    env.svm.warp_to_slot(1);
+    env.resolve();
+
+    // Expired backing enters the junior pool while the late claim still dilutes its rate.
+    let (early_dest, cu) = env.close_resolved_with_cu(&early_owner, early);
+    assert_cu_within("provisional receipt close", cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(early_dest) as u128, CAPITAL + RESIDUAL / 2);
+    let early_state = env.portfolio_state(early);
+    assert_eq!(early_state.capital.get(), 0);
+    assert_eq!(early_state.pnl.get(), 0);
+    assert_eq!(
+        resolved_receipt(&early_state),
+        ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: FACE * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: FACE,
+            paid_effective: RESIDUAL / 2,
+            finalized: false,
+        }
+    );
+    let (_, provisional) = env.market_state();
+    let ledger = provisional.resolved_payout_ledger;
+    assert_eq!(ledger.snapshot_residual, RESIDUAL);
+    assert_eq!(ledger.terminal_claim_exact_receipts_num, FACE * BOUND_SCALE);
+    assert_eq!(ledger.terminal_claim_bound_unreceipted_num, FACE * BOUND_SCALE);
+    assert_eq!(ledger.current_payout_rate_num, RESIDUAL * BOUND_SCALE);
+    assert_eq!(ledger.current_payout_rate_den, 2 * FACE * BOUND_SCALE);
+    assert!(!ledger.payout_halted);
+    assert_eq!(provisional.c_tot, CAPITAL);
+    assert_eq!(provisional.insurance, INSURANCE);
+    assert_eq!(
+        provisional.source_backing_buckets[1].fresh_unliened_backing_num,
+        FACE * BOUND_SCALE
+    );
+
+    let late_dest = env.token_account_for_mint(env.mint, late_owner.pubkey(), 0);
+    let topup_dest = env.token_account_for_mint(env.mint, early_owner.pubkey(), 0);
+    let program_id = env.program_id;
+    let market = env.market;
+    let vault = env.vault;
+    let vault_authority = env.vault_authority;
+    let payout_ix = |ix: ProgInstruction, owner: Pubkey, portfolio: Pubkey, dest: Pubkey| {
+        Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(owner, false),
+                AccountMeta::new(market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(vault, false),
+                AccountMeta::new_readonly(vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: ix.encode(),
+        }
+    };
+    let close_early = payout_ix(
+        ProgInstruction::CloseResolved { fee_rate_per_slot: 0 },
+        early_owner.pubkey(),
+        early,
+        topup_dest,
+    );
+    let close_late = payout_ix(
+        ProgInstruction::CloseResolved { fee_rate_per_slot: 0 },
+        late_owner.pubkey(),
+        late,
+        late_dest,
+    );
+    let claim_early = payout_ix(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        early_owner.pubkey(),
+        early,
+        topup_dest,
+    );
+    let tracked = [
+        ("market", market),
+        ("early portfolio", early),
+        ("late portfolio", late),
+        ("vault", vault),
+        ("initial payout", early_dest),
+        ("late payout", late_dest),
+        ("top-up payout", topup_dest),
+    ];
+    let before = tracked.map(|(_, key)| env.svm.get_account(&key).unwrap());
+
+    for ix in [claim_early.clone(), close_early.clone(), claim_early.clone()] {
+        env.svm.expire_blockhash();
+        let cu = send_raw_tx(&mut env.svm, &env.payer, ix, &[])
+            .expect("provisional receipt replay succeeds without payment");
+        assert_cu_within("provisional receipt replay", cu, CUSTODY_CU_LIMIT);
+        for ((label, key), account_before) in tracked.iter().zip(&before) {
+            assert_eq!(
+                env.svm.get_account(key).unwrap(),
+                *account_before,
+                "zero-value replay must preserve {label} and the later top-up entitlement"
+            );
+        }
+    }
+
+    // The first instruction pays the late owner and raises the rate. The second must reject
+    // its wrong-owner destination, rolling back both payouts and the bound refinement.
+    let bad_claim = payout_ix(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        early_owner.pubkey(),
+        early,
+        late_dest,
+    );
+    env.svm.expire_blockhash();
+    let rejected = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), close_late.clone(), bad_claim],
+        &[],
+    )
+    .expect_err("close followed by a misdirected newly payable top-up must reject");
+    let invalid_dest = percolator_prog::error::PercolatorError::InvalidTokenAccount as u32;
+    assert!(
+        rejected.contains(&format!("InstructionError(3, Custom({invalid_dest}))")),
+        "the close must succeed before the top-up rejects its destination: {rejected}"
+    );
+    for ((label, key), account_before) in tracked.iter().zip(&before) {
+        assert_eq!(
+            env.svm.get_account(key).unwrap(),
+            *account_before,
+            "rejected close/top-up transaction must roll back the entire {label} account"
+        );
+    }
+
+    env.svm.expire_blockhash();
+    let cu = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), close_late.clone(), claim_early.clone()],
+        &[],
+    )
+    .expect("same close and newly payable top-up succeed with the owner's destination");
+    assert_cu_within("close and rate-change top-up retry", cu, 2 * CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(late_dest) as u128, CAPITAL + FACE);
+    assert_eq!(env.token_amount(topup_dest) as u128, RESIDUAL / 2);
+    let receipt = resolved_receipt(&env.portfolio_state(early));
+    assert!(receipt.present);
+    assert!(!receipt.finalized);
+    assert_eq!(receipt.terminal_positive_claim_face, FACE);
+    assert_eq!(receipt.paid_effective, RESIDUAL);
+    let (_, settled) = env.market_state();
+    assert_eq!(settled.resolved_payout_ledger.snapshot_residual, RESIDUAL);
+    assert_eq!(
+        settled.resolved_payout_ledger.terminal_claim_bound_unreceipted_num,
+        0
+    );
+    assert_eq!(
+        settled.resolved_payout_ledger.terminal_claim_exact_receipts_num,
+        FACE * BOUND_SCALE
+    );
+    assert_eq!(
+        settled.resolved_payout_ledger.current_payout_rate_num,
+        RESIDUAL * BOUND_SCALE
+    );
+    assert_eq!(
+        settled.resolved_payout_ledger.current_payout_rate_den,
+        FACE * BOUND_SCALE
+    );
+    assert_eq!(settled.c_tot, 0);
+    assert_eq!(settled.pnl_pos_tot, 0);
+    assert_eq!(settled.pnl_pos_bound_tot_num, 0);
+    assert_eq!(settled.vault, INSURANCE);
+    assert_eq!(env.token_amount(vault) as u128, INSURANCE);
+
+    // Repeated claims now clear only the terminal haircut shortfall. Funded insurance must
+    // remain untouched when either close route is replayed after that receipt disappears.
+    let after_payment = tracked.map(|(_, key)| env.svm.get_account(&key).unwrap());
+    for ix in [claim_early.clone(), claim_early, close_early, close_late] {
+        env.svm.expire_blockhash();
+        let cu = send_raw_tx(&mut env.svm, &env.payer, ix, &[])
+            .expect("terminal receipt cleanup and close replays succeed");
+        assert_cu_within("terminal rate-change receipt replay", cu, CUSTODY_CU_LIMIT);
+        assert_eq!(
+            resolved_receipt(&env.portfolio_state(early)),
+            ResolvedPayoutReceiptV16::EMPTY
+        );
+        for ((label, key), account_before) in tracked.iter().zip(&after_payment) {
+            if *key != early {
+                assert_eq!(
+                    env.svm.get_account(key).unwrap(),
+                    *account_before,
+                    "terminal receipt cleanup/replay must preserve {label}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        env.token_amount(early_dest) as u128 + env.token_amount(topup_dest) as u128,
+        CAPITAL + RESIDUAL,
+        "the early owner receives its increased terminal entitlement exactly once"
+    );
+    assert_eq!(
+        [early_dest, late_dest, topup_dest, vault]
+            .into_iter()
+            .map(|key| env.token_amount(key) as u128)
+            .sum::<u128>(),
+        FUNDED
+    );
+    env.close_portfolio_with_cu(&early_owner, early);
+    env.close_portfolio_with_cu(&late_owner, late);
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 0);
+    assert_eq!(env.market_state().1.insurance, INSURANCE);
+    assert_eq!(env.token_amount(vault) as u128, INSURANCE);
+}
+
 // security.md sweep - resolved payout dual-mint rail isolation (#33/#44/#48): a resolved winner can
 // be paid through the secondary base-unit reserve, but that receipt must then exhaust the shared
 // terminal claim. Independently funded primary reserve liquidity must not permit a second payout.
