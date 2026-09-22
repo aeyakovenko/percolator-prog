@@ -12642,6 +12642,187 @@ fn v16_bpf_close_resolved_pays_positive_pnl_through_engine_ledger() {
     assert!(!resolved_receipt(&account).present);
 }
 
+// A full portfolio's early terminal close must preserve every source claim until
+// the counterparty exits, then pay the exact settled value and permit reclamation.
+#[test]
+fn v16_bpf_full_leg_resolved_close_preserves_claims_and_pays_exactly() {
+    const N: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const CAPITAL: u128 = 10_000;
+    const OPEN_PRICE: u64 = 100;
+    const RESOLVED_PRICE: u64 = 95;
+    const PNL_PER_LEG: u128 = (OPEN_PRICE - RESOLVED_PRICE) as u128;
+    const TOTAL_PNL: u128 = N as u128 * PNL_PER_LEG;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(N, 10_000, 10_000, 10_000);
+    for asset_index in 0..N {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, OPEN_PRICE);
+    }
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+        let source = env.deposit(owner, portfolio, CAPITAL);
+        assert_eq!(env.token_amount(source), 0);
+    }
+    for asset_index in 0..N {
+        env.trade_asset_with_cu(
+            asset_index,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            POS_SCALE as i128,
+            OPEN_PRICE,
+            0,
+        );
+    }
+
+    env.svm.warp_to_slot(1);
+    for asset_index in 0..N {
+        env.push_auth_mark_for_asset_as_admin(asset_index, 1, RESOLVED_PRICE);
+    }
+    let assets: Vec<u16> = (0..N).collect();
+    for portfolio in [long, short] {
+        let cu = env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                close_q: 0,
+                observations: crank_observations_for_assets(&assets),
+            },
+        );
+        assert_cu_within("full-leg resolved precrank", cu, 900_000);
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(portfolio))),
+            N as u32,
+            "terminal exit must start with every supported leg occupied"
+        );
+    }
+    let loser = env.portfolio_state(long);
+    let winner = env.portfolio_state(short);
+    assert_eq!(loser.capital.get(), CAPITAL - TOTAL_PNL);
+    assert_eq!(loser.pnl.get(), 0);
+    assert_eq!(winner.capital.get(), CAPITAL);
+    assert_eq!(winner.pnl.get(), TOTAL_PNL as i128);
+    assert_eq!(
+        winner.source_domains.iter().filter(|source| source.is_occupied()).count(),
+        N as usize
+    );
+    let (_, settled) = env.market_state();
+    assert_eq!(settled.config.max_portfolio_assets, N);
+    assert_eq!(settled.c_tot, 2 * CAPITAL - TOTAL_PNL);
+    assert_eq!(settled.pnl_pos_tot, TOTAL_PNL);
+    assert_eq!(settled.vault, 2 * CAPITAL);
+    assert_eq!(env.token_amount(env.vault) as u128, settled.vault);
+    for asset_index in 0..N as usize {
+        let asset = &settled.assets[asset_index];
+        assert_eq!(asset.effective_price, RESOLVED_PRICE);
+        assert_eq!(asset.oi_eff_long_q, POS_SCALE);
+        assert_eq!(asset.oi_eff_short_q, POS_SCALE);
+        assert_eq!(asset.stored_pos_count_long, 1);
+        assert_eq!(asset.stored_pos_count_short, 1);
+        assert_eq!(
+            state::portfolio_source_domain(&winner, 2 * asset_index).source_claim_bound_num.get(),
+            PNL_PER_LEG * BOUND_SCALE
+        );
+    }
+    let resolve_cu = env.resolve();
+    assert_cu_within("full-leg resolve", resolve_cu, CUSTODY_CU_LIMIT);
+
+    let loser_before = env.svm.get_account(&long).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let (early_dest, early_cu) = env.close_resolved_with_cu(&short_owner, short);
+    assert_cu_within("full-leg early resolved close", early_cu, 1_400_000);
+    assert_eq!(env.token_amount(early_dest), 0);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.svm.get_account(&long).unwrap(), loser_before);
+    let pending = env.portfolio_state(short);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&pending)));
+    assert_eq!(pending.capital.get(), CAPITAL);
+    assert_eq!(pending.pnl.get(), TOTAL_PNL as i128);
+    assert_eq!(pending.source_domains, winner.source_domains);
+    assert!(!resolved_receipt(&pending).present);
+    let (_, waiting) = env.market_state();
+    assert_eq!(waiting.mode, MarketModeV16::Resolved);
+    assert_eq!(waiting.c_tot, 2 * CAPITAL - TOTAL_PNL);
+    assert_eq!(waiting.pnl_pos_tot, TOTAL_PNL);
+    assert_eq!(waiting.vault, 2 * CAPITAL);
+    for asset in waiting.assets.iter().take(N as usize) {
+        assert_eq!(asset.oi_eff_long_q, POS_SCALE);
+        assert_eq!(asset.stored_pos_count_long, 1);
+        assert_eq!(asset.oi_eff_short_q, 0);
+        assert_eq!(asset.stored_pos_count_short, 0);
+    }
+
+    let winner_before = env.svm.get_account(&short).unwrap();
+    let (loser_dest, loser_cu) = env.close_resolved_with_cu(&long_owner, long);
+    assert_cu_within("full-leg losing resolved close", loser_cu, 1_400_000);
+    assert_eq!(env.token_amount(loser_dest) as u128, CAPITAL - TOTAL_PNL);
+    assert_eq!(env.svm.get_account(&short).unwrap(), winner_before);
+    let (_, funded) = env.market_state();
+    assert_eq!(funded.c_tot, CAPITAL);
+    assert_eq!(funded.pnl_pos_tot, TOTAL_PNL);
+    assert_eq!(funded.vault, CAPITAL + TOTAL_PNL);
+    assert_eq!(env.token_amount(env.vault) as u128, funded.vault);
+
+    let (winner_dest, winner_cu) = env.close_resolved_with_cu(&short_owner, short);
+    assert_cu_within("full-leg winning resolved payout", winner_cu, 1_400_000);
+    assert_eq!(env.token_amount(winner_dest) as u128, CAPITAL + TOTAL_PNL);
+    let (_, paid) = env.market_state();
+    assert_eq!(paid.vault, 0);
+    assert_eq!(paid.c_tot, 0);
+    assert_eq!(paid.insurance, 0);
+    assert_eq!(paid.pnl_pos_tot, 0);
+    assert_eq!(paid.pnl_pos_bound_tot_num, 0);
+    assert_eq!(paid.negative_pnl_account_count, 0);
+    for asset in paid.assets.iter().take(N as usize) {
+        assert_eq!(asset.oi_eff_long_q, 0);
+        assert_eq!(asset.oi_eff_short_q, 0);
+        assert_eq!(asset.stored_pos_count_long, 0);
+        assert_eq!(asset.stored_pos_count_short, 0);
+    }
+    for source in &paid.source_credit {
+        assert_eq!(source.positive_claim_bound_num, 0);
+    }
+    assert_eq!(env.token_amount(env.vault), 0);
+    assert_eq!(
+        env.token_amount(early_dest) as u128
+            + env.token_amount(loser_dest) as u128
+            + env.token_amount(winner_dest) as u128
+            + env.token_amount(env.vault) as u128,
+        2 * CAPITAL,
+        "terminal SPL payouts plus remaining custody conserve both deposits"
+    );
+
+    let market_lamports = env.svm.get_account(&env.market).unwrap().lamports;
+    let mut reclaimed_lamports = 0;
+    for (completed, (owner, portfolio)) in [(&long_owner, long), (&short_owner, short)]
+        .into_iter()
+        .enumerate()
+    {
+        let account = env.portfolio_state(portfolio);
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(&account)));
+        assert_eq!(account.capital.get(), 0);
+        assert_eq!(account.pnl.get(), 0);
+        assert_eq!(close_progress(&account).residual_remaining, 0);
+        assert!(!resolved_receipt(&account).present);
+        assert!(account.source_domains.iter().all(|source| !source.is_occupied()));
+        reclaimed_lamports += env.svm.get_account(&portfolio).unwrap().lamports;
+        let cu = env.close_portfolio_with_cu(owner, portfolio);
+        assert_cu_within("full-leg resolved dematerialize", cu, CUSTODY_CU_LIMIT);
+        assert_eq!(env.svm.get_account(&portfolio).unwrap().lamports, 0);
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap().lamports,
+            market_lamports + reclaimed_lamports
+        );
+        assert_eq!(env.market_state().1.materialized_portfolio_count, 1 - completed as u64);
+    }
+    println!(
+        "v16 full-leg resolved close CU early={early_cu}, loser={loser_cu}, winner={winner_cu}"
+    );
+}
+
 #[test]
 fn v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free() {
     let mut env = V16CuEnv::new();
@@ -48115,6 +48296,154 @@ fn v16_attack_force_shutdown_window_allows_matched_user_exit() {
         env.token_amount(env.vault),
         "accounting == real vault after shutdown-window exits"
     );
+}
+
+// A batch's lower total exposure cannot authorize growth on a Recovery asset. A later
+// lifecycle rejection must roll back the earlier Active-leg reduction and its fee, while
+// a batch reducing both assets remains available during the shutdown exit window.
+#[test]
+fn v16_bpf_recovery_asset_batch_rejects_net_reducing_risk_increase_atomically() {
+    const PRICE: u64 = 100;
+    const CAPITAL: u128 = 1_000_000;
+    const SHUT: u64 = 10;
+    const DELAY: u64 = 50;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+    let (long_owner, long_account, short_owner, short_account) =
+        funded_no_cpi_reported_price_pair(&mut env, CAPITAL);
+    for asset_index in [0, 1] {
+        env.trade_asset_with_cu(
+            asset_index,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            (4 * POS_SCALE) as i128,
+            PRICE,
+            0,
+        );
+    }
+
+    let batch = |env: &mut V16CuEnv, recovery_delta: i128| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![
+                    BatchTradeLeg {
+                        asset_index: 0,
+                        size_q: -((2 * POS_SCALE) as i128),
+                        exec_price: PRICE,
+                        fee_bps: 100,
+                    },
+                    BatchTradeLeg {
+                        asset_index: 1,
+                        size_q: recovery_delta,
+                        exec_price: PRICE,
+                        fee_bps: 0,
+                    },
+                ],
+            },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+                AccountMeta::new(short_account, false),
+            ],
+            &[&long_owner, &short_owner],
+        )
+    };
+
+    env.svm.warp_to_slot(SHUT);
+    let active_cu = batch(&mut env, POS_SCALE as i128)
+        .expect("the same mixed-direction batch must succeed while both assets are Active");
+    assert_cu_within("Active mixed batch", active_cu, MULTI_ASSET_OPEN_TRADE_CU_LIMIT);
+    let active = env.market_state().1;
+    assert_eq!(active.assets[0].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(active.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(active.assets[0].oi_eff_long_q, 2 * POS_SCALE);
+    assert_eq!(active.assets[1].oi_eff_long_q, 5 * POS_SCALE);
+    assert_eq!(active.insurance, 4, "the first batch leg charges both owners");
+
+    env.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        SHUT,
+        0,
+    );
+    let (cfg, shutdown) = env.market_state();
+    assert_eq!(shutdown.mode, MarketModeV16::Live);
+    assert_eq!(shutdown.assets[0].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(shutdown.assets[1].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(shutdown.assets[1].effective_price, PRICE);
+    assert!(!oracle_v16::permissionless_stale_matured(&cfg, SHUT));
+    for (asset_index, size) in [(0, 2 * POS_SCALE), (1, 5 * POS_SCALE)] {
+        assert_eq!(shutdown.assets[asset_index].oi_eff_long_q, size);
+        assert_eq!(shutdown.assets[asset_index].oi_eff_short_q, size);
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(long_account), asset_index).basis_pos_q,
+            size as i128
+        );
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(short_account), asset_index).basis_pos_q,
+            -(size as i128)
+        );
+    }
+
+    // Closing two units on asset 0 and adding one on asset 1 lowers gross exposure,
+    // but the second leg still violates asset 1's lifecycle admission gate.
+    let keys = [env.market, long_account, short_account, env.vault];
+    let before = keys.map(|key| env.svm.get_account(&key).unwrap());
+    let rejected = batch(&mut env, POS_SCALE as i128)
+        .expect_err("lower batch exposure must not permit growth on the Recovery asset");
+    assert!(
+        rejected.contains("Custom(21)") || rejected.contains("custom program error: 0x15"),
+        "Recovery risk increase must fail with EngineLockActive: {rejected}"
+    );
+    for (key, expected) in keys.iter().zip(&before) {
+        assert_eq!(
+            env.svm.get_account(key).unwrap(),
+            *expected,
+            "later lifecycle rejection must roll back positions, fees, and custody for {key}"
+        );
+    }
+
+    let reduce_cu = batch(&mut env, -(POS_SCALE as i128))
+        .expect("both legs can reduce during the Recovery asset's shutdown exit window");
+    assert_cu_within(
+        "Recovery mixed batch reduce",
+        reduce_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    let reduced = env.market_state().1;
+    assert_eq!(reduced.mode, MarketModeV16::Live);
+    assert_eq!(reduced.assets[0].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(reduced.assets[1].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(reduced.assets[1].effective_price, PRICE);
+    assert_eq!(reduced.assets[0].oi_eff_long_q, 0);
+    assert_eq!(reduced.assets[0].oi_eff_short_q, 0);
+    assert_eq!(reduced.assets[1].oi_eff_long_q, 4 * POS_SCALE);
+    assert_eq!(reduced.assets[1].oi_eff_short_q, 4 * POS_SCALE);
+    for (account, expected_q) in [
+        (long_account, (4 * POS_SCALE) as i128),
+        (short_account, -((4 * POS_SCALE) as i128)),
+    ] {
+        let portfolio = env.portfolio_state(account);
+        assert!(!has_active_leg_for_asset(&portfolio, 0));
+        assert_eq!(percolator::active_bitmap_count_ones(active_bitmap(&portfolio)), 1);
+        assert_eq!(active_leg_for_asset(&portfolio, 1).basis_pos_q, expected_q);
+        assert_eq!(portfolio.capital.get(), CAPITAL - 4);
+        assert_eq!(portfolio.pnl.get(), 0);
+    }
+    assert_eq!(reduced.insurance, shutdown.insurance + 4);
+    assert_eq!(reduced.c_tot, shutdown.c_tot - 4);
+    assert_eq!(reduced.vault, 2 * CAPITAL);
+    assert_eq!(reduced.vault, reduced.c_tot + reduced.insurance);
+    assert_domain_budget_remaining_total_consistent(&reduced, "Recovery mixed batch reduce");
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), before[3]);
 }
 
 // lifecycle sweep — explicit DrainOnly is a public UpdateAssetLifecycle action, distinct from
