@@ -48895,6 +48895,114 @@ fn v16_attack_base_unit_mints_reject_mismatched_decimals() {
     );
 }
 
+// Both base-unit inputs must be initialized SPL mints before the configured pair can change.
+#[test]
+fn v16_bpf_update_base_unit_mints_rejects_invalid_mint_classes_without_mutation() {
+    use percolator_prog::error::PercolatorError;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let primary = env.mint;
+    let secondary = env.create_mint();
+    let update = |env: &mut V16CuEnv| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::UpdateBaseUnitMints {
+                primary_mint: primary.to_bytes(),
+                secondary_mint: secondary.to_bytes(),
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new_readonly(primary, false),
+                AccountMeta::new_readonly(secondary, false),
+            ],
+            &[&admin],
+        )
+    };
+    let protected = [
+        ("market", env.market),
+        ("authority", admin.pubkey()),
+        ("primary mint", primary),
+        ("secondary mint", secondary),
+        ("vault", env.vault),
+    ];
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    // Keep keys, signatures, decimals and empty-market preconditions valid in every case.
+    for (role, key) in [("primary", primary), ("secondary", secondary)] {
+        let valid = env.svm.get_account(&key).unwrap();
+        let mut wrong_owner = valid.clone();
+        wrong_owner.owner = solana_sdk::system_program::ID;
+        let mut token_account = valid.clone();
+        token_account.data = make_token_data(primary, admin.pubkey(), 7);
+        let mut uninitialized = valid.clone();
+        let mut mint = Mint::unpack(&valid.data).unwrap();
+        mint.is_initialized = false;
+        Mint::pack(mint, &mut uninitialized.data).unwrap();
+        let mut truncated = valid.clone();
+        truncated.data.truncate(Mint::LEN - 1);
+        let mut oversized = valid.clone();
+        oversized.data.push(0);
+
+        for (case, invalid) in [
+            ("wrong account owner", wrong_owner),
+            ("SPL token account as mint", token_account),
+            ("uninitialized mint", uninitialized),
+            ("truncated mint", truncated),
+            ("mint with trailing data", oversized),
+        ] {
+            env.svm.set_account(key, invalid).unwrap();
+            let before = protected.map(|(label, key)| {
+                (label, key, env.svm.get_account(&key).unwrap())
+            });
+            let rejected = update(&mut env).expect_err("invalid mint class must reject");
+            assert!(
+                rejected.contains(&format!(
+                    "Custom({})",
+                    PercolatorError::InvalidMint as u32
+                )),
+                "{role} {case}: must fail mint validation: {rejected}"
+            );
+            for (label, key, account) in &before {
+                assert_eq!(
+                    env.svm.get_account(key).as_ref(),
+                    Some(account),
+                    "{role} {case}: the entire {label} account must remain unchanged"
+                );
+            }
+            env.svm.set_account(key, valid.clone()).unwrap();
+        }
+    }
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected mint classes must not partially configure the pair"
+    );
+    let before_valid = protected.map(|(label, key)| {
+        (label, key, env.svm.get_account(&key).unwrap())
+    });
+    update(&mut env).expect("same instruction succeeds with valid mints at both addresses");
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.collateral_mint, primary.to_bytes());
+    assert_eq!(cfg.secondary_collateral_mint, secondary.to_bytes());
+    assert_ne!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "valid control must persist the new secondary mint"
+    );
+    for (label, key, account) in &before_valid {
+        if *key != env.market {
+            assert_eq!(
+                env.svm.get_account(key).as_ref(),
+                Some(account),
+                "valid configuration preserves the entire {label} account"
+            );
+        }
+    }
+}
+
 // security.md sweep — asset-0 / market admin is bounded (#5 / README L85): even the market-wide admin
 // cannot reach into a PERMISSIONLESSLY-created asset's own domain insurance (that is gated by that
 // asset's operator), nor can it withdraw a user's portfolio collateral (gated by the portfolio owner).
