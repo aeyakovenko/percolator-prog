@@ -32436,6 +32436,95 @@ fn v16_attack_recovery_tools_owner_gated() {
     );
 }
 
+// No-permanent-lock: a full owner reduction leaves an old-epoch counterparty leg in live
+// ResetPending. One owner forfeit must clear that blocker for unsigned reset and capital exit.
+#[test]
+fn v16_bpf_rebalance_full_drain_reset_has_bounded_public_exit() {
+    const CAPITAL: u128 = 1_000;
+    let mut env = V16CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, CAPITAL);
+    env.deposit(&short_owner, short, CAPITAL);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    let short_before = env.svm.get_account(&short).unwrap();
+    let old_leg = active_leg_for_asset(&env.portfolio_state(short), 0);
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    let cu = env.rebalance_reduce_with_cu(&long_owner, long, 0, POS_SCALE);
+    assert_cu_within("full reduction starts side reset", cu, CUSTODY_CU_LIMIT);
+    let (_, pending) = env.market_state();
+    assert_eq!(pending.mode, MarketModeV16::Live);
+    assert_eq!(pending.assets[0].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(pending.assets[0].mode_short, SideModeV16::ResetPending);
+    assert_eq!(pending.assets[0].epoch_short, old_leg.epoch_snap + 1);
+    assert_eq!(pending.assets[0].oi_eff_long_q, 0);
+    assert_eq!(pending.assets[0].oi_eff_short_q, 0);
+    assert_eq!(pending.assets[0].stored_pos_count_long, 0);
+    assert_eq!(pending.assets[0].stored_pos_count_short, 1);
+    assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let err = env
+        .send(
+            ProgInstruction::FinalizeResetSide {
+                asset_index: 0,
+                side: 1,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .expect_err("the remaining old-epoch leg must block reset");
+    let stale = percolator_prog::error::PercolatorError::EngineStale as u32;
+    assert!(err.contains(&format!("Custom({stale})")), "{err}");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
+
+    let long_before = env.svm.get_account(&long).unwrap();
+    let cu = env.forfeit_recovery_leg_with_cu(&short_owner, short, 0, 1);
+    assert_cu_within("old-epoch reset leg forfeit", cu, CUSTODY_CU_LIMIT);
+    let cleared = env.portfolio_state(short);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&cleared)));
+    assert_eq!(cleared.capital.get(), CAPITAL);
+    assert_eq!(cleared.pnl.get(), 0);
+    assert_eq!(env.market_state().1.assets[0].stored_pos_count_short, 0);
+    assert_eq!(env.svm.get_account(&long).unwrap(), long_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    env.svm.expire_blockhash();
+    let cu = env.finalize_reset_side_with_cu(0, 1);
+    assert_cu_within("reset after old-epoch leg cleanup", cu, CUSTODY_CU_LIMIT);
+    let (_, reset) = env.market_state();
+    assert_eq!(reset.mode, MarketModeV16::Live);
+    assert_eq!(reset.assets[0].mode_short, SideModeV16::Normal);
+    assert_eq!(reset.assets[0].epoch_short, pending.assets[0].epoch_short);
+    assert_eq!(reset.c_tot, 2 * CAPITAL);
+    assert_eq!(reset.vault, 2 * CAPITAL);
+
+    for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+        let (dest, cu) = env.withdraw_with_cu(owner, portfolio, CAPITAL);
+        assert_cu_within("withdraw after side reset", cu, CUSTODY_CU_LIMIT);
+        assert_eq!(env.token_amount(dest) as u128, CAPITAL);
+        let cu = env.close_portfolio_with_cu(owner, portfolio);
+        assert_cu_within("dematerialize after side reset", cu, CUSTODY_CU_LIMIT);
+    }
+    let (_, exited) = env.market_state();
+    assert_eq!(exited.c_tot, 0);
+    assert_eq!(exited.vault, 0);
+    assert_eq!(env.token_amount(env.vault), 0);
+    assert_eq!(exited.materialized_portfolio_count, 0);
+}
+
 // security.md sweep — permissionless reset finalizer (#31/#44): anyone may finalize a reset-pending
 // side, but only after all engine reset blockers for that side are zero. A public finalizer must not
 // be able to unlock trading while positions, stale accounts, pending obligations, or domain-loss
