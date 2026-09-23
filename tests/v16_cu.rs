@@ -58348,6 +58348,114 @@ fn v16_attack_batch_cannot_force_counterparty_underwater() {
     );
 }
 
+// Invariant: signed fills split across assets and CPI routes share the LP's post-fee collateral.
+// Fresh-signature retries cannot reuse that margin or leave extra positions, fees, or matcher state.
+#[test]
+fn v16_bpf_cpi_route_switch_retries_respect_aggregate_collateral() {
+    use percolator_prog::error::PercolatorError;
+
+    for first_batch in [false, true] {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 500);
+        for asset in 0..2 {
+            env.configure_auth_mark_for_asset_as_admin(asset, 1, 100);
+        }
+        let taker_owner = Keypair::new();
+        let lp_owner = Keypair::new();
+        let taker = env.create_portfolio(&taker_owner);
+        let lp = env.create_portfolio(&lp_owner);
+        env.deposit(&taker_owner, taker, 10_000);
+        env.deposit(&lp_owner, lp, 201);
+        let (matcher, ctx, delegate) =
+            auth_matcher_for_lp_via_system_create(&mut env, &lp_owner, lp);
+        let fill = |env: &mut V16CuEnv, batch: bool, asset_index: u16| {
+            let size_q = if asset_index == 0 { 1 } else { -1 } * POS_SCALE as i128;
+            let instruction = if batch {
+                ProgInstruction::BatchTradeCpi {
+                    legs: vec![BatchTradeCpiLeg {
+                        asset_index,
+                        size_q,
+                        fee_bps: 100,
+                        limit_price: 100,
+                    }],
+                }
+            } else {
+                ProgInstruction::TradeCpi {
+                    asset_index,
+                    size_q,
+                    fee_bps: 100,
+                    limit_price: 100,
+                }
+            };
+            env.svm.expire_blockhash();
+            env.send(
+                instruction,
+                vec![
+                    AccountMeta::new(taker_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker, false),
+                    AccountMeta::new(lp, false),
+                    AccountMeta::new_readonly(matcher, false),
+                    AccountMeta::new(ctx, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                &[&taker_owner],
+            )
+        };
+
+        fill(&mut env, first_batch, 0).expect("first fill fits the LP's collateral");
+        assert_eq!(env.portfolio_state(lp).capital.get(), 200);
+        assert_eq!(health_cert(&env.portfolio_state(lp)).certified_initial_req, 100);
+        let before = [env.market, taker, lp, ctx, env.vault]
+            .map(|key| (key, env.svm.get_account(&key).unwrap()));
+
+        // Both legs fit separately, but their combined 200-atom margin plus two fees needs 202.
+        for batch in [!first_batch, !first_batch, first_batch] {
+            let error = fill(&mut env, batch, 1)
+                .expect_err("the second asset must count the first asset's margin and fees");
+            assert!(
+                error.contains(&format!("Custom({})", PercolatorError::EngineInvalidConfig as u32)),
+                "first_batch={first_batch}, batch={batch}: {error}"
+            );
+            for (key, account) in &before {
+                assert_eq!(
+                    env.svm.get_account(key).unwrap(),
+                    *account,
+                    "first_batch={first_batch}, batch={batch}: rejected retry changed {key}"
+                );
+            }
+        }
+
+        env.deposit(&lp_owner, lp, 1);
+        fill(&mut env, !first_batch, 1).expect("one more collateral atom permits the same fill");
+        let (cfg, group) = env.market_state();
+        assert_eq!(cfg.matcher_req_seq, 2, "only committed fills consume request IDs");
+        for (portfolio, sign, capital) in [(taker, 1, 9_998), (lp, -1, 200)] {
+            let account = env.portfolio_state(portfolio);
+            assert_eq!(account.capital.get(), capital, "exact cumulative signed fees");
+            assert_eq!(account.pnl.get(), 0);
+            assert_eq!(health_cert(&account).certified_initial_req, 200);
+            for (asset, direction) in [(0, sign), (1, -sign)] {
+                assert_eq!(
+                    active_leg_for_asset(&account, asset).basis_pos_q,
+                    direction * POS_SCALE as i128,
+                    "each asset fills its signed quantity exactly once"
+                );
+            }
+        }
+        for asset in &group.assets[..2] {
+            assert_eq!(asset.oi_eff_long_q, POS_SCALE);
+            assert_eq!(asset.oi_eff_short_q, POS_SCALE);
+        }
+        assert_eq!(group.insurance, 4);
+        assert_eq!(group.insurance_domain_budget, vec![1; 4]);
+        assert_domain_budget_remaining_total_consistent(&group, "CPI collateral route switch");
+        assert_eq!(group.c_tot, 10_198);
+        assert_eq!(group.vault, 10_202);
+        assert_eq!(group.c_tot + group.insurance, group.vault);
+        assert_eq!(env.token_amount(env.vault), 10_202);
+    }
+}
+
 // Surface 2 guard: the force-close timeout uses the AUTHENTICATED clock, not the caller's now_slot.
 // A cranker cannot rug traders early by LYING that the exit window elapsed — passing a post-timeout
 // now_slot while the real clock is still inside the window must REJECT; only once the real clock
