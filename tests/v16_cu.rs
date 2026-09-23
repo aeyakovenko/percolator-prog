@@ -61403,6 +61403,126 @@ fn v16_bpf_oracle_composite_divide_legs_produce_correct_cross_rate() {
     );
 }
 
+// Invariant: equivalent direct/composite observations must produce identical economic state
+// through a price move and partial close; only per-feed configuration/history may differ.
+#[test]
+fn v16_bpf_direct_and_composite_oracle_trade_state_equivalence() {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        trade_fee_base_bps: 100,
+        ..V16CuMarketParams::default()
+    });
+    let (long_owner, long, short_owner, short) =
+        funded_no_cpi_reported_price_pair(&mut env, 10_000_000);
+    let keys = [env.market, long, short, env.vault];
+    let before = keys.map(|key| env.svm.get_account(&key).unwrap());
+    let mut expected = None;
+
+    for composite in [false, true] {
+        for (&key, account) in keys.iter().zip(before.iter()) {
+            env.svm.set_account(key, account.clone()).unwrap();
+        }
+        set_test_clock(&mut env, 1, 100);
+        env.svm.expire_blockhash();
+        let feeds = if composite {
+            [[0xe1; 32], [0xe2; 32], [0xe3; 32]]
+        } else {
+            [[0xe1; 32], [0; 32], [0; 32]]
+        };
+        let prices = if composite {
+            vec![6_000_000, 2_000_000, 3_000_000]
+        } else {
+            vec![1_000_000]
+        };
+        let initial: Vec<_> = prices
+            .iter()
+            .enumerate()
+            .map(|(i, &price)| env.set_pyth_price_with_conf(&feeds[i], price, -6, 0, 100))
+            .collect();
+        let flags = if composite {
+            ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3
+        } else {
+            0
+        };
+        env.try_configure_hybrid_with_cu(
+            prices.len() as u8, flags, feeds, &initial, 1, 100, 0, 0, 3,
+        )
+        .expect("configure equivalent oracle");
+        env.trade_with_cu(
+            &long_owner, long, &short_owner, short, POS_SCALE as i128, 1_000_000, 0,
+        );
+
+        set_test_clock(&mut env, 2, 101);
+        let fresh: Vec<_> = prices
+            .iter()
+            .enumerate()
+            .map(|(i, &price)| {
+                let price = if i == 0 { price * 11 / 10 } else { price };
+                env.set_pyth_price_with_conf(&feeds[i], price, -6, 0, 101)
+            })
+            .collect();
+        for portfolio in [short, long] {
+            env.crank_with_oracle_tail(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 2,
+                    close_q: 0,
+                    observations: crank_observations(0),
+                },
+                &fresh,
+            );
+        }
+        env.trade_with_cu(
+            &long_owner, long, &short_owner, short, -((POS_SCALE / 2) as i128), 1_100_000, 0,
+        );
+
+        let (mut cfg, group) = env.market_state();
+        assert_eq!(cfg.oracle_target_price_e6, 1_100_000);
+        assert_eq!(cfg.last_good_oracle_slot, 2);
+        assert_eq!(group.assets[0].effective_price, 1_100_000);
+        assert_eq!(group.assets[0].oi_eff_long_q, POS_SCALE / 2);
+        assert_eq!(group.assets[0].oi_eff_short_q, POS_SCALE / 2);
+        assert!(
+            env.portfolio_state(long).pnl.get() > 0,
+            "price move creates a claim"
+        );
+        assert!(
+            env.portfolio_state(short).capital.get() < 9_990_000,
+            "loss is settled"
+        );
+        assert_eq!(group.insurance, 31_000, "fees from both fills");
+        assert_domain_budget_remaining_total_consistent(&group, "oracle routes");
+
+        let market = env.svm.get_account(&env.market).unwrap();
+        let mut profile = state::read_asset_oracle_profile(&market.data, 0).unwrap();
+        // Normalize only the representation of the feeds, retaining aggregate price/freshness,
+        // EWMA state, all engine accounting, and complete portfolio/custody accounts.
+        cfg.oracle_leg_count = 0;
+        cfg.oracle_leg_flags = 0;
+        cfg.oracle_leg_feeds = [[0; 32]; 3];
+        cfg.oracle_leg_prices_e6 = [0; 3];
+        cfg.oracle_leg_publish_times = [0; 3];
+        profile.oracle_leg_count = 0;
+        profile.oracle_leg_flags = 0;
+        profile.oracle_leg_feeds = [[0; 32]; 3];
+        profile.oracle_leg_prices_e6 = [0; 3];
+        profile.oracle_leg_publish_times = [0; 3];
+        let accounts = [long, short, env.vault].map(|key| env.svm.get_account(&key).unwrap());
+        assert_eq!(accounts[2], before[3], "trading preserves vault custody");
+        let actual = (
+            cfg,
+            profile,
+            bytemuck::bytes_of(market_group_header_bytes(&market.data)).to_vec(),
+            market_engine_slot_bytes(&market.data, 0).to_vec(),
+            accounts,
+        );
+        if let Some(expected) = &expected {
+            assert_eq!(&actual, expected, "direct/composite economic state differs");
+        } else {
+            expected = Some(actual);
+        }
+    }
+}
+
 // ForfeitRecoveryLeg owner-gating + input guard (sibling of v16_attack_rebalance_reduce_owner_gated, which
 // was tested while ForfeitRecoveryLeg was not). handle_forfeit_recovery_leg uses with_one_portfolio_view
 // (owner_must_sign=true), so a non-owner forfeiting a victim's recovery leg -- which would force the victim
