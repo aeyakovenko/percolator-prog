@@ -42825,50 +42825,72 @@ fn v16_attack_deposit_does_not_dilute_junior_backing() {
     );
 }
 
-// security.md sweep — insurance-fund ops do not touch junior-PnL backing (#6/#33/#22 interaction): a
-// backed junior holder is funded by residual (vault − c_tot − insurance). A domain insurance top-up
-// (+X to vault AND insurance) and a domain insurance withdrawal (−X to vault AND insurance) both leave
-// residual invariant. Attacker/edge goal: route value through the insurance fund to shift a junior
-// holder's realizable claim (mint by growing it / theft by shrinking it). Protection: residual — and the
-// holder's certified equity — is identical across both insurance operations; senior conservation holds.
+// Invariant: insurance top-up/withdrawal preserves a trade-created junior claim, its source
+// backing, and certified equity while moving exactly the funded insurance tokens.
 #[test]
 fn v16_attack_insurance_ops_preserve_junior_backing() {
     let mut env = V16CuEnv::new();
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
     env.top_up_backing_bucket(1, 40, 10_000);
     let ho = Keypair::new();
     let h = env.create_portfolio(&ho);
+    let counterparty_owner = Keypair::new();
+    let counterparty = env.create_portfolio(&counterparty_owner);
     env.deposit(&ho, h, 1_000);
-    env.add_source_positive_pnl(h, 1, 40);
-    env.crank(
+    env.deposit(&counterparty_owner, counterparty, 1_000);
+    env.trade_with_cu(
+        &ho,
         h,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 0,
-            close_q: 0,
-            observations: crank_observations(0),
-        },
+        &counterparty_owner,
+        counterparty,
+        (8 * POS_SCALE) as i128,
+        100,
+        0,
     );
-    let eq0 = health_cert(&env.portfolio_state(h)).certified_equity;
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 105);
+    for portfolio in [counterparty, h] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let h0 = env.portfolio_state(h);
+    let eq0 = health_cert(&h0).certified_equity;
     let g0 = env.market_state().1;
-    let residual0 = g0
-        .vault
-        .saturating_sub(g0.c_tot)
-        .saturating_sub(g0.insurance);
-    assert!(
-        env.portfolio_state(h).pnl.get() > 0,
-        "holder carries backed junior pnl"
+    let residual0 = g0.vault - g0.c_tot - g0.insurance;
+    assert_eq!(h0.pnl.get(), 40, "public trade and crank create the claim");
+    assert!(has_active_leg_for_asset(&h0, 0));
+    assert!(eq0 > h0.capital.get() as i128, "claim contributes to equity");
+    assert_eq!(g0.source_credit[1].exact_positive_claim_num, 40 * BOUND_SCALE);
+    assert_eq!(g0.source_credit[1].positive_claim_bound_num, 40 * BOUND_SCALE);
+    assert_eq!(
+        g0.source_backing_buckets[1].fresh_unliened_backing_num,
+        80 * BOUND_SCALE,
+        "provider top-up plus the counterparty's settled loss fund the backing"
     );
+    let holder_before = env.svm.get_account(&h).unwrap();
+    let counterparty_before = env.svm.get_account(&counterparty).unwrap();
 
     let read = |env: &V16CuEnv| -> (i128, u128) {
         let g = env.market_state().1;
-        (
-            g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance) as i128,
-            g.insurance,
-        )
+        ((g.vault - g.c_tot - g.insurance) as i128, g.insurance)
     };
 
-    // (1) domain insurance TOP-UP: +1M to vault AND insurance -> residual unchanged.
     let admin = env.admin.insecure_clone();
-    env.top_up_insurance_domain_with_authority(&admin, 0, 1_000_000);
+    let source = env.top_up_insurance_domain_with_authority(&admin, 0, 1_000_000);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault) as u128, g0.vault + 1_000_000);
+    assert_eq!(env.svm.get_account(&h).unwrap(), holder_before);
+    assert_eq!(
+        env.svm.get_account(&counterparty).unwrap(),
+        counterparty_before
+    );
     let (res1, ins1) = read(&env);
     assert_eq!(
         res1, residual0 as i128,
@@ -42885,7 +42907,7 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
     env.crank(
         h,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 0,
+            now_slot: 2,
             close_q: 0,
             observations: crank_observations(0),
         },
@@ -42896,9 +42918,15 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
         "holder equity unchanged by insurance top-up"
     );
 
-    // (2) domain insurance WITHDRAW: −600k from vault AND insurance -> residual STILL unchanged.
-    env.try_withdraw_insurance_domain_with_authority(&admin, 0, 600_000)
+    let (dest, cu) = env
+        .try_withdraw_insurance_domain_with_authority(&admin, 0, 600_000)
         .expect("domain withdraw ok");
+    assert_cu_within(
+        "insurance withdrawal with a public junior claim",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), 600_000);
     let (res2, ins2) = read(&env);
     assert_eq!(
         res2, residual0 as i128,
@@ -42911,7 +42939,7 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
     env.crank(
         h,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 0,
+            now_slot: 2,
             close_q: 0,
             observations: crank_observations(0),
         },
@@ -42923,11 +42951,28 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
         eq0,
         "holder equity unchanged across BOTH insurance ops"
     );
+    assert_eq!(hf.pnl.get(), h0.pnl.get(), "holder pnl stable");
+    assert_eq!(hf.capital.get(), h0.capital.get());
+    assert_eq!(hf.source_domains, h0.source_domains);
     assert_eq!(
-        hf.pnl.get(),
-        env.portfolio_state(h).pnl.get(),
-        "holder pnl stable"
+        gf.source_credit[1].positive_claim_bound_num,
+        g0.source_credit[1].positive_claim_bound_num
     );
+    assert_eq!(
+        gf.source_backing_buckets[1].fresh_unliened_backing_num,
+        g0.source_backing_buckets[1].fresh_unliened_backing_num
+    );
+    assert_eq!(
+        env.svm.get_account(&counterparty).unwrap(),
+        counterparty_before
+    );
+    assert_eq!(gf.c_tot, g0.c_tot);
+    assert_eq!(gf.vault, g0.vault + 400_000);
+    assert_eq!(
+        gf.insurance_domain_budget[0],
+        g0.insurance_domain_budget[0] + 400_000
+    );
+    assert_domain_budget_remaining_total_consistent(&gf, "insurance ops preserve junior backing");
     assert_eq!(
         gf.vault as u64,
         env.token_amount(env.vault),
