@@ -1024,6 +1024,26 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_variable_length_decode_enforces_record_count_cap() {
+    // Fixed-count field/trailing proofs do not establish the variable-record cap.
+    // Oversized counts must reject before allocating or scanning any declared records.
+    let mut crank_over = [0u8; 26];
+    crank_over[0] = 5;
+    crank_over[25] = 17;
+    assert!(Instruction::decode(&crank_over).is_err());
+
+    let mut batch_nocpi_over = [0u8; 2];
+    batch_nocpi_over[0] = 66;
+    batch_nocpi_over[1] = 17;
+    assert!(Instruction::decode(&batch_nocpi_over).is_err());
+
+    let mut batch_cpi_over = [0u8; 2];
+    batch_cpi_over[0] = 67;
+    batch_cpi_over[1] = 17;
+    assert!(Instruction::decode(&batch_cpi_over).is_err());
+}
+
+#[kani::proof]
 fn kani_v16_decode_rejects_trailing_bytes() {
     let extra: u8 = kani::any();
     let data = [1u8, extra];
