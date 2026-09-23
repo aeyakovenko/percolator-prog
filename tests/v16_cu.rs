@@ -4358,6 +4358,109 @@ fn crank_portfolio_on_market(
     .expect("crank portfolio on explicit market")
 }
 
+// Malformed market schemas must return typed wrapper errors and roll back an earlier
+// successful instruction, including its lamports, rather than accepting an ambiguous layout.
+#[test]
+fn v16_bpf_market_schema_rejection_rolls_back_prior_transfer() {
+    use percolator_prog::{constants::HEADER_LEN, error::PercolatorError};
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16CuEnv::new();
+    let recipient = Pubkey::new_unique();
+    env.ensure_signer_account(recipient);
+    let valid = env.svm.get_account(&env.market).unwrap();
+    let admin_before = env.svm.get_account(&env.admin.pubkey()).unwrap();
+    let recipient_before = env.svm.get_account(&recipient).unwrap();
+    let send = |env: &mut V16CuEnv| {
+        env.svm.expire_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[
+                heap_ix(),
+                cu_ix(),
+                system_instruction::transfer(&env.admin.pubkey(), &recipient, 123),
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: vec![
+                        AccountMeta::new_readonly(env.admin.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                    ],
+                    data: ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps: 100 }.encode(),
+                },
+            ],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &env.admin],
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx)
+    };
+
+    let mut cases = Vec::new();
+    let invalid_len = InstructionError::Custom(PercolatorError::InvalidAccountLen as u32);
+    for (label, len, error) in [
+        ("empty", 0, invalid_len.clone()),
+        ("short header", HEADER_LEN - 1, invalid_len.clone()),
+        ("header only", HEADER_LEN, invalid_len),
+        (
+            "short body",
+            valid.data.len() - 1,
+            InstructionError::InvalidAccountData,
+        ),
+        (
+            "trailing byte",
+            valid.data.len() + 1,
+            InstructionError::InvalidAccountData,
+        ),
+    ] {
+        let mut malformed = valid.clone();
+        malformed.data.resize(len, 0);
+        cases.push((label, malformed, error));
+    }
+    for (label, offset, error) in [
+        ("magic high byte", 7, PercolatorError::NotInitialized),
+        ("version low byte", 8, PercolatorError::InvalidVersion),
+        ("version high byte", 9, PercolatorError::InvalidVersion),
+        ("account kind", 10, PercolatorError::InvalidAccountKind),
+    ] {
+        let mut malformed = valid.clone();
+        malformed.data[offset] ^= 1;
+        cases.push((label, malformed, InstructionError::Custom(error as u32)));
+    }
+
+    for (label, malformed, error) in cases {
+        env.svm.set_account(env.market, malformed.clone()).unwrap();
+        let failed = send(&mut env).expect_err("malformed market schema must reject");
+        assert_eq!(
+            failed.err,
+            TransactionError::InstructionError(3, error),
+            "{label}: {failed:?}"
+        );
+        // The fee payer is separate; every writable instruction account must be identical.
+        for (key, before) in [
+            (env.market, &malformed),
+            (env.admin.pubkey(), &admin_before),
+            (recipient, &recipient_before),
+        ] {
+            assert_eq!(
+                env.svm.get_account(&key).as_ref(),
+                Some(before),
+                "{label}: account {key} changed despite schema rejection"
+            );
+        }
+    }
+
+    env.svm.set_account(env.market, valid).unwrap();
+    send(&mut env).expect("restoring the canonical schema permits both instructions");
+    assert_eq!(env.market_state().0.fee_redirect_to_market_0_bps, 100);
+    assert_eq!(
+        env.svm.get_account(&env.admin.pubkey()).unwrap().lamports,
+        admin_before.lamports - 123
+    );
+    assert_eq!(
+        env.svm.get_account(&recipient).unwrap().lamports,
+        recipient_before.lamports + 123
+    );
+}
+
 #[test]
 fn v16_bpf_deposit_and_withdraw_move_spl_tokens_with_ledger() {
     let mut env = V16CuEnv::new();
