@@ -8955,6 +8955,148 @@ fn v16_attack_underfunded_sync_with_cranker_reward_still_closes_payer() {
     }
 }
 
+// A later withdrawal rejection must restore a fee-drained portfolio after maintenance
+// dematerializes it and sweeps its rent, even when part of the cranker reward was transferred.
+#[test]
+fn v16_bpf_maintenance_dematerialization_late_withdraw_failure_is_atomic() {
+    use percolator_prog::error::PercolatorError;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 40,
+    );
+    env.update_maintenance_fee_policy_with_cu(5_000);
+    let charged_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let charged = env.create_portfolio(&charged_owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+    let source = env.deposit(&charged_owner, charged, 7);
+    let dest = env.token_account(cranker_owner.pubkey(), 0);
+    let wrong_dest = env.token_account(charged_owner.pubkey(), 0);
+    env.svm.warp_to_slot(10);
+
+    let (_, group_before) = env.market_state();
+    assert_eq!(group_before.materialized_portfolio_count, 2);
+    assert_eq!(group_before.c_tot, 7);
+    assert_eq!(group_before.insurance, 0);
+    assert_eq!(group_before.vault, 7);
+    assert_eq!(env.portfolio_state(charged).capital.get(), 7);
+    assert_eq!(env.portfolio_state(cranker).capital.get(), 0);
+    let market_lamports = env.svm.get_account(&env.market).unwrap().lamports;
+    let charged_lamports = env.svm.get_account(&charged).unwrap().lamports;
+    let before = [
+        ("market", env.market),
+        ("charged portfolio", charged),
+        ("cranker portfolio", cranker),
+        ("vault", env.vault),
+        ("reward destination", dest),
+        ("wrong-owner destination", wrong_dest),
+        ("deposit source", source),
+        ("charged owner", charged_owner.pubkey()),
+        ("cranker owner", cranker_owner.pubkey()),
+        ("mint", env.mint),
+    ]
+    .map(|(label, key)| (label, key, env.svm.get_account(&key).unwrap()));
+
+    let sync_and_withdraw = |env: &mut V16CuEnv, final_dest: Pubkey| {
+        env.svm.expire_blockhash();
+        let withdraw = |amount, destination| Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(cranker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(cranker, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: ProgInstruction::Withdraw { amount }.encode(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[
+                heap_ix(),
+                cu_ix(),
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: vec![
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(charged, false),
+                        AccountMeta::new(cranker, false),
+                    ],
+                    data: ProgInstruction::SyncMaintenanceFee { now_slot: 10 }.encode(),
+                },
+                withdraw(1, dest),
+                withdraw(2, final_dest),
+            ],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &cranker_owner],
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx)
+    };
+    let failed = sync_and_withdraw(&mut env, wrong_dest)
+        .expect_err("the final withdrawal must reject a wrong-owner destination");
+    assert_eq!(
+        failed.err,
+        TransactionError::InstructionError(
+            4,
+            InstructionError::Custom(PercolatorError::InvalidTokenAccount as u32),
+        ),
+        "maintenance and the first withdrawal must succeed before rejection: {failed:?}"
+    );
+    let token_success = format!("Program {} success", spl_token::ID);
+    let token_trace: Vec<&str> = failed
+        .meta
+        .logs
+        .iter()
+        .map(String::as_str)
+        .filter(|line| line.starts_with("Program log: Instruction:") || *line == token_success)
+        .collect();
+    assert_eq!(
+        token_trace,
+        vec!["Program log: Instruction: Transfer", token_success.as_str()],
+        "one reward transfer must complete before the later validation failure: {failed:?}"
+    );
+    // The distinct transaction payer pays fees; all lifecycle and custody accounts roll back.
+    for (label, key, account) in &before {
+        assert_eq!(
+            env.svm.get_account(key).as_ref(),
+            Some(account),
+            "late withdrawal failure must restore every byte and lamport of {label}"
+        );
+    }
+
+    let succeeded = sync_and_withdraw(&mut env, dest)
+        .expect("the same maintenance and withdrawals succeed with the owner's destination");
+    assert_cu_within(
+        "maintenance dematerialization and reward withdrawal retry",
+        succeeded.compute_units_consumed,
+        3 * CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports + charged_lamports,
+        "retry sweeps the charged portfolio's rent exactly once"
+    );
+    if let Some(closed) = env.svm.get_account(&charged) {
+        assert_eq!(closed.lamports, 0);
+        assert!(closed.data.is_empty(), "retry deallocates the charged portfolio");
+    }
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.materialized_portfolio_count, 1);
+    assert_eq!(group_after.c_tot, 0);
+    assert_eq!(group_after.insurance, 4);
+    assert_eq!(group_after.vault, 4);
+    assert_eq!(group_after.insurance_domain_budget_remaining_total, 4);
+    assert_domain_budget_remaining_total_consistent(&group_after, "maintenance retry");
+    assert_eq!(env.portfolio_state(cranker).capital.get(), 0);
+    assert_eq!(env.token_amount(env.vault), 4);
+    assert_eq!(env.token_amount(dest), 3, "retry pays the reward exactly once");
+    assert_eq!(env.token_amount(wrong_dest), 0);
+    assert_eq!(env.token_amount(source), 0);
+}
+
 #[test]
 fn v16_bpf_nonflat_fee_sync_settles_hidden_loss_before_sweeping_fee() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
@@ -11050,6 +11192,155 @@ fn v16_attack_all_active_pending_auth_marks_refresh_with_bounded_public_crank() 
         health_cert(&env.portfolio_state(long_account)).cert_oracle_epoch,
         refreshed_group.oracle_epoch,
         "max-shape account certifies after every active pending mark is observed"
+    );
+}
+
+#[test]
+fn v16_attack_crank_truncated_composite_tail_preserves_reverse_order_refresh() {
+    const MARK: u64 = 1_000_000;
+    const NEXT_MARK0: u64 = 1_010_000;
+    const NEXT_MARK1: u64 = 1_020_000;
+    const OPEN_SLOT: u64 = 1;
+    const CRANK_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    set_test_clock(&mut env, OPEN_SLOT, 100);
+    let feeds0 = [[0xb1u8; 32], [0xb2u8; 32], [0xb3u8; 32]];
+    let feed1 = [0xb4u8; 32];
+    let initial00 = env.set_pyth_price_with_conf(&feeds0[0], MARK as i64, -6, 0, 100);
+    let initial01 = env.set_pyth_price_with_conf(&feeds0[1], MARK as i64, -6, 0, 100);
+    let initial02 = env.set_pyth_price_with_conf(&feeds0[2], MARK as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        3,
+        0,
+        feeds0,
+        &[initial00, initial01, initial02],
+        OPEN_SLOT,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure asset-0 composite oracle");
+    let initial1 = env.set_pyth_price_with_conf(&feed1, MARK as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        1,
+        1,
+        0,
+        [feed1, [0u8; 32], [0u8; 32]],
+        &[initial1],
+        OPEN_SLOT,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure asset-1 single-leg oracle");
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000_000);
+    for asset_index in 0..2 {
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(
+            asset_index,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            POS_SCALE as i128,
+            MARK,
+            0,
+        );
+    }
+    let long_before = env.portfolio_state(long);
+    assert_eq!(leg(&long_before, 0).asset_index, 0);
+    assert_eq!(leg(&long_before, 1).asset_index, 1);
+    assert!(health_cert(&long_before).valid);
+
+    set_test_clock(&mut env, CRANK_SLOT, 101);
+    let fresh1 = env.set_pyth_price_with_conf(&feed1, NEXT_MARK1 as i64, -6, 0, 101);
+    let fresh00 = env.set_pyth_price_with_conf(&feeds0[0], NEXT_MARK0 as i64, -6, 0, 101);
+    let fresh01 = env.set_pyth_price_with_conf(&feeds0[1], MARK as i64, -6, 0, 101);
+    let fresh02 = env.set_pyth_price_with_conf(&feeds0[2], MARK as i64, -6, 0, 101);
+    let (_, group_before) = env.market_state();
+    for asset_index in 0..2 {
+        assert_eq!(group_before.assets[asset_index].effective_price, MARK);
+        assert!(group_before.assets[asset_index].slot_last < CRANK_SLOT);
+    }
+
+    // The first hint is valid and precedes the portfolio's first active asset.
+    // The second hint needs three accounts, but its final constituent is missing.
+    let crank = ProgInstruction::PermissionlessCrank {
+        now_slot: CRANK_SLOT,
+        close_q: 0,
+        observations: vec![
+            CrankObservationHint {
+                asset_index: 1,
+                oracle_accounts: 1,
+            },
+            CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 3,
+            },
+        ],
+    };
+    let mut accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(long, false),
+        AccountMeta::new_readonly(fresh1, false),
+        AccountMeta::new_readonly(fresh00, false),
+        AccountMeta::new_readonly(fresh01, false),
+    ];
+    let keys = [env.market, long, short, env.vault, fresh1, fresh00, fresh01, fresh02];
+    let before: Vec<_> = keys.iter().map(|key| env.svm.get_account(key).unwrap()).collect();
+    env.svm.expire_blockhash();
+    let rejected = env
+        .send(crank.clone(), accounts.clone(), &[])
+        .expect_err("truncated second observation must reject after the valid first observation");
+    assert!(
+        rejected.contains("NotEnoughAccountKeys"),
+        "expected missing composite oracle account: {rejected}"
+    );
+    for (key, account_before) in keys.iter().zip(before.iter()) {
+        assert_eq!(
+            &env.svm.get_account(key).unwrap(),
+            account_before,
+            "truncated-tail rejection must restore the entire account {key}, including prior accrual"
+        );
+    }
+
+    accounts.push(AccountMeta::new_readonly(fresh02, false));
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(crank, accounts, &[])
+        .expect("completing the tail must refresh with the same reversed hints at the same slot");
+    assert_cu_within("reversed mixed-length oracle-tail refresh", cu, CRANK_CU_LIMIT);
+    let (_, group_after) = env.market_state();
+    let long_after = env.portfolio_state(long);
+    for (asset_index, next_mark) in [(0, NEXT_MARK0), (1, NEXT_MARK1)] {
+        assert_eq!(group_after.assets[asset_index].raw_oracle_target_price, next_mark);
+        assert_eq!(group_after.assets[asset_index].effective_price, next_mark);
+        assert_eq!(group_after.assets[asset_index].slot_last, CRANK_SLOT);
+        assert_eq!(
+            active_leg_for_asset(&long_after, asset_index).basis_pos_q,
+            active_leg_for_asset(&long_before, asset_index).basis_pos_q,
+            "refresh preserves the position on asset {asset_index}"
+        );
+    }
+    assert!(group_after.oracle_epoch > group_before.oracle_epoch);
+    assert!(health_cert(&long_after).valid);
+    assert_eq!(
+        health_cert(&long_after).cert_oracle_epoch,
+        group_after.oracle_epoch,
+        "complete observations certify the portfolio after both asset marks progress"
     );
 }
 
