@@ -19068,6 +19068,110 @@ fn v16_attack_convert_released_pnl_respects_caller_cap() {
     );
 }
 
+// Invariant: racing live conversions/withdrawals against one shared backing bucket cannot
+// improve either claimant's payout or consume the other claimant's remaining support.
+#[test]
+fn v16_bpf_live_shared_backing_conversion_order_preserves_entitlements() {
+    const DEPOSIT: u128 = 1_000;
+    const PROFITS: [u128; 2] = [21, 35];
+    const TOTAL: u128 = 56;
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let owners = [Keypair::new(), Keypair::new()];
+    let winners = owners.each_ref().map(|owner| env.create_portfolio(owner));
+    let loser_owner = Keypair::new();
+    let loser = env.create_portfolio(&loser_owner);
+    env.deposit(&loser_owner, loser, DEPOSIT);
+    for i in 0..2 {
+        env.deposit(&owners[i], winners[i], DEPOSIT);
+        env.trade_asset_with_cu(
+            0, &owners[i], winners[i], &loser_owner, loser,
+            ((3 + 2 * i) as u128 * POS_SCALE / 2) as i128, 100, 0,
+        );
+    }
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 114);
+    for portfolio in [loser, winners[0], winners[1]] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    for i in 0..2 {
+        env.trade_asset_with_cu(
+            0, &owners[i], winners[i], &loser_owner, loser,
+            -(((3 + 2 * i) as u128 * POS_SCALE / 2) as i128), 114, 0,
+        );
+        let account = env.portfolio_state(winners[i]);
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(&account)));
+        assert_eq!(account.pnl.get(), PROFITS[i] as i128);
+        assert_eq!(account.capital.get(), DEPOSIT);
+        assert_eq!(
+            state::portfolio_source_domain(&account, 1).source_claim_bound_num.get(),
+            PROFITS[i] * BOUND_SCALE,
+        );
+    }
+    let loser_dest = env.withdraw(&loser_owner, loser, DEPOSIT - TOTAL);
+    assert_eq!(env.token_amount(loser_dest) as u128, DEPOSIT - TOTAL);
+    let group = env.market_state().1;
+    assert_eq!(group.source_credit[1].positive_claim_bound_num, TOTAL * BOUND_SCALE);
+    assert_eq!(group.source_backing_buckets[1].fresh_unliened_backing_num, TOTAL * BOUND_SCALE);
+    assert_eq!(group.source_backing_buckets[1].consumed_liened_backing_num, 0);
+    assert_eq!(group.vault, 2 * DEPOSIT + TOTAL);
+
+    let keys = [env.market, winners[0], winners[1], loser, env.vault];
+    let before = keys.map(|key| env.svm.get_account(&key).unwrap());
+    let mut outcomes = Vec::new();
+    for order in [[0, 1], [1, 0]] {
+        for (&key, account) in keys.iter().zip(&before) {
+            env.svm.set_account(key, account.clone()).unwrap();
+        }
+        env.svm.expire_blockhash();
+        let mut consumed = 0;
+        let mut payouts = [0; 2];
+        for i in order {
+            let other_before = env.svm.get_account(&winners[1 - i]).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            env.crank(
+                winners[i],
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 1,
+                    close_q: 0,
+                    observations: crank_observations(0),
+                },
+            );
+            env.convert_released_pnl_with_cu(&owners[i], winners[i], u128::MAX);
+            let account = env.portfolio_state(winners[i]);
+            assert_eq!(account.capital.get(), DEPOSIT + PROFITS[i]);
+            assert_eq!(account.pnl.get(), 0);
+            assert!(account.source_domains.iter().all(|source| !source.is_occupied()));
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+            let dest = env.withdraw(&owners[i], winners[i], DEPOSIT + PROFITS[i]);
+            payouts[i] = env.token_amount(dest);
+            consumed += PROFITS[i];
+            let group = env.market_state().1;
+            assert_eq!(group.source_credit[1].positive_claim_bound_num, (TOTAL - consumed) * BOUND_SCALE);
+            assert_eq!(group.source_backing_buckets[1].fresh_unliened_backing_num, (TOTAL - consumed) * BOUND_SCALE);
+            assert_eq!(group.source_backing_buckets[1].consumed_liened_backing_num, consumed * BOUND_SCALE);
+            assert_eq!(group.source_credit[1].spent_backing_num, consumed * BOUND_SCALE);
+            assert_eq!(group.insurance, 0);
+            assert_eq!(group.vault, group.c_tot + TOTAL - consumed);
+            assert_eq!(group.vault, env.token_amount(env.vault) as u128);
+            assert_eq!(env.svm.get_account(&winners[1 - i]).unwrap(), other_before);
+            assert_eq!(env.svm.get_account(&loser).unwrap(), before[3]);
+        }
+        assert_eq!(payouts, [1_021, 1_035]);
+        let group = env.market_state().1;
+        assert_eq!((group.vault, group.c_tot, group.pnl_pos_tot), (0, 0, 0));
+        outcomes.push((payouts, group.source_credit[1], group.source_backing_buckets[1]));
+    }
+    assert_eq!(outcomes[0], outcomes[1], "caller order changes payouts or backing allocation");
+}
+
 // Converting each closed trade's profit or retaining it through the next trade must produce
 // the same economic state and token payouts once the combined released PnL is converted.
 #[test]
