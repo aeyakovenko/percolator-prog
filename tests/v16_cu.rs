@@ -14467,6 +14467,80 @@ fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
 }
 
 #[test]
+fn v16_bpf_hybrid_stale_publication_fallback_preserves_freshness() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0xb4u8; 32];
+    let initial = env.set_pyth_price(&feed, 200_000, -6, 100);
+    env.try_configure_hybrid_with_cu(
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial],
+        1,
+        100,
+        0,
+        0,
+        3,
+    )
+    .expect("configure hybrid oracle");
+    env.configure_permissionless_resolve_with_cu(6, 1);
+    let keeper = Keypair::new();
+    let portfolio = env.create_portfolio(&keeper);
+    let (cfg_before, group_before) = env.market_state();
+    let mut accrued_slot = group_before.assets[0].slot_last;
+    let profile_before = state::read_asset_oracle_profile(
+        &env.svm.get_account(&env.market).unwrap().data,
+        0,
+    )
+    .unwrap();
+
+    // This newer publication is expired by Clock time but fresh under slot-derived time.
+    // Successful EWMA fallback must not record it or renew the stale-resolution deadline.
+    let expired = env.set_pyth_price(&feed, 900_000, -6, 101);
+    for (slot, unix_time) in [(5, 200), (6, 201)] {
+        set_test_clock(&mut env, slot, unix_time);
+        env.crank_with_oracle_tail(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                close_q: 0,
+                observations: crank_observations_with_accounts(0, 1),
+            },
+            &[expired],
+        );
+        let (cfg, group) = env.market_state();
+        let profile = state::read_asset_oracle_profile(
+            &env.svm.get_account(&env.market).unwrap().data,
+            0,
+        )
+        .unwrap();
+        assert_eq!(group.current_slot, slot);
+        assert!(group.assets[0].slot_last > accrued_slot);
+        assert!(group.assets[0].slot_last <= slot);
+        accrued_slot = group.assets[0].slot_last;
+        assert_eq!(group.assets[0].effective_price, 200_000);
+        assert_eq!(group.assets[0].raw_oracle_target_price, 200_000);
+        assert_eq!(cfg, cfg_before, "fallback must not renew wrapper freshness");
+        assert_eq!(
+            profile, profile_before,
+            "fallback must preserve oracle provenance"
+        );
+    }
+
+    set_test_clock(&mut env, 7, 202);
+    env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 7 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    )
+    .expect("fallback cranks must leave the original stale-resolution deadline intact");
+    let (_, resolved) = env.market_state();
+    assert_eq!(resolved.mode, MarketModeV16::Resolved);
+    assert_eq!(resolved.resolved_slot, 7);
+}
+
+#[test]
 fn v16_bpf_configure_and_push_ewma_mark_are_bounded_and_clock_authenticated() {
     let mut env = V16CuEnv::new();
     let configure_real_slot = 8;
@@ -41834,6 +41908,115 @@ fn v16_attack_nocpi_extreme_price_caps_ewma_move_without_dos() {
     }
 }
 
+// Trade-driven EWMA shares one slot budget across fresh-signature retries and route switches.
+// Existing OI fixes the externality cost; exact notionals isolate partitioning from fee rounding.
+#[test]
+fn v16_bpf_signed_ewma_budget_survives_split_and_route_switch() {
+    use NoCpiReportedPricePath::{Batch, Single};
+
+    const MARK: u64 = 10_000;
+    const DEPOSIT: u128 = 1_000_000;
+    const BASE_BPS: u64 = 100;
+    const MAX_FEE_BPS: u64 = 8_000;
+    const EXTERNALITY_FEE: u128 = 12_000; // 2 * (6 * MARK) * 10% mark movement.
+
+    for direction in [-1i128, 1] {
+        for (reported_price, expected_mark) in [(8_000, 9_000), (12_000, 11_000)] {
+            for steps in [
+                &[(Single, 2)][..],
+                &[(Batch, 2)][..],
+                &[(Single, 1), (Single, 1)][..],
+                &[(Batch, 1), (Batch, 1)][..],
+                &[(Single, 1), (Batch, 1)][..],
+                &[(Batch, 1), (Single, 1)][..],
+            ] {
+                let label = format!("sign={direction}, price={reported_price}, {steps:?}");
+                let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+                    initial_price: MARK,
+                    max_trading_fee_bps: MAX_FEE_BPS,
+                    max_price_move_bps_per_slot: 2_000,
+                    ..V16CuMarketParams::default()
+                });
+                env.configure_ewma_mark_with_cu(0, MARK, 1, 0);
+                let (owner_a, account_a, owner_b, account_b) =
+                    funded_no_cpi_reported_price_pair(&mut env, DEPOSIT);
+                env.trade_asset_with_cu(
+                    0,
+                    &owner_a,
+                    account_a,
+                    &owner_b,
+                    account_b,
+                    direction * (6 * POS_SCALE) as i128,
+                    MARK,
+                    0,
+                );
+                env.update_trade_fee_policy_with_cu(BASE_BPS);
+                let vault_before = env.svm.get_account(&env.vault).unwrap();
+                env.svm.warp_to_slot(1);
+                let mut filled_units = 0u128;
+
+                for &(path, units) in steps {
+                    env.svm.expire_blockhash();
+                    try_no_cpi_reported_price_trade_with_cu(
+                        &mut env,
+                        path,
+                        &owner_a,
+                        account_a,
+                        &owner_b,
+                        account_b,
+                        direction * (units * POS_SCALE) as i128,
+                        reported_price,
+                        0,
+                    )
+                    .unwrap_or_else(|err| panic!("{label}, {path:?}: {err}"));
+                    filled_units += units;
+
+                    let (cfg, group) = env.market_state();
+                    let notional = filled_units * reported_price as u128;
+                    let base_fee = 2 * notional * BASE_BPS as u128 / 10_000;
+                    let total_fee = EXTERNALITY_FEE + base_fee;
+                    assert_eq!(cfg.mark_ewma_e6, expected_mark, "{label}: no compounding");
+                    assert_eq!(cfg.mark_ewma_last_slot, 1, "{label}");
+                    assert_eq!(group.assets[0].effective_price, MARK, "{label}");
+                    assert_eq!(group.insurance, total_fee, "{label}: cumulative fee");
+                    assert!(
+                        total_fee <= 2 * notional * MAX_FEE_BPS as u128 / 10_000,
+                        "{label}: cumulative fee ceiling"
+                    );
+                    let position = (6 + filled_units) * POS_SCALE;
+                    assert_eq!(group.assets[0].oi_eff_long_q, position, "{label}");
+                    assert_eq!(group.assets[0].oi_eff_short_q, position, "{label}");
+                    for (key, sign) in [(account_a, direction), (account_b, -direction)] {
+                        let account = env.portfolio_state(key);
+                        assert_eq!(
+                            active_leg_for_asset(&account, 0).basis_pos_q,
+                            sign * position as i128,
+                            "{label}: signed cumulative fill"
+                        );
+                        assert_eq!(account.capital.get(), DEPOSIT - total_fee / 2, "{label}");
+                        assert_eq!(account.pnl.get(), 0, "{label}");
+                    }
+                    assert_eq!(group.c_tot, 2 * DEPOSIT - total_fee, "{label}");
+                    assert_eq!(
+                        group.insurance_domain_budget,
+                        vec![total_fee / 2; 2],
+                        "{label}"
+                    );
+                    assert_domain_budget_remaining_total_consistent(&group, &label);
+                    assert_eq!(group.c_tot + group.insurance, group.vault, "{label}");
+                    assert_eq!(group.vault, 2 * DEPOSIT, "{label}");
+                    assert_eq!(
+                        env.svm.get_account(&env.vault).unwrap(),
+                        vault_before,
+                        "{label}"
+                    );
+                }
+                assert_eq!(filled_units, 2, "{label}: all routes authorize the same total");
+            }
+        }
+    }
+}
+
 // security.md sweep — ADL deleverage precision/conservation (#9/#22/#33): when a bankrupt side is
 // partially liquidated, the engine auto-deleverages the WINNING (opposite) side by scaling its a-factor
 // by oi_after/oi_before (percolator/src/v16.rs:9834). Attacker goal: have the winner keep its full claim
@@ -44914,6 +45097,107 @@ fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
         ok.is_ok(),
         "clean TradeCpi (no poisoned tail) executes: {:?}",
         ok
+    );
+}
+
+// A matcher-owned, unsigned context bypasses the protocol-owner and signer tail guards;
+// its key must still be excluded from the tail, while a distinct matcher-owned context is valid.
+#[test]
+fn v16_attack_tradecpi_matcher_context_cannot_alias_tail() {
+    use percolator_prog::error::PercolatorError;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16CuEnv::new();
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let (matcher_program, other_ctx, _) =
+        auth_matcher_for_lp_via_system_create(&mut env, &lp_owner, lp);
+    let (ctx, delegate, _) =
+        env.init_auth_matcher_context_via_system_create(matcher_program, &lp_owner, lp);
+    let size_q = (10 * POS_SCALE) as i128;
+    let before = [
+        env.market,
+        taker,
+        lp,
+        ctx,
+        other_ctx,
+        delegate,
+        env.vault,
+        taker_owner.pubkey(),
+    ]
+    .map(|key| (key, env.svm.get_account(&key)));
+    let trade = |env: &mut V16CuEnv, tail: Pubkey| {
+        env.svm.expire_blockhash();
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(taker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker, false),
+                AccountMeta::new(lp, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+                AccountMeta::new(tail, false),
+            ],
+            data: ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q,
+                fee_bps: 100,
+                limit_price: 0,
+            }
+            .encode(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &taker_owner],
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx)
+    };
+
+    let failed = trade(&mut env, ctx).expect_err("matcher context must not also be a tail account");
+    assert_eq!(
+        failed.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::InvalidInstruction as u32),
+        ),
+        "context alias must fail wrapper validation: {failed:?}"
+    );
+    let matcher_invoke = format!("Program {matcher_program} invoke");
+    assert!(
+        !failed
+            .meta
+            .logs
+            .iter()
+            .any(|line| line.starts_with(&matcher_invoke)),
+        "context alias must reject before matcher CPI: {failed:?}"
+    );
+    for (key, account) in &before {
+        assert_eq!(
+            env.svm.get_account(key).as_ref(),
+            account.as_ref(),
+            "rejected context alias must preserve the entire account {key}"
+        );
+    }
+
+    trade(&mut env, other_ctx).expect("changing only the tail key to a distinct context permits fill");
+    let group = env.market_state().1;
+    assert_eq!(group.assets[0].oi_eff_long_q, size_q as u128);
+    assert_eq!(group.assets[0].oi_eff_short_q, size_q as u128);
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(taker), 0).basis_pos_q,
+        size_q
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(lp), 0).side,
+        SideV16::Short
     );
 }
 
