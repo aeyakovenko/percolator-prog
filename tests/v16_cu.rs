@@ -32473,6 +32473,80 @@ fn v16_attack_topup_insurance_domain_authority_gated() {
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
+// Invariant: asset-1 insurance authority cannot cross into asset 0 through the retained
+// TopUpInsurance route, even though the same signer and token accounts can fund its own domain.
+#[test]
+fn v16_attack_cross_asset_insurance_authority_cannot_use_retained_topup() {
+    use percolator_prog::error::PercolatorError;
+
+    let mut env = V16CuEnv::new();
+    let local_authority = Keypair::new();
+    env.ensure_signer_account(local_authority.pubkey());
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        local_authority.pubkey(),
+        env.admin.pubkey(),
+        env.admin.pubkey(),
+        env.admin.pubkey(),
+    );
+    let source = env.token_account(local_authority.pubkey(), 60);
+    let accounts = vec![
+        AccountMeta::new(local_authority.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(source, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 2,
+            amount: 20,
+        },
+        accounts.clone(),
+        &[&local_authority],
+    )
+    .expect("asset-1 insurance authority can fund its own domain");
+    assert_eq!(env.token_amount(source), 40);
+    assert_eq!(
+        &env.market_state().1.insurance_domain_budget[..],
+        &[0, 0, 20, 0]
+    );
+
+    // No optional ledger: its authority binding must not mask the retained route's own check.
+    let watched = [env.market, env.vault, source, local_authority.pubkey()];
+    let before = watched.map(|key| env.svm.get_account(&key).unwrap());
+    env.svm.expire_blockhash();
+    let error = env
+        .send(
+            ProgInstruction::TopUpInsurance { amount: 20 },
+            accounts,
+            &[&local_authority],
+        )
+        .expect_err("local insurance authority must not fund asset 0 via the retained route");
+    assert!(
+        error.contains(&format!("Custom({})", PercolatorError::Unauthorized as u32)),
+        "expected Unauthorized, got {error}"
+    );
+    for (key, account) in watched.into_iter().zip(before) {
+        assert_eq!(
+            env.svm.get_account(&key).unwrap(),
+            account,
+            "rejected retained top-up must leave {key} unchanged"
+        );
+    }
+
+    let (admin_source, _) = env.top_up_insurance_with_cu(20);
+    assert_eq!(env.token_amount(admin_source), 0);
+    assert_eq!(env.token_amount(source), 40);
+    let (_, group) = env.market_state();
+    assert_eq!(&group.insurance_domain_budget[..], &[10, 10, 20, 0]);
+    assert_eq!((group.insurance, group.vault), (40, 40));
+    assert_eq!(env.token_amount(env.vault), 40);
+    assert_domain_budget_remaining_total_consistent(&group, "retained top-up authority scope");
+}
+
 // security.md sweep — recovery-tool gating (#6): ForfeitRecoveryLeg is owner-gated
 // (with_one_portfolio_view enforces owner signs + matches the portfolio). FinalizeResetSide is
 // market-only and permissionless, so a bogus victim-portfolio account list must not be accepted.
