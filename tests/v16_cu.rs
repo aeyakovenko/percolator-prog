@@ -5192,6 +5192,107 @@ fn v16_bpf_privileged_retire_uses_authenticated_slot() {
     );
 }
 
+// Retirement must count each reusable slot once: append stays blocked until all retired
+// slots are reused, then becomes reachable without a phantom free-slot count stranding growth.
+#[test]
+fn v16_bpf_repeated_retirement_preserves_reuse_count_and_append_progress() {
+    const FEE: u128 = 7;
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE);
+    env.activate_asset(1, 1, 100);
+    env.activate_asset(2, 2, 100);
+    env.svm.warp_to_slot(3);
+    for (asset_index, expected_free) in [(1, 1), (2, 2), (1, 2), (2, 2)] {
+        env.svm.expire_blockhash();
+        let cu = env.update_asset_lifecycle_as_admin_with_cu(
+            processor::ASSET_ACTION_RETIRE,
+            asset_index,
+            3,
+            0,
+        );
+        assert_cu_within("retire and repeat retirement", cu, CUSTODY_CU_LIMIT);
+        let (cfg, group) = env.market_state();
+        assert_eq!(cfg.free_market_slot_count, expected_free);
+        assert_eq!(
+            group.assets[asset_index as usize].lifecycle,
+            AssetLifecycleV16::Retired
+        );
+    }
+
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    let source = env.token_account(creator.pubkey(), (3 * FEE) as u64);
+    let activate = |env: &mut V16CuEnv, asset_index| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: processor::ASSET_ACTION_ACTIVATE,
+                asset_index,
+                now_slot: env.svm.get_sysvar::<Clock>().slot,
+                initial_price: 100,
+                insurance_authority: creator.pubkey().to_bytes(),
+                insurance_operator: creator.pubkey().to_bytes(),
+                backing_bucket_authority: creator.pubkey().to_bytes(),
+                oracle_authority: creator.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&creator],
+        )
+    };
+    let next_market_id = env.market_state().1.next_market_id;
+    for (slot, reuse_index, remaining) in [(4, 2, 1), (5, 1, 0)] {
+        env.svm.warp_to_slot(slot);
+        let snapshots = [env.market, source, env.vault]
+            .map(|key| (key, env.svm.get_account(&key).unwrap()));
+        let err = activate(&mut env, 3).expect_err("retired slots must be reused before append");
+        assert!(err.contains("Custom(21)"), "expected EngineLockActive: {err}");
+        for (key, before) in snapshots {
+            assert_eq!(
+                env.svm.get_account(&key).unwrap(),
+                before,
+                "blocked append cannot realloc the market or charge a fee"
+            );
+        }
+        let cu = activate(&mut env, reuse_index).expect("permissionless reuse makes progress");
+        assert_cu_within("reuse after repeated retirement", cu, CUSTODY_CU_LIMIT);
+        let (cfg, group) = env.market_state();
+        assert_eq!(cfg.free_market_slot_count, remaining);
+        assert_eq!(group.config.max_market_slots, 3);
+        assert_eq!(
+            group.assets[reuse_index as usize].lifecycle,
+            AssetLifecycleV16::Active
+        );
+        assert_eq!(
+            group.assets[reuse_index as usize].market_id,
+            next_market_id + slot - 4
+        );
+        assert_eq!(
+            env.token_amount(source) as u128,
+            (remaining as u128 + 1) * FEE
+        );
+    }
+
+    env.svm.warp_to_slot(6);
+    let cu = activate(&mut env, 3).expect("exhausting retired slots must unlock append");
+    assert_cu_within("append after exhausting retired slots", cu, CUSTODY_CU_LIMIT);
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.free_market_slot_count, 0);
+    assert_eq!(group.config.max_market_slots, 4);
+    assert_eq!(group.assets[3].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(group.assets[3].market_id, next_market_id + 2);
+    assert_eq!(group.next_market_id, next_market_id + 3);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault) as u128, 3 * FEE);
+    assert_eq!(group.vault, 3 * FEE);
+    assert_eq!(group.insurance, 3 * FEE);
+}
+
 #[test]
 fn v16_bpf_privileged_reactivate_uses_authenticated_slot() {
     let mut env = V16CuEnv::new();
@@ -18979,6 +19080,127 @@ fn v16_bpf_released_pnl_incremental_and_aggregate_conversion_equivalence() {
             assert_eq!(env.portfolio_state(portfolio).pnl.get(), 0, "{label}");
         }
     }
+}
+
+// Composed conversion/withdrawal must match separate calls and spend only the owner's released
+// value. A late over-withdrawal must restore the source claim, even with another domain's
+// insurance and recoverable backing in the same vault; those protected funds remain withdrawable.
+#[test]
+fn v16_bpf_convert_withdraw_composition_preserves_other_domain_principal() {
+    const CAPITAL: u128 = 1_000;
+    const BACKING: u128 = 700;
+    const INSURANCE: u128 = 300;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_auth_mark_with_cu(0, 100);
+    let admin = env.admin.insecure_clone();
+    env.top_up_backing_bucket(3, BACKING, 10_000);
+    env.top_up_insurance_domain_with_authority(&admin, 2, INSURANCE);
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loser = env.create_portfolio(&loser_owner);
+    env.deposit(&winner_owner, winner, CAPITAL);
+    env.deposit(&loser_owner, loser, CAPITAL);
+    env.trade_asset_with_cu(
+        0, &winner_owner, winner, &loser_owner, loser, POS_SCALE as i128, 100, 0,
+    );
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 140);
+    for portfolio in [loser, winner] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.trade_asset_with_cu(
+        0, &winner_owner, winner, &loser_owner, loser, -(POS_SCALE as i128), 140, 0,
+    );
+    let released = u128::try_from(env.portfolio_state(winner).pnl.get()).unwrap();
+    assert!(released > 0, "public trades produced a real source-backed gain");
+    assert!(env.market_state().1.source_credit[1].positive_claim_bound_num > 0);
+    let loser_capital = env.portfolio_state(loser).capital.get();
+    env.withdraw(&loser_owner, loser, loser_capital);
+    let payout = CAPITAL + released;
+    assert_eq!(env.token_amount(env.vault) as u128, payout + BACKING + INSURANCE);
+    let dest = env.token_account(winner_owner.pubkey(), 0);
+    let convert = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(winner_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(winner, false),
+        ],
+        data: ProgInstruction::ConvertReleasedPnl { amount: released }.encode(),
+    };
+    let withdraw = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(winner_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(winner, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::Withdraw { amount: payout }.encode(),
+    };
+    let keys = [env.market, winner, loser, env.vault, dest];
+    let snapshot = |env: &V16CuEnv| keys.map(|key| env.svm.get_account(&key).unwrap());
+    let before = snapshot(&env);
+    let mut excessive = withdraw.clone();
+    excessive.data = ProgInstruction::Withdraw { amount: payout + 1 }.encode();
+    let error = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), convert.clone(), excessive],
+        &[&winner_owner],
+    )
+    .expect_err("shared vault liquidity cannot authorize one extra atom");
+    let locked = percolator_prog::error::PercolatorError::EngineLockActive as u32;
+    assert!(
+        error.contains(&format!("InstructionError(3, Custom({locked}))")),
+        "conversion must succeed before the withdrawal rejects: {error}"
+    );
+    assert_eq!(snapshot(&env), before, "late failure restores claims and custody");
+
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), convert.clone(), withdraw.clone()],
+        &[&winner_owner],
+    )
+    .expect("retry converts and withdraws exactly the owner's entitlement");
+    let composed = snapshot(&env);
+    for (&key, account) in keys.iter().zip(&before) {
+        env.svm.set_account(key, account.clone()).unwrap();
+    }
+    for ix in [convert, withdraw] {
+        send_raw_tx(&mut env.svm, &env.payer, ix, &[&winner_owner])
+            .expect("the same instructions also succeed separately");
+    }
+    assert_eq!(snapshot(&env), composed, "composition preserves exact account state");
+    assert_eq!(env.token_amount(dest) as u128, payout);
+    assert_eq!(env.portfolio_state(winner).capital.get(), 0);
+    assert_eq!(env.portfolio_state(winner).pnl.get(), 0);
+    assert_eq!(
+        market_engine_slot_bytes(&composed[0].data, 1),
+        market_engine_slot_bytes(&before[0].data, 1),
+        "conversion and withdrawal leave the unrelated domain byte-identical"
+    );
+    let provider_dest = env.token_account(admin.pubkey(), 0);
+    env.withdraw_backing_bucket_to_admin_token_with_cu(provider_dest, 3, BACKING);
+    env.withdraw_insurance_domain_to_admin_token_with_cu(provider_dest, 2, INSURANCE);
+    assert_eq!(env.token_amount(provider_dest) as u128, BACKING + INSURANCE);
+    assert_eq!(env.token_amount(env.vault), 0, "all protected principal remains payable");
+    assert_eq!(env.market_state().1.vault, 0);
 }
 
 // security.md sweep - ConvertReleasedPnl market isolation (#2/#33/#44): owner authorization alone is not
