@@ -60682,6 +60682,109 @@ fn v16_bpf_failed_signed_tradecpi_retry_preserves_matcher_identity() {
     assert_eq!(env.token_amount(source), 0);
 }
 
+// Invariant: the persisted matcher request counter must fail closed at exhaustion before
+// either CPI route invokes the matcher; the last unused ID must still authorize a real fill.
+#[test]
+fn v16_attack_matcher_req_seq_exhaustion_blocks_cpi_without_mutation() {
+    use percolator_prog::error::PercolatorError;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    for instruction in [
+        ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            fee_bps: 0,
+            limit_price: 100,
+        },
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                fee_bps: 0,
+                limit_price: 100,
+            }],
+        },
+    ] {
+        let mut env = V16CuEnv::new();
+        let taker_owner = Keypair::new();
+        let lp_owner = Keypair::new();
+        let taker = env.create_portfolio(&taker_owner);
+        let lp = env.create_portfolio(&lp_owner);
+        env.deposit(&taker_owner, taker, 10_000);
+        env.deposit(&lp_owner, lp, 10_000);
+        let (matcher_program, ctx, delegate) =
+            auth_matcher_for_lp_via_system_create(&mut env, &lp_owner, lp);
+        let ix = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(taker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker, false),
+                AccountMeta::new(lp, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            data: instruction.encode(),
+        };
+        let send = |env: &mut V16CuEnv| {
+            env.svm.expire_blockhash();
+            let tx = Transaction::new_signed_with_payer(
+                &[heap_ix(), cu_ix(), ix.clone()],
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &taker_owner],
+                env.svm.latest_blockhash(),
+            );
+            env.svm.send_transaction(tx)
+        };
+        let mut market = env.svm.get_account(&env.market).unwrap();
+        let mut cfg = env.market_state().0;
+        cfg.matcher_req_seq = u64::MAX;
+        state::write_wrapper_config(&mut market.data, &cfg).unwrap();
+        env.svm.set_account(env.market, market.clone()).unwrap();
+        let before = [env.market, taker, lp, ctx, env.vault]
+            .map(|key| (key, env.svm.get_account(&key).unwrap()));
+
+        let failed = send(&mut env).expect_err("exhausted request IDs must reject");
+        assert_eq!(
+            failed.err,
+            TransactionError::InstructionError(
+                2,
+                InstructionError::Custom(PercolatorError::InvalidInstruction as u32),
+            ),
+            "{instruction:?}: {failed:?}"
+        );
+        assert!(
+            !failed
+                .meta
+                .logs
+                .iter()
+                .any(|log| log.starts_with(&format!("Program {matcher_program} invoke ["))),
+            "exhaustion must reject before matcher CPI: {instruction:?}: {failed:?}"
+        );
+        for (key, account) in before {
+            assert_eq!(
+                env.svm.get_account(&key).unwrap(),
+                account,
+                "{instruction:?}: rejected request changed {key}"
+            );
+        }
+
+        cfg.matcher_req_seq = u64::MAX - 1;
+        state::write_wrapper_config(&mut market.data, &cfg).unwrap();
+        env.svm.set_account(env.market, market).unwrap();
+        send(&mut env).expect("changing only the counter permits the final request ID");
+        assert_eq!(env.market_state().0.matcher_req_seq, u64::MAX);
+        for (portfolio, position) in [(taker, POS_SCALE as i128), (lp, -(POS_SCALE as i128))] {
+            assert_eq!(
+                active_leg_for_asset(&env.portfolio_state(portfolio), 0).basis_pos_q,
+                position,
+                "{instruction:?}: the final request must execute a real fill"
+            );
+        }
+    }
+}
+
 #[test]
 fn v16_attack_tradecpi_matcher_req_id_advances_monotonically_on_market() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
