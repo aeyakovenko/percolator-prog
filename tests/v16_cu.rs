@@ -40468,6 +40468,114 @@ fn v16_bpf_swap_secondary_signer_and_writable_boundaries_are_atomic() {
     }
 }
 
+// Invariant: a valid primary source cannot double as the secondary destination; reject before
+// either SPL transfer, preserving reserves and claims. Correcting only the destination must succeed.
+#[test]
+fn v16_bpf_swap_secondary_rejects_primary_source_as_secondary_destination() {
+    use percolator_prog::error::PercolatorError;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    let depositor = Keypair::new();
+    let portfolio = env.create_portfolio(&depositor);
+    env.deposit(&depositor, portfolio, 1_000);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 50),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let before = [
+        ("market", env.market),
+        ("portfolio", portfolio),
+        ("primary mint", env.mint),
+        ("secondary mint", secondary_mint),
+        ("primary source", primary_source),
+        ("primary vault", env.vault),
+        ("secondary destination", secondary_dest),
+        ("secondary vault", secondary_vault),
+    ]
+    .map(|(label, key)| (label, key, env.svm.get_account(&key).unwrap()));
+    let swap = |env: &mut V16CuEnv, destination: Pubkey| {
+        env.svm.expire_blockhash();
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(admin.pubkey(), true),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new(primary_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: ProgInstruction::SwapSecondaryForPrimary { amount: 10 }.encode(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &admin],
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx)
+    };
+
+    let failed = swap(&mut env, primary_source)
+        .expect_err("the primary source is not a secondary-mint destination");
+    assert_eq!(
+        failed.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::InvalidMint as u32),
+        ),
+        "the wrapper must reject the mint-role substitution: {failed:?}"
+    );
+    let token_invoke = format!("Program {} invoke", spl_token::ID);
+    assert!(
+        !failed
+            .meta
+            .logs
+            .iter()
+            .any(|line| line.starts_with(&token_invoke)),
+        "neither SPL transfer may run before mint rejection: {failed:?}"
+    );
+    for (label, key, account) in &before {
+        assert_eq!(
+            env.svm.get_account(key).as_ref(),
+            Some(account),
+            "rejected swap preserves the entire {label} account"
+        );
+    }
+
+    swap(&mut env, secondary_dest).expect("correcting only the destination permits the swap");
+    assert_eq!(env.token_amount(primary_source), 0);
+    assert_eq!(env.token_amount(env.vault), 1_010);
+    assert_eq!(env.token_amount(secondary_dest), 10);
+    assert_eq!(env.token_amount(secondary_vault), 40);
+    for (label, key, account) in &before {
+        if ![primary_source, env.vault, secondary_dest, secondary_vault].contains(key) {
+            assert_eq!(
+                env.svm.get_account(key).as_ref(),
+                Some(account),
+                "successful swap preserves the entire {label} account"
+            );
+        }
+    }
+}
+
 // security.md sweep - SwapSecondaryForPrimary account aliasing (#26/#35/#44): the primary source must
 // be an authority-owned token account and the secondary destination must be authority-owned. Otherwise
 // the authority could pass the primary vault as both source and destination for a no-op primary transfer
