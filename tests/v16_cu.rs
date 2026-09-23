@@ -48989,6 +48989,204 @@ fn v16_bpf_insurance_authority_roundtrip_after_admin_burn_is_scoped() {
     }
 }
 
+// Rotating a local admin during shutdown must preserve the original exit deadline, revoke the
+// old admin's lifecycle access, and leave matched exits and permissionless force-close usable.
+#[test]
+fn v16_bpf_asset_admin_rotation_preserves_pending_shutdown_exit() {
+    const SHUT: u64 = 2;
+    const DELAY: u64 = 5;
+    const CAPITAL: u128 = 10_000;
+
+    let mut env = V16CuEnv::new();
+    let old_admin = Keypair::new();
+    let new_admin = Keypair::new();
+    let cranker = Keypair::new();
+    env.ensure_signer_account(cranker.pubkey());
+    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+    env.update_market_init_fee_policy_with_cu(10);
+    env.svm.warp_to_slot(1);
+    let domain_authority = env.admin.pubkey();
+    env.activate_permissionless_asset_with_fee(
+        &old_admin,
+        1,
+        1,
+        100,
+        domain_authority,
+        domain_authority,
+        domain_authority,
+        domain_authority,
+        10,
+    );
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, CAPITAL);
+    env.deposit(&short_owner, short_account, CAPITAL);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (2 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    assert_eq!(env.market_state().1.assets[1].oi_eff_long_q, 2 * POS_SCALE);
+    assert_eq!(env.market_state().1.assets[1].oi_eff_short_q, 2 * POS_SCALE);
+
+    env.svm.warp_to_slot(SHUT);
+    env.try_shutdown_asset_with_authority(&old_admin, 1, SHUT)
+        .expect("original local admin starts shutdown with live user positions");
+    let before_rotation = env.svm.get_account(&env.market).unwrap();
+    let mut expected_profile = state::read_asset_oracle_profile(&before_rotation.data, 1).unwrap();
+    assert_eq!(expected_profile.asset_admin, old_admin.pubkey().to_bytes());
+    assert_eq!(expected_profile.last_good_oracle_slot, SHUT);
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+
+    env.svm.warp_to_slot(SHUT + 2);
+    env.try_update_per_asset_authority_with_cu(
+        &old_admin,
+        Some(&new_admin),
+        1,
+        processor::ASSET_AUTH_ADMIN,
+        new_admin.pubkey().to_bytes(),
+    )
+    .expect("local admin can co-sign a handoff during the shutdown exit window");
+    expected_profile.asset_admin = new_admin.pubkey().to_bytes();
+    let after_rotation = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(
+        bytemuck::bytes_of(&state::read_asset_oracle_profile(&after_rotation.data, 1).unwrap()),
+        bytemuck::bytes_of(&expected_profile),
+        "rotation changes only the local admin, preserving the frozen mark and shutdown slot"
+    );
+    assert_eq!(
+        market_engine_slot_bytes(&after_rotation.data, 1),
+        market_engine_slot_bytes(&before_rotation.data, 1),
+        "rotation preserves the recovering asset's engine state and live open interest"
+    );
+
+    // Include every writable instruction account and custody; the separate payer pays fees.
+    let watched = [
+        env.market,
+        env.vault,
+        long_account,
+        short_account,
+        old_admin.pubkey(),
+        new_admin.pubkey(),
+        cranker.pubkey(),
+    ];
+    let snapshot = |env: &V16CuEnv| -> Vec<Account> {
+        watched
+            .iter()
+            .map(|key| env.svm.get_account(key).unwrap())
+            .collect()
+    };
+
+    env.svm.warp_to_slot(SHUT + DELAY - 1);
+    let before_stale = snapshot(&env);
+    let error = env
+        .try_shutdown_asset_with_authority(&old_admin, 1, SHUT + DELAY - 1)
+        .expect_err("rotated-out local admin must lose shutdown authority");
+    assert!(
+        error.contains("Custom(8)"),
+        "expected Unauthorized, got {error}"
+    );
+    assert_eq!(
+        snapshot(&env),
+        before_stale,
+        "stale admin rejection rolls back all watched accounts exactly"
+    );
+
+    env.try_shutdown_asset_with_authority(&new_admin, 1, SHUT + DELAY - 1)
+        .expect("current local admin can submit the same shutdown instruction");
+    assert_eq!(
+        snapshot(&env),
+        before_stale,
+        "accepted repeated shutdown cannot restart the exit timer or alter frozen state"
+    );
+
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        -(POS_SCALE as i128),
+        100,
+        0,
+    );
+    assert_eq!(env.market_state().1.assets[1].oi_eff_long_q, POS_SCALE);
+    assert_eq!(env.market_state().1.assets[1].oi_eff_short_q, POS_SCALE);
+    for portfolio in [long_account, short_account] {
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(portfolio), 1)
+                .basis_pos_q
+                .unsigned_abs(),
+            POS_SCALE,
+            "matched owners can reduce during the exit window after rotation"
+        );
+    }
+
+    let before_early = snapshot(&env);
+    let error = env
+        .try_force_close_abandoned_asset_with_cu(
+            &cranker,
+            long_account,
+            short_account,
+            1,
+            SHUT + DELAY - 1,
+            POS_SCALE,
+        )
+        .expect_err("rotation must not shorten the original exit window");
+    assert!(
+        error.contains("Custom(21)"),
+        "expected EngineLockActive, got {error}"
+    );
+    assert_eq!(
+        snapshot(&env),
+        before_early,
+        "early force-close rolls back all watched accounts exactly"
+    );
+
+    env.svm.warp_to_slot(SHUT + DELAY);
+    env.force_close_abandoned_asset_with_cu(
+        &cranker,
+        long_account,
+        short_account,
+        1,
+        SHUT + DELAY,
+        POS_SCALE,
+    );
+    let (_, closed_group) = env.market_state();
+    assert_eq!(closed_group.assets[1].oi_eff_long_q, 0);
+    assert_eq!(closed_group.assets[1].oi_eff_short_q, 0);
+    for (owner, portfolio) in [(&long_owner, long_account), (&short_owner, short_account)] {
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(
+            &env.portfolio_state(portfolio)
+        )));
+        assert_eq!(env.portfolio_state(portfolio).capital.get(), CAPITAL);
+        let dest = env.withdraw(owner, portfolio, CAPITAL);
+        assert_eq!(
+            env.token_amount(dest),
+            CAPITAL as u64,
+            "owner recovers all collateral without either admin signing"
+        );
+        assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+    }
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.marketauth, domain_authority.to_bytes());
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(group.insurance, 10);
+    assert_eq!(group.vault, 10);
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+}
+
 // security.md sweep — zero required authority anti-brick (#6/#30/#48): activation rejects zero domain
 // authorities because they can strand domain funds or oracle liveness during terminal wind-down.
 // UpdateAssetAuthority must preserve that invariant too: an admin/operator cannot burn the
@@ -51500,6 +51698,173 @@ fn v16_attack_base_unit_mint_reset_requires_old_secondary_reserve_empty() {
         replacement_primary.to_bytes(),
         "replacement primary mint stored once old primary vault is empty"
     );
+}
+
+// An empty reserve proves that a mint can be retired only for its own market. Another market's
+// canonical reserve for the same mint must not hide raw custody behind empty accounting totals.
+#[test]
+fn v16_bpf_base_unit_rotation_rejects_foreign_empty_reserve() {
+    use percolator_prog::error::PercolatorError;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let market_a = env.market;
+    let secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary);
+    let (market_b, vault_authority_b, primary_vault_b) =
+        init_independent_market_same_mint(&mut env, V16CuMarketParams::default());
+    env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market_b, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(secondary, false),
+        ],
+        &[&admin],
+    )
+    .expect("configure the same base-unit pair on market B");
+
+    let secondary_vault_a = canonical_vault_ata(env.vault_authority, secondary);
+    let secondary_vault_b = canonical_vault_ata(vault_authority_b, secondary);
+    assert_ne!(env.vault_authority, vault_authority_b);
+    assert_ne!(secondary_vault_a, secondary_vault_b);
+    for (vault, authority, amount) in [
+        (secondary_vault_a, env.vault_authority, 50),
+        (secondary_vault_b, vault_authority_b, 0),
+    ] {
+        env.svm
+            .set_account(
+                vault,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(secondary, authority, amount),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    }
+    for market in [market_a, market_b] {
+        let account = env.svm.get_account(&market).unwrap();
+        let (cfg, group) = state::read_market(&account.data).unwrap();
+        assert_eq!(cfg.collateral_mint, env.mint.to_bytes());
+        assert_eq!(cfg.secondary_collateral_mint, secondary.to_bytes());
+        assert_eq!((group.vault, group.c_tot, group.insurance), (0, 0, 0));
+    }
+    assert_eq!(env.token_amount(secondary_vault_a), 50);
+    assert_eq!(env.token_amount(secondary_vault_b), 0);
+
+    let replacement = env.create_mint();
+    let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 50);
+    let secondary_dest = env.token_account_for_mint(secondary, admin.pubkey(), 0);
+    let protected = [
+        ("market A", market_a),
+        ("market B", market_b),
+        ("authority", admin.pubkey()),
+        ("primary mint", env.mint),
+        ("old secondary mint", secondary),
+        ("replacement secondary mint", replacement),
+        ("primary vault A", env.vault),
+        ("primary vault B", primary_vault_b),
+        ("secondary vault A", secondary_vault_a),
+        ("secondary vault B", secondary_vault_b),
+        ("primary source", primary_source),
+        ("secondary destination", secondary_dest),
+    ];
+    let before = protected.map(|(label, key)| {
+        (label, key, env.svm.get_account(&key).unwrap())
+    });
+    let rotate = |env: &mut V16CuEnv, market: Pubkey, old_secondary_vault: Pubkey| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::UpdateBaseUnitMints {
+                primary_mint: env.mint.to_bytes(),
+                secondary_mint: replacement.to_bytes(),
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(market, false),
+                AccountMeta::new_readonly(env.mint, false),
+                AccountMeta::new_readonly(replacement, false),
+                AccountMeta::new_readonly(old_secondary_vault, false),
+            ],
+            &[&admin],
+        )
+    };
+
+    let rejected = rotate(&mut env, market_a, secondary_vault_b)
+        .expect_err("market B's empty reserve must not authorize retiring market A's funded reserve");
+    assert!(
+        rejected.contains(&format!(
+            "Custom({})",
+            PercolatorError::InvalidVaultAccount as u32
+        )),
+        "same-mint foreign reserve must fail vault binding: {rejected}"
+    );
+    for (label, key, account) in &before {
+        assert_eq!(
+            env.svm.get_account(key).as_ref(),
+            Some(account),
+            "rejected rotation preserves the entire {label} account"
+        );
+    }
+
+    rotate(&mut env, market_b, secondary_vault_b)
+        .expect("the same empty reserve is valid proof for market B");
+    let market_b_after = env.svm.get_account(&market_b).unwrap();
+    let (cfg_b, group_b) = state::read_market(&market_b_after.data).unwrap();
+    assert_eq!(cfg_b.collateral_mint, env.mint.to_bytes());
+    assert_eq!(cfg_b.secondary_collateral_mint, replacement.to_bytes());
+    assert_eq!((group_b.vault, group_b.c_tot, group_b.insurance), (0, 0, 0));
+    for (label, key, account) in &before {
+        if *key != market_b {
+            assert_eq!(
+                env.svm.get_account(key).as_ref(),
+                Some(account),
+                "market B rotation preserves the entire {label} account"
+            );
+        }
+    }
+
+    // Drain A's old secondary reserve through the public swap before rotating its mint.
+    let primary_vault_a = env.vault;
+    env.swap_secondary_for_primary_with_cu(
+        primary_source,
+        primary_vault_a,
+        secondary_dest,
+        secondary_vault_a,
+        50,
+    );
+    assert_eq!(env.token_amount(primary_source), 0);
+    assert_eq!(env.token_amount(primary_vault_a), 50);
+    assert_eq!(env.token_amount(secondary_dest), 50);
+    assert_eq!(env.token_amount(secondary_vault_a), 0);
+    assert_eq!(env.svm.get_account(&market_a).as_ref(), Some(&before[0].2));
+    assert_eq!(env.svm.get_account(&market_b).unwrap(), market_b_after);
+
+    let before_valid = protected.map(|(label, key)| {
+        (label, key, env.svm.get_account(&key).unwrap())
+    });
+    rotate(&mut env, market_a, secondary_vault_a)
+        .expect("market A can rotate once its own canonical old reserve is empty");
+    let (cfg_a, group_a) = env.market_state();
+    assert_eq!(cfg_a.collateral_mint, env.mint.to_bytes());
+    assert_eq!(cfg_a.secondary_collateral_mint, replacement.to_bytes());
+    assert_eq!((group_a.vault, group_a.c_tot, group_a.insurance), (0, 0, 0));
+    for (label, key, account) in &before_valid {
+        if *key != market_a {
+            assert_eq!(
+                env.svm.get_account(key).as_ref(),
+                Some(account),
+                "market A rotation preserves the entire {label} account"
+            );
+        }
+    }
 }
 
 // security.md sweep — base-unit mint scale isolation (#44/#48): the primary/secondary base-unit mints
