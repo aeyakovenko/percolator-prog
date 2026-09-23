@@ -53796,6 +53796,102 @@ fn v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu() {
     );
 }
 
+// Invariant: at maximal market capacity, a tail-domain owner's increased terminal
+// entitlement remains claimable exactly once, and receipt cleanup permits bounded exit.
+#[test]
+fn v16_bpf_10m_market_resolved_topup_and_owner_exit_stay_bounded() {
+    const N: usize = 5_834;
+    const CAPITAL: u128 = 1_000;
+    const FACE: u128 = 100;
+    const RESIDUAL: u128 = 40;
+    const EARLY_DOMAIN: usize = 2 * (N - 1);
+    const LATE_DOMAIN: usize = EARLY_DOMAIN + 1;
+
+    let mut env = V16CuEnv::new();
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, N - 1, 100);
+    // ClosePortfolio credits reclaimed rent to the market, so keep that recipient rent-exempt.
+    let mut market = env.svm.get_account(&env.market).unwrap();
+    market.lamports = env.svm.minimum_balance_for_rent_exemption(account_len);
+    env.svm.set_account(env.market, market).unwrap();
+    let early_owner = Keypair::new();
+    let late_owner = Keypair::new();
+    let early = env.create_portfolio(&early_owner);
+    let late = env.create_portfolio(&late_owner);
+    env.deposit(&early_owner, early, CAPITAL);
+    env.deposit(&late_owner, late, CAPITAL);
+    env.top_up_backing_bucket(EARLY_DOMAIN as u16, RESIDUAL, 2);
+    env.top_up_backing_bucket(LATE_DOMAIN as u16, FACE, 100);
+    env.add_source_positive_pnl(early, EARLY_DOMAIN, FACE);
+    env.add_source_positive_pnl(late, LATE_DOMAIN, FACE);
+    env.svm.warp_to_slot(2);
+    env.resolve();
+
+    // Expired backing pays a provisional haircut; the last domain still dilutes the rate.
+    let (early_dest, early_cu) = env.close_resolved_with_cu(&early_owner, early);
+    assert_cu_within("10MiB provisional resolved close", early_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(early_dest) as u128, CAPITAL + RESIDUAL / 2);
+    let receipt = resolved_receipt(&env.portfolio_state(early));
+    assert!(receipt.present && !receipt.finalized);
+    assert_eq!(receipt.terminal_positive_claim_face, FACE);
+    assert_eq!(receipt.paid_effective, RESIDUAL / 2);
+
+    let (late_dest, late_cu) = env.close_resolved_with_cu(&late_owner, late);
+    assert_cu_within("10MiB last-domain resolved close", late_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(late_dest) as u128, CAPITAL + FACE);
+    let (_, before) = env.market_state();
+    assert_eq!(
+        before.resolved_payout_ledger.terminal_claim_bound_unreceipted_num,
+        0
+    );
+    assert_eq!(before.vault, RESIDUAL / 2);
+    let late_before = env.svm.get_account(&late).unwrap();
+    let dest = env.token_account_for_mint(env.mint, early_owner.pubkey(), 0);
+
+    let claim_cu = env.claim_resolved_payout_topup_with_cu(early_owner.pubkey(), early, dest);
+    assert_cu_within("10MiB ClaimResolvedPayoutTopup", claim_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(dest) as u128, RESIDUAL / 2);
+    assert_eq!(
+        resolved_receipt(&env.portfolio_state(early)).paid_effective,
+        RESIDUAL
+    );
+    assert_eq!(env.token_amount(env.vault), 0);
+    assert_eq!(env.svm.get_account(&late).unwrap(), late_before);
+    let (_, after) = env.market_state();
+    assert_eq!(after.vault, 0);
+    assert_eq!(after.c_tot, 0);
+    assert_eq!(after.pnl_pos_tot, 0);
+    assert_eq!(after.resolved_payout_ledger, before.resolved_payout_ledger);
+
+    let mut max_cleanup_cu = 0;
+    for _ in 0..2 {
+        env.svm.expire_blockhash();
+        let cu = env.claim_resolved_payout_topup_with_cu(early_owner.pubkey(), early, dest);
+        assert_cu_within("10MiB terminal receipt cleanup/replay", cu, CUSTODY_CU_LIMIT);
+        max_cleanup_cu = max_cleanup_cu.max(cu);
+        assert_eq!(
+            resolved_receipt(&env.portfolio_state(early)),
+            ResolvedPayoutReceiptV16::EMPTY
+        );
+        assert_eq!(env.token_amount(dest) as u128, RESIDUAL / 2);
+        assert_eq!(env.token_amount(env.vault), 0);
+        assert_eq!(env.market_state().1.vault, 0);
+    }
+    assert_eq!(
+        [early_dest, late_dest, dest, env.vault]
+            .into_iter()
+            .map(|key| env.token_amount(key) as u128)
+            .sum::<u128>(),
+        2 * CAPITAL + RESIDUAL + FACE
+    );
+    for (owner, portfolio) in [(&early_owner, early), (&late_owner, late)] {
+        let cu = env.close_portfolio_with_cu(owner, portfolio);
+        assert_cu_within("10MiB resolved owner exit", cu, CUSTODY_CU_LIMIT);
+        assert_eq!(env.svm.get_account(&portfolio).unwrap().lamports, 0);
+    }
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 0);
+    println!("v16 10MiB resolved top-up CU={claim_cu}, cleanup/replay CU={max_cleanup_cu}");
+}
+
 // DoS regression — terminal insurance withdrawal used to compute authority capacity with one
 // full-domain scan and then debit with another. A sparse near-10 MiB market with only the LAST
 // domain funded exhausted the 1.4M tx cap before the authority could recover funds, stranding
