@@ -55979,6 +55979,100 @@ fn v16_attack_drain_only_cpi_reduce_remains_live() {
     }
 }
 
+// Invariant: a retained LP leg from a retired asset incarnation cannot authorize a DrainOnly
+// reduction before matcher CPI; changing only its market_id to the current incarnation permits it.
+#[test]
+fn v16_bpf_drain_only_cpi_rejects_retired_lp_leg_before_matcher() {
+    let mut env = V16CuEnv::new();
+    env.activate_asset(1, 1, 100);
+    let retired_market_id = env.market_state().1.assets[1].market_id;
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_RETIRE, 1, 1, 0);
+    env.activate_asset(1, 2, 100);
+    let current_market_id = env.market_state().1.assets[1].market_id;
+    assert_ne!(retired_market_id, current_market_id);
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+    env.trade_asset_with_cu(
+        1, &taker, taker_account, &lp, lp_account, POS_SCALE as i128, 100, 0,
+    );
+    let (matcher_program, ctx, delegate) = auth_matcher_for_lp(&mut env, &lp, lp_account);
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_DRAIN_ONLY, 1, 0, 0);
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::DrainOnly
+    );
+
+    let current_lp = env.svm.get_account(&lp_account).unwrap();
+    let mut stale_lp = current_lp.clone();
+    let mut portfolio = state::read_portfolio(&stale_lp.data).unwrap();
+    assert_eq!(leg(&portfolio, 0).asset_index, 1);
+    assert_eq!(leg(&portfolio, 0).market_id, current_market_id);
+    portfolio.legs[0].market_id = percolator::V16PodU64::new(retired_market_id);
+    state::write_portfolio(&mut stale_lp.data, &portfolio).unwrap();
+    env.svm.set_account(lp_account, stale_lp).unwrap();
+
+    let instruction = ProgInstruction::TradeCpi {
+        asset_index: 1,
+        size_q: -(POS_SCALE as i128),
+        fee_bps: 0,
+        limit_price: 0,
+    };
+    let accounts = vec![
+        AccountMeta::new(taker.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(taker_account, false),
+        AccountMeta::new(lp_account, false),
+        AccountMeta::new_readonly(matcher_program, false),
+        AccountMeta::new(ctx, false),
+        AccountMeta::new_readonly(delegate, false),
+    ];
+    let tracked = [env.market, taker_account, lp_account, ctx, env.vault];
+    let before = tracked.map(|key| env.svm.get_account(&key).unwrap());
+    let request_seq_before = env.market_state().0.matcher_req_seq;
+    let err = env
+        .send(instruction.clone(), accounts.clone(), &[&taker])
+        .expect_err("the retired LP leg cannot reduce risk in the current incarnation");
+    let lock_active = percolator_prog::error::PercolatorError::EngineLockActive as u32;
+    assert!(err.contains(&format!("Custom({lock_active})")), "{err}");
+    assert!(
+        err.contains(&format!("Program {} invoke", env.program_id)),
+        "{err}"
+    );
+    assert!(
+        !err.contains(&format!("Program {matcher_program} invoke")),
+        "incarnation rejection must precede matcher CPI: {err}"
+    );
+    for (key, account) in tracked.into_iter().zip(before) {
+        assert_eq!(
+            env.svm.get_account(&key).unwrap(),
+            account,
+            "rejection mutated {key}"
+        );
+    }
+
+    // Restore only the leg's incarnation; keep the matcher grant and closing request identical.
+    env.svm.set_account(lp_account, current_lp).unwrap();
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(instruction, accounts, &[&taker])
+        .expect("the current LP leg can close through the same authorized matcher");
+    assert_cu_within("current-incarnation DrainOnly CPI close", cu, TRADE_CU_LIMIT);
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.matcher_req_seq, request_seq_before + 1);
+    assert_eq!(group.assets[1].oi_eff_long_q, 0);
+    assert_eq!(group.assets[1].oi_eff_short_q, 0);
+    for portfolio in [taker_account, lp_account] {
+        assert!(!has_active_leg_for_asset(&env.portfolio_state(portfolio), 1));
+    }
+    assert_eq!(group.vault, group.c_tot + group.insurance);
+    assert_eq!(env.token_amount(env.vault) as u128, group.vault);
+}
+
 // LoF/DoS sweep: BatchTradeNoCpi is the remaining public trade route for the DrainOnly wind-down
 // invariant. A batch fill must not open or grow risk after DrainOnly, but it must still let matched
 // users close existing risk. This complements the direct no-CPI and CPI-route coverage.
