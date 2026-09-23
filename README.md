@@ -790,14 +790,14 @@ The current Kani suite is in `tests/v16_kani.rs`. It proves wrapper ABI and loca
 Engine-specific invariants (conservation, warmup, liquidation properties, etc.) live in the `percolator` crate's verification suite. The program relies on engine correctness but does not restate it.
 
 ### Test suite
-The code and test harnesses are the source of truth for counts and exact CU numbers. The active suites are:
-
 - host unit and LiteSVM integration tests under `tests/`
 - SBF-backed alignment/CU tests in `tests/v16_cu.rs`
 - wrapper Kani proofs in `tests/v16_kani.rs`
 - engine arithmetic/accounting proofs in the pinned `percolator` crate
 
-Before publishing a bounty, run the commands in [Build & test](#build--test) and record the exact output for the current commit.
+- [ ] Map proposed tests to an invariant, nearest test (`path::name`), and uncovered case; extend overlapping tests. Assert the triggering state and a postcondition that fails on invariant violation.
+
+Run [Build & test](#build--test); record exact output and commit.
 
 ---
 
