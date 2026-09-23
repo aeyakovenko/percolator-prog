@@ -29203,6 +29203,85 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
     );
 }
 
+// Invariant: a later policy rejection must propagate Unauthorized and undo the earlier
+// same-transaction handoff, including both marketauth and asset-0 authority writes.
+#[test]
+fn v16_bpf_late_policy_rejection_rolls_back_authority_handoff() {
+    use percolator_prog::error::PercolatorError;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16CuEnv::new();
+    let new_admin = Keypair::new();
+    env.ensure_signer_account(new_admin.pubkey());
+    let before = [env.market, env.admin.pubkey(), new_admin.pubkey()]
+        .map(|key| (key, env.svm.get_account(&key).unwrap()));
+    let handoff_and_update = |env: &mut V16CuEnv, policy_authority: Pubkey| {
+        env.svm.expire_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[
+                heap_ix(),
+                cu_ix(),
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: vec![
+                        AccountMeta::new_readonly(env.admin.pubkey(), true),
+                        AccountMeta::new_readonly(new_admin.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                    ],
+                    data: ProgInstruction::UpdateAuthority {
+                        new_pubkey: new_admin.pubkey().to_bytes(),
+                    }
+                    .encode(),
+                },
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: vec![
+                        AccountMeta::new_readonly(policy_authority, true),
+                        AccountMeta::new(env.market, false),
+                    ],
+                    data: ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps: 2_000 }.encode(),
+                },
+            ],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &env.admin, &new_admin],
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx)
+    };
+
+    let old_admin = env.admin.pubkey();
+    let failed = handoff_and_update(&mut env, old_admin)
+        .expect_err("the outgoing authority must lose policy power within the transaction");
+    assert_eq!(
+        failed.err,
+        TransactionError::InstructionError(
+            3,
+            InstructionError::Custom(PercolatorError::Unauthorized as u32),
+        ),
+        "the handoff must succeed before the policy rejects: {failed:?}"
+    );
+    // The separate transaction payer absorbs fees; compare every other account in full.
+    for (key, account) in &before {
+        assert_eq!(
+            env.svm.get_account(key).as_ref(),
+            Some(account),
+            "late policy rejection must restore every byte and lamport of {key}"
+        );
+    }
+
+    handoff_and_update(&mut env, new_admin.pubkey())
+        .expect("the same handoff and policy update succeed with the incoming authority");
+    let (cfg, _) = env.market_state();
+    assert_eq!(cfg.marketauth, new_admin.pubkey().to_bytes());
+    assert_eq!(cfg.fee_redirect_to_market_0_bps, 2_000);
+    assert_eq!(
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap()
+            .asset_admin,
+        new_admin.pubkey().to_bytes(),
+    );
+}
+
 // security.md sweep - stale marketauth policy replay (#6/#33): after marketauth is handed off, the
 // previous key must lose operational policy power, not just rotation power. Otherwise a stale admin
 // could later grief reward shares, fee redirects, permissionless-create cost, or stale-resolve timing.
