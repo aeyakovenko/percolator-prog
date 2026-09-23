@@ -13446,6 +13446,117 @@ fn v16_bpf_close_resolved_pays_positive_pnl_through_engine_ledger() {
     assert!(!resolved_receipt(&account).present);
 }
 
+// Invariant: a source claim tagged with a retired asset episode cannot consume the
+// reused slot's backing or change a later claim's terminal payout, even with no active leg.
+#[test]
+fn v16_bpf_resolved_source_claim_rejects_retired_episode_without_affecting_later_claim() {
+    let mut env = V16CuEnv::new();
+    env.activate_asset(1, 1, 100);
+    let old_market_id = env.market_state().1.assets[1].market_id;
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_RETIRE, 1, 1, 0);
+    env.activate_asset(1, 2, 100);
+    let current_market_id = env.market_state().1.assets[1].market_id;
+    assert_ne!(old_market_id, current_market_id);
+
+    let owners = [Keypair::new(), Keypair::new()];
+    let portfolios = owners.each_ref().map(|owner| env.create_portfolio(owner));
+    env.top_up_backing_bucket(2, 100, 100);
+    for ((owner, portfolio), face) in owners.iter().zip(portfolios).zip([40, 60]) {
+        env.deposit(owner, portfolio, 1_000);
+        env.add_source_positive_pnl(portfolio, 2, face);
+    }
+    env.resolve();
+    let valid_account = env.svm.get_account(&portfolios[0]).unwrap();
+    let mut stale_account = valid_account.clone();
+    let mut claim = state::read_portfolio(&stale_account.data).unwrap();
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&claim)));
+    let source = claim
+        .source_domains
+        .iter_mut()
+        .find(|s| s.domain.get() == 2)
+        .unwrap();
+    assert_eq!(source.source_claim_market_id.get(), current_market_id);
+    assert_eq!(source.source_claim_bound_num.get(), 40 * BOUND_SCALE);
+    source.source_claim_market_id = percolator::V16PodU64::new(old_market_id);
+    state::write_portfolio(&mut stale_account.data, &claim).unwrap();
+    env.svm.set_account(portfolios[0], stale_account).unwrap();
+
+    let dest = env.token_account(owners[0].pubkey(), 0);
+    let metas = vec![
+        AccountMeta::new(owners[0].pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolios[0], false),
+        AccountMeta::new(dest, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(env.vault_authority, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    let tracked = [env.market, portfolios[0], portfolios[1], env.vault, dest];
+    let before = tracked.map(|key| env.svm.get_account(&key).unwrap());
+    let err = env
+        .send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            metas.clone(),
+            &[&owners[0]],
+        )
+        .expect_err("a retired episode's source claim cannot spend current backing");
+    let hidden_leg = percolator_prog::error::PercolatorError::EngineHiddenLeg as u32;
+    assert!(err.contains(&format!("Custom({hidden_leg})")), "{err}");
+    for (key, account) in tracked.into_iter().zip(before) {
+        assert_eq!(
+            env.svm.get_account(&key).unwrap(),
+            account,
+            "rejected claim mutated {key}"
+        );
+    }
+
+    let (later_dest, cu) = env.close_resolved_with_cu(&owners[1], portfolios[1]);
+    assert_cu_within("later episode terminal claim", cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(later_dest), 1_060);
+    assert_eq!(env.token_amount(dest), 0);
+    assert_eq!(env.token_amount(env.vault), 1_040);
+    let (_, pending) = env.market_state();
+    assert_eq!(
+        pending.source_credit[2].positive_claim_bound_num,
+        40 * BOUND_SCALE
+    );
+    assert_eq!(
+        pending.source_backing_buckets[2].fresh_unliened_backing_num,
+        40 * BOUND_SCALE
+    );
+
+    // Restore only the episode binding; the identical payout instruction must now succeed.
+    env.svm.set_account(portfolios[0], valid_account).unwrap();
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            metas,
+            &[&owners[0]],
+        )
+        .expect("the current episode's claim remains payable");
+    assert_cu_within("current episode terminal claim", cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(dest), 1_040);
+    assert_eq!(env.token_amount(later_dest) + env.token_amount(dest), 2_100);
+    assert_eq!(env.token_amount(env.vault), 0);
+    let (_, settled) = env.market_state();
+    assert_eq!(settled.vault, 0);
+    assert_eq!(settled.c_tot, 0);
+    assert_eq!(settled.pnl_pos_tot, 0);
+    assert_eq!(settled.source_credit[2].positive_claim_bound_num, 0);
+    assert_eq!(settled.source_backing_buckets[2].fresh_unliened_backing_num, 0);
+    for portfolio in portfolios {
+        let account = env.portfolio_state(portfolio);
+        assert_eq!(account.capital.get(), 0);
+        assert_eq!(account.pnl.get(), 0);
+        assert!(!resolved_receipt(&account).present);
+    }
+}
+
 // A full portfolio's early terminal close must preserve every source claim until
 // the counterparty exits, then pay the exact settled value and permit reclamation.
 #[test]
