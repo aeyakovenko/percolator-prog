@@ -24999,6 +24999,58 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
     assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
 }
 
+// Invariant: SetMatcherConfig binds the matcher seed namespace, even for another valid PDA of
+// this program and market; rejecting the vault PDA must also undo the preceding legacy realloc.
+#[test]
+fn v16_attack_set_matcher_config_rejects_vault_pda_as_delegate() {
+    let mut env = V16CuEnv::new();
+    let lp_owner = Keypair::new();
+    let lp = env.create_portfolio(&lp_owner);
+    let (matcher_program, ctx, delegate) = auth_matcher_for_lp(&mut env, &lp_owner, lp);
+    let canonical_config = env.portfolio_matcher_config(lp);
+    let vault_authority = env.vault_authority;
+    assert_ne!(vault_authority, delegate);
+    env.svm.airdrop(&vault_authority, 1_000_000_000).unwrap();
+
+    let mut legacy_lp = env.svm.get_account(&lp).unwrap();
+    legacy_lp.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(lp, legacy_lp).unwrap();
+    let before = [
+        env.market,
+        lp,
+        lp_owner.pubkey(),
+        ctx,
+        delegate,
+        vault_authority,
+        env.vault,
+    ]
+    .map(|key| (key, env.svm.get_account(&key).unwrap()));
+
+    let rejected = env
+        .try_set_matcher_config(matcher_program, &lp_owner, lp, ctx, vault_authority, 1)
+        .expect_err("the vault PDA cannot authorize the matcher role");
+    assert!(
+        rejected.contains("InstructionError(2, InvalidArgument)"),
+        "expected wrapper PDA binding rejection: {rejected}"
+    );
+    for (key, account_before) in before {
+        assert_eq!(
+            env.svm.get_account(&key).unwrap(),
+            account_before,
+            "rejected role substitution must leave account {key} unchanged"
+        );
+    }
+
+    env.try_set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 1)
+        .expect("the same request succeeds with the canonical matcher delegate");
+    assert_eq!(env.portfolio_matcher_config(lp), canonical_config);
+    assert_eq!(
+        env.svm.get_account(&lp).unwrap().data.len(),
+        env.portfolio_account_len,
+        "canonical authorization commits the legacy realloc"
+    );
+}
+
 #[test]
 fn v16_attack_permissionless_lp_cpi_rejects_wrong_delegate_owner_or_account_binding() {
     let mut env = V16CuEnv::new();
