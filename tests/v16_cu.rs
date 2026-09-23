@@ -11509,6 +11509,270 @@ fn v16_attack_no_observation_refresh_cannot_certify_over_later_active_mark_move(
     );
 }
 
+// Complements v16_attack_no_observation_refresh_cannot_certify_over_later_active_mark_move:
+// a pending mark outside the target's active legs must neither block its loss
+// settlement nor consume the unrelated asset's same-slot observation opportunity.
+#[test]
+fn v16_bpf_no_observation_refresh_preserves_unrelated_pending_mark() {
+    const MARK: u64 = 100;
+    const NEXT_MARK0: u64 = 130;
+    const NEXT_MARK1: u64 = 120;
+    const COLLATERAL: u64 = 10_000;
+    const CRANK_SLOT: u64 = 2;
+
+    // Follow the System/SPL bootstrap test so every collateral atom is minted.
+    let mut svm = LiteSVM::new();
+    let program_id = percolator_prog::id();
+    for (id, path) in [
+        (program_id, program_path()),
+        (spl_token::ID, spl_token_program_path()),
+        (
+            associated_token_program_id(),
+            associated_token_program_path(),
+        ),
+    ] {
+        svm.add_program(id, &std::fs::read(path).expect("read BPF"));
+    }
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+    svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
+    let mint = Keypair::new();
+    system_create_account_for_test(&mut svm, &payer, &mint, Mint::LEN, spl_token::ID);
+    send_raw_tx(
+        &mut svm,
+        &payer,
+        spl_token::instruction::initialize_mint(
+            &spl_token::ID,
+            &mint.pubkey(),
+            &admin.pubkey(),
+            None,
+            0,
+        )
+        .unwrap(),
+        &[],
+    )
+    .expect("initialize collateral mint");
+    let params = V16CuMarketParams {
+        max_portfolio_assets: 2,
+        initial_price: MARK,
+        ..V16CuMarketParams::default()
+    };
+    let market = Keypair::new();
+    system_create_account_for_test(
+        &mut svm,
+        &payer,
+        &market,
+        state::market_account_len_for_capacity(2).unwrap(),
+        program_id,
+    );
+    let vault_authority =
+        Pubkey::find_program_address(&[b"vault", market.pubkey().as_ref()], &program_id).0;
+    let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint.pubkey());
+    send_tx(
+        &mut svm,
+        program_id,
+        &payer,
+        init_market_instruction(&params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new_readonly(mint.pubkey(), false),
+        ],
+        &[&admin],
+    )
+    .expect("initialize market");
+    let mut env = V16CuEnv {
+        svm,
+        program_id,
+        payer,
+        admin,
+        market: market.pubkey(),
+        mint: mint.pubkey(),
+        vault,
+        vault_authority,
+        portfolio_account_len: state::portfolio_account_len_for_market_slots(2).unwrap(),
+    };
+    env.svm.warp_to_slot(1);
+    for asset_index in 0..2 {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 1, MARK);
+    }
+    let owners: [Keypair; 4] = std::array::from_fn(|_| Keypair::new());
+    let portfolios: [Keypair; 4] = std::array::from_fn(|_| Keypair::new());
+    for (owner, portfolio) in owners.iter().zip(&portfolios) {
+        env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            portfolio,
+            env.portfolio_account_len,
+            env.program_id,
+        );
+        env.send(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio.pubkey(), false),
+            ],
+            &[owner],
+        )
+        .expect("initialize portfolio");
+        let source = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            spl_token::instruction::mint_to(
+                &spl_token::ID,
+                &env.mint,
+                &source,
+                &env.admin.pubkey(),
+                &[],
+                COLLATERAL,
+            )
+            .unwrap(),
+            &[&env.admin],
+        )
+        .expect("mint collateral");
+        env.send(
+            ProgInstruction::Deposit {
+                amount: COLLATERAL as u128,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio.pubkey(), false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        )
+        .expect("deposit minted collateral");
+        assert_eq!(env.token_amount(source), 0);
+    }
+    let [long, short, unrelated_long, unrelated_short] = portfolios.each_ref().map(Signer::pubkey);
+    for (asset_index, first) in [(1, 0), (0, 2)] {
+        env.trade_asset_with_cu(
+            asset_index,
+            &owners[first],
+            portfolios[first].pubkey(),
+            &owners[first + 1],
+            portfolios[first + 1].pubkey(),
+            POS_SCALE as i128,
+            MARK,
+            0,
+        );
+    }
+    let supply = Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+        .unwrap()
+        .supply;
+    assert_eq!(supply, 4 * COLLATERAL);
+    assert_eq!(env.token_amount(env.vault), supply);
+
+    env.svm.warp_to_slot(CRANK_SLOT);
+    env.push_auth_mark_for_asset_as_admin(0, CRANK_SLOT, NEXT_MARK0);
+    env.push_auth_mark_for_asset_as_admin(1, CRANK_SLOT, NEXT_MARK1);
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: CRANK_SLOT,
+            close_q: 0,
+            observations: crank_observations(1),
+        },
+    );
+    let before = env.portfolio_state(short);
+    let group_before = env.market_state().1;
+    assert_eq!(active_bitmap(&before), active_bitmap_with(&[0]));
+    assert_eq!(leg(&before, 0).asset_index, 1);
+    assert_eq!(before.capital.get(), COLLATERAL as u128);
+    assert!(health_cert(&before).cert_oracle_epoch < group_before.oracle_epoch);
+    assert_eq!(group_before.assets[1].effective_price, NEXT_MARK1);
+    assert_eq!(group_before.assets[1].slot_last, CRANK_SLOT);
+    assert_eq!(group_before.assets[0].effective_price, MARK);
+    assert!(group_before.assets[0].slot_last < CRANK_SLOT);
+    assert_eq!(group_before.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(group_before.assets[0].oi_eff_short_q, POS_SCALE);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let profile_before = state::read_asset_oracle_profile(&market_before.data, 0).unwrap();
+    assert_eq!(profile_before.mark_ewma_e6, NEXT_MARK0);
+    assert_eq!(profile_before.mark_ewma_last_slot, CRANK_SLOT);
+    let untouched = [long, unrelated_long, unrelated_short]
+        .map(|key| (key, env.svm.get_account(&key).unwrap()));
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: CRANK_SLOT,
+                close_q: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        )
+        .expect("an unrelated pending mark must not block committed loss settlement");
+    assert_cu_within("local no-observation refresh", cu, CRANK_CU_LIMIT);
+    let after = env.portfolio_state(short);
+    let group_after = env.market_state().1;
+    let loss = (NEXT_MARK1 - MARK) as u128;
+    assert_eq!(after.capital.get(), before.capital.get() - loss);
+    assert_eq!(after.pnl.get(), 0);
+    assert_eq!(group_after.c_tot, group_before.c_tot - loss);
+    assert_eq!(group_after.insurance, group_before.insurance);
+    assert_eq!(active_bitmap(&after), active_bitmap(&before));
+    assert_eq!(leg(&after, 0).basis_pos_q, -(POS_SCALE as i128));
+    let cert = health_cert(&after);
+    assert!(cert.valid);
+    assert_eq!(cert.cert_oracle_epoch, group_after.oracle_epoch);
+    assert_eq!(cert.certified_equity, (COLLATERAL as u128 - loss) as i128);
+    let market_after = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(
+        market_engine_slot_bytes(&market_after.data, 0),
+        market_engine_slot_bytes(&market_before.data, 0),
+        "refresh must preserve every byte of the unrelated asset's accounting"
+    );
+    assert_eq!(
+        state::read_asset_oracle_profile(&market_after.data, 0).unwrap(),
+        profile_before,
+        "refresh must preserve the unrelated pending oracle profile"
+    );
+    for (key, account) in untouched {
+        assert_eq!(env.svm.get_account(&key).unwrap(), account);
+    }
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(group_after.vault, supply as u128);
+    assert!(group_after.vault >= group_after.c_tot + group_after.insurance);
+
+    let short_after = env.svm.get_account(&short).unwrap();
+    env.crank(
+        unrelated_short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: CRANK_SLOT,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    let final_group = env.market_state().1;
+    assert_eq!(
+        final_group.assets[0].effective_price, NEXT_MARK0,
+        "the unrelated pending mark must still apply in the same slot"
+    );
+    assert_eq!(final_group.assets[0].slot_last, CRANK_SLOT);
+    assert_eq!(
+        env.portfolio_state(unrelated_short).capital.get(),
+        (COLLATERAL - (NEXT_MARK0 - MARK)) as u128
+    );
+    assert_eq!(env.svm.get_account(&short).unwrap(), short_after);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(final_group.vault, supply as u128);
+    assert!(final_group.vault >= final_group.c_tot + final_group.insurance);
+}
+
 #[test]
 fn v16_attack_all_active_pending_auth_marks_refresh_with_bounded_public_crank() {
     const N: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;

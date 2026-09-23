@@ -534,6 +534,34 @@ fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
 }
 
 #[kani::proof]
+fn kani_v16_matcher_return_full_fill_has_exact_flag_policy() {
+    use solana_program::program_error::ProgramError;
+
+    // A valid full fill isolates the flag policy, including all reserved bits.
+    let flags: u32 = kani::any();
+    let ret = MatcherReturn {
+        abi_version: percolator_prog::constants::MATCHER_ABI_VERSION,
+        flags,
+        exec_price_e6: 100,
+        exec_size: 1,
+        req_id: 42,
+        lp_account_id: 7,
+        oracle_price_e6: 100,
+        asset_index: 1,
+    };
+    let result = validate_matcher_return(&ret, 7, 1, 100, 1, 42);
+    if flags == FLAG_VALID || flags == (FLAG_VALID | FLAG_PARTIAL_OK) {
+        assert!(result.is_ok());
+    } else {
+        assert!(matches!(result, Err(ProgramError::InvalidAccountData)));
+    }
+
+    kani::cover!(flags == FLAG_VALID && result.is_ok());
+    kani::cover!(flags == (FLAG_VALID | FLAG_PARTIAL_OK) && result.is_ok());
+    kani::cover!(flags == (FLAG_VALID | (1u32 << 31)) && result.is_err());
+}
+
+#[kani::proof]
 fn kani_v16_permissionless_crank_decode_preserves_wire_fields() {
     let now_slot: u64 = kani::any();
     let close_q: u128 = kani::any();
