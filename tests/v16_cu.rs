@@ -4513,6 +4513,95 @@ fn v16_bpf_retained_signed_withdraw_executes_at_most_once() {
     assert_eq!(after_fresh.insurance, 0);
 }
 
+// Deposit requires exact SPL account lengths at both custody endpoints, even when amount=0
+// skips the transfer CPI; malformed layouts must preserve all account bytes and lamports.
+#[test]
+fn v16_bpf_deposit_rejects_noncanonical_token_account_lengths() {
+    use percolator_prog::error::PercolatorError;
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    let source = env.token_account(owner.pubkey(), 600);
+    let deposit = |env: &mut V16CuEnv, amount| {
+        env.svm.expire_blockhash();
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: ProgInstruction::Deposit { amount }.encode(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &owner],
+            env.svm.latest_blockhash(),
+        );
+        env.svm.send_transaction(tx)
+    };
+
+    for (role, key) in [("source", source), ("canonical vault", env.vault)] {
+        let valid = env.svm.get_account(&key).unwrap();
+        for len in [TokenAccount::LEN - 1, TokenAccount::LEN + 1] {
+            let mut malformed = valid.clone();
+            malformed.data.resize(len, 0);
+            env.svm.set_account(key, malformed).unwrap();
+            let before = [
+                env.market,
+                portfolio,
+                source,
+                env.vault,
+                env.mint,
+                owner.pubkey(),
+            ]
+            .map(|key| (key, env.svm.get_account(&key).unwrap()));
+            for amount in [400, 0] {
+                let failed = deposit(&mut env, amount).expect_err("invalid SPL length must reject");
+                assert_eq!(
+                    failed.err,
+                    TransactionError::InstructionError(
+                        2,
+                        InstructionError::Custom(PercolatorError::InvalidTokenAccount as u32),
+                    ),
+                    "{role}, length {len}, amount {amount}: {failed:?}"
+                );
+                assert!(
+                    !failed.meta.logs.iter().any(|line| {
+                        line.starts_with(&format!("Program {} invoke", spl_token::ID))
+                    }),
+                    "{role}, length {len}: malformed custody must reject before SPL CPI"
+                );
+                // A separate payer absorbs fees; all instruction accounts must remain identical.
+                for (key, account) in &before {
+                    assert_eq!(
+                        env.svm.get_account(key).as_ref(),
+                        Some(account),
+                        "{role}, length {len}, amount {amount}: changed account {key}"
+                    );
+                }
+            }
+        }
+        env.svm.set_account(key, valid).unwrap();
+    }
+
+    deposit(&mut env, 400).expect("same deposit succeeds with exact SPL account lengths");
+    assert_eq!(env.token_amount(source), 200);
+    assert_eq!(env.token_amount(env.vault), 1_400);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 1_400);
+    let (_, group) = env.market_state();
+    assert_eq!(group.c_tot, 1_400);
+    assert_eq!(group.vault, 1_400);
+    assert_eq!(group.insurance, 0);
+}
+
 #[test]
 fn v16_bpf_failed_deposit_spl_transfer_rolls_back_engine_credit() {
     let mut env = V16CuEnv::new();
@@ -10248,6 +10337,125 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     );
     assert_eq!(after_group.vault as u64, env.token_amount(env.vault));
     assert!(after_group.vault >= after_group.c_tot + after_group.insurance);
+}
+
+// Observation hints only discover prices: once both legs are current, omitted, partial,
+// or reordered hints must make the same bounded liquidation on the first active leg.
+#[test]
+fn v16_bpf_crank_observation_hints_cannot_steer_liquidation_asset() {
+    let mut outcomes = Vec::new();
+    for hints in [&[][..], &[0][..], &[1][..], &[0, 1][..], &[1, 0][..]] {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+        env.svm.warp_to_slot(1);
+        for asset_index in 0..2 {
+            env.configure_auth_mark_for_asset_as_admin(asset_index, 1, 100);
+        }
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, 100_000);
+        env.deposit(&short_owner, short, 6_000);
+        // Asset 1 occupies slot 0, so neither numeric asset order nor hint order selects it.
+        for asset_index in [1, 0] {
+            env.trade_asset_with_cu(
+                asset_index,
+                &long_owner,
+                long,
+                &short_owner,
+                short,
+                (10 * POS_SCALE) as i128,
+                100,
+                0,
+            );
+        }
+        env.svm.warp_to_slot(2);
+        for asset_index in 0..2 {
+            env.push_auth_mark_for_asset_as_admin(asset_index, 2, 300);
+        }
+        for slot in [2, 3] {
+            env.svm.warp_to_slot(slot);
+            env.crank(
+                short,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    close_q: 0,
+                    observations: crank_observations_for_assets(&[0, 1]),
+                },
+            );
+        }
+        let before = env.portfolio_state(short);
+        let group_before = env.market_state().1;
+        assert_eq!(leg(&before, 0).asset_index, 1);
+        assert_eq!(leg(&before, 1).asset_index, 0);
+        let cert = health_cert(&before);
+        assert!(cert.valid && cert.certified_equity > 0 && cert.certified_liq_deficit > 0);
+        assert_eq!(cert.cert_oracle_epoch, group_before.oracle_epoch);
+        for asset_index in 0..2 {
+            assert_eq!(group_before.assets[asset_index].effective_price, 300);
+            assert_eq!(group_before.assets[asset_index].slot_last, 3);
+            assert_eq!(group_before.assets[asset_index].oi_eff_short_q, 10 * POS_SCALE);
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let long_before = env.svm.get_account(&long).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 3,
+                    close_q: POS_SCALE,
+                    observations: crank_observations_for_assets(hints),
+                },
+                vec![
+                    AccountMeta::new_readonly(long_owner.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(short, false),
+                ],
+                &[],
+            )
+            .unwrap_or_else(|err| panic!("single liquidation with hints {hints:?}: {err}"));
+        assert_cu_within("hint-independent two-leg liquidation", cu, CRANK_CU_LIMIT);
+        let after = env.portfolio_state(short);
+        let group_after = env.market_state().1;
+        assert_eq!(
+            group_after.assets[1].oi_eff_short_q,
+            9 * POS_SCALE,
+            "hints {hints:?}: exactly one budgeted step closes the engine-selected asset"
+        );
+        assert_eq!(
+            active_leg_for_asset(&after, 1).basis_pos_q,
+            -((9 * POS_SCALE) as i128)
+        );
+        assert_eq!(
+            active_leg_for_asset(&after, 0),
+            active_leg_for_asset(&before, 0),
+            "hints {hints:?}: the other leg is not selected"
+        );
+        let market_after = env.svm.get_account(&env.market).unwrap();
+        assert_eq!(
+            market_engine_slot_bytes(&market_after.data, 0),
+            market_engine_slot_bytes(&market_before.data, 0),
+            "hints {hints:?}: the other asset's accounting is unchanged"
+        );
+        assert_eq!(env.svm.get_account(&long).unwrap(), long_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+        assert_eq!(group_after.vault, group_before.vault);
+        assert_eq!(group_after.vault, env.token_amount(env.vault) as u128);
+        assert!(group_after.vault >= group_after.c_tot + group_after.insurance);
+        outcomes.push((
+            after.capital.get(),
+            after.pnl.get(),
+            group_after.c_tot,
+            group_after.insurance,
+            group_after.assets[1],
+        ));
+    }
+    assert!(
+        outcomes.windows(2).all(|pair| pair[0] == pair[1]),
+        "hint presence and order must not change liquidation accounting"
+    );
 }
 
 #[test]
@@ -59234,6 +59442,155 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_single_context() {
         ctx_before,
         "failed replay transaction must roll back the first matcher context write"
     );
+}
+
+// A failed signed CPI trade stays consumed after collateral repair, while its matcher
+// response and request sequence roll back; fresh authorization reuses the next ID once.
+#[test]
+fn v16_bpf_failed_signed_tradecpi_retry_preserves_matcher_identity() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    let mut env = V16CuEnv::new();
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 10_000);
+    env.deposit(&lp_owner, lp, 1_000);
+    let (matcher_program, ctx, delegate) =
+        auth_matcher_for_lp_via_system_create(&mut env, &lp_owner, lp);
+    env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        ctx,
+        delegate,
+        0,
+        POS_SCALE as i128,
+        100,
+    )
+    .expect("seed a committed matcher response");
+    let read_ctx_req_id = |env: &V16CuEnv| {
+        let data = env.svm.get_account(&ctx).unwrap().data;
+        u64::from_le_bytes(data[32..40].try_into().unwrap())
+    };
+    assert_eq!(read_ctx_req_id(&env), 1);
+    assert_eq!(env.market_state().0.matcher_req_seq, 1);
+
+    let instruction = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        data: ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: (10 * POS_SCALE) as i128,
+            fee_bps: 100,
+            limit_price: 100,
+        }
+        .encode(),
+    };
+    let retained = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), instruction.clone()],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &taker_owner],
+        env.svm.latest_blockhash(),
+    );
+    let watched = [
+        env.market,
+        taker,
+        lp,
+        ctx,
+        env.vault,
+        taker_owner.pubkey(),
+        lp_owner.pubkey(),
+    ];
+    let before_failure = watched.map(|key| (key, env.svm.get_account(&key).unwrap()));
+    let failed = env
+        .svm
+        .send_transaction(retained.clone())
+        .expect_err("maker cannot margin the additional fill");
+    assert_eq!(
+        failed.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(
+                percolator_prog::error::PercolatorError::EngineInvalidConfig as u32,
+            ),
+        )
+    );
+    assert!(
+        failed
+            .meta
+            .logs
+            .iter()
+            .any(|log| log == &format!("Program {matcher_program} success")),
+        "failure must occur after the matcher wrote its response: {failed:?}"
+    );
+    for (key, before) in before_failure {
+        assert_eq!(
+            env.svm.get_account(&key).unwrap(),
+            before,
+            "failed fill must roll back {key}"
+        );
+    }
+
+    let source = env.deposit(&lp_owner, lp, 1_000);
+    assert_eq!(env.portfolio_state(lp).capital.get(), 1_999);
+    assert_eq!(read_ctx_req_id(&env), 1);
+    assert_eq!(env.market_state().0.matcher_req_seq, 1);
+    assert_eq!(retained.message.recent_blockhash, env.svm.latest_blockhash());
+    let before_replay: Vec<_> = watched
+        .into_iter()
+        .chain([source, env.payer.pubkey()])
+        .map(|key| (key, env.svm.get_account(&key).unwrap()))
+        .collect();
+    let replay = env
+        .svm
+        .send_transaction(retained.clone())
+        .expect_err("funding cannot revive a failed signature");
+    assert_eq!(replay.err, TransactionError::AlreadyProcessed);
+    assert_eq!(replay.meta.compute_units_consumed, 0);
+    assert!(replay.meta.logs.is_empty());
+    for (key, before) in before_replay {
+        assert_eq!(
+            env.svm.get_account(&key).unwrap(),
+            before,
+            "signed replay must preserve {key}"
+        );
+    }
+
+    env.svm.expire_blockhash();
+    assert_ne!(retained.message.recent_blockhash, env.svm.latest_blockhash());
+    send_raw_tx(&mut env.svm, &env.payer, instruction, &[&taker_owner])
+        .expect("fresh signatures authorize the identical fill after collateral repair");
+    assert_eq!(read_ctx_req_id(&env), 2);
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.matcher_req_seq, 2);
+    for (portfolio, position, capital) in [
+        (taker, (11 * POS_SCALE) as i128, 9_989),
+        (lp, -((11 * POS_SCALE) as i128), 1_989),
+    ] {
+        let account = env.portfolio_state(portfolio);
+        assert_eq!(active_leg_for_asset(&account, 0).basis_pos_q, position);
+        assert_eq!(account.capital.get(), capital);
+        assert_eq!(account.pnl.get(), 0);
+    }
+    assert_eq!(group.assets[0].oi_eff_long_q, 11 * POS_SCALE);
+    assert_eq!(group.assets[0].oi_eff_short_q, 11 * POS_SCALE);
+    assert_eq!(group.c_tot, 11_978);
+    assert_eq!(group.insurance, 22);
+    assert_eq!(group.vault, 12_000);
+    assert_eq!(env.token_amount(env.vault), 12_000);
+    assert_eq!(env.token_amount(source), 0);
 }
 
 #[test]
