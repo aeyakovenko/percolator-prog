@@ -33322,6 +33322,64 @@ fn v16_attack_finalize_reset_side_requires_empty_side_counts() {
     );
 }
 
+// Invariant: opposite-side blockers and their global summary cannot lock an empty reset side;
+// finalizing that side must neither clear nor authorize the still-blocked side.
+#[test]
+fn v16_bpf_finalize_reset_side_ignores_opposite_side_blockers() {
+    let mut env = V16CuEnv::new();
+    env.mutate_market(|_, group| {
+        group.assets[0].mode_long = SideModeV16::ResetPending;
+        group.assets[0].mode_short = SideModeV16::ResetPending;
+        group.assets[0].stored_pos_count_short = 1;
+        group.assets[0].stale_account_count_short = 1;
+        group.assets[0].pending_obligation_count_short = 1;
+        group.pending_domain_loss_barriers[1] = 1;
+    });
+    let (_, before) = env.market_state();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(
+        market_group_header_bytes(&market_before.data)
+            .resolved_payout_blocker_count
+            .get(),
+        3,
+        "short-side blockers must contribute to the global summary"
+    );
+
+    let cu = env.finalize_reset_side_with_cu(0, 0);
+    assert_cu_within("reset with opposite-side blockers", cu, CUSTODY_CU_LIMIT);
+    let (_, after) = env.market_state();
+    let mut expected_asset = before.assets[0];
+    expected_asset.mode_long = SideModeV16::Normal;
+    assert_eq!(after.assets[0], expected_asset);
+    assert_eq!(after.risk_epoch, before.risk_epoch + 1);
+    assert_eq!(
+        after.pending_domain_loss_barriers,
+        before.pending_domain_loss_barriers
+    );
+    let market_after = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(
+        market_group_header_bytes(&market_after.data)
+            .resolved_payout_blocker_count
+            .get(),
+        3,
+        "finalizing the empty long side preserves the short-side summary"
+    );
+
+    let err = env
+        .send(
+            ProgInstruction::FinalizeResetSide {
+                asset_index: 0,
+                side: 1,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .expect_err("finalizing long must not authorize the blocked short side");
+    let stale = percolator_prog::error::PercolatorError::EngineStale as u32;
+    assert!(err.contains(&format!("Custom({stale})")), "{err}");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_after);
+}
+
 // security.md sweep - unsigned reset finalizer must not unlock drain-only sides (#30/#48):
 // FinalizeResetSide is intentionally permissionless, and Normal is an idempotent no-op, but DrainOnly
 // is a distinct risk throttle. A public caller must not be able to treat DrainOnly like ResetPending
