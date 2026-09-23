@@ -36772,6 +36772,78 @@ fn v16_attack_backing_expiry_no_overpay() {
     );
 }
 
+// Invariant: CloseResolved retains unspent backing before expiry, but at exact expiry
+// clears its fresh bucket/source/aggregate amounts once. Retrying must preserve the
+// normalized state and the neighboring bucket with a far-future expiry.
+#[test]
+fn v16_bpf_resolved_close_normalizes_exact_expiry_once() {
+    for (slot, status, fresh_num) in [
+        (0, BackingBucketStatusV16::Fresh, BOUND_SCALE),
+        (1, BackingBucketStatusV16::Expired, 0),
+    ] {
+        let mut env = V16CuEnv::new();
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        env.deposit(&owner, portfolio, 1);
+        env.top_up_backing_bucket(0, 2, 1);
+        env.top_up_backing_bucket(1, 1, u64::MAX - 1);
+        env.add_source_positive_pnl(portfolio, 0, 1);
+        env.svm.warp_to_slot(slot);
+        env.resolve();
+
+        let before = env.market_state().1;
+        assert_eq!(before.current_slot, slot);
+        assert_eq!(
+            before.source_backing_buckets[0].status,
+            BackingBucketStatusV16::Fresh
+        );
+        assert_eq!(
+            before.source_backing_buckets[0].fresh_unliened_backing_num,
+            2 * BOUND_SCALE
+        );
+        assert_eq!(before.source_backing_buckets[1].expiry_slot, u64::MAX - 1);
+        assert_eq!(
+            market_group_header_bytes(&env.svm.get_account(&env.market).unwrap().data)
+                .source_fresh_backing_total_num
+                .get(),
+            3 * BOUND_SCALE
+        );
+
+        for expected_payout in [2, 0] {
+            env.svm.expire_blockhash();
+            let (dest, cu) = env.close_resolved_with_cu(&owner, portfolio);
+            assert_cu_within("CloseResolved exact expiry/retry", cu, CUSTODY_CU_LIMIT);
+            assert_eq!(env.token_amount(dest), expected_payout, "slot {slot}");
+            let after = env.market_state().1;
+            let bucket = &after.source_backing_buckets[0];
+            assert_eq!(bucket.status, status, "slot {slot}");
+            assert_eq!(bucket.expiry_slot, 1);
+            assert_eq!(bucket.fresh_unliened_backing_num, fresh_num, "slot {slot}");
+            assert_eq!(bucket.valid_liened_backing_num, 0);
+            assert_eq!(bucket.impaired_liened_backing_num, 0);
+            assert_eq!(after.source_credit[0].fresh_reserved_backing_num, fresh_num);
+            assert_eq!(
+                after.source_backing_buckets[1],
+                before.source_backing_buckets[1]
+            );
+            assert_eq!(after.source_credit[1], before.source_credit[1]);
+            assert_eq!(
+                market_group_header_bytes(&env.svm.get_account(&env.market).unwrap().data)
+                    .source_fresh_backing_total_num
+                    .get(),
+                fresh_num + BOUND_SCALE,
+                "slot {slot}: aggregate retains exactly the remaining fresh backing"
+            );
+            assert_eq!(after.vault, 2);
+            assert_eq!(env.token_amount(env.vault), 2);
+            assert_eq!(after.c_tot, 0);
+            assert_eq!(after.insurance, 0);
+            assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+            assert_eq!(env.portfolio_state(portfolio).pnl.get(), 0);
+        }
+    }
+}
+
 // security.md sweep — large-amount deposit boundary + TVL cap (#37): the vault is capped at
 // MAX_VAULT_TVL (overflow prevention). A deposit above the cap must reject; a large deposit just below
 // it must credit exactly (no truncation/wraparound in the u128 aggregates) and round-trip exactly.
