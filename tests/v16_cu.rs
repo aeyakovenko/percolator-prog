@@ -12145,6 +12145,117 @@ fn v16_bpf_current_full_14_leg_tradenocpi_is_under_tx_limit() {
     assert_eq!(short.legs[0].basis_pos_q.get(), -((9 * POS_SCALE) as i128));
 }
 
+// Invariant: source-credit changes on a nontraded asset invalidate the trade fast path
+// even with current prices/legs; rejection must be conservative relative to full refresh.
+#[test]
+fn v16_bpf_trade_requires_refresh_after_nontraded_source_credit_change() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(8, 1_000, 1_000, 500);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 20_000);
+    env.deposit(&short_owner, short, 20_000);
+    for asset in 0..8 {
+        env.trade_asset_with_cu(
+            asset,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            (10 * POS_SCALE) as i128,
+            100,
+            0,
+        );
+    }
+    let before = env.market_state().1;
+    let portfolios_before = [long, short].map(|key| env.svm.get_account(&key).unwrap());
+    for portfolio in [long, short] {
+        let account = env.portfolio_state(portfolio);
+        let cert = health_cert(&account);
+        assert!(cert.valid && cert.certified_initial_req > 0);
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&account)),
+            8
+        );
+        assert_eq!(cert.active_bitmap_at_cert, active_bitmap(&account));
+        assert_eq!(cert.cert_oracle_epoch, before.oracle_epoch);
+        assert_eq!(cert.cert_funding_epoch, before.funding_epoch);
+        assert_eq!(cert.cert_risk_epoch, before.risk_epoch);
+        assert_eq!(cert.cert_asset_set_epoch, before.asset_set_epoch);
+    }
+
+    // Domain 15 belongs to asset 7; the attempted trade touches only asset 0.
+    env.top_up_backing_bucket(15, 40, 10_000);
+    let after = env.market_state().1;
+    assert_eq!(after.assets, before.assets);
+    assert_eq!(after.oracle_epoch, before.oracle_epoch);
+    assert_eq!(after.funding_epoch, before.funding_epoch);
+    assert_eq!(after.asset_set_epoch, before.asset_set_epoch);
+    assert!(after.risk_epoch > before.risk_epoch);
+    assert!(after.source_credit[15].credit_epoch > before.source_credit[15].credit_epoch);
+    assert_eq!(
+        after.source_credit[15].fresh_reserved_backing_num,
+        before.source_credit[15].fresh_reserved_backing_num + 40 * BOUND_SCALE
+    );
+    for (key, expected) in [long, short].into_iter().zip(&portfolios_before) {
+        assert_eq!(env.svm.get_account(&key).unwrap(), *expected);
+    }
+
+    let market_before_trade = env.svm.get_account(&env.market).unwrap();
+    let rejected = env
+        .try_trade_asset_with_cu(
+            0,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            -(POS_SCALE as i128),
+            100,
+            0,
+        )
+        .expect_err("risk-epoch-only staleness must reject the eight-leg trade fast path");
+    assert!(
+        rejected.contains("Custom(19)"),
+        "expected EngineStale: {rejected}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_trade);
+    for (key, expected) in [long, short].into_iter().zip(&portfolios_before) {
+        assert_eq!(env.svm.get_account(&key).unwrap(), *expected);
+        env.crank(
+            key,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                close_q: 0,
+                observations: crank_observations_for_assets(&[0, 1, 2, 3, 4, 5, 6, 7]),
+            },
+        );
+        let mut expected_cert = health_cert(&state::read_portfolio(&expected.data).unwrap());
+        expected_cert.cert_risk_epoch = after.risk_epoch;
+        assert_eq!(health_cert(&env.portfolio_state(key)), expected_cert);
+    }
+
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -(POS_SCALE as i128),
+        100,
+        0,
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(long), 0).basis_pos_q,
+        (9 * POS_SCALE) as i128
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(short), 0).basis_pos_q,
+        -((9 * POS_SCALE) as i128)
+    );
+}
+
 #[test]
 fn v16_bpf_stale_full_14_leg_tradenocpi_rejects_before_cu_cliff() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
