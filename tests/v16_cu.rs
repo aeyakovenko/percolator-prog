@@ -19394,6 +19394,92 @@ fn v16_bpf_live_shared_backing_conversion_order_preserves_entitlements() {
     assert_eq!(outcomes[0], outcomes[1], "caller order changes payouts or backing allocation");
 }
 
+// Invariant: floor(3 * floor(CREDIT_RATE_SCALE / 3) / CREDIT_RATE_SCALE) is zero;
+// the unallocated backing atom stays explicit and cannot become health or withdrawable capital.
+#[test]
+fn v16_bpf_live_credit_rate_rounding_residue_cannot_be_withdrawn() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.add_source_positive_pnl(portfolio, 1, 3);
+    env.top_up_backing_bucket(1, 1, 10_000);
+    let funded = env.market_state().1;
+    assert_eq!(funded.source_credit[1].credit_rate_num, percolator::CREDIT_RATE_SCALE / 3);
+    assert_eq!(funded.source_credit[1].fresh_reserved_backing_num, BOUND_SCALE);
+    assert_eq!(funded.source_credit[1].positive_claim_bound_num, 3 * BOUND_SCALE);
+    assert_eq!(funded.source_backing_buckets[1].fresh_unliened_backing_num, BOUND_SCALE);
+    let dest = env.token_account(owner.pubkey(), 0);
+    let keys = [env.market, portfolio, env.vault, dest];
+    let snapshot = |env: &V16CuEnv| keys.map(|key| env.svm.get_account(&key).unwrap());
+
+    for capital in [1_000, 1_001] {
+        if capital == 1_001 {
+            env.deposit(&owner, portfolio, 1);
+        }
+        env.svm.expire_blockhash();
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+        );
+        let account = env.portfolio_state(portfolio);
+        let group = env.market_state().1;
+        assert!(health_cert(&account).valid);
+        assert_eq!(health_cert(&account).certified_equity, capital as i128);
+        assert_eq!(account.capital.get(), capital);
+        assert_eq!(account.pnl.get(), 3);
+        assert_eq!(state::portfolio_source_domain(&account, 1).source_claim_bound_num.get(), 3 * BOUND_SCALE);
+        assert_eq!(group.source_credit, funded.source_credit);
+        assert_eq!(group.source_backing_buckets, funded.source_backing_buckets);
+        assert_eq!((group.c_tot, group.insurance), (capital, 0));
+        assert_eq!(group.insurance_domain_budget, funded.insurance_domain_budget);
+        assert_eq!(group.vault, capital + 1);
+        assert_eq!(env.token_amount(env.vault) as u128, group.vault);
+
+        let before = snapshot(&env);
+        for (ix, accounts) in [
+            (
+                ProgInstruction::ConvertReleasedPnl { amount: u128::MAX },
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+            ),
+            (
+                ProgInstruction::Withdraw { amount: capital + 1 },
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+            ),
+        ] {
+            env.svm.expire_blockhash();
+            let error = env.send(ix, accounts, &[&owner]).expect_err("rounding residue is not spendable");
+            let locked = percolator_prog::error::PercolatorError::EngineLockActive as u32;
+            assert!(error.contains(&format!("Custom({locked})")), "{error}");
+            assert_eq!(snapshot(&env), before, "rejection must preserve claims and custody");
+        }
+    }
+
+    let paid = env.withdraw(&owner, portfolio, 1_001);
+    assert_eq!(env.token_amount(paid), 1_001, "actual deposits remain withdrawable");
+    let group = env.market_state().1;
+    assert_eq!((group.vault, group.c_tot, group.insurance), (1, 0, 0));
+    assert_eq!(env.token_amount(env.vault), 1);
+    assert_eq!(group.source_credit, funded.source_credit);
+    assert_eq!(group.source_backing_buckets, funded.source_backing_buckets);
+}
+
 // Converting each closed trade's profit or retaining it through the next trade must produce
 // the same economic state and token payouts once the combined released PnL is converted.
 #[test]
