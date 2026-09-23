@@ -9,6 +9,40 @@ use percolator_prog::matcher_abi::{
 use percolator_prog::policy_v16;
 
 #[kani::proof]
+fn kani_v16_ewma_initialization_has_exact_fee_threshold() {
+    let price: u64 = kani::any();
+    let halflife_slots: u64 = kani::any();
+    let last_slot: u64 = kani::any();
+    let now_slot: u64 = kani::any();
+    let fee_paid: u64 = kani::any();
+    let mark_min_fee: u64 = kani::any();
+
+    // Initialization applies the fee threshold independently of elapsed time and halflife.
+    let next_mark = policy_v16::ewma_update(
+        0,
+        price,
+        halflife_slots,
+        last_slot,
+        now_slot,
+        fee_paid,
+        mark_min_fee,
+    );
+    if fee_paid < mark_min_fee {
+        assert_eq!(next_mark, 0);
+    } else {
+        assert_eq!(next_mark, price);
+    }
+
+    kani::cover!(price > 0 && fee_paid < mark_min_fee && next_mark == 0);
+    kani::cover!(price > 0 && mark_min_fee > 0 && fee_paid == mark_min_fee && next_mark == price);
+    kani::cover!(price > 0 && fee_paid > mark_min_fee && next_mark == price);
+    kani::cover!(price > 0 && mark_min_fee == 0 && fee_paid == 0 && next_mark == price);
+    kani::cover!(
+        price == u64::MAX && mark_min_fee == u64::MAX && fee_paid == u64::MAX && next_mark == price
+    );
+}
+
+#[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
     let mark_raw: u16 = kani::any();
     let index_raw: u16 = kani::any();

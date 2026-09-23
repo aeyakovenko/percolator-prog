@@ -36097,6 +36097,95 @@ fn v16_attack_exposure_transfer_chain_conserves() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
+// Crossing through zero and closing before reopening must produce the same matched book.
+#[test]
+fn v16_bpf_matched_book_crossing_fill_order_preserves_positions_and_fees() {
+    const DEPOSIT: u128 = 1_000;
+    const PRICE: u64 = 100;
+    const FEE_BPS: u64 = 100;
+
+    for direction in [1i128, -1] {
+        for order in [[0usize, 1], [1, 0]] {
+            let mut env = V16CuEnv::new();
+            let owners = [Keypair::new(), Keypair::new(), Keypair::new()];
+            let portfolios = owners.each_ref().map(|owner| env.create_portfolio(owner));
+            for i in 0..3 {
+                env.deposit(&owners[i], portfolios[i], DEPOSIT);
+            }
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            let mut positions = [0i128; 3];
+            let mut fees = [0u128; 3];
+
+            // Start A=+2, B=-2, C=0. B then buys 3 from C and 2 from A.
+            // Reversing those fills makes B visit flat instead of crossing directly to +1.
+            let fills = [(1usize, 2usize, 3i128), (0, 1, -2)];
+            for (a, b, units) in [(0, 1, 2), fills[order[0]], fills[order[1]]] {
+                let untouched = 3 - a - b;
+                let untouched_before = env.svm.get_account(&portfolios[untouched]).unwrap();
+                let size_q = direction * units * POS_SCALE as i128;
+                env.svm.expire_blockhash();
+                env.trade_asset_with_cu(
+                    0,
+                    &owners[a],
+                    portfolios[a],
+                    &owners[b],
+                    portfolios[b],
+                    size_q,
+                    PRICE,
+                    FEE_BPS,
+                );
+                positions[a] += size_q;
+                positions[b] -= size_q;
+                // At price 100 and 100 bps, each participant pays one atom per unit.
+                fees[a] += units.unsigned_abs();
+                fees[b] += units.unsigned_abs();
+
+                let group = env.market_state().1;
+                let expected_oi = positions.iter().map(|q| (*q).max(0) as u128).sum::<u128>();
+                assert_eq!(positions.iter().sum::<i128>(), 0);
+                assert_eq!(group.assets[0].oi_eff_long_q, expected_oi);
+                assert_eq!(group.assets[0].oi_eff_short_q, expected_oi);
+                assert_eq!(group.insurance, fees.iter().sum::<u128>());
+                assert_eq!(group.c_tot, 3 * DEPOSIT - group.insurance);
+                assert_eq!(group.pnl_pos_tot, 0);
+                assert_eq!(group.vault, 3 * DEPOSIT);
+                assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+                assert_eq!(
+                    env.svm.get_account(&portfolios[untouched]).unwrap(),
+                    untouched_before,
+                );
+                assert_domain_budget_remaining_total_consistent(&group, "matched fill");
+                for i in 0..3 {
+                    let account = env.portfolio_state(portfolios[i]);
+                    assert_eq!(account.capital.get(), DEPOSIT - fees[i]);
+                    assert_eq!(account.pnl.get(), 0);
+                    if positions[i] == 0 {
+                        assert!(percolator::active_bitmap_is_empty(active_bitmap(&account)));
+                    } else {
+                        assert_eq!(active_bitmap(&account), active_bitmap_with(&[0]));
+                        assert_eq!(
+                            active_leg_for_asset(&account, 0).basis_pos_q,
+                            positions[i],
+                        );
+                    }
+                }
+            }
+
+            assert_eq!(
+                positions,
+                [0, direction * 3 * POS_SCALE as i128, -direction * 3 * POS_SCALE as i128],
+            );
+            assert_eq!(fees, [4, 7, 3]);
+            let group = env.market_state().1;
+            assert_eq!(
+                (group.assets[0].oi_eff_long_q, group.assets[0].oi_eff_short_q),
+                (3 * POS_SCALE, 3 * POS_SCALE),
+            );
+            assert_eq!((group.c_tot, group.insurance, group.vault), (2_986, 14, 3_000));
+        }
+    }
+}
+
 // security.md sweep — token program validation (#44): deposit/withdraw must verify the token program
 // account is the real SPL Token program. Injecting a different program must reject — no routing the
 // transfer CPI through an attacker-controlled program.
