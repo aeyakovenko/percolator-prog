@@ -23022,6 +23022,112 @@ fn v16_attack_backing_withdraw_cannot_strand_liened_winner() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
+// Invariant: partitioning a live backing withdrawal preserves the source-credit watermark,
+// provider ledger, and custody; no prefix may withdraw even one atom of a winner's support.
+#[test]
+fn v16_bpf_backing_withdraw_partition_preserves_claim_watermark_and_ledger() {
+    const BACKING: u128 = 101;
+    const CLAIM: u128 = 41;
+    const WITHDRAWABLE: u128 = BACKING - CLAIM;
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, BACKING, 10_000);
+    let owner = Keypair::new();
+    let winner = env.create_portfolio(&owner);
+    env.add_source_positive_pnl(winner, 1, CLAIM);
+    let admin = env.admin.insecure_clone();
+    let dest = env.token_account(admin.pubkey(), 0);
+    let keys = [env.market, ledger, winner, env.vault, dest];
+    let snapshot = |env: &V16CuEnv| keys.map(|key| env.svm.get_account(&key).unwrap());
+    let before = snapshot(&env);
+    let initial_group = env.market_state().1;
+    let withdraw = |env: &mut V16CuEnv, amount| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::WithdrawBackingBucket { domain: 1, amount },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&admin],
+        )
+    };
+    let mut outcomes = Vec::new();
+    for parts in [&[WITHDRAWABLE][..], &[1, WITHDRAWABLE - 2, 1][..]] {
+        for (&key, account) in keys.iter().zip(&before) {
+            env.svm.set_account(key, account.clone()).unwrap();
+        }
+        let mut paid = 0;
+        for amount in parts.iter().copied().chain(std::iter::once(0)) {
+            let checkpoint = snapshot(&env);
+            let error = withdraw(&mut env, WITHDRAWABLE - paid + 1)
+                .expect_err("withdrawal cannot consume the live claim's backing");
+            let locked = percolator_prog::error::PercolatorError::EngineLockActive as u32;
+            assert!(error.contains(&format!("Custom({locked})")), "{error}");
+            assert_eq!(
+                snapshot(&env), checkpoint,
+                "overdraw must roll back every account"
+            );
+            if amount == 0 {
+                break;
+            }
+            withdraw(&mut env, amount).expect("withdraw within the remaining watermark");
+            paid += amount;
+            let group = env.market_state().1;
+            assert_eq!(group.vault, BACKING - paid);
+            assert_eq!(env.token_amount(env.vault) as u128, BACKING - paid);
+            assert_eq!(env.token_amount(dest) as u128, paid);
+            assert_eq!(
+                group.source_credit[1].positive_claim_bound_num,
+                CLAIM * BOUND_SCALE
+            );
+            assert_eq!(
+                group.source_credit[1].credit_rate_num,
+                percolator::CREDIT_RATE_SCALE
+            );
+            assert_eq!(
+                group.source_credit[1].fresh_reserved_backing_num,
+                (BACKING - paid) * BOUND_SCALE
+            );
+            assert_eq!(
+                group.source_backing_buckets[1].fresh_unliened_backing_num,
+                (BACKING - paid) * BOUND_SCALE
+            );
+            let provider =
+                state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data)
+                    .unwrap();
+            assert_eq!(provider.total_principal_atoms, BACKING - paid);
+            assert_eq!(provider.total_principal_withdrawn_atoms, paid);
+            assert_eq!(provider.total_deposited_atoms, BACKING);
+            assert_eq!(env.svm.get_account(&winner).unwrap(), before[2]);
+        }
+        assert_eq!(paid, WITHDRAWABLE);
+        let mut outcome = snapshot(&env);
+        // Each successful call invalidates certificates once; only these epochs may differ.
+        {
+            let (_, group) = state::market_view_mut(&mut outcome[0].data).unwrap();
+            assert_eq!(group.header.risk_epoch.get(), initial_group.risk_epoch + parts.len() as u64);
+            let credit_epoch = &mut group.markets[0].engine.source_credit_short.credit_epoch;
+            assert_eq!(
+                credit_epoch.get(),
+                initial_group.source_credit[1].credit_epoch + parts.len() as u64
+            );
+            group.header.risk_epoch = percolator::V16PodU64::new(initial_group.risk_epoch);
+            *credit_epoch = percolator::V16PodU64::new(initial_group.source_credit[1].credit_epoch);
+        }
+        outcomes.push(outcome);
+    }
+    assert_eq!(
+        outcomes[0], outcomes[1],
+        "split withdrawals must match the aggregate economic state"
+    );
+}
+
 // security.md sweep — deposit atomicity vs underfunded source (#35/#48): depositing more than the
 // source token account holds must fail ATOMICALLY — capital must never be credited before the token
 // transfer succeeds (a credit-before-transfer bug would let an attacker mint capital for free).
