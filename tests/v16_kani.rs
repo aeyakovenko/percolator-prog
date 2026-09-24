@@ -9,6 +9,29 @@ use percolator_prog::matcher_abi::{
 use percolator_prog::policy_v16;
 
 #[kani::proof]
+fn kani_v16_price_move_unit_anchor_has_exact_u64_boundary() {
+    let new: u64 = kani::any();
+    // At a unit anchor, each upward price unit adds exactly 10_000 bps.
+    let max_representable_price = 1 + u64::MAX / 10_000;
+    let move_bps = policy_v16::price_move_bps_ceil(1, new);
+
+    if new == 0 {
+        assert_eq!(move_bps, Some(10_000));
+    } else if new <= max_representable_price {
+        assert_eq!(move_bps, Some((new - 1) * 10_000));
+    } else {
+        assert_eq!(move_bps, None);
+    }
+
+    kani::cover!(new == 0 && move_bps == Some(10_000));
+    kani::cover!(new == 1 && move_bps == Some(0));
+    kani::cover!(new == 2 && move_bps == Some(10_000));
+    kani::cover!(new == max_representable_price && move_bps.is_some());
+    kani::cover!(new == max_representable_price + 1 && move_bps.is_none());
+    kani::cover!(new == u64::MAX && move_bps.is_none());
+}
+
+#[kani::proof]
 fn kani_v16_ewma_initialization_has_exact_fee_threshold() {
     let price: u64 = kani::any();
     let halflife_slots: u64 = kani::any();

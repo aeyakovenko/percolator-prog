@@ -38943,6 +38943,256 @@ fn v16_attack_fee_redirect_split_lands_correctly() {
     assert_domain_budget_remaining_total_consistent(&g, "trade fee redirect split");
 }
 
+// Nearest: v16_attack_fee_redirect_split_lands_correctly checks a large fill with tolerance.
+// Uncovered: fragmented equal volume crosses fee/redirect rounding thresholds; every atom
+// must reach its exact domain and remain recoverable after the traders fully withdraw.
+#[test]
+fn v16_bpf_trade_fee_fragmentation_preserves_exact_domain_allocation() {
+    const COLLATERAL: u64 = 1_000;
+    const PRICE: u64 = 100;
+    // (units per fill, fill count, fee per trader per fill, domain credits per fill).
+    // Two fills isolate redirect flooring; four also exercise the fee ceiling.
+    for (units, fills, fee, credits) in [
+        (4u128, 1u128, 6u128, [2u128, 4, 3, 3, 0, 0]),
+        (2, 2, 3, [0, 2, 2, 2, 0, 0]),
+        (1, 4, 2, [0, 2, 1, 1, 0, 0]),
+    ] {
+        let mut svm = LiteSVM::new();
+        let program_id = percolator_prog::id();
+        for (id, path) in [
+            (program_id, program_path()),
+            (spl_token::ID, spl_token_program_path()),
+            (associated_token_program_id(), associated_token_program_path()),
+        ] {
+            svm.add_program(id, &std::fs::read(path).expect("read BPF"));
+        }
+        let payer = Keypair::new();
+        let admin = Keypair::new();
+        svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+        svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
+        let mint = Keypair::new();
+        system_create_account_for_test(&mut svm, &payer, &mint, Mint::LEN, spl_token::ID);
+        send_raw_tx(
+            &mut svm,
+            &payer,
+            spl_token::instruction::initialize_mint(
+                &spl_token::ID,
+                &mint.pubkey(),
+                &admin.pubkey(),
+                None,
+                0,
+            )
+            .unwrap(),
+            &[],
+        )
+        .expect("initialize collateral mint");
+        let params = V16CuMarketParams {
+            max_portfolio_assets: 3,
+            initial_price: PRICE,
+            ..V16CuMarketParams::default()
+        };
+        let market = Keypair::new();
+        system_create_account_for_test(
+            &mut svm,
+            &payer,
+            &market,
+            state::market_account_len_for_capacity(3).unwrap(),
+            program_id,
+        );
+        let vault_authority =
+            Pubkey::find_program_address(&[b"vault", market.pubkey().as_ref()], &program_id).0;
+        let vault = create_ata_for_test(&mut svm, &payer, vault_authority, mint.pubkey());
+        send_tx(
+            &mut svm,
+            program_id,
+            &payer,
+            init_market_instruction(&params),
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(market.pubkey(), false),
+                AccountMeta::new_readonly(mint.pubkey(), false),
+            ],
+            &[&admin],
+        )
+        .expect("initialize market");
+        let mut env = V16CuEnv {
+            svm,
+            program_id,
+            payer,
+            admin,
+            market: market.pubkey(),
+            mint: mint.pubkey(),
+            vault,
+            vault_authority,
+            portfolio_account_len: state::portfolio_account_len_for_market_slots(3).unwrap(),
+        };
+        for asset_index in 0..3 {
+            env.configure_auth_mark_for_asset_as_admin(asset_index, 0, PRICE);
+        }
+        env.update_fee_redirect_policy_with_cu(5_000);
+        let owners = [Keypair::new(), Keypair::new()];
+        let portfolios = [Keypair::new(), Keypair::new()];
+        let mut destinations = Vec::new();
+        for (owner, portfolio) in owners.iter().zip(&portfolios) {
+            env.ensure_signer_account(owner.pubkey());
+            system_create_account_for_test(
+                &mut env.svm,
+                &env.payer,
+                portfolio,
+                env.portfolio_account_len,
+                env.program_id,
+            );
+            env.send(
+                ProgInstruction::InitPortfolio,
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio.pubkey(), false),
+                ],
+                &[owner],
+            )
+            .expect("initialize portfolio");
+            let source = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+            send_raw_tx(
+                &mut env.svm,
+                &env.payer,
+                spl_token::instruction::mint_to(
+                    &spl_token::ID,
+                    &env.mint,
+                    &source,
+                    &env.admin.pubkey(),
+                    &[],
+                    COLLATERAL,
+                )
+                .unwrap(),
+                &[&env.admin],
+            )
+            .expect("mint collateral");
+            env.send(
+                ProgInstruction::Deposit {
+                    amount: COLLATERAL as u128,
+                },
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio.pubkey(), false),
+                    AccountMeta::new(source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[owner],
+            )
+            .expect("deposit minted collateral");
+            assert_eq!(env.token_amount(source), 0);
+            destinations.push(source);
+        }
+        let supply = Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+            .unwrap()
+            .supply;
+        assert_eq!(supply, 2 * COLLATERAL);
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let [long, short] = portfolios.each_ref().map(Signer::pubkey);
+        for filled in 1..=fills {
+            env.svm.expire_blockhash();
+            env.trade_asset_with_cu(
+                1,
+                &owners[0],
+                long,
+                &owners[1],
+                short,
+                (units * POS_SCALE) as i128,
+                PRICE,
+                150,
+            );
+            let group = env.market_state().1;
+            for (portfolio, sign) in [(long, 1), (short, -1)] {
+                let account = env.portfolio_state(portfolio);
+                assert_eq!(account.capital.get(), COLLATERAL as u128 - fee * filled);
+                assert_eq!(account.pnl.get(), 0);
+                assert_eq!(
+                    active_leg_for_asset(&account, 1).basis_pos_q,
+                    sign * (units * filled * POS_SCALE) as i128,
+                );
+            }
+            assert_eq!(group.c_tot, supply as u128 - 2 * fee * filled);
+            assert_eq!(group.insurance, 2 * fee * filled);
+            assert_eq!(
+                group.insurance_domain_budget.as_slice(),
+                &credits.map(|c| c * filled),
+                "{fills} fills, checkpoint {filled}: exact rounding allocation",
+            );
+            assert_eq!(group.insurance_domain_spent.as_slice(), &[0; 6]);
+            assert_eq!(group.insurance_domain_budget_remaining_total, group.insurance);
+            assert_domain_budget_remaining_total_consistent(&group, "fragmented trade fees");
+            assert_eq!(group.vault, group.c_tot + group.insurance);
+            assert_eq!(group.vault, supply as u128);
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+        }
+        assert_eq!(units * fills, 4, "all partitions execute the same volume");
+        let budgets = env.market_state().1.insurance_domain_budget;
+        env.trade_asset_with_cu(
+            1,
+            &owners[0],
+            long,
+            &owners[1],
+            short,
+            -(4 * POS_SCALE as i128),
+            PRICE,
+            0,
+        );
+        let payout = COLLATERAL as u128 - fee * fills;
+        for i in 0..2 {
+            let portfolio = portfolios[i].pubkey();
+            assert!(percolator::active_bitmap_is_empty(active_bitmap(
+                &env.portfolio_state(portfolio),
+            )));
+            env.send(
+                ProgInstruction::Withdraw { amount: payout },
+                vec![
+                    AccountMeta::new(owners[i].pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(destinations[i], false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&owners[i]],
+            )
+            .expect("withdraw all post-fee collateral");
+            assert_eq!(env.token_amount(destinations[i]) as u128, payout);
+            assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+        }
+        let group = env.market_state().1;
+        assert_eq!(group.c_tot, 0);
+        assert_eq!(group.pnl_pos_tot, 0);
+        assert_eq!(group.vault, 2 * fee * fills);
+        assert_eq!(group.insurance, group.vault);
+        assert_eq!(group.insurance_domain_budget, budgets);
+        assert_eq!(env.token_amount(env.vault) as u128, group.vault);
+        let recovery = create_ata_for_test(&mut env.svm, &env.payer, env.admin.pubkey(), env.mint);
+        for domain in [0usize, 2] {
+            env.withdraw_insurance_domain_to_admin_token_with_cu(
+                recovery,
+                domain as u16,
+                budgets[domain] + budgets[domain + 1],
+            );
+        }
+        let group = env.market_state().1;
+        assert_eq!((group.vault, group.c_tot, group.insurance), (0, 0, 0));
+        assert_eq!(group.insurance_domain_budget.as_slice(), &[0; 6]);
+        assert_domain_budget_remaining_total_consistent(&group, "recovered fragmented trade fees");
+        assert_eq!(env.token_amount(env.vault), 0);
+        assert_eq!(env.token_amount(recovery) as u128, 2 * fee * fills);
+        assert_eq!(
+            env.token_amount(recovery)
+                + destinations.iter().map(|key| env.token_amount(*key)).sum::<u64>(),
+            supply,
+            "every minted atom is recovered by its recorded recipient",
+        );
+    }
+}
+
 // security.md sweep — backing-fee policy authorization (#6) [fee-routing #7]: UpdateBackingFeePolicy
 // (per-domain backing fee + insurance share) is gated to the domain's insurance_authority. A non-
 // authority must reject, and an out-of-range share must reject. No unauthorized fee-policy tampering.
