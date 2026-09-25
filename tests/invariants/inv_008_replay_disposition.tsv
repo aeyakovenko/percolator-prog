@@ -51,3 +51,4 @@ tag	variant	disposition	boundary
 67	BatchTradeCpi	retry:BatchTradeCpi	Both portfolio incarnations and position episodes are exercised by the retry matrix.
 68	SetMatcherConfig	supersession:MatcherConfig	Portfolio-local sequence is exercised by the supersession matrix.
 69	RestartAssetOracle	supersession:RestartAssetOracle	Asset generation and the scope-local observation sequence bind the recovery restart.
+70	CanonicalizeSpentBackingHistory	incarnation-episode	Asset generation, the live backing authority, and its authority epoch bind the clear; once history is gone a replay rejects without mutation.

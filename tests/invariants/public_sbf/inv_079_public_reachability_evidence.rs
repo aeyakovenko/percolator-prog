@@ -1541,6 +1541,11 @@ fn v16_public_instruction_dispatch_registry_matches_reviewed_handlers() {
         (67, "BatchTradeCpi", "handle_batch_trade_cpi"),
         (68, "SetMatcherConfig", "handle_set_matcher_config"),
         (69, "RestartAssetOracle", "handle_restart_asset_oracle"),
+        (
+            70,
+            "CanonicalizeSpentBackingHistory",
+            "handle_canonicalize_spent_backing_history",
+        ),
     ]
     .into_iter()
     .map(|(tag, variant, handler)| PublicInstructionDispatch {

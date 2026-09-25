@@ -55,3 +55,4 @@ tag	variant	status	instance_bound_roles	evidence	remaining_gap
 67	BatchTradeCpi	EXHAUSTIVE	account_a,account_b,matcher_context,delegate	v16_attack_trade_paths_reject_cross_market_portfolio_substitution	-
 68	SetMatcherConfig	EXHAUSTIVE	portfolio,delegate_pda_bound_to_market_portfolio_owner_program_context	v16_attack_set_matcher_config_rejects_cross_instance_capability_tuple	-
 69	RestartAssetOracle	NO_MIXED_ROLE	market	-	-
+70	CanonicalizeSpentBackingHistory	NO_MIXED_ROLE	market	-	-

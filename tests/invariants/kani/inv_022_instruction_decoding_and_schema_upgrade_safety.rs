@@ -2390,6 +2390,7 @@ fn kani_v16_unknown_or_truncated_tags_reject() {
             | 67
             | 68
             | 69
+            | 70
     );
     let split = Instruction::decode_tag_for_proof(&data);
     kani::cover!(known, "public-tag gate admits a known tag");

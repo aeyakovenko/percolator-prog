@@ -177,6 +177,7 @@ pub enum AuthorityIntentKind {
     LifecycleRetire,
     LifecycleShutdownMarket,
     LifecycleShutdownAssetAdmin,
+    SpentHistoryCanonicalization,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -807,7 +808,7 @@ impl RetryIntentKind {
 }
 
 impl AuthorityIntentKind {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::MarketAuthorityHandoff,
         Self::AssetAdminHandoff,
         Self::InsuranceAuthorityHandoff,
@@ -842,6 +843,7 @@ impl AuthorityIntentKind {
         Self::LifecycleRetire,
         Self::LifecycleShutdownMarket,
         Self::LifecycleShutdownAssetAdmin,
+        Self::SpentHistoryCanonicalization,
     ];
 
     fn discriminator(self) -> u8 {
@@ -880,6 +882,7 @@ impl AuthorityIntentKind {
             Self::LifecycleRetire => 31,
             Self::LifecycleShutdownMarket => 32,
             Self::LifecycleShutdownAssetAdmin => 33,
+            Self::SpentHistoryCanonicalization => 34,
         }
     }
 
@@ -899,7 +902,10 @@ impl AuthorityIntentKind {
             Self::InsuranceTopUp | Self::InsuranceDomainTopUp => {
                 Some(percolator_prog::processor::ASSET_AUTH_INSURANCE)
             }
-            Self::BackingTopUp | Self::BackingWithdrawal | Self::BackingEarningsWithdrawal => {
+            Self::BackingTopUp
+            | Self::BackingWithdrawal
+            | Self::BackingEarningsWithdrawal
+            | Self::SpentHistoryCanonicalization => {
                 Some(percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET)
             }
             Self::InsuranceWithdrawal => {
@@ -978,6 +984,7 @@ impl AuthorityIntentKind {
             | Self::LifecycleRetire
             | Self::LifecycleShutdownMarket
             | Self::LifecycleShutdownAssetAdmin => "UpdateAssetLifecycle",
+            Self::SpentHistoryCanonicalization => "CanonicalizeSpentBackingHistory",
         }
     }
 }
@@ -7461,6 +7468,12 @@ fn prepare_authority_incarnation_route(
             env.configure_permissionless_resolve(100, 5)
                 .map_err(|error| format!("configure retained lifecycle shutdown: {error}"))?;
         }
+        AuthorityIntentKind::SpentHistoryCanonicalization => {
+            env.warp_to_slot(1);
+            env.retire_asset(1, 1)
+                .map_err(|error| format!("retire asset before retained canonicalization: {error}"))?;
+            env.install_matched_spent_backing_history(1, 25);
+        }
         _ => {}
     }
     Ok(None)
@@ -7571,6 +7584,9 @@ fn build_authority_incarnation_intent(
         AuthorityIntentKind::LifecycleShutdownMarket => env.build_retained_shutdown_asset(ASSET, 1),
         AuthorityIntentKind::LifecycleShutdownAssetAdmin => {
             env.build_retained_shutdown_asset_for_actor(AUTHORITY_A, ASSET, 1)
+        }
+        AuthorityIntentKind::SpentHistoryCanonicalization => {
+            env.build_retained_canonicalize_spent_backing_history_for_actor(AUTHORITY_A, ASSET)
         }
     }
 }

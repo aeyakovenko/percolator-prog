@@ -589,8 +589,8 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
 
     const HEADER: &str = "type\tfields\tclassification\tevidence";
     // 238 named public fields plus the three unit-variant no-data subjects.
-    const EXPECTED_FIELD_COUNT: usize = 241;
-    const EXPECTED_TYPE_COUNT: usize = 52;
+    const EXPECTED_FIELD_COUNT: usize = 244;
+    const EXPECTED_TYPE_COUNT: usize = 53;
 
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let profile_names = INV_083_BOUNDARY_PROFILES
@@ -687,9 +687,9 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
         ("duration", 9),
         ("enum", 5),
         ("expiry", 2),
-        ("identity", 78),
+        ("identity", 80),
         ("ignored", 1),
-        ("index", 24),
+        ("index", 25),
         ("key", 9),
         ("no-data", 3),
         ("price", 12),
