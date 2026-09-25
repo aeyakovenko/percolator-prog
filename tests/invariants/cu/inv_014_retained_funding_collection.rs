@@ -36,6 +36,7 @@ struct Ledger {
     trade_fees: u128,
     fee_slots: [u64; 2],
     maintenance_domains: [u128; 2],
+    maintenance_carry: bool,
     settled_funding: u64,
     converted: bool,
     paid: [u64; 2],
@@ -50,6 +51,7 @@ impl Ledger {
             trade_fees: fee(QUANTITY, OPEN_CAP),
             fee_slots: [0; 2],
             maintenance_domains: [0; 2],
+            maintenance_carry: false,
             settled_funding: 0,
             converted: false,
             paid: [0; 2],
@@ -70,8 +72,11 @@ impl Ledger {
 
     fn collect(&mut self, actor: usize, slot: u64) {
         let amount = u128::from((slot - self.fee_slots[actor]) * MAINTENANCE);
-        self.maintenance_domains[0] += amount / 2;
-        self.maintenance_domains[1] += amount - amount / 2;
+        // Odd atoms alternate sides across collections (issue #386 carry).
+        let long = amount / 2 + u128::from(amount % 2 == 1 && self.maintenance_carry);
+        self.maintenance_carry ^= amount % 2 == 1;
+        self.maintenance_domains[0] += long;
+        self.maintenance_domains[1] += amount - long;
         self.fee_slots[actor] = slot;
     }
 

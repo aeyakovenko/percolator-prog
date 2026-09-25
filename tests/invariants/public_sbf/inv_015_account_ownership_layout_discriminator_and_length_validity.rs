@@ -150,8 +150,9 @@ fn apply_malformed_case(env: &mut V16Svm, case: MalformedCase) {
         MalformedCase::MarketNonzeroWrapperPadding => {
             let padding_offset =
                 constants::HEADER_LEN + core::mem::offset_of!(state::WrapperConfigV16, _padding0);
+            // Bit 0 is the maintenance-fee split carry (issue #386); 2 is out of domain.
             replace_account(env, env.market, |account| {
-                account.data[padding_offset] = 1;
+                account.data[padding_offset] = 2;
             });
         }
         MalformedCase::MarketTrailingByte => {
@@ -544,9 +545,9 @@ fn every_wrapper_config_byte_domain_rejects_before_engine_borrow() {
             2,
         ),
         (
-            "wrapper padding",
+            "wrapper padding (fee split carry is 0 or 1)",
             core::mem::offset_of!(state::WrapperConfigV16, _padding0),
-            1,
+            2,
         ),
     ];
 

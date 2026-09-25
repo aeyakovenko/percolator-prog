@@ -170,17 +170,13 @@ fn v16_program_reward_mapping_preserves_owner_local_first_risk_across_routes() {
                             (PRICE, PRICE)
                         );
                         assert_eq!(group.insurance, insurance, "{label}");
+                        // Maintenance splits by cumulative total (issue #386 carry).
+                        let total = (0..2)
+                            .filter(|&i| charged[i])
+                            .map(|i| retained[i])
+                            .sum::<u128>();
                         for domain in 0..2 {
-                            let budget = (0..2)
-                                .filter(|&i| charged[i])
-                                .map(|i| {
-                                    if domain == 0 {
-                                        retained[i] / 2
-                                    } else {
-                                        retained[i] - retained[i] / 2
-                                    }
-                                })
-                                .sum::<u128>();
+                            let budget = if domain == 0 { total / 2 } else { total - total / 2 };
                             assert_eq!(group.insurance_domain_budget[domain], budget, "{label}");
                         }
                         assert!(group.insurance_domain_budget[2..].iter().all(|&x| x == 0));
