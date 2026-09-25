@@ -10974,8 +10974,17 @@ pub mod processor {
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
             let authorities = domain_authorities_from_view(&group, &cfg, long_domain)?;
             let (ledger_authority, debit_epoch_asset) = if live_mode {
-                let shutdown_drain =
+                // The debit below draws on both of the asset's insurance domains, so each
+                // domain's loss barrier must be clear: a bankrupt long's close raises the
+                // short (paying) domain's barrier and relies on that budget staying put.
+                let long_shutdown_drain =
                     live_domain_withdraw_health_or_shutdown_view(&cfg, &group, long_domain)?;
+                let short_domain = long_domain
+                    .checked_add(1)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                let short_shutdown_drain =
+                    live_domain_withdraw_health_or_shutdown_view(&cfg, &group, short_domain)?;
+                let shutdown_drain = long_shutdown_drain && short_shutdown_drain;
                 let local_authorized =
                     live_authority_matches(&authorities.insurance_operator, operator.key);
                 let admin_shutdown_authorized = asset_index != 0
