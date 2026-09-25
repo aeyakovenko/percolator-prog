@@ -368,7 +368,8 @@ impl World {
             ),
             (0, 0, 0)
         );
-        let long = book.maintenance.iter().map(|fee| fee / 2).sum::<u128>() + book.trading;
+        // Maintenance splits by cumulative total (issue #386 carry).
+        let long = book.maintenance.iter().sum::<u128>() / 2 + book.trading;
         assert_eq!(&group.insurance_domain_budget[..2], &[long, fees - long]);
         assert!(group.insurance_domain_budget[2..].iter().all(|v| *v == 0));
         assert_eq!(group.assets[0].oi_eff_long_q, book.position.unsigned_abs());

@@ -108,8 +108,9 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
         production.matches("map_err(map_v16_error)").count(),
         // Recovery committed-state selection, terminal insurance payout, and current mark/reward
         // custody updates expanded the propagated engine-result census from its prior 133-call
-        // baseline; every future drift still requires an INV-080 disposition review.
-        137,
+        // baseline; every future drift still requires an INV-080 disposition review. The per-side
+        // maintenance credit (issue #386) adds two.
+        139,
         "engine-result mapping drift requires an INV-080 disposition review"
     );
     let recovery_handler = production

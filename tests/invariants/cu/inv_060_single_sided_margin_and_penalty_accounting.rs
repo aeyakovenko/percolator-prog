@@ -238,11 +238,8 @@ fn v16_program_flat_first_open_collects_maintenance_before_margin_admission() {
                 u128::from(env.token_amount(env.vault)),
                 "{label}"
             );
-            assert_eq!(group.insurance_domain_budget[0], 2 * (ACCRUED_FEE / 2));
-            assert_eq!(
-                group.insurance_domain_budget[1],
-                2 * (ACCRUED_FEE - ACCRUED_FEE / 2)
-            );
+            assert_eq!(group.insurance_domain_budget[0], ACCRUED_FEE);
+            assert_eq!(group.insurance_domain_budget[1], ACCRUED_FEE);
             for party in 0..2 {
                 let account = env.portfolio_state(portfolios[party]);
                 let cert = health_cert(&account);
@@ -487,13 +484,8 @@ fn v16_program_accrued_maintenance_precedes_new_asset_risk_admission() {
                         u128::from(env.token_amount(env.vault)),
                         "{label}"
                     );
-                    // Split each account's odd fee before aggregating the two domain credits.
-                    let budgets = [
-                        2 * (ACCRUED_FEE / 2),
-                        2 * (ACCRUED_FEE - ACCRUED_FEE / 2),
-                        0,
-                        0,
-                    ];
+                    // The two accounts' fees split by cumulative total (issue #386 carry).
+                    let budgets = [ACCRUED_FEE, ACCRUED_FEE, 0, 0];
                     for (domain, expected) in budgets.into_iter().enumerate() {
                         assert_eq!(
                             group.insurance_domain_budget[domain], expected,

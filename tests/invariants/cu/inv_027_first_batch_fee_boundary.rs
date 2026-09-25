@@ -252,7 +252,7 @@ fn v16_program_first_batch_admission_accounts_each_rounded_fee_after_maintenance
                 );
                 assert_eq!(
                     &group.insurance_domain_budget[..4],
-                    &[2 * (FEE / 2) + 1, 2 * (FEE - FEE / 2) + 1, 1, 1]
+                    &[FEE + 1, FEE + 1, 1, 1]
                 );
                 assert!(group.insurance_domain_budget[4..].iter().all(|&x| x == 0));
                 for i in 0..2 {

@@ -1395,7 +1395,7 @@ pub mod state {
             )
             || config.conf_filter_bps > 10_000
             || config.invert > 1
-            || config._padding0 != 0
+            || config._padding0 > 1
             || config.fee_redirect_to_market_0_bps > 10_000
             || config.oracle_leg_count as usize > ORACLE_LEG_CAP
             || (config.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
@@ -1678,10 +1678,60 @@ pub mod state {
         config: &WrapperConfigV16,
     ) -> Result<(), ProgramError> {
         validate_wrapper_config(config)?;
-        data.get_mut(HEADER_LEN..HEADER_LEN + WRAPPER_CONFIG_LEN)
-            .ok_or(PercolatorError::InvalidAccountLen)?
-            .copy_from_slice(bytemuck::bytes_of(config));
+        let bytes = data
+            .get_mut(HEADER_LEN..HEADER_LEN + WRAPPER_CONFIG_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        // The maintenance-fee split carry is owned by MaintenanceFeeSplitCarry and written in
+        // place; a handler writing back an earlier config copy must not roll it back.
+        let carry = bytes[MAINTENANCE_FEE_SPLIT_CARRY_OFF];
+        bytes.copy_from_slice(bytemuck::bytes_of(config));
+        bytes[MAINTENANCE_FEE_SPLIT_CARRY_OFF] = carry;
         Ok(())
+    }
+
+    /// Offset, within the wrapper config, of the one-bit maintenance-fee split carry. The field
+    /// keeps its historical `_padding0` name so the account layout is unchanged.
+    pub const MAINTENANCE_FEE_SPLIT_CARRY_OFF: usize =
+        core::mem::offset_of!(WrapperConfigV16, _padding0);
+
+    /// In-place handle to the market's maintenance-fee split carry (0 or 1).
+    pub struct MaintenanceFeeSplitCarry<'a>(&'a mut u8);
+
+    impl MaintenanceFeeSplitCarry<'_> {
+        /// Split `amount` between the long and short domains so that any partition of the same
+        /// cumulative amount yields the same allocation: odd atoms alternate sides across calls.
+        pub fn split(&mut self, amount: u128) -> (u128, u128) {
+            let odd = amount & 1 == 1;
+            let long = amount / 2 + u128::from(odd && *self.0 == 1);
+            if odd {
+                *self.0 ^= 1;
+            }
+            (long, amount - long)
+        }
+    }
+
+    /// `market_view_mut` plus the maintenance-fee split carry, which lives in the config region
+    /// and is therefore disjoint from the market group view.
+    pub fn market_view_mut_with_fee_carry(
+        data: &mut [u8],
+    ) -> Result<
+        (
+            WrapperConfigV16,
+            MarketViewMutV16<'_>,
+            MaintenanceFeeSplitCarry<'_>,
+        ),
+        ProgramError,
+    > {
+        if data.len() < MIN_MARKET_ACCOUNT_LEN {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        check_header(data, KIND_MARKET)?;
+        let config = read_wrapper_config_from_bytes(data)?;
+        let capacity = validate_market_dynamic_len(data)?;
+        let (head, state_data) = data.split_at_mut(MARKET_GROUP_OFF);
+        let carry = &mut head[HEADER_LEN + MAINTENANCE_FEE_SPLIT_CARRY_OFF];
+        let group = market_group_view_from_state(state_data, capacity)?;
+        Ok((config, group, MaintenanceFeeSplitCarry(carry)))
     }
 
     #[inline]
@@ -1934,6 +1984,13 @@ pub mod state {
         let state_data = data
             .get_mut(MARKET_GROUP_OFF..)
             .ok_or(PercolatorError::InvalidAccountLen)?;
+        Ok((config, market_group_view_from_state(state_data, capacity)?))
+    }
+
+    fn market_group_view_from_state(
+        state_data: &mut [u8],
+        capacity: usize,
+    ) -> Result<MarketViewMutV16<'_>, ProgramError> {
         let header_len = core::mem::size_of::<MarketGroupV16HeaderAccount>();
         let (header_bytes, market_bytes) = state_data.split_at_mut(header_len);
         let header = bytemuck::try_from_bytes_mut::<MarketGroupV16HeaderAccount>(header_bytes)
@@ -1951,7 +2008,7 @@ pub mod state {
         let markets =
             bytemuck::try_cast_slice_mut::<u8, Market<AssetOracleStorageV16>>(markets_bytes)
                 .map_err(|_| ProgramError::InvalidAccountData)?;
-        Ok((config, MarketGroupV16ViewMut::new(header, markets)))
+        Ok(MarketGroupV16ViewMut::new(header, markets))
     }
 
     pub fn activate_dynamic_asset_slot(
@@ -6788,7 +6845,7 @@ pub mod processor {
     }
 
     fn credit_maintenance_fee_to_active_market_budgets_view(
-        cfg: &WrapperConfigV16,
+        fee_carry: &mut state::MaintenanceFeeSplitCarry<'_>,
         group: &mut state::MarketViewMutV16<'_>,
         amount: u128,
     ) -> ProgramResult {
@@ -6805,8 +6862,18 @@ pub mod processor {
         // O(1) in N — the per-active-asset loop was the wrapper's only per-instruction O(N)-in-
         // max_market_slots cost, which a parasite-append bloat could push over the CU limit, bricking
         // SyncMaintenanceFee/CloseResolved and the market's eventual closability.
-        let _ = cfg;
-        credit_market_insurance_budget_view(group, 0, amount)
+        //
+        // FIX #386: SyncMaintenanceFee is permissionless, so call boundaries are attacker-chosen.
+        // Splitting each call independently gave every odd atom to the short domain, letting a
+        // caller pick the side allocation by cadence. The market-level carry alternates odd atoms
+        // across calls, so any partition of the same cumulative fee allocates identically.
+        let (long_amount, short_amount) = fee_carry.split(amount);
+        group
+            .credit_domain_insurance_budget_not_atomic(0, long_amount)
+            .map_err(map_v16_error)?;
+        group
+            .credit_domain_insurance_budget_not_atomic(1, short_amount)
+            .map_err(map_v16_error)
     }
 
     /// Crystallize every maintenance fee that is currently collectible from this portfolio before
@@ -6815,6 +6882,7 @@ pub mod processor {
     /// ordering and attributes the collected amount to the canonical maintenance-fee destination.
     fn collect_maintenance_fee_to_slot_before_value_debit_view(
         cfg: &WrapperConfigV16,
+        fee_carry: &mut state::MaintenanceFeeSplitCarry<'_>,
         group: &mut state::MarketViewMutV16<'_>,
         portfolio: &mut percolator::PortfolioV16ViewMut<'_>,
         now_slot: u64,
@@ -6825,26 +6893,28 @@ pub mod processor {
         let charged = group
             .sync_account_fee_to_slot_not_atomic(portfolio, now_slot, cfg.maintenance_fee_per_slot)
             .map_err(map_v16_error)?;
-        credit_maintenance_fee_to_active_market_budgets_view(cfg, group, charged)?;
+        credit_maintenance_fee_to_active_market_budgets_view(fee_carry, group, charged)?;
         Ok(charged)
     }
 
     fn collect_maintenance_fee_before_value_debit_view(
         cfg: &WrapperConfigV16,
+        fee_carry: &mut state::MaintenanceFeeSplitCarry<'_>,
         group: &mut state::MarketViewMutV16<'_>,
         portfolio: &mut percolator::PortfolioV16ViewMut<'_>,
     ) -> Result<u128, ProgramError> {
         let now_slot = authenticated_market_slot_or_fallback_view(group);
-        collect_maintenance_fee_to_slot_before_value_debit_view(cfg, group, portfolio, now_slot)
+        collect_maintenance_fee_to_slot_before_value_debit_view(cfg, fee_carry, group, portfolio, now_slot)
     }
 
     fn collect_maintenance_fee_before_trade_view(
         cfg: &WrapperConfigV16,
+        fee_carry: &mut state::MaintenanceFeeSplitCarry<'_>,
         group: &mut state::MarketViewMutV16<'_>,
         portfolio: &mut percolator::PortfolioV16ViewMut<'_>,
     ) -> Result<u128, ProgramError> {
         let now_slot = authenticated_market_slot_or_fallback_view(group);
-        collect_maintenance_fee_to_slot_before_value_debit_view(cfg, group, portfolio, now_slot)
+        collect_maintenance_fee_to_slot_before_value_debit_view(cfg, fee_carry, group, portfolio, now_slot)
     }
 
     fn require_asset_active_for_oracle_reconfiguration_view(
@@ -7944,7 +8014,7 @@ pub mod processor {
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
         let withdrawn_amount = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            let (cfg, mut group, mut fee_carry) = state::market_view_mut_with_fee_carry(&mut market_data)?;
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
@@ -7960,7 +8030,7 @@ pub mod processor {
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
             expect_portfolio_view_owner(&portfolio, owner.key)?;
             let capital_before_fee = portfolio.header.capital.get();
-            collect_maintenance_fee_before_value_debit_view(&cfg, &mut group, &mut portfolio)?;
+            collect_maintenance_fee_before_value_debit_view(&cfg, &mut fee_carry, &mut group, &mut portfolio)?;
             // Preserve an atomic withdraw-all path when the submitted balance became stale only
             // because this instruction crystallized its fee. Partial withdrawals remain exact.
             let withdrawn_amount = if amount == capital_before_fee {
@@ -8016,7 +8086,7 @@ pub mod processor {
         let mut cfg_after = None;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            let (mut cfg, mut group, mut fee_carry) = state::market_view_mut_with_fee_carry(&mut market_data)?;
             let asset_index_usize = asset_index as usize;
             if asset_index_usize >= group.markets.len()
                 || group.markets[asset_index_usize]
@@ -8111,8 +8181,8 @@ pub mod processor {
                 &account_b,
                 core::slice::from_ref(&req),
             )?;
-            collect_maintenance_fee_before_trade_view(&cfg, &mut group, &mut account_a)?;
-            collect_maintenance_fee_before_trade_view(&cfg, &mut group, &mut account_b)?;
+            collect_maintenance_fee_before_trade_view(&cfg, &mut fee_carry, &mut group, &mut account_a)?;
+            collect_maintenance_fee_before_trade_view(&cfg, &mut fee_carry, &mut group, &mut account_b)?;
             let account_a_needs_source_capacity =
                 trade_delta_may_require_source_domain_capacity(account_a_position, size_q)?;
             let account_b_needs_source_capacity =
@@ -8363,7 +8433,7 @@ pub mod processor {
         let mut cfg_after = None;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            let (mut cfg, mut group, mut fee_carry) = state::market_view_mut_with_fee_carry(&mut market_data)?;
             // v1 scope: per-leg backing-domain trade fees are not split in a batch yet. If a backing
             // fee policy is configured, reject so we never silently skip those fees.
             if cfg.backing_trade_fee_policy_count != 0 {
@@ -8485,8 +8555,8 @@ pub mod processor {
                     &group, &account_a, &account_b, &requests,
                 )?;
             }
-            collect_maintenance_fee_before_trade_view(&cfg, &mut group, &mut account_a)?;
-            collect_maintenance_fee_before_trade_view(&cfg, &mut group, &mut account_b)?;
+            collect_maintenance_fee_before_trade_view(&cfg, &mut fee_carry, &mut group, &mut account_a)?;
+            collect_maintenance_fee_before_trade_view(&cfg, &mut fee_carry, &mut group, &mut account_b)?;
             if needs_source_domain_capacity {
                 let mut admitted_source_domains_a =
                     reserved_source_domains_snapshot_for_trade_view(
@@ -9072,7 +9142,7 @@ pub mod processor {
         ensure_portfolio_storage_for_market_slots(account_b_ai, max_market_slots)?;
 
         let mut market_data = market_ai.try_borrow_mut_data()?;
-        let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+        let (cfg, mut group, mut fee_carry) = state::market_view_mut_with_fee_carry(&mut market_data)?;
         if group.header.mode != 0
             || asset_index_usize >= group.header.config.max_market_slots.get() as usize
             || asset_index_usize >= group.markets.len()
@@ -9107,8 +9177,8 @@ pub mod processor {
         account_b
             .validate_with_market(&group.as_view())
             .map_err(map_v16_error)?;
-        collect_maintenance_fee_before_value_debit_view(&cfg, &mut group, &mut account_a)?;
-        collect_maintenance_fee_before_value_debit_view(&cfg, &mut group, &mut account_b)?;
+        collect_maintenance_fee_before_value_debit_view(&cfg, &mut fee_carry, &mut group, &mut account_a)?;
+        collect_maintenance_fee_before_value_debit_view(&cfg, &mut fee_carry, &mut group, &mut account_b)?;
         let position_a = signed_position_for_asset_view(&group, &account_a, asset_index_usize)?;
         let position_b = signed_position_for_asset_view(&group, &account_b, asset_index_usize)?;
         if position_a == 0 || position_b == 0 {
@@ -11607,7 +11677,7 @@ pub mod processor {
 
         let close_after_sync = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            let (cfg, mut group, mut fee_carry) = state::market_view_mut_with_fee_carry(&mut market_data)?;
             if group.header.mode == 0 {
                 reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             }
@@ -11644,8 +11714,7 @@ pub mod processor {
                     let retained = charged
                         .checked_sub(reward)
                         .ok_or(PercolatorError::EngineCounterUnderflow)?;
-                    credit_maintenance_fee_to_active_market_budgets_view(
-                        &cfg, &mut group, retained,
+                    credit_maintenance_fee_to_active_market_budgets_view(&mut fee_carry, &mut group, retained,
                     )?;
                     group.validate_shape().map_err(map_v16_error)?;
                     portfolio
@@ -11689,8 +11758,7 @@ pub mod processor {
                     let retained = charged
                         .checked_sub(reward)
                         .ok_or(PercolatorError::EngineCounterUnderflow)?;
-                    credit_maintenance_fee_to_active_market_budgets_view(
-                        &cfg, &mut group, retained,
+                    credit_maintenance_fee_to_active_market_budgets_view(&mut fee_carry, &mut group, retained,
                     )?;
                     group.validate_shape().map_err(map_v16_error)?;
                     portfolio
@@ -11709,7 +11777,7 @@ pub mod processor {
                         cfg_pre.maintenance_fee_per_slot,
                     )
                     .map_err(map_v16_error)?;
-                credit_maintenance_fee_to_active_market_budgets_view(&cfg, &mut group, charged)?;
+                credit_maintenance_fee_to_active_market_budgets_view(&mut fee_carry, &mut group, charged)?;
                 group.validate_shape().map_err(map_v16_error)?;
                 portfolio
                     .validate_with_market(&group.as_view())
@@ -13623,7 +13691,7 @@ pub mod processor {
 
         let (cfg_after, payout) = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            let (cfg, mut group, mut fee_carry) = state::market_view_mut_with_fee_carry(&mut market_data)?;
             let max_market_slots = group.header.config.max_market_slots.get() as usize;
             ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
@@ -13684,7 +13752,7 @@ pub mod processor {
                 .insurance
                 .get()
                 .saturating_sub(insurance_before);
-            credit_maintenance_fee_to_active_market_budgets_view(&cfg, &mut group, retained)?;
+            credit_maintenance_fee_to_active_market_budgets_view(&mut fee_carry, &mut group, retained)?;
             group.validate_shape().map_err(map_v16_error)?;
             let payout = match outcome {
                 percolator::ResolvedCloseOutcomeV16::ProgressOnly => 0,
@@ -13821,7 +13889,7 @@ pub mod processor {
         let cfg_after;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            let (mut cfg, mut group, mut fee_carry) = state::market_view_mut_with_fee_carry(&mut market_data)?;
             let summary = {
                 let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
                 let mut portfolio = state::portfolio_view_mut_for_market_slots(
@@ -14168,7 +14236,7 @@ pub mod processor {
                 && !summary.pending_close
                 && !summary.expired_close
             {
-                collect_maintenance_fee_before_value_debit_view(&cfg, &mut group, &mut portfolio)?;
+                collect_maintenance_fee_before_value_debit_view(&cfg, &mut fee_carry, &mut group, &mut portfolio)?;
                 summary = group
                     .build_actionable_summary_at_slot(&portfolio.as_view(), authenticated_now_slot)
                     .map_err(map_v16_error)?;

@@ -1734,7 +1734,7 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
 
     const ROWS: &[ArithmeticOwner] = &[
         ArithmeticOwner { function: "accrue_asset_to_not_atomic", class: "ENGINE_HOST_FACADE", evidence: "engine-owned host serialization model" },
-        ArithmeticOwner { function: "market_view_mut", class: "STRUCTURAL", evidence: "INV-015" },
+        ArithmeticOwner { function: "market_group_view_from_state", class: "STRUCTURAL", evidence: "INV-015" },
         ArithmeticOwner { function: "market_from_wire_boxed", class: "STRUCTURAL", evidence: "INV-015" },
         ArithmeticOwner { function: "write_market_wire", class: "STRUCTURAL", evidence: "INV-025" },
         ArithmeticOwner { function: "scale_decimal_exponent_to_e6", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
