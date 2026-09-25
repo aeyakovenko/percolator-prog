@@ -21,7 +21,7 @@
 //! those scenarios. It joins the complete decoder/route/account/input/admission inventories to the
 //! wrapper-to-engine transition, wrapper-field, value, stock, certificate, position/OI, scope,
 //! adversarial-role containment, rollback, and independent-model owners. Each owner remains
-//! independently executable; this gate fails if one disappears or the 49-route registry acquires
+//! independently executable; this gate fails if one disappears or the 50-route registry acquires
 //! an omission.
 //!
 //! Guarantee boundary: this is a proof-equivalence decomposition for the current deployed surface,
@@ -92,7 +92,7 @@ fn inv081_source_defines_kani_proof(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_success_state_validity_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "4db11a8cb0053815e23a35d3a7d3edc265d8d866";
+    const ENGINE_PIN: &str = "a87d5057e94ccbb6446aeb6c7d0096d62e25cf96";
     const OWNERS: &[Inv081CompositionOwner] = &[
         Inv081CompositionOwner {
             layer: "production instruction and public witness roster",
@@ -293,7 +293,7 @@ fn v16_program_success_state_validity_composition_is_source_complete() {
             !line.is_empty() && !line.starts_with('#') && !line.starts_with("tag\tvariant\t")
         })
         .collect::<Vec<_>>();
-    assert_eq!(route_rows.len(), 49, "public instruction roster drift");
+    assert_eq!(route_rows.len(), 50, "public instruction roster drift");
     assert!(
         route_rows.iter().all(|line| !line.contains("\tOMITTED\t")),
         "every public route needs executable success and CU evidence",

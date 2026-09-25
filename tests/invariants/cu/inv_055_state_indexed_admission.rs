@@ -1646,6 +1646,11 @@ fn inv055_public_route_admission(variant: &str) -> Option<Inv055AdmissionEvidenc
             "tests/invariants/cu/inv_065_reset_recovery_and_retired_state_isolation.rs",
             "v16_attack_finalize_reset_side_requires_empty_side_counts",
         ),
+        "CanonicalizeSpentBackingHistory" => inv055_evidence(
+            AssetLifecycle,
+            "tests/invariants/cu/inv_065_reset_recovery_and_retired_state_isolation.rs",
+            "v16_program_backing_authority_canonicalizes_spent_history_before_reuse",
+        ),
         "RestartAssetOracle" => inv055_evidence(
             AssetLifecycle,
             "tests/invariants/cu/inv_069_terminal_normalization_and_retirement.rs",
@@ -1825,7 +1830,7 @@ fn v16_program_every_public_instruction_has_a_state_admission_owner() {
             evidence.test,
         );
     }
-    assert_eq!(variants.len(), 49, "public instruction roster drift");
+    assert_eq!(variants.len(), 50, "public instruction roster drift");
     assert_eq!(
         variants,
         inv055_instruction_enum_variants(include_str!("../../../src/v16_program.rs")),

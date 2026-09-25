@@ -308,6 +308,11 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             observation_sequence: 3,
             authority_epoch: 0,
         },
+        ProgInstruction::CanonicalizeSpentBackingHistory {
+            asset_index: 1,
+            market_id: 2,
+            authority_epoch: 0,
+        },
         ProgInstruction::UpdateAssetLifecycle {
             action: 0,
             asset_index: 1,
@@ -502,7 +507,7 @@ fn host_instruction_decoder_rejects_unknown_one_byte_tags() {
         .collect();
     assert_eq!(
         known_tags.len(),
-        49,
+        50,
         "corpus must list every public instruction tag"
     );
 

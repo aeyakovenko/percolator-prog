@@ -8,7 +8,7 @@
 //!
 //! Evidence in this file (I/C plus invariant-specific route assertions): a source-complete caller
 //! input roster guard proves only PermissionlessCrank exposes discovery hints. A second gate
-//! classifies all 49 canonical public instructions and requires executable public witnesses for
+//! classifies all 50 canonical public instructions and requires executable public witnesses for
 //! every current-certificate/full-refresh route, flat-only value exit, immutable terminal payout,
 //! refreshing cure, and stale-safe risk reduction; a new instruction cannot silently inherit a
 //! favorable-action exemption. Matched forward and
@@ -225,7 +225,8 @@ fn inv056_public_route_evidence(variant: &str) -> Option<Inv056RouteEvidence> {
         | "PushAuthMark"
         | "UpdateAssetAuthority"
         | "SetMatcherConfig"
-        | "RestartAssetOracle" => inv056_evidence(ControlOrBookkeeping, None),
+        | "RestartAssetOracle"
+        | "CanonicalizeSpentBackingHistory" => inv056_evidence(ControlOrBookkeeping, None),
         _ => return None,
     };
     Some(evidence)
@@ -314,7 +315,7 @@ fn v16_program_no_hint_favorable_route_roster_is_source_complete() {
 
     assert_eq!(
         variants.len(),
-        49,
+        50,
         "the canonical public route count changed"
     );
     assert_eq!(dispositions.get(&DiscoveryHint), Some(&1));

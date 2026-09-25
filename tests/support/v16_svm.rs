@@ -2928,6 +2928,92 @@ impl V16Svm {
         )
     }
 
+    /// Tag 70 (issue #170), signed by `actor_index` as the asset's backing bucket authority.
+    pub fn canonicalize_spent_backing_history_for_actor(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let authority_epoch = self
+            .primary_control_sequences(asset_index as usize)
+            .authority_epoch;
+        self.send_program(
+            ProgInstruction::CanonicalizeSpentBackingHistory {
+                asset_index,
+                market_id,
+                authority_epoch,
+            },
+            vec![
+                AccountMeta::new_readonly(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn build_retained_canonicalize_spent_backing_history_for_actor(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+    ) -> Transaction {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let authority_epoch = self
+            .primary_control_sequences(asset_index as usize)
+            .authority_epoch;
+        self.build_program_transaction(
+            ProgInstruction::CanonicalizeSpentBackingHistory {
+                asset_index,
+                market_id,
+                authority_epoch,
+            },
+            vec![
+                AccountMeta::new_readonly(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    /// Installs the matched, value-free spent-backing history a completed round trip leaves on
+    /// an emptied asset's long domain (`consumed == provider_receivable == spent`).
+    pub fn install_matched_spent_backing_history(&mut self, asset_index: u16, atoms: u128) {
+        use percolator::{BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account};
+        use percolator::{SourceCreditStateV16, SourceCreditStateV16Account, BOUND_SCALE};
+        use percolator_prog::constants::{ASSET_ORACLE_WRAPPER_LEN, MARKET_ASSET_SLOT_LEN};
+        use percolator_prog::constants::{MARKET_GROUP_LEN, MARKET_GROUP_OFF};
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let engine = MARKET_GROUP_OFF
+            + MARKET_GROUP_LEN
+            + asset_index as usize * MARKET_ASSET_SLOT_LEN
+            + ASSET_ORACLE_WRAPPER_LEN;
+        let history = atoms * BOUND_SCALE;
+        let mut account = self.svm.get_account(&self.market).unwrap();
+        let src_off = engine
+            + core::mem::offset_of!(percolator::EngineAssetSlotV16Account, source_credit_long);
+        let bucket_off =
+            engine + core::mem::offset_of!(percolator::EngineAssetSlotV16Account, backing_long);
+        let src = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: history,
+            provider_receivable_num: history,
+            credit_rate_num: percolator::CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+        let bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            consumed_liened_backing_num: history,
+            status: BackingBucketStatusV16::Expired,
+            ..BackingBucketV16::EMPTY
+        });
+        account.data[src_off..src_off + core::mem::size_of::<SourceCreditStateV16Account>()]
+            .copy_from_slice(bytemuck::bytes_of(&src));
+        account.data[bucket_off..bucket_off + core::mem::size_of::<BackingBucketV16Account>()]
+            .copy_from_slice(bytemuck::bytes_of(&bucket));
+        self.svm.set_account(self.market, account).unwrap();
+    }
+
     pub fn restart_asset_oracle(
         &mut self,
         asset_index: u16,

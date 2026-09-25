@@ -325,7 +325,7 @@ fn v16_program_account_role_matrix_roster_is_source_complete() {
     let source_variants = inv017_instruction_variants(production);
     assert_eq!(
         source_variants.len(),
-        49,
+        50,
         "production instruction roster drift"
     );
 
@@ -399,10 +399,10 @@ fn v16_program_account_role_matrix_roster_is_source_complete() {
     );
     assert_eq!(
         evidence_witnesses.len(),
-        20,
+        21,
         "INV-017 executable account-role evidence roster drift"
     );
-    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&49));
+    assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&50));
     assert_eq!(status_counts.get("PARTIAL"), None);
     assert_eq!(status_counts.get("OPEN"), None);
 }
@@ -6033,5 +6033,74 @@ fn v16_attack_convert_released_pnl_owner_gated() {
         env.portfolio_state(p).capital.get(),
         cap0 + 40,
         "owner converts the backed 40 to capital"
+    );
+}
+
+/// Asset 0 shut down empty (Recovery) with the matched, value-free spent-backing history a
+/// completed round trip leaves behind, so tag 70 has a mutating canonical control.
+fn canonicalize_history_alias_fixture() -> CoreAccountAliasFixture {
+    use percolator::{BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account};
+    use percolator::{SourceCreditStateV16, SourceCreditStateV16Account, BOUND_SCALE};
+    use percolator_prog::constants::{ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_LEN, MARKET_GROUP_OFF};
+    let mut env = V16CuEnv::new();
+    let authority = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&authority, 0, 2)
+        .expect("asset admin publicly shuts down empty asset");
+    let market_id = env.asset_market_id(0);
+    let engine = MARKET_GROUP_OFF + MARKET_GROUP_LEN + ASSET_ORACLE_WRAPPER_LEN;
+    let history = 25 * BOUND_SCALE;
+    let mut account = env.svm.get_account(&env.market).unwrap();
+    let src_off =
+        engine + core::mem::offset_of!(percolator::EngineAssetSlotV16Account, source_credit_long);
+    let bucket_off =
+        engine + core::mem::offset_of!(percolator::EngineAssetSlotV16Account, backing_long);
+    let src = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        spent_backing_num: history,
+        provider_receivable_num: history,
+        credit_rate_num: percolator::CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        consumed_liened_backing_num: history,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    account.data[src_off..src_off + core::mem::size_of::<SourceCreditStateV16Account>()]
+        .copy_from_slice(bytemuck::bytes_of(&src));
+    account.data[bucket_off..bucket_off + core::mem::size_of::<BackingBucketV16Account>()]
+        .copy_from_slice(bytemuck::bytes_of(&bucket));
+    env.svm.set_account(env.market, account).unwrap();
+    let instruction = ProgInstruction::CanonicalizeSpentBackingHistory {
+        asset_index: 0,
+        market_id,
+        authority_epoch: env.control_sequences(0).authority_epoch,
+    };
+    let accounts = vec![
+        AccountMeta::new(authority.pubkey(), true),
+        AccountMeta::new(env.market, false),
+    ];
+    let tracked_accounts = vec![env.market];
+    CoreAccountAliasFixture {
+        env,
+        signers: vec![authority],
+        instruction,
+        accounts,
+        tracked_accounts,
+    }
+}
+
+#[test]
+fn v16_program_canonicalize_spent_backing_history_account_roles_are_exhaustive() {
+    assert_core_account_alias_matrix(
+        "CanonicalizeSpentBackingHistory",
+        &["backing_authority", "market"],
+        &[0],
+        &[1],
+        &[],
+        canonicalize_history_alias_fixture,
     );
 }

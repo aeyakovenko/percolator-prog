@@ -3174,6 +3174,13 @@ pub mod ix {
             domain: u16,
         },
         SyncInsuranceLedger,
+        /// Clear matched, value-free spent-backing history from an empty Recovery/Retired asset
+        /// so it can restart (issue #170). Signed by the asset's backing bucket authority.
+        CanonicalizeSpentBackingHistory {
+            asset_index: u16,
+            market_id: u64,
+            authority_epoch: u64,
+        },
         ConfigurePermissionlessResolve {
             asset_generation_frontier: u64,
             stale_slots: u64,
@@ -3357,6 +3364,7 @@ pub mod ix {
                     | 67
                     | 68
                     | 69
+                    | 70
             )
         }
 
@@ -3760,6 +3768,11 @@ pub mod ix {
                     domain: read_u16(&mut rest)?,
                 },
                 54 => Self::SyncInsuranceLedger,
+                70 => Self::CanonicalizeSpentBackingHistory {
+                    asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
+                    authority_epoch: read_u64(&mut rest)?,
+                },
                 38 => Self::ConfigurePermissionlessResolve {
                     asset_generation_frontier: read_u64(&mut rest)?,
                     stale_slots: read_u64(&mut rest)?,
@@ -4246,6 +4259,16 @@ pub mod ix {
                     push_u16(&mut out, domain);
                 }
                 Self::SyncInsuranceLedger => out.push(54),
+                Self::CanonicalizeSpentBackingHistory {
+                    asset_index,
+                    market_id,
+                    authority_epoch,
+                } => {
+                    out.push(70);
+                    push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
+                    push_u64(&mut out, authority_epoch);
+                }
                 Self::ConfigurePermissionlessResolve {
                     asset_generation_frontier,
                     stale_slots,
@@ -7370,6 +7393,17 @@ pub mod processor {
                 handle_sync_backing_domain_ledger(program_id, accounts, domain)
             }
             Instruction::SyncInsuranceLedger => handle_sync_insurance_ledger(program_id, accounts),
+            Instruction::CanonicalizeSpentBackingHistory {
+                asset_index,
+                market_id,
+                authority_epoch,
+            } => handle_canonicalize_spent_backing_history(
+                program_id,
+                accounts,
+                asset_index,
+                market_id,
+                authority_epoch,
+            ),
             Instruction::ConfigurePermissionlessResolve {
                 asset_generation_frontier,
                 stale_slots,
@@ -10824,6 +10858,45 @@ pub mod processor {
             signer_seeds,
         )?;
         Ok(())
+    }
+
+    /// Accounts: 0 `[signer]` backing bucket authority of the asset, 1 `[writable]` market.
+    #[inline(never)]
+    fn handle_canonicalize_spent_backing_history<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        asset_index: u16,
+        expected_market_id: u64,
+        expected_authority_epoch: u64,
+    ) -> ProgramResult {
+        let authority = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        expect_signer(authority)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+        let asset_index = asset_index as usize;
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+        if group.header.mode != 0 {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        let configured_slots = group.header.config.max_market_slots.get() as usize;
+        if asset_index >= configured_slots || asset_index >= group.markets.len() {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        require_asset_generation_view(&group, asset_index, expected_market_id)?;
+        let long_domain = asset_index
+            .checked_mul(2)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let authorities = domain_authorities_from_view(&group, &cfg, long_domain)?;
+        if !live_authority_matches(&authorities.backing_bucket_authority, authority.key) {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        require_authority_epoch_view(&group, asset_index, expected_authority_epoch)?;
+        group
+            .canonicalize_spent_backing_history_not_atomic(asset_index)
+            .map_err(map_v16_error)?;
+        group.validate_shape().map_err(map_v16_error)
     }
 
     #[inline(never)]
