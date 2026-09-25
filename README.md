@@ -795,7 +795,40 @@ Engine-specific invariants (conservation, warmup, liquidation properties, etc.) 
 - wrapper Kani proofs in `tests/v16_kani.rs`
 - engine arithmetic/accounting proofs in the pinned `percolator` crate
 
-- [ ] Map proposed tests to an invariant, nearest test (`path::name`), and uncovered case; extend overlapping tests. Assert the triggering state and a postcondition that fails on invariant violation.
+### Invariant coverage gate
+
+An invariant with a known coverage gap is not security evidence. Treat it as an open gap until it has
+an executable oracle that would fail on the bug class, plus enough route/lifecycle breadth to make the
+claim meaningful. A one-off regression may be useful, but it does not make the invariant covered unless
+it is tied to a reusable checker.
+
+Every new invariant-coverage change must record:
+
+- invariant name and the exact safety/liveness claim being checked
+- nearest existing test or proof (`path::name`) and the uncovered case
+- whether the check is a reusable oracle, a route/metamorphic pair, a Kani proof, a CU bound, or only a
+  single regression
+- the public route sequence that reaches the checked state; no direct mutation of program-owned bytes
+  counts as LoF/DoS evidence
+- a non-vacuous precondition and a postcondition that would fail on the violation
+- whether the change independently rediscovers a held-out bug class, without encoding the held-out
+  issue details into the worker prompt
+
+Coverage is incomplete while any of these families lacks reusable invariant-level checks:
+
+- retained signed intent replay across fresh blockhashes, route variants, retries, partial fills, and
+  authority/policy changes
+- terminal and resolved-state liveness from funded public states to payout, forfeit, recovery receipt,
+  or close
+- source-domain value provenance, including attribution of rewards, fees, residuals, backing, and
+  insurance, not just aggregate conservation
+- authority incarnation and funded-authority containment across rotation, disable, re-enable, and
+  cold-admin paths
+- supported-shape runtime liveness, including account growth/realloc, max-shape CU, and required exit
+  paths under real SBF/SVM rules
+
+Do not close an open LoF/DoS issue from invariant work unless the invariant oracle or its generated
+public trace reproduces the issue class on the vulnerable code and passes on the fixing commit.
 
 Run [Build & test](#build--test); record exact output and commit.
 
