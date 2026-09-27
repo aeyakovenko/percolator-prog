@@ -6854,19 +6854,28 @@ pub mod processor {
         if asset_index >= group.markets.len()
             || group.markets[asset_index].engine.asset.lifecycle != 2
             || asset_local_has_position_or_loss_state_view(group, asset_index)
-            || group.header.pnl_pos_tot.get() != 0
-            || group.header.stale_certificate_count.get() != 0
-            || group.header.b_stale_account_count.get() != 0
-            || group.header.negative_pnl_account_count.get() != 0
             || group.header.bankruptcy_hlock_active != 0
             || group.header.threshold_stress_active != 0
-            || group.header.loss_stale_active != 0
             || group
                 .header
                 .recovery_reason
                 .try_to_runtime()
                 .map_err(map_v16_error)?
                 .is_some()
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        // Asset 0's profile is mirrored into the market's base config, so reconfiguring it still
+        // requires the whole market to be quiet. Any other asset is target-scoped: once it holds
+        // no positions, loss or backing state (checked above), no account's PnL, certificate or
+        // loss attribution depends on its oracle, and requiring market-wide quiescence would
+        // block permissionless listing whenever any trader anywhere has open PnL.
+        if asset_index == 0
+            && (group.header.pnl_pos_tot.get() != 0
+                || group.header.stale_certificate_count.get() != 0
+                || group.header.b_stale_account_count.get() != 0
+                || group.header.negative_pnl_account_count.get() != 0
+                || group.header.loss_stale_active != 0)
         {
             return Err(PercolatorError::EngineLockActive.into());
         }
