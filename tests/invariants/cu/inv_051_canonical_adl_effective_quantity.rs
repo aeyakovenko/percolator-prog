@@ -38,6 +38,9 @@ use super::*;
 #[path = "inv_051_dual_adl_matched_partitions.rs"]
 mod dual_adl_matched_partitions;
 
+#[path = "inv_051_adl_residue_harvest_449.rs"]
+mod adl_residue_harvest_449;
+
 #[test]
 fn v16_program_nonunit_adl_reduction_partitions_preserve_raw_basis_and_funded_exit() {
     use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
