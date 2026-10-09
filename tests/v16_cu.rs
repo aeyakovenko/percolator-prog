@@ -9009,3 +9009,6 @@ mod inv_088_global_summaries_are_not_account_local_proofs;
 
 #[path = "invariants/cu/inv_089_activation_reactivation_and_initialization_equivalence.rs"]
 mod inv_089_activation_reactivation_and_initialization_equivalence;
+
+#[path = "invariants/cu/inv_070_issue289_bankruptcy_residual_recredit.rs"]
+mod inv_070_issue289_bankruptcy_residual_recredit;
