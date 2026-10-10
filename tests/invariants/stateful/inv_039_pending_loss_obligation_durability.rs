@@ -83,7 +83,10 @@ fn v16_host_market_roundtrip_preserves_funding_mark_checkpoint() {
 fn v16_program_partial_liquidation_cannot_erase_pending_funding() {
     let discovery = discover_partial_liquidation_accrual_ordering([0x39; 32])
         .unwrap_or_else(|error| panic!("partial-liquidation accrual ordering failed: {error}"));
-    assert_eq!(discovery.control_paid, 200, "{discovery:?}");
+    // Exact funding (#458): 100 units * price 1_000 * 1e-5 cap rate = 1 atom per pending slot,
+    // two slots (2 -> 4) owe exactly 2 atoms; the 100%-margin victim sheds that notional.
+    const PENDING_FUNDING: u128 = 2;
+    assert_eq!(discovery.control_paid, PENDING_FUNDING, "{discovery:?}");
     assert_eq!(discovery.control_paid, discovery.control_received);
     assert_eq!(discovery.reordered_paid, discovery.control_paid);
     assert_eq!(discovery.reordered_received, discovery.control_received);
@@ -105,13 +108,19 @@ fn v16_program_partial_liquidation_cannot_erase_pending_funding() {
         discovery
             .initial_effective_oi_q
             .checked_sub(discovery.control_effective_oi_q),
-        Some(200_000),
+        Some(PENDING_FUNDING * 1_000_000 / 1_000),
         "{discovery:?}"
     );
     assert_eq!(discovery.reordered_payouts, discovery.control_payouts);
     assert_eq!(
         discovery.control_payouts,
-        [99_800, 1_000_200, 1_000_000, 1_000_000, 1_000_000]
+        [
+            100_000 - PENDING_FUNDING,
+            1_000_000 + PENDING_FUNDING,
+            1_000_000,
+            1_000_000,
+            1_000_000
+        ]
     );
     assert!(discovery.control_terminal && discovery.reordered_terminal);
     assert!(discovery.control_max_crank_cu < TX_CU_LIMIT);
@@ -247,9 +256,19 @@ proptest! {
         let discoveries = discover_accrual_ordering_violations(seed)
             .map_err(TestCaseError::fail)?;
         prop_assert_eq!(discoveries.len(), AccrualOrderingKind::ALL.len());
+        let mut expiry_waits = 0u8;
         for (expected, discovery) in AccrualOrderingKind::ALL.into_iter().zip(&discoveries) {
             prop_assert_eq!(discovery.kind, expected);
             prop_assert!(discovery.certifies_terminal_value(), "{discovery:?}");
+            // The settle-first control exits immediately. Only forfeit-before-settlement may
+            // leave a partly source-backed claim, and its exit is one committed backing expiry
+            // (a bounded public wait, not a lock or a value change).
+            prop_assert_eq!(discovery.control_backing_expiry_waits, 0, "{:?}", discovery);
+            prop_assert!(discovery.reordered_backing_expiry_waits <= 1, "{discovery:?}");
+            if discovery.reordered_backing_expiry_waits != 0 {
+                prop_assert_eq!(discovery.kind, AccrualOrderingKind::RecoveryForfeit);
+            }
+            expiry_waits += discovery.reordered_backing_expiry_waits;
             let mut wrong_payout_identity = discovery.clone();
             wrong_payout_identity.terminal_evidence.victim_destinations =
                 vec![discovery.terminal_evidence.counterparty_destinations[0]];
@@ -288,6 +307,7 @@ proptest! {
             violations.is_empty(),
             "accrual-ordering invariant violations remain: {violations:?}"
         );
+        prop_assert_eq!(expiry_waits, 1, "the forfeit-first world must exercise backing expiry");
     }
 
     #[test]
@@ -303,6 +323,8 @@ proptest! {
             prop_assert!(discovery.rejected_exact_rollback, "{discovery:?}");
             prop_assert!(discovery.retry_landed, "{discovery:?}");
             prop_assert!(discovery.certifies_terminal_value(), "{discovery:?}");
+            prop_assert_eq!(discovery.control_backing_expiry_waits, 0, "{:?}", discovery);
+            prop_assert_eq!(discovery.reordered_backing_expiry_waits, 0, "{:?}", discovery);
         }
         let violations: Vec<_> = discoveries
             .iter()
@@ -456,14 +478,31 @@ proptest! {
                 discovery.control_f_short_num
             );
             prop_assert_eq!(discovery.victim_payout_loss, 0);
+            let bound = crate::support::invariant_discovery::PROSPECTIVE_FUNDING_DUST_BOUND;
+            prop_assert!(discovery.control_vault_dust <= bound, "{discovery:?}");
+            prop_assert!(discovery.reordered_vault_dust <= bound, "{discovery:?}");
             if matches!(
                 discovery.route,
                 ProspectiveAccrualRoute::NoCpi | ProspectiveAccrualRoute::BatchNoCpi
             ) {
-                prop_assert_eq!(discovery.coalition_payout_gain, 0);
+                // Exact funding (#458): the victim payout is order-independent; the coalition
+                // can differ only by its own payer-side rounding dust that the vault retains.
                 prop_assert_eq!(
-                    discovery.reordered_total_payout,
-                    discovery.control_total_payout
+                    discovery.coalition_payout_gain,
+                    discovery
+                        .control_vault_dust
+                        .saturating_sub(discovery.reordered_vault_dust)
+                );
+                prop_assert!(discovery.coalition_payout_gain <= 1, "{discovery:?}");
+                prop_assert_eq!(
+                    discovery.reordered_total_payout + discovery.reordered_vault_dust,
+                    discovery.control_total_payout + discovery.control_vault_dust
+                );
+                let mut undusted = discovery.clone();
+                undusted.terminal_evidence.vault_dust_bound = 0;
+                prop_assert_eq!(
+                    undusted.certifies_terminal_ordering(),
+                    discovery.control_vault_dust == 0 && discovery.reordered_vault_dust == 0
                 );
             }
         }
@@ -538,11 +577,22 @@ proptest! {
             reproduction.control_f_short_num
         );
         prop_assert_eq!(reproduction.victim_payout_loss, 0);
+        let bound = crate::support::fuzz_model::PR380_FUNDING_DUST_BOUND;
+        prop_assert!(reproduction.control_vault_dust <= bound);
+        prop_assert!(reproduction.attack_vault_dust <= bound);
         if matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
-            prop_assert_eq!(reproduction.attacker_coalition_gain, 0);
+            // Exact funding (#458): only the coalition's own vault-retained rounding dust is
+            // order-dependent; the victim payout is not.
             prop_assert_eq!(
-                reproduction.attack_total_payout,
-                reproduction.control_total_payout
+                reproduction.attacker_coalition_gain,
+                reproduction
+                    .control_vault_dust
+                    .saturating_sub(reproduction.attack_vault_dust)
+            );
+            prop_assert!(reproduction.attacker_coalition_gain <= 1);
+            prop_assert_eq!(
+                reproduction.attack_total_payout + reproduction.attack_vault_dust,
+                reproduction.control_total_payout + reproduction.control_vault_dust
             );
         }
     }

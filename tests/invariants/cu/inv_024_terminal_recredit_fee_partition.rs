@@ -25,11 +25,18 @@ const AVAILABLE: u64 = INSURANCE + INSURANCE_FEE - SPENT;
 const USER_PAID: [u64; 2] = [0, CAPITAL[1] + LOSS - SOURCE_PRINCIPAL];
 const FEE_PREFIX: u64 = 17;
 const RELEASED_LIEN: u64 = 1_050 * 105 / 2 - CAPITAL[0];
+// percolator-prog#457 (engine #226): when the released lien left domain-1 provider
+// backing behind the former winner's unrealized face, the reversal nets that face 1:1
+// against the twin domain. The consumed twin backing (still recorded as a domain-1
+// provider receivable) is credited to the loss domain, so the claimant collects it from
+// its source domain instead of leaving it as junior residue on its terminal receipt.
+const TWIN_CREDIT: u64 = PROFIT - RELEASED_LIEN;
+const RESIDUAL_SOURCE_PAID: u64 = SOURCE_PAID + TWIN_CREDIT;
+const _: () = assert!(RESIDUAL_SOURCE_PAID == 54_003 && SOURCE_FACE - RESIDUAL_SOURCE_PAID == 2_697);
 
 #[derive(Default)]
 struct Entitlements {
     principal_paid: u64,
-    source_principal_paid: u64,
     fees_paid: u64,
     insurance_paid: u64,
     recredited: u64,
@@ -42,13 +49,12 @@ impl Entitlements {
         // Expiry completes the user receipt before reserve disposal.
         let remaining = BACKING + PROVIDER_FEE + AVAILABLE
             - self.principal_paid
-            - self.source_principal_paid
             - self.fees_paid
             - self.insurance_paid;
         let amounts = [
             USER_PAID[0],
             USER_PAID[1] + SOURCE_PRINCIPAL,
-            self.principal_paid + self.source_principal_paid + self.fees_paid,
+            self.principal_paid + self.fees_paid,
             0,
             self.insurance_paid,
         ];
@@ -103,15 +109,17 @@ impl Entitlements {
         );
         assert_eq!(
             group.source_credit[0].provider_receivable_num,
-            u128::from(SOURCE_PAID) * BOUND_SCALE
+            u128::from(RESIDUAL_SOURCE_PAID) * BOUND_SCALE
         );
+        // The loss domain's floored source atom lapsed into the claimant's receipt.
         assert_eq!(
             group.source_backing_buckets[0].fresh_unliened_backing_num,
-            u128::from(SOURCE_PRINCIPAL - self.source_principal_paid) * BOUND_SCALE
+            0
         );
+        assert_eq!(group.source_credit[0].fresh_reserved_backing_num, 0);
         assert_eq!(
-            group.source_credit[0].fresh_reserved_backing_num,
-            u128::from(SOURCE_PRINCIPAL - self.source_principal_paid) * BOUND_SCALE
+            group.source_backing_buckets[0].status,
+            BackingBucketStatusV16::Expired
         );
         assert_domain_budget_remaining_total_consistent(&group, "fee-protected terminal recredit");
         let mut image = env.svm.get_account(&env.market).unwrap();
@@ -143,7 +151,7 @@ impl Entitlements {
             assert_eq!(record.total_earnings_withdrawn_atoms, self.fees_paid.into());
             assert_eq!(record.last_observed_bucket_earnings_atoms, fees);
         }
-        assert_eq!(self.principal_paid, BACKING - residual - SOURCE_PRINCIPAL);
+        assert_eq!(self.principal_paid, BACKING - residual);
         assert!(self.recredited <= residual.min(SPENT));
     }
 }
@@ -359,7 +367,10 @@ fn terminal_fee_loss_prefix(
                             domain: 1,
                             market_id: world.env.asset_market_id(0),
                             authority_epoch: world.env.control_sequences(0).authority_epoch,
-                            amount: u128::from(BACKING - residual - SOURCE_PRINCIPAL),
+                            // #226: the claimant's floored source atom is now funded by
+                            // the loss domain it was collected from, so domain 1 need
+                            // only retain the released lien plus `residual`.
+                            amount: u128::from(BACKING - residual),
                         },
                         vec![
                             AccountMeta::new_readonly(world.wallets[2], true),
@@ -443,7 +454,7 @@ fn terminal_fee_loss_after_receipt_expiry(
     let group = world.env.market_state().1;
     assert_eq!(
         group.source_credit[1].fresh_reserved_backing_num,
-        u128::from(residual + SOURCE_PRINCIPAL + RELEASED_LIEN) * BOUND_SCALE
+        u128::from(residual + RELEASED_LIEN) * BOUND_SCALE
     );
     assert_eq!(
         group.source_credit[1].provider_receivable_num,
@@ -454,17 +465,45 @@ fn terminal_fee_loss_after_receipt_expiry(
         [
             0,
             USER_PAID[1] - RELEASED_LIEN,
-            BACKING - residual - SOURCE_PRINCIPAL,
+            BACKING - residual,
             0,
             0,
         ]
+    );
+    assert_eq!(
+        (
+            group.source_credit[0].spent_backing_num,
+            group.source_credit[0].provider_receivable_num,
+            group.source_backing_buckets[0].consumed_liened_backing_num,
+        ),
+        (
+            u128::from(RESIDUAL_SOURCE_PAID) * BOUND_SCALE,
+            u128::from(RESIDUAL_SOURCE_PAID) * BOUND_SCALE,
+            u128::from(RESIDUAL_SOURCE_PAID) * BOUND_SCALE,
+        )
+    );
+    assert_eq!(
+        (
+            group.source_credit[1].spent_backing_num,
+            group.source_backing_buckets[1].consumed_liened_backing_num,
+        ),
+        (
+            u128::from(TWIN_CREDIT) * BOUND_SCALE,
+            u128::from(TWIN_CREDIT) * BOUND_SCALE,
+        )
+    );
+    assert_eq!(
+        group.source_backing_buckets[0].fresh_unliened_backing_num,
+        u128::from(SOURCE_PRINCIPAL) * BOUND_SCALE
     );
     let receipt = resolved_receipt(&world.env.portfolio_state(world.portfolios[1]));
     assert!(receipt.present && !receipt.finalized);
     assert_eq!(
         receipt.terminal_positive_claim_face,
-        u128::from(SOURCE_FACE - SOURCE_PAID)
+        u128::from(SOURCE_FACE - RESIDUAL_SOURCE_PAID)
     );
+    // The claimant's total entitlement is unchanged; only its composition moved
+    // from the terminal receipt to source-domain collection.
     assert_eq!(
         receipt.terminal_positive_claim_face - receipt.paid_effective,
         u128::from(SOURCE_PRINCIPAL + RELEASED_LIEN)
@@ -506,17 +545,33 @@ fn terminal_fee_loss_after_receipt_expiry(
         Some((2, PercolatorError::EngineNonProgress)),
     );
     world.env.svm.warp_to_slot(100);
+    // Each hinted crank lapses one bucket: first the receipt's source (loss) domain,
+    // whose floored atom now backs the claimant (#226), then the retained twin domain.
     let allowed = [world.env.market];
-    land(
-        &mut world.env,
-        &[expiry],
-        &[],
-        &tracked,
-        &allowed,
-        0,
-        None,
-        None,
-    );
+    for expired in [[true, false], [true, true]] {
+        land(
+            &mut world.env,
+            &[expiry.clone()],
+            &[],
+            &tracked,
+            &allowed,
+            0,
+            None,
+            None,
+        );
+        let group = world.env.market_state().1;
+        for domain in 0..2 {
+            assert_eq!(
+                group.source_backing_buckets[domain].status,
+                if expired[domain] {
+                    BackingBucketStatusV16::Expired
+                } else {
+                    BackingBucketStatusV16::Fresh
+                }
+            );
+        }
+        assert_eq!(group.source_backing_buckets[0].fresh_unliened_backing_num, 0);
+    }
     assert_eq!(
         resolved_receipt(&world.env.portfolio_state(world.portfolios[1])),
         receipt
@@ -658,7 +713,7 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
                 }
             };
             let mut book = Entitlements {
-                principal_paid: BACKING - residual - SOURCE_PRINCIPAL,
+                principal_paid: BACKING - residual,
                 ..Entitlements::default()
             };
             check(&world, &book);
@@ -684,18 +739,19 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
                 amount: SOURCE_PRINCIPAL.into(),
             }
             .encode();
-            let allowed = [world.env.market, world.env.vault, world.tokens[2]];
+            // The loss domain's floored atom already paid the claimant's receipt at
+            // expiry (#226), so the provider cannot also withdraw it from the
+            // expired domain-0 bucket.
             peak = peak.max(land(
                 &mut world.env,
                 &[source_principal],
                 &[],
                 &tracked,
-                &allowed,
+                &[],
                 0,
                 None,
-                None,
+                Some((2, PercolatorError::EngineStale)),
             ));
-            book.source_principal_paid = SOURCE_PRINCIPAL;
             check(&world, &book);
             assert_eq!(world.env.svm.get_account(&ledger), initial_ledger);
             let mut close = Instruction {

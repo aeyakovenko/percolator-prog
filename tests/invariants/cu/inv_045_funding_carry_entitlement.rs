@@ -1,7 +1,10 @@
 //! INV-045 / row425: fractional price carry across a funding-premium reversal.
 //! Explicit market cranks leave owner K/F unsettled; signed reductions and account
 //! cranks must preserve each owner's input-derived entitlement through SPL exit.
-//! Integral lots, unit ADL and zero fees isolate funding from settlement residue.
+//! Integral lots, unit ADL and zero fees isolate funding from K settlement residue.
+//! #458: the F index accrues the exact sub-unit transfer; each F settlement pays the
+//! floor, advances the snapshot by the covering ceiling and carries the sub-atom
+//! remainder, which a basis change drops. The ledger replays that rule per leg.
 
 use super::*;
 
@@ -14,15 +17,26 @@ mod checkpoint_replacement;
 const RATE: i128 = 10_000;
 const REVERSAL_SLOT: u64 = 3;
 const END_SLOT: u64 = 8;
+const ADL: i128 = ADL_ONE as i128;
 
 struct Ledger {
     lots: [[i128; 2]; 4],
+    // Principal + exact K entitlement + settled F atoms.
     value: [i128; 4],
     price: [u64; 2],
+    // Long-side ADL-scaled F index; the short index is its exact negation.
     funding: [i128; 2],
     carry: [u64; 2],
     slot: u64,
     latent_checks: usize,
+    // Long-signed F snapshots: a leg stores `signum(lots) * f_snap`.
+    f_snap: [[i128; 2]; 4],
+    // Exact (rational, x ADL_ONE) funding entitlement, settled F atoms, and F value
+    // lost to settlement ceilings and basis-change remainder drops (x ADL_ONE).
+    f_ideal_num: [i128; 4],
+    f_settled: [i128; 4],
+    f_residue_num: [i128; 4],
+    carried_remainder_checks: usize,
 }
 
 impl Ledger {
@@ -35,7 +49,75 @@ impl Ledger {
             carry: [0; 2],
             slot: 0,
             latent_checks: 0,
+            f_snap: [[0; 2]; 4],
+            f_ideal_num: [0; 4],
+            f_settled: [0; 4],
+            f_residue_num: [0; 4],
+            carried_remainder_checks: 0,
         }
+    }
+
+    /// One slot of #458 funding: per-side floor of the exact A-scaled numerator.
+    pub(super) fn accrue_funding(&mut self, asset: usize, rate: i128, price: i128) {
+        let funding = (-rate * price * ADL).div_euclid(1_000_000_000);
+        assert_eq!((rate * price * ADL).div_euclid(1_000_000_000), -funding);
+        for actor in 0..4 {
+            self.f_ideal_num[actor] += self.lots[actor][asset] * funding;
+        }
+        self.funding[asset] += funding;
+    }
+
+    pub(super) fn f_pending(&self, actor: usize, asset: usize) -> i128 {
+        self.lots[actor][asset] * (self.funding[asset] - self.f_snap[actor][asset])
+    }
+
+    /// Engine F settlement of every leg of `actor` (K is integral and exact here).
+    pub(super) fn settle_f(&mut self, actor: usize) {
+        for asset in 0..2 {
+            let lots = self.lots[actor][asset];
+            if lots == 0 {
+                self.f_snap[actor][asset] = self.funding[asset];
+                continue;
+            }
+            let atoms = self.f_pending(actor, asset).div_euclid(ADL);
+            let step = (atoms * ADL).div_euclid(lots.abs())
+                + i128::from((atoms * ADL).rem_euclid(lots.abs()) != 0);
+            self.f_residue_num[actor] += lots.abs() * step - atoms * ADL;
+            self.f_snap[actor][asset] += lots.signum() * step;
+            self.f_settled[actor] += atoms;
+            self.value[actor] += atoms;
+            assert!((0..ADL).contains(&self.f_pending(actor, asset)));
+        }
+    }
+
+    /// Basis change after settlement: the sub-atom F credit is dropped.
+    pub(super) fn resize(&mut self, actor: usize, asset: usize, delta: i128) {
+        let remainder = self.f_pending(actor, asset);
+        assert!((0..ADL).contains(&remainder), "settled before resize");
+        self.f_residue_num[actor] += remainder;
+        self.f_snap[actor][asset] = self.funding[asset];
+        self.lots[actor][asset] += delta;
+    }
+
+    /// Unowned vault custody left by F settlement ceilings: payers pay at least and
+    /// receivers collect at most the exact transfer.
+    pub(super) fn dust(&self) -> u128 {
+        u128::try_from(-self.f_settled.iter().sum::<i128>()).unwrap()
+    }
+
+    /// Owner entitlement and unowned dust after every open leg settles its F floor
+    /// and is cleared (dropping its sub-atom remainder), as a resolved close does.
+    pub(super) fn closed_out(&self) -> ([i128; 4], u128) {
+        let mut value = self.value;
+        let mut settled = self.f_settled.iter().sum::<i128>();
+        for actor in 0..4 {
+            for asset in 0..2 {
+                let atoms = self.f_pending(actor, asset).div_euclid(ADL);
+                value[actor] += atoms;
+                settled += atoms;
+            }
+        }
+        (value, u128::try_from(-settled).unwrap())
     }
 
     fn advance(&mut self, direction: i128, slot: u64) {
@@ -51,12 +133,10 @@ impl Ledger {
             // Public premium, rate bound and one-slot signed floor. No wrapper
             // accrual helper or decoded F index supplies the expected result.
             let rate = ((target - price) * 1_000_000_000 / price).clamp(-RATE, RATE);
-            let funding = -(rate * price).div_euclid(1_000_000_000);
             for actor in 0..4 {
-                self.value[actor] +=
-                    self.lots[actor][asset] * (price - self.price[asset] as i128 + funding);
+                self.value[actor] += self.lots[actor][asset] * (price - self.price[asset] as i128);
             }
-            self.funding[asset] += funding;
+            self.accrue_funding(asset, rate, price);
             self.price[asset] = price as u64;
         }
         self.slot = slot;
@@ -77,7 +157,7 @@ impl Ledger {
                 self.carry[asset]
             );
             let k = (self.price[asset] as i128 - ANCHORS[asset] as i128) * ADL_ONE as i128;
-            let f = self.funding[asset] * ADL_ONE as i128;
+            let f = self.funding[asset];
             assert_eq!((state.k_long, state.k_short), (k, -k));
             assert_eq!((state.f_long_num, state.f_short_num), (f, -f));
             assert_eq!((state.a_long, state.a_short), (ADL_ONE, ADL_ONE));
@@ -92,9 +172,11 @@ impl Ledger {
         }
         let mut capital = 0;
         let mut positive_pnl = 0;
+        let mut total_f_pending = 0;
         for actor in 0..4 {
             let account = env.portfolio_state(world.portfolios[actor]);
             let mut latent = 0;
+            let mut f_pending = 0;
             for asset in 0..2 {
                 let leg = account
                     .legs
@@ -110,13 +192,20 @@ impl Ledger {
                 assert_eq!(leg.b_rem, 0);
                 let sign = self.lots[actor][asset].signum();
                 let k = sign * (self.price[asset] as i128 - ANCHORS[asset] as i128);
-                let f = sign * self.funding[asset];
                 assert_eq!(leg.k_snap % ADL_ONE as i128, 0);
-                assert_eq!(leg.f_snap % ADL_ONE as i128, 0);
-                latent += self.lots[actor][asset].abs()
-                    * (k - leg.k_snap / ADL_ONE as i128 + f - leg.f_snap / ADL_ONE as i128);
+                assert_eq!(leg.f_snap, sign * self.f_snap[actor][asset], "{:?}", world.trace);
+                self.carried_remainder_checks +=
+                    usize::from(self.f_snap[actor][asset] != self.funding[asset]);
+                latent += self.lots[actor][asset].abs() * (k - leg.k_snap / ADL_ONE as i128);
+                f_pending += self.f_pending(actor, asset);
             }
-            self.latent_checks += usize::from(latent != 0);
+            assert_eq!(
+                self.f_settled[actor] * ADL + f_pending + self.f_residue_num[actor],
+                self.f_ideal_num[actor],
+                "owner={actor}: exact funding entitlement"
+            );
+            total_f_pending += f_pending;
+            self.latent_checks += usize::from(latent != 0 || f_pending.div_euclid(ADL) != 0);
             assert_eq!(
                 account.capital.get() as i128
                     + account.pnl.get()
@@ -132,9 +221,14 @@ impl Ledger {
         assert_eq!((group.c_tot, group.pnl_pos_tot), (capital, positive_pnl));
         assert_eq!(group.insurance, 0);
         assert_eq!(group.backing_provider_earnings_total, 0);
+        // F is exactly zero-sum in the index; settled atoms, carried remainders and
+        // lost residue partition it, so the unowned vault dust is input-derived.
+        assert_eq!(self.f_ideal_num.iter().sum::<i128>(), 0);
         assert_eq!(
-            self.value.iter().sum::<i128>(),
-            PRINCIPAL.map(i128::from).iter().sum()
+            self.value.iter().sum::<i128>() * ADL
+                + total_f_pending
+                + self.f_residue_num.iter().sum::<i128>(),
+            PRINCIPAL.map(i128::from).iter().sum::<i128>() * ADL
         );
         let paid = world
             .tokens
@@ -171,6 +265,7 @@ fn settle(world: &mut World, ledger: &mut Ledger, actor: usize) {
     ) {
         world.max_cu = world.max_cu.max(cu);
     }
+    ledger.settle_f(actor);
     assert_eq!(
         absent
             .iter()
@@ -293,9 +388,11 @@ fn reduce(
         world.max_cu = world
             .max_cu
             .max(result.unwrap_or_else(|error| panic!("{error}: {:?}", world.trace)));
+        ledger.settle_f(0);
+        ledger.settle_f(1);
         for asset in assets {
-            ledger.lots[0][asset as usize] -= lots;
-            ledger.lots[1][asset as usize] += lots;
+            ledger.resize(0, asset as usize, -lots);
+            ledger.resize(1, asset as usize, lots);
         }
         ledger.check(world);
         assert_eq!(carry_transport_exit::profiles(world), profile_before);
@@ -325,8 +422,11 @@ fn pay(world: &mut World, ledger: &mut Ledger, reverse: bool) {
                 ledger.price[asset],
                 0,
             ));
-            ledger.lots[actor][asset] = 0;
-            ledger.lots[actor + 1][asset] = 0;
+            ledger.settle_f(actor);
+            ledger.settle_f(actor + 1);
+            let lots = ledger.lots[actor][asset];
+            ledger.resize(actor, asset, -lots);
+            ledger.resize(actor + 1, asset, lots);
             ledger.check(world);
         }
     }
@@ -384,7 +484,10 @@ fn pay(world: &mut World, ledger: &mut Ledger, reverse: bool) {
         ledger.value
     );
     let group = world.env.market_state().1;
-    assert_eq!((group.vault, group.c_tot, group.pnl_pos_tot), (0, 0, 0));
+    assert_eq!(
+        (group.vault, group.c_tot, group.pnl_pos_tot),
+        (ledger.dust(), 0, 0)
+    );
 }
 
 #[test]
@@ -482,12 +585,27 @@ fn v16_program_funding_reversal_preserves_carry_and_unsettled_owner_entitlement(
                         ledger.price,
                         [(100 - direction) as u64, (125 + direction) as u64]
                     );
+                    // Every premium saturates: F_long = sum over slots of
+                    // -signum(premium) * RATE * price * ADL_ONE / 1e9 (#458, no unit floor).
                     assert_eq!(
                         ledger.funding,
-                        if direction == -1 { [3, 5] } else { [5, 3] }
+                        if direction == -1 {
+                            [-2_010_000_000_000, 2_480_000_000_000]
+                        } else {
+                            [1_990_000_000_000, -2_520_000_000_000]
+                        }
                     );
-                    assert!(ledger.latent_checks >= 16);
-                    assert_eq!(ledger.value, [100_108, 199_904, 300_089, 399_965]);
+                    assert!(ledger.latent_checks >= 15);
+                    assert!(ledger.carried_remainder_checks > 0);
+                    // Exact K + settled-F replay (no unit-floor funding gift).
+                    assert_eq!(
+                        ledger.value,
+                        if direction == -1 {
+                            [99_997, 200_011, 300_012, 400_041]
+                        } else {
+                            [100_005, 200_003, 300_020, 400_033]
+                        }
+                    );
                     pay(&mut world, &mut ledger, settle_first);
                     if let Some(expected) = reference {
                         assert_eq!(ledger.value, expected);

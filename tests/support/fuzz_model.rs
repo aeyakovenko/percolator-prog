@@ -545,7 +545,14 @@ pub struct ProspectiveFundingRewriteReproduction {
     pub attacker_coalition_gain: u128,
     pub control_total_payout: u128,
     pub attack_total_payout: u128,
+    /// Terminal vault SPL above insurance: exact-funding payer-ceiling/receiver-floor dust (#458).
+    pub control_vault_dust: u128,
+    pub attack_vault_dust: u128,
 }
+
+/// Exact funding (#458) floors each side's settlement, so every funded leg can leave less than
+/// one atom of payer-up/receiver-down dust in the vault. The PR 380 worlds hold four funded legs.
+pub const PR380_FUNDING_DUST_BOUND: u128 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResolveBeforeCommittedAccrualReproduction {
@@ -21128,10 +21135,23 @@ pub fn verify_favorable_funding_claim_bound_route_matrix(seed: [u8; 32]) -> Resu
     const ACTOR_A: usize = 0;
     const ACTOR_B: usize = 1;
     const ASSET: u16 = 0;
-    const PRICE: u64 = 2;
-    const TARGET: u64 = 1;
-    const Q: i128 = 100 * POS_SCALE as i128;
+    // Exact (#458) funding: the premium (TARGET - PRICE) / PRICE = -50% clamps the
+    // rate to FUNDING_CAP, so one slot moves exactly
+    // Q_LOTS * FUNDING_CAP * PRICE / FUNDING_DEN whole atoms with no sub-atom dust.
+    // PRICE * MOVE_BPS * 3 slots < 10_000 keeps the mark envelope from moving the
+    // effective price, isolating a zero-mark-move funding transfer.
+    const PRICE: u64 = 2_000;
+    const TARGET: u64 = 1_000;
+    const MOVE_BPS: u64 = 1;
+    const FUNDING_CAP: u64 = 10_000;
+    const Q_LOTS: u128 = 250;
+    const Q: i128 = Q_LOTS as i128 * POS_SCALE as i128;
     const DEPOSIT: u128 = 1_000_000;
+    const EXPECTED_FUNDING: u128 = Q_LOTS * FUNDING_CAP as u128 * PRICE as u128 / 1_000_000_000;
+    const _: () = assert!(
+        EXPECTED_FUNDING > 0
+            && (Q_LOTS * FUNDING_CAP as u128 * PRICE as u128) % 1_000_000_000 == 0
+    );
 
     let mut world_count = 0u64;
     for route in [
@@ -21150,9 +21170,9 @@ pub fn verify_favorable_funding_claim_bound_route_matrix(seed: [u8; 32]) -> Resu
                 world_seed,
                 MarketConfig {
                     initial_price: PRICE,
-                    max_price_move_bps_per_slot: 24,
+                    max_price_move_bps_per_slot: MOVE_BPS,
                     max_accrual_dt_slots: 1,
-                    max_abs_funding_e9_per_slot: 1_000,
+                    max_abs_funding_e9_per_slot: FUNDING_CAP,
                     min_funding_lifetime_slots: 1,
                     actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
                     actor_token_balances: [DEPOSIT as u64, DEPOSIT as u64, 1, 1, 1],
@@ -21250,6 +21270,11 @@ pub fn verify_favorable_funding_claim_bound_route_matrix(seed: [u8; 32]) -> Resu
             let payer = if winner == ACTOR_A { ACTOR_B } else { ACTOR_A };
             let winner_pnl = u128::try_from(env.primary_portfolio(winner).pnl.get())
                 .map_err(|_| format!("{label}: positive funding PnL does not fit u128"))?;
+            if winner_pnl != EXPECTED_FUNDING {
+                return Err(format!(
+                    "{label}: funding transfer is not the exact clamped-rate amount: pnl={winner_pnl}, expected={EXPECTED_FUNDING}"
+                ));
+            }
             let expected_claim_num = winner_pnl
                 .checked_mul(BOUND_SCALE)
                 .ok_or_else(|| format!("{label}: funding claim scale overflow"))?;
@@ -24061,9 +24086,24 @@ pub fn reproduce_prospective_funding_rewrite(
         .coalition_payout
         .checked_sub(control.coalition_payout)
         .ok_or("PR 380 trade-first ordering decreased coalition payout")?;
+    let vault_dust = |world: &ProspectiveFundingWorld| {
+        world
+            .vault_residual
+            .checked_sub(world.insurance_residual)
+            .filter(|dust| *dust <= PR380_FUNDING_DUST_BOUND)
+            .ok_or_else(|| {
+                format!("PR 380 terminal vault dust is not bounded funding rounding: {world:?}")
+            })
+    };
+    let control_vault_dust = vault_dust(&control)?;
+    let attack_vault_dust = vault_dust(&attack)?;
+    // With fixed execution prices, SPL value is order-independent once the bounded rounding
+    // dust retained by the vault is counted: the coalition can only gain what the victim lost
+    // plus the reduction of its own payer-side rounding dust.
     if fixed_execution_price
-        && (victim_payout_loss != attacker_coalition_gain
-            || control.total_payout != attack.total_payout)
+        && (control.total_payout + control_vault_dust != attack.total_payout + attack_vault_dust
+            || attacker_coalition_gain
+                != victim_payout_loss + control_vault_dust.saturating_sub(attack_vault_dust))
     {
         return Err(format!(
             "PR 380 prospective worlds do not conserve order-independent SPL value: \
@@ -24082,6 +24122,8 @@ pub fn reproduce_prospective_funding_rewrite(
         attacker_coalition_gain,
         control_total_payout: control.total_payout,
         attack_total_payout: attack.total_payout,
+        control_vault_dust,
+        attack_vault_dust,
     })
 }
 
@@ -31246,6 +31288,11 @@ struct ProspectiveFundingWorld {
     final_effective_price: u64,
     f_short_num: i128,
     total_payout: u128,
+    /// Terminal payouts by actor: attacker, victim, stamper long, stamper short.
+    payouts: [u128; 4],
+    /// SPL left in the vault after every actor is terminal (insurance plus dust).
+    vault_residual: u128,
+    insurance_residual: u128,
 }
 
 fn run_prospective_funding_world(
@@ -31414,6 +31461,14 @@ fn run_prospective_funding_world(
         final_effective_price: group_after.assets[0].effective_price,
         f_short_num: group_after.assets[0].f_short_num,
         total_payout,
+        payouts: [
+            attacker_payout,
+            victim_payout,
+            stamper_long_payout,
+            stamper_short_payout,
+        ],
+        vault_residual: u128::from(env.token_amount(env.vault)),
+        insurance_residual: env.primary_market_state().1.insurance,
     })
 }
 
@@ -34230,9 +34285,14 @@ pub fn verify_counterparty_encumbrance_route_matrix(mut seed: [u8; 32]) -> Resul
     Ok(())
 }
 
+// Funding accrues exactly (engine #458): per side `floor(A * rate * dt * price / 1e9)` with the
+// payer rounded up and the receiver down. The cap-rate (10_000 e9/slot) at price 2 moves each unit
+// by 2e-5 atom per slot, so the funding pairs below hold multiples of 50_000 units to make every
+// elapsed slot an exact whole-atom transfer. Balanced paid == received is then a real transfer,
+// not the retired whole-price-unit floor's rounding gift.
 fn zero_move_funding_world(seed: [u8; 32]) -> Result<V16Svm, String> {
     const PRICE: u64 = 2;
-    const DEPOSIT: u128 = 1_000_000;
+    const DEPOSIT: u128 = 10_000_000;
 
     Ok(V16Svm::new(
         seed,
@@ -34240,7 +34300,7 @@ fn zero_move_funding_world(seed: [u8; 32]) -> Result<V16Svm, String> {
             initial_price: PRICE,
             max_price_move_bps_per_slot: 24,
             max_accrual_dt_slots: 1,
-            max_abs_funding_e9_per_slot: 1_000,
+            max_abs_funding_e9_per_slot: 10_000,
             min_funding_lifetime_slots: 1,
             actor_deposits: [
                 DEPOSIT,
@@ -34296,7 +34356,7 @@ fn run_trade_funding_order_world(
     close_before_crank: bool,
 ) -> Result<(u64, u64, i128, i128), String> {
     const PRICE: u64 = 2;
-    const Q: i128 = 100 * POS_SCALE as i128;
+    const Q: i128 = 50_000 * POS_SCALE as i128;
 
     let mut env = zero_move_funding_world(seed)?;
     execute_trade_route(&mut env, route, 0, 1, 0, -Q, PRICE, 0)
@@ -34342,7 +34402,7 @@ fn run_rebalance_funding_order_world(
     reduce_before_crank: bool,
 ) -> Result<(u64, u128, u128, u128), String> {
     const PRICE: u64 = 2;
-    const Q: i128 = 100 * POS_SCALE as i128;
+    const Q: i128 = 50_000 * POS_SCALE as i128;
 
     let mut env = zero_move_funding_world(seed)?;
     env.trade_no_cpi(0, 1, 0, -Q, PRICE, 0)
@@ -34385,8 +34445,8 @@ fn run_forfeit_funding_order_world(
     forfeit_before_crank: bool,
 ) -> Result<(u64, i128, u128, u128), String> {
     const PRICE: u64 = 2;
-    const Q_ATTACKER: i128 = 5 * POS_SCALE as i128;
-    const Q_WHALE: i128 = 95 * POS_SCALE as i128;
+    const Q_ATTACKER: i128 = 50_000 * POS_SCALE as i128;
+    const Q_WHALE: i128 = 950_000 * POS_SCALE as i128;
 
     let mut env = zero_move_funding_world(seed)?;
     env.trade_no_cpi(1, 2, 0, -Q_WHALE, PRICE, 0)
@@ -35343,7 +35403,10 @@ fn build_omitted_rescue_world(seed: [u8; 32]) -> Result<(V16Svm, u128, u128), St
             max_abs_funding_e9_per_slot: 10_000,
             min_funding_lifetime_slots: 1,
             actor_deposits: [
-                3_115_000,
+                // Exact rescue funding (prog#458) is 100_000 units * 100 * 10_000 / 1e9 = 100
+                // atoms. 3_214_250 = 3_115_000 + 99_250 leaves a 50-atom pre-rescue deficit that
+                // the 100-atom rescue more than cures (the old floor gifted 100_000 atoms).
+                3_214_250,
                 50_000_000,
                 super::v16_svm::USER_DEPOSIT,
                 super::v16_svm::USER_DEPOSIT,

@@ -82,7 +82,7 @@
 
 use super::*;
 use crate::support::v16_svm::{MarketConfig, PublicTerminalClassification, TxSuccess, V16Svm};
-use percolator::POS_SCALE;
+use percolator::{ADL_ONE, POS_SCALE};
 use percolator_prog::ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint};
 
 #[path = "inv_045_retained_mark_exit.rs"]
@@ -1659,11 +1659,36 @@ fn run_pending_target_replacement(
     max_cu = max_cu.max(close.compute_units);
     let closed_profile = env.primary_profile(0);
     let closed_group = env.primary_market_state().1;
+    // Exact (#458) funding: during catch-up both owners hold 4 lots, and each side's
+    // F index moved by its own per-side floor of the exact transfer. The flat close
+    // settles each leg to floor(|basis| * dF / (ADL_ONE * POS_SCALE)) (|basis| divides
+    // the denominator, so cadence is exact); the payer is charged at least and the
+    // receiver credited at most the exact transfer, leaving that cross-side dust in
+    // the vault outside every owner and insurance balance.
+    let held_lots = (TOTAL_Q - 2 * CHUNK_Q) / POS_SCALE as i128;
+    let funded_atoms = [
+        caught_group.assets[0].f_long_num - first_before_group.assets[0].f_long_num,
+        caught_group.assets[0].f_short_num - first_before_group.assets[0].f_short_num,
+    ]
+    .map(|delta| (held_lots * delta).div_euclid(ADL_ONE as i128));
+    let funding_dust = -(funded_atoms[0] + funded_atoms[1]);
+    let unallocated_vault = i128::try_from(closed_group.vault).expect("vault fits i128")
+        - i128::try_from(closed_group.c_tot).expect("c_tot fits i128")
+        - i128::try_from(closed_group.pnl_pos_tot).expect("pnl fits i128")
+        - i128::try_from(closed_group.insurance).expect("insurance fits i128");
+    if !(0..=1).contains(&funding_dust)
+        || funded_atoms[0].min(funded_atoms[1]) >= 0
+        || unallocated_vault != funding_dust
+    {
+        return Err(format!(
+            "{context}: funding dust is not the exact per-side floor residue: funded={funded_atoms:?}, dust={funding_dust}, unallocated={unallocated_vault}"
+        ));
+    }
     if closed_profile.mark_ewma_e6 != caught_profile.mark_ewma_e6
         || closed_profile.mark_ewma_last_slot != caught_profile.mark_ewma_last_slot
         || closed_group.assets[0].oi_eff_long_q != 0
         || closed_group.assets[0].oi_eff_short_q != 0
-        || accepted_mark_pair_value_and_insurance(&env) != baseline_pair_value
+        || accepted_mark_pair_value_and_insurance(&env) + funding_dust != baseline_pair_value
         || env.token_supply_observed() != baseline_supply
         || env.market_data(true) != baseline_foreign
     {

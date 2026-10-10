@@ -183,9 +183,10 @@ fn v16_program_fractional_reset_histories_preserve_route_and_residue_adjusted_ow
                             );
                         }
                         let residue_num = ledger.residue_num.iter().flatten().sum::<i128>();
-                        assert_eq!(residue_num % SCALE, 0);
-                        let residue = u128::try_from(residue_num / SCALE).unwrap();
+                        assert_eq!(residue_num % DEN, 0);
+                        let residue = u128::try_from(residue_num / DEN).unwrap();
                         assert!(residue > 0 && ledger.latent_checks > 0);
+                        assert!(ledger.carried_remainder_checks > 0);
                         assert!(ledger
                             .residue_num
                             .iter()
@@ -250,7 +251,7 @@ fn v16_program_fractional_reset_histories_preserve_route_and_residue_adjusted_ow
                     let extra_residue = current.2[actor].iter().sum::<i128>()
                         - old_residue[actor].iter().sum::<i128>();
                     let difference = i128::from(old_paid[actor]) - i128::from(current.4[actor]);
-                    assert_eq!(difference * SCALE, extra_residue);
+                    assert_eq!(difference * DEN, extra_residue);
                     assert!((0..=16).contains(&difference));
                     if actor >= 2 {
                         assert_eq!(difference, 0);

@@ -633,6 +633,7 @@ fn v16_program_prior_claim_forfeit_prerequisite_matrix_preserves_withdrawable_va
         PRICE,
         0,
     );
+    let f_short_at_open = env.market_state().1.assets[ASSET as usize].f_short_num;
     env.svm.warp_to_slot(20);
     env.push_auth_mark_for_asset_as_admin(ASSET, 20, PROFIT_MARK);
     env.crank(
@@ -642,6 +643,14 @@ fn v16_program_prior_claim_forfeit_prerequisite_matrix_preserves_withdrawable_va
             observations: crank_observations(ASSET),
         },
     );
+    // The one-unit short receives exact funding (prog#458): its settled credit is the floor of
+    // the short index rise over A * POS_SCALE, and the close drops the sub-atom remainder.
+    let (f_short_at_close, a_short) = {
+        let asset = env.market_state().1.assets[ASSET as usize];
+        (asset.f_short_num, asset.a_short)
+    };
+    let funding_credit = (f_short_at_close - f_short_at_open).div_euclid(a_short as i128);
+    assert!(funding_credit >= 0);
     env.trade_asset_with_cu(
         ASSET,
         &first_peer_owner,
@@ -658,7 +667,10 @@ fn v16_program_prior_claim_forfeit_prerequisite_matrix_preserves_withdrawable_va
     let historical_claim = state::portfolio_source_domain(&first_episode, SOURCE_DOMAIN as usize)
         .source_claim_bound_num
         .get();
-    assert_eq!(historical_pnl, 48_000);
+    assert_eq!(
+        historical_pnl,
+        i128::from(PRICE - PROFIT_MARK) + funding_credit
+    );
     assert!(historical_claim > 0);
 
     env.trade_asset_with_cu(
@@ -757,7 +769,10 @@ fn v16_program_prior_claim_forfeit_prerequisite_matrix_preserves_withdrawable_va
         &[&victim_owner],
     )
     .expect("terminal route must pay the preserved prior claim");
-    assert_eq!(env.token_amount(destination), 1_048_000);
+    assert_eq!(
+        u128::from(env.token_amount(destination)),
+        1_000_000 + historical_pnl as u128
+    );
 }
 
 #[test]
