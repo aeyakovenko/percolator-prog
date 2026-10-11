@@ -8,6 +8,11 @@
 //! short is liquidated permissionlessly; the market resolves; every portfolio
 //! exits; the provider exits insurance and backing; CloseSlab must then succeed
 //! with a zero vault and the provider receiving everything not paid to traders.
+//!
+//! The forfeit variant keeps the winner's long leg active after the bankrupt short
+//! is liquidated (no keeper refresh of the winner): the long side is left in
+//! ResetPending with zero effective OI, and the winner exits through the public
+//! owner-signed ForfeitRecoveryLeg + FinalizeResetSide path before resolution.
 
 use super::*;
 use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
@@ -84,8 +89,40 @@ fn issue289_portfolio(env: &V16CuEnv, label: &str, portfolio: Pubkey) {
     );
 }
 
+/// Expected terminal ledger of one #289 run (atoms).
+struct Issue289Expect {
+    trader_payouts: u64,
+    vault_after_portfolios: u128,
+    winner_source_provider_receivable: u128,
+}
+
 #[test]
 fn v16_issue289_public_bankruptcy_residual_is_recredited_before_terminal_close() {
+    run_issue289(
+        false,
+        Issue289Expect {
+            // Winner nets the 30M mark gain: 10M capital + 30M PnL.
+            trader_payouts: 2 * TRADER_CAPITAL + 20_000_000,
+            vault_after_portfolios: 380_000_000,
+            winner_source_provider_receivable: 30_000_000,
+        },
+    );
+}
+
+#[test]
+fn v16_issue289_winner_recovery_forfeit_path_recredits_residual_before_terminal_close() {
+    run_issue289(
+        true,
+        Issue289Expect {
+            // The owner forfeits the dead leg's unsettled 30M gain; only capital exits.
+            trader_payouts: TRADER_CAPITAL,
+            vault_after_portfolios: 410_000_000,
+            winner_source_provider_receivable: 0,
+        },
+    );
+}
+
+fn run_issue289(winner_forfeits: bool, expect: Issue289Expect) {
     let mut env = inv018_public_spl_market_with_params(
         0,
         V16CuMarketParams {
@@ -274,8 +311,14 @@ fn v16_issue289_public_bankruptcy_residual_is_recredited_before_terminal_close()
     }
     issue289_dump(&env, "mark at 130");
 
-    // Permissionless liquidation of the bankrupt short, then refresh the winner.
-    for portfolio in [short, long] {
+    // Permissionless liquidation of the bankrupt short, then (control) refresh the
+    // winner. The forfeit variant leaves the winner's dead leg for its owner.
+    let liquidation_targets: &[Pubkey] = if winner_forfeits {
+        &[short]
+    } else {
+        &[short, long]
+    };
+    for &portfolio in liquidation_targets {
         for _ in 0..8 {
             if env
                 .crank_if_actionable(
@@ -296,8 +339,30 @@ fn v16_issue289_public_bankruptcy_residual_is_recredited_before_terminal_close()
     issue289_portfolio(&env, "short", short);
 
     // Winner follows the public Recovery forfeit/reset path when the side is in reset.
-    if has_active_leg_for_asset(&env.portfolio_state(long), 0) {
-        match env.send(
+    let winner_leg_active = has_active_leg_for_asset(&env.portfolio_state(long), 0);
+    assert_eq!(
+        winner_leg_active, winner_forfeits,
+        "only the forfeit variant keeps the winner's leg into the reset path"
+    );
+    if winner_forfeits {
+        let asset = env.market_state().1.assets[0];
+        eprintln!(
+            "[289] before forfeit: lifecycle={:?} mode_long={:?} mode_short={:?} oi_eff_long={} \
+             stored_long={} long_pnl={}",
+            asset.lifecycle,
+            asset.mode_long,
+            asset.mode_short,
+            asset.oi_eff_long_q,
+            asset.stored_pos_count_long,
+            env.portfolio_state(long).pnl.get()
+        );
+        assert_eq!(asset.mode_long, SideModeV16::ResetPending);
+        assert_eq!(asset.oi_eff_long_q, 0);
+        assert_eq!(asset.stored_pos_count_long, 1);
+    }
+    if winner_leg_active {
+        env.svm.expire_blockhash();
+        let forfeit = env.send(
             ProgInstruction::ForfeitRecoveryLeg {
                 portfolio_id: env.portfolio_id(long),
                 position_epoch: env.portfolio_position_epoch(long),
@@ -310,12 +375,16 @@ fn v16_issue289_public_bankruptcy_residual_is_recredited_before_terminal_close()
                 AccountMeta::new(long, false),
             ],
             &[&owners[0]],
-        ) {
-            Ok(_) => eprintln!("[289] winner forfeited recovery leg"),
-            Err(e) => eprintln!("[289] winner forfeit not applicable: {e}"),
-        }
+        );
+        eprintln!("[289] winner ForfeitRecoveryLeg: {forfeit:?}");
+        forfeit.expect("winner's public Recovery forfeit must land");
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(long), 0),
+            "forfeit must detach the winner's dead leg"
+        );
         for side in 0..2u8 {
-            let _ = env.send(
+            env.svm.expire_blockhash();
+            let finalize = env.send(
                 ProgInstruction::FinalizeResetSide {
                     asset_index: 0,
                     side,
@@ -323,7 +392,19 @@ fn v16_issue289_public_bankruptcy_residual_is_recredited_before_terminal_close()
                 vec![AccountMeta::new(env.market, false)],
                 &[],
             );
+            eprintln!("[289] FinalizeResetSide side {side}: {finalize:?}");
         }
+        let asset = env.market_state().1.assets[0];
+        eprintln!(
+            "[289] after reset: mode_long={:?} mode_short={:?} stored_long={}",
+            asset.mode_long, asset.mode_short, asset.stored_pos_count_long
+        );
+        assert_eq!(asset.stored_pos_count_long, 0);
+        assert_eq!(
+            asset.mode_long,
+            SideModeV16::Normal,
+            "long-side reset must finalize"
+        );
         issue289_dump(&env, "after recovery path");
         issue289_portfolio(&env, "long", long);
     }
@@ -401,19 +482,19 @@ fn v16_issue289_public_bankruptcy_residual_is_recredited_before_terminal_close()
     // separate 20M claim-free residual (insurance spent on the loser's domain while
     // the loser's capital became provider receivable on the winner's source domain).
     let (_, group) = env.market_state();
-    assert_eq!(group.vault, 380_000_000);
+    assert_eq!(group.vault, expect.vault_after_portfolios);
     assert_eq!(group.insurance, 180_000_000);
     assert_eq!(group.insurance_domain_spent[0], 20_000_000);
     assert_eq!(
         group.source_credit[1].provider_receivable_num / BOUND_SCALE,
-        30_000_000
+        expect.winner_source_provider_receivable
     );
 
     // Provider exits backing through the canonical WithdrawBackingBucket path.
     for domain in 0..2u16 {
-        let fresh =
-            env.market_state().1.source_backing_buckets[domain as usize].fresh_unliened_backing_num
-                / BOUND_SCALE;
+        let fresh = env.market_state().1.source_backing_buckets[domain as usize]
+            .fresh_unliened_backing_num
+            / BOUND_SCALE;
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::WithdrawBackingBucket {
@@ -459,8 +540,37 @@ fn v16_issue289_public_bankruptcy_residual_is_recredited_before_terminal_close()
         &[&provider],
     );
     eprintln!("[289] full 200M insurance withdrawal: {full_insurance:?}");
+    if full_insurance.is_err() {
+        // Quantify the strand: withdraw what insurance alone still records.
+        let recorded = env.market_state().1.insurance;
+        env.svm.expire_blockhash();
+        let partial = env.send(
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index: 0,
+                market_id: env.asset_market_id(0),
+                authority_epoch: env.withdrawal_authority_epoch(provider.pubkey(), 0, true),
+                amount: recorded.into(),
+            },
+            vec![
+                AccountMeta::new(provider.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(provider_token, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&provider],
+        );
+        eprintln!("[289] fallback {recorded} insurance withdrawal: {partial:?}");
+    }
     issue289_dump(&env, "after insurance exit");
 
+    let mint_supply = |env: &V16CuEnv| {
+        Mint::unpack(&env.svm.get_account(&env.mint).unwrap().data)
+            .unwrap()
+            .supply
+    };
+    let supply_before_close = mint_supply(&env);
     env.svm.expire_blockhash();
     let close = env.send(
         ProgInstruction::CloseSlab {
@@ -478,6 +588,7 @@ fn v16_issue289_public_bankruptcy_residual_is_recredited_before_terminal_close()
         &[&admin],
     );
     eprintln!("[289] CloseSlab: {close:?}");
+    let burned_at_close = supply_before_close - mint_supply(&env);
     let closed = close.is_ok()
         && state::read_market(&env.svm.get_account(&env.market).unwrap().data).is_err();
 
@@ -490,19 +601,31 @@ fn v16_issue289_public_bankruptcy_residual_is_recredited_before_terminal_close()
         .unwrap_or(0);
     eprintln!(
         "[289] RESULT: closed={closed} provider_deposit={PROVIDER_DEPOSIT} provider_payout={provider_payout} \
-         trader_deposits={} trader_payouts={trader_payouts} spl_vault={spl_vault} admin_dust={}",
+         trader_deposits={} trader_payouts={trader_payouts} spl_vault={spl_vault} admin_dust={} \
+         burned_at_close={burned_at_close}",
         2 * TRADER_CAPITAL,
         env.token_amount(admin_token),
     );
 
-    assert_eq!(trader_payouts, 2 * TRADER_CAPITAL + 20_000_000, "winner nets 30M of PnL");
+    assert_eq!(
+        trader_payouts, expect.trader_payouts,
+        "trader payout ledger"
+    );
     assert_eq!(
         provider_payout,
         PROVIDER_DEPOSIT + 2 * TRADER_CAPITAL - trader_payouts,
         "provider must receive everything not paid to traders"
     );
     assert_eq!(spl_vault, 0, "no stranded vault residual");
-    assert_eq!(env.token_amount(admin_token), 0, "market authority receives no value");
+    assert_eq!(
+        burned_at_close, 0,
+        "CloseSlab must not burn provider-owned residual"
+    );
+    assert_eq!(
+        env.token_amount(admin_token),
+        0,
+        "market authority receives no value"
+    );
     full_insurance.expect("full 200M insurance withdrawal must succeed");
     assert!(closed, "CloseSlab must succeed: {close:?}");
     assert_closed_market_tombstone(&env.svm.get_account(&env.market).unwrap());
