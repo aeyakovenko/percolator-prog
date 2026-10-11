@@ -616,7 +616,8 @@ fn v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolv
         }
     }
     assert_eq!(worlds, 8);
-    // #458: one extra resolved close attempt (pinned public rollback evidence).
-    assert_eq!(rollbacks, 89);
+    // Pinned public rollback evidence: 42 trade/crank prefixes plus 11 resolved
+    // close attempts in each of the 4 rollback worlds (#457 general netting).
+    assert_eq!(rollbacks, 86);
     eprintln!("row425 overlapping checkpoints: worlds={worlds}, rollbacks={rollbacks}, SPL prefixes rolled back={spl_rollbacks}, payouts={}, peak CU={peak_cu}, bound={CU_LIMIT}", worlds * 4);
 }

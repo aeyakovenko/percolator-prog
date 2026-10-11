@@ -57,6 +57,7 @@ fn v16_program_fractional_reset_histories_preserve_route_and_residue_adjusted_ow
     let mut peak = 0;
     let mut floor_witnesses = 0;
     let mut cadence_witnesses = 0;
+    let mut eager_settlements = 0;
     let mut residues = std::collections::BTreeSet::new();
     for direction in [-1, 1] {
         let mut deferred: Option<(
@@ -128,6 +129,11 @@ fn v16_program_fractional_reset_histories_preserve_route_and_residue_adjusted_ow
                                 crank(&mut world, &mut ledger, 2, publish_first);
                                 if eager && slot % 5 == 3 {
                                     for actor in [1, 0] {
+                                        eager_settlements += usize::from(
+                                            (0..2)
+                                                .flat_map(|asset| ledger.pending(actor, asset))
+                                                .any(|n| n.div_euclid(DEN) != 0),
+                                        );
                                         crank(&mut world, &mut ledger, actor, publish_first);
                                     }
                                 }
@@ -209,22 +215,7 @@ fn v16_program_fractional_reset_histories_preserve_route_and_residue_adjusted_ow
                             |_, _, _| {},
                         );
                         assert_eq!(paid.map(i128::from), ledger.value);
-                        let group = world.env.market_state().1;
-                        assert_eq!(
-                            (
-                                group.vault,
-                                group.insurance,
-                                group.backing_provider_earnings_total
-                            ),
-                            (residue, 0, 0)
-                        );
-                        assert!(group.source_backing_buckets.iter().all(|b| {
-                            (b.status != percolator::BackingBucketStatusV16::Fresh
-                                || b.fresh_unliened_backing_num == 0)
-                                && b.valid_liened_backing_num == 0
-                                && b.impaired_liened_backing_num == 0
-                                && b.utilization_fee_earnings == 0
-                        }));
+                        assert_terminal_backing_is_vault_dust(&world, residue);
                         let result = (
                             endpoint,
                             ledger.ideal_num,
@@ -251,12 +242,13 @@ fn v16_program_fractional_reset_histories_preserve_route_and_residue_adjusted_ow
                     let extra_residue = current.2[actor].iter().sum::<i128>()
                         - old_residue[actor].iter().sum::<i128>();
                     let difference = i128::from(old_paid[actor]) - i128::from(current.4[actor]);
+                    // Eager owner cranks land where K is atom-aligned (no price
+                    // move since the last frontier) and #458 carries every sub-atom
+                    // F remainder, so the extra settlements are value-neutral: the
+                    // eager and deferred cadences pay every owner identically.
                     assert_eq!(difference * DEN, extra_residue);
-                    assert!((0..=16).contains(&difference));
-                    if actor >= 2 {
-                        assert_eq!(difference, 0);
-                    }
-                    cadence_witnesses += usize::from(difference > 0);
+                    assert_eq!(difference, 0, "owner={actor}: cadence changed payout");
+                    cadence_witnesses += 1;
                 }
             } else {
                 deferred = Some(current);
@@ -264,7 +256,9 @@ fn v16_program_fractional_reset_histories_preserve_route_and_residue_adjusted_ow
         }
     }
     assert_eq!((worlds, resets, rollbacks), (32, 192, 320));
-    assert!(floor_witnesses > 0 && cadence_witnesses > 0);
+    assert!(floor_witnesses > 0 && cadence_witnesses == 8);
+    // Nonvacuity: every inserted eager owner crank settled at least one real atom.
+    assert_eq!(eager_settlements, 128);
     assert_cu_within("fractional moving reset histories", peak, 600_000);
-    eprintln!("Scope I carry: worlds={worlds}, nonzero_resets={resets}, rollbacks={rollbacks}, payouts=128, residues={residues:?}, separate_floors={floor_witnesses}, cadence_witnesses={cadence_witnesses}, peak_cu={peak}");
+    eprintln!("Scope I carry: worlds={worlds}, nonzero_resets={resets}, rollbacks={rollbacks}, payouts=128, residues={residues:?}, separate_floors={floor_witnesses}, cadence_witnesses={cadence_witnesses}, eager_settlements={eager_settlements}, peak_cu={peak}");
 }
