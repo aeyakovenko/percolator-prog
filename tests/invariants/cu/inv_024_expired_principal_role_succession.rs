@@ -15,6 +15,8 @@ struct Attribution {
     observed: [Option<u64>; 4],
     moved: [bool; 2],
     expired: bool,
+    /// Successful insurance debits, each of which consumes the authority epoch.
+    insurance_payouts: u64,
 }
 
 impl Attribution {
@@ -27,6 +29,7 @@ impl Attribution {
         assert!(amount > 0 && amount <= self.remaining(index / 2));
         self.paid[index] += amount;
         self.observed[index] = Some(self.remaining(index / 2));
+        self.insurance_payouts += u64::from(index / 2 == INSURER);
     }
 
     fn tokens(&self) -> [u64; 5] {
@@ -184,6 +187,7 @@ fn v16_program_expired_principal_stays_out_of_successor_fee_and_insurance_claims
                 let mut expected_sequences = sequences;
                 expected_sequences.authority_epoch +=
                     book.moved.iter().filter(|moved| **moved).count() as u64;
+                expected_sequences.authority_epoch += book.insurance_payouts;
                 assert_eq!(env.control_sequences(0), expected_sequences);
                 for ((key, frame), amount) in world
                     .tokens
@@ -311,7 +315,16 @@ fn v16_program_expired_principal_stays_out_of_successor_fee_and_insurance_claims
             book.pay(1, 1);
             check(&world, &book);
             let insurance = reserve(&world, INSURER, 2, 1, ledgers[3]);
-            let retired_principal = reserve(&world, PRINCIPAL, 4, 1, ledgers[1]);
+            // Bind the epoch after the insurance prefix so the suffix reaches the
+            // retired-principal gate rather than the epoch guard.
+            let mut retired_principal = reserve(&world, PRINCIPAL, 4, 1, ledgers[1]);
+            retired_principal.data = ProgInstruction::WithdrawBackingBucket {
+                domain: 1,
+                market_id: world.env.asset_market_id(0),
+                authority_epoch: world.env.control_sequences(0).authority_epoch + 1,
+                amount: 1,
+            }
+            .encode();
             execute(
                 &mut world,
                 &[insurance.clone(), retired_principal],

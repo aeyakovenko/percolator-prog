@@ -15,10 +15,12 @@
 //! same destination, enough target stock remains, and the peer's epoch is unchanged.
 //! Fresh target consent and retained peer consent spend only their own domain stock.
 //!
+//! Every successful insurance debit also consumes its asset's authority epoch, so the
+//! handoff and later fresh consents are signed at the post-debit epoch.
+//!
 //! Limits: this is bounded authority-epoch and destination-role composition, not
 //! an intrinsic insurance-stock sequence oracle. WithdrawInsuranceAsset has no
-//! independent stock-sequence field. Successful withdrawal consumption at a fixed
-//! authority epoch, new-stock replenishment, fee/policy histories, native/secondary
+//! independent stock-sequence field. New-stock replenishment, fee/policy histories, native/secondary
 //! rails, liabilities, arbitrary histories, and durable nonces remain unproven.
 //! Row 428 stays OPEN. SVM rollback and the bundled classic SPL program are assumed.
 
@@ -323,7 +325,8 @@ fn v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch() {
                              target_stock: [u128; 2],
                              peer_stock: [u128; 2],
                              changed_epoch: bool,
-                             foreign_destination: bool| {
+                             foreign_destination: bool,
+                             debits: [u64; 2]| {
                     let group = env.market_state().1;
                     let mut budgets = [0; 4];
                     budgets[target * 2..target * 2 + 2].copy_from_slice(&target_stock);
@@ -354,6 +357,9 @@ fn v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch() {
                     for asset in 0..2 {
                         let mut expected_controls = controls[asset];
                         let mut expected_profile = profiles[asset];
+                        // Each successful insurance debit consumes its asset's epoch.
+                        expected_controls.authority_epoch +=
+                            if asset == target { debits[0] } else { debits[1] };
                         if asset == target && changed_epoch {
                             expected_controls.authority_epoch += 1;
                             expected_profile.oracle_authority = successor.pubkey().to_bytes();
@@ -416,6 +422,8 @@ fn v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch() {
                     )
                     .unwrap()
                 };
+                // The handoff always follows the retained consent's own successful debit
+                // (earlier in the same transaction or history), which consumed epoch E.
                 let handoff = Instruction {
                     program_id,
                     accounts: vec![
@@ -426,13 +434,13 @@ fn v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch() {
                     data: ProgInstruction::UpdateAssetAuthority {
                         asset_index: target as u16,
                         market_id: market_ids[target],
-                        authority_epoch: controls[target].authority_epoch,
+                        authority_epoch: controls[target].authority_epoch + 1,
                         kind: processor::ASSET_AUTH_ORACLE,
                         new_pubkey: successor.pubkey().to_bytes(),
                     }
                     .encode(),
                 };
-                check(&env, TARGET, PEER, false, false);
+                check(&env, TARGET, PEER, false, false, [0, 0]);
                 let abort = transaction(
                     &env,
                     vec![
@@ -459,10 +467,10 @@ fn v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch() {
                     Some((5, spl_token::error::TokenError::InsufficientFunds as u32)),
                     [2, 2],
                 );
-                check(&env, TARGET, PEER, false, false);
+                check(&env, TARGET, PEER, false, false, [0, 0]);
                 assert_eq!(bincode::serialize(&retained[0]).unwrap(), retained_bytes[0]);
                 evidence.deliver(&mut env, retained[0].clone(), &watched, None, [1, 1]);
-                check(&env, [36, 41], PEER, false, false);
+                check(&env, [36, 41], PEER, false, false, [1, 0]);
 
                 let change = transaction(
                     &env,
@@ -471,7 +479,7 @@ fn v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch() {
                     &[&env.admin],
                 );
                 evidence.deliver(&mut env, change, &watched, None, [0, 1]);
-                check(&env, [36, 41], PEER, false, true);
+                check(&env, [36, 41], PEER, false, true, [1, 0]);
                 assert_eq!(bincode::serialize(&retained[1]).unwrap(), retained_bytes[1]);
                 evidence.deliver(
                     &mut env,
@@ -480,7 +488,7 @@ fn v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch() {
                     Some((2, PercolatorError::InvalidTokenAccount as u32)),
                     [0, 0],
                 );
-                check(&env, [36, 41], PEER, false, true);
+                check(&env, [36, 41], PEER, false, true, [1, 0]);
 
                 let repair = change_owner(successor.pubkey(), &admin);
                 let abort_repair = transaction(
@@ -501,11 +509,11 @@ fn v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch() {
                     Some((5, PercolatorError::EngineStale as u32)),
                     [2, 2],
                 );
-                check(&env, [36, 41], PEER, false, true);
+                check(&env, [36, 41], PEER, false, true, [1, 0]);
                 let commit_repair =
                     transaction(&env, vec![repair, handoff], 23, &[&env.admin, &successor]);
                 evidence.deliver(&mut env, commit_repair, &watched, None, [1, 1]);
-                check(&env, [36, 41], PEER, true, false);
+                check(&env, [36, 41], PEER, true, false, [1, 0]);
                 assert_eq!(bincode::serialize(&retained[2]).unwrap(), retained_bytes[2]);
                 evidence.deliver(
                     &mut env,
@@ -514,7 +522,7 @@ fn v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch() {
                     Some((2, PercolatorError::EngineStale as u32)),
                     [0, 0],
                 );
-                check(&env, [36, 41], PEER, true, false);
+                check(&env, [36, 41], PEER, true, false, [1, 0]);
                 let abort_peer =
                     transaction(&env, vec![peer_withdraw, original], 24, &[&env.admin]);
                 evidence.deliver(
@@ -524,19 +532,19 @@ fn v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch() {
                     Some((3, PercolatorError::EngineStale as u32)),
                     [1, 1],
                 );
-                check(&env, [36, 41], PEER, true, false);
+                check(&env, [36, 41], PEER, true, false, [1, 0]);
 
                 assert_eq!(
                     bincode::serialize(&retained_peer).unwrap(),
                     retained_peer_bytes
                 );
                 evidence.deliver(&mut env, retained_peer, &watched, None, [1, 1]);
-                check(&env, [36, 41], [48, 23], true, false);
+                check(&env, [36, 41], [48, 23], true, false, [1, 1]);
                 let fresh = transaction(
                     &env,
                     vec![withdraw(
                         target,
-                        controls[target].authority_epoch + 1,
+                        controls[target].authority_epoch + 2,
                         37,
                         true,
                     )],
@@ -544,15 +552,15 @@ fn v16_retained_insurance_destination_repair_cannot_cross_oracle_role_epoch() {
                     &[&env.admin],
                 );
                 evidence.deliver(&mut env, fresh, &watched, None, [1, 1]);
-                check(&env, [0, 40], [48, 23], true, false);
+                check(&env, [0, 40], [48, 23], true, false, [2, 1]);
                 let final_instructions = vec![
-                    withdraw(target, controls[target].authority_epoch + 1, 40, !resolved),
-                    withdraw(peer, controls[peer].authority_epoch, 71, !resolved),
+                    withdraw(target, controls[target].authority_epoch + 3, 40, !resolved),
+                    withdraw(peer, controls[peer].authority_epoch + 1, 71, !resolved),
                 ];
                 let final_signers = if resolved { vec![] } else { vec![&env.admin] };
                 let finish = transaction(&env, final_instructions, 26, &final_signers);
                 evidence.deliver(&mut env, finish, &watched, None, [2, 2]);
-                check(&env, [0; 2], [0; 2], true, false);
+                check(&env, [0; 2], [0; 2], true, false, [3, 2]);
             }
         }
     }

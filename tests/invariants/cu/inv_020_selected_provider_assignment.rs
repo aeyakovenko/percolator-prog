@@ -133,6 +133,12 @@ fn v16_program_selected_provider_assignment_preserves_fee_domains_and_owner_exit
                 }
                 assert_eq!(env.portfolio_state(target).capital.get(), DEPOSITS[1]);
                 set_test_clock(&mut env, 2, 102);
+                assert_eq!(frame(&env, &immutable_keys), immutable);
+                // Stale-account refresh consumes authenticated reports in the current slot.
+                for (asset, leg) in legs.iter().enumerate() {
+                    write_epoch_matrix_leg(&mut env, *leg, CURRENT[asset], 102, 2);
+                }
+                let immutable = frame(&env, &immutable_keys);
 
                 // A valid sibling report cannot stand in for the selected asset's configured key.
                 let mut substituted = legs;

@@ -1683,6 +1683,56 @@ fn resolved_portfolio_is_terminal(env: &V16Svm, actor: usize) -> bool {
         && (!close.active || (close.finalized && close.residual_remaining == 0))
 }
 
+/// Public continuation for a resolved market whose open partial receipts wait
+/// on fresh source backing: let the backing lapse, then normalize it through a
+/// resolved crank sent by an open-receipt holder. The hint names the asset that
+/// owns the lapsed domain (domains 2i/2i+1 belong to asset i). Returns false when
+/// nothing is Fresh or no listed actor holds an open receipt.
+fn expire_fresh_resolved_backing(env: &mut V16Svm, order: &[usize]) -> Result<bool, String> {
+    let group = env.primary_market_state().1;
+    let Some((domain, expiry_slot)) = group
+        .source_backing_buckets
+        .iter()
+        .enumerate()
+        .filter(|(_, bucket)| bucket.status == percolator::BackingBucketStatusV16::Fresh)
+        .map(|(domain, bucket)| (domain, bucket.expiry_slot))
+        .min_by_key(|(_, expiry)| *expiry)
+    else {
+        return Ok(false);
+    };
+    let Some(cranker) = order.iter().copied().find(|actor| {
+        env.primary_portfolio(*actor)
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .is_ok_and(|receipt| receipt.present && !receipt.finalized)
+    }) else {
+        return Ok(false);
+    };
+    if env.current_slot() < expiry_slot {
+        env.warp_to_slot(expiry_slot);
+    }
+    let now_slot = env.current_slot();
+    let asset_index = u16::try_from(domain / 2)
+        .map_err(|_| "resolved backing domain exceeds u16 asset index".to_string())?;
+    env.crank_resolved_primary_signed(
+        cranker,
+        now_slot,
+        vec![CrankObservationHint {
+            asset_index,
+            oracle_accounts: 0,
+        }],
+    )
+    .map_err(|error| format!("hinted resolved backing-expiry crank for domain {domain}: {error}"))?;
+    if env.primary_market_state().1.source_backing_buckets[domain].status
+        == percolator::BackingBucketStatusV16::Fresh
+    {
+        return Err(format!(
+            "hinted resolved crank did not normalize lapsed backing domain {domain}"
+        ));
+    }
+    Ok(true)
+}
+
 fn settle_resolved_portfolios(
     env: &mut V16Svm,
     order: &[usize],
@@ -1743,11 +1793,24 @@ fn settle_resolved_portfolios(
                 || env.primary_portfolio_data(actor) != portfolio_before
                 || env.all_token_account_data() != tokens_before;
             if !mutated && !resolved_portfolio_is_terminal(env, actor) {
-                return Err(format!(
-                    "resolved actor {actor} returned a successful no-op at sweep {sweep}"
-                ));
+                // A partial receipt intentionally stays open while fresh source
+                // backing could still raise its rate; that wait is the only
+                // admissible successful no-op and is resolved below by expiry.
+                if fresh_backing_expiries(&env.primary_market_state().1)
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .is_none()
+                {
+                    return Err(format!(
+                        "resolved actor {actor} returned a successful no-op at sweep {sweep}"
+                    ));
+                }
             }
             sweep_mutated |= mutated;
+        }
+        if !sweep_mutated && expire_fresh_resolved_backing(env, order)? {
+            continue;
         }
         if !sweep_mutated {
             return Err(format!(
@@ -2295,22 +2358,6 @@ fn run_resolved_claim_partition_schedule(
             after_release_window.payout_snapshot,
         ));
     }
-    let payout_ledger = after_release_window.resolved_payout_ledger;
-    let claimant_final_partitions = claimant_receipt_faces
-        .iter()
-        .map(|face| {
-            reference_math::mul_div_floor_with_remainder(
-                *face,
-                payout_ledger.current_payout_rate_num,
-                payout_ledger.current_payout_rate_den,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let claimant_topup_remainders = claimant_final_partitions
-        .iter()
-        .map(|(_, remainder)| *remainder)
-        .collect::<Vec<_>>();
-
     let mut destination_substitution_rejected = false;
     let mut concurrent_receipt_framed = false;
     let mut locality_claim_payout = 0u128;
@@ -2417,6 +2464,24 @@ fn run_resolved_claim_partition_schedule(
             .filter(|actor| !claimant_order.contains(actor)),
     );
     settle_resolved_portfolios(&mut env, &terminal_order, &mut max_compute_units)?;
+    // Partial receipts stay open until fresh backing lapses, so the terminal
+    // sweep may expire it; every claimant is checked against the final rate.
+    let payout_ledger = env.primary_market_state().1.resolved_payout_ledger;
+    let claimant_final_partitions = claimant_receipt_faces
+        .iter()
+        .map(|face| {
+            reference_math::mul_div_floor_with_remainder(
+                *face,
+                payout_ledger.current_payout_rate_num,
+                payout_ledger.current_payout_rate_den,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let claimant_topup_remainders = claimant_final_partitions
+        .iter()
+        .map(|(_, remainder)| *remainder)
+        .collect::<Vec<_>>();
+
 
     let payouts = env
         .actors
@@ -4100,6 +4165,20 @@ fn run_target_history(
             } else {
                 [0usize, 1usize]
             };
+            // Partial receipts wait for fresh backing to lapse. Its deadline is
+            // cadence metadata (crystallization slot + horizon), so settle from a
+            // cadence-independent slot at or past every admissible deadline.
+            if fresh_backing_expiries(&env.primary_market_state().1)
+                .into_iter()
+                .flatten()
+                .next()
+                .is_some()
+            {
+                let settle_slot = endpoint
+                    .checked_add(BACKING_FRESHNESS_HORIZON)
+                    .ok_or_else(|| "resolved settlement slot overflow".to_string())?;
+                env.warp_to_slot(settle_slot.max(env.current_slot()));
+            }
             settle_resolved_portfolios(&mut env, &order, &mut max_compute_units)?;
         }
         HistorySuffix::ShutdownForfeit => {
@@ -4339,14 +4418,18 @@ fn v16_program_public_resolved_claim_split_is_conservatively_rounded() {
                 aggregate.winner_resolved_payout - split.winner_resolved_payout <= 1,
                 "two-way public claim split escaped the one-floor rounding envelope for {open_route:?}/{close_route:?}: aggregate={aggregate:?}, split={split:?}"
             );
+            // Each claimant's entitlement is floor(face * final rate) independent of its
+            // seeded partial payment, so once fresh backing lapses and raises the rate the
+            // top-up stage alone can recover a seed-stage floor; the conservative
+            // rounding envelope is therefore over the whole receipt (seed + top-up).
             assert!(
-                three_way.winner_resolved_payout <= split.winner_resolved_payout
-                    && aggregate.winner_resolved_payout - three_way.winner_resolved_payout <= 2,
+                three_way.winner_payout <= split.winner_payout
+                    && aggregate.winner_payout - three_way.winner_payout <= 2,
                 "three-way public claim split escaped the two-floor rounding envelope for {open_route:?}/{close_route:?}: aggregate={aggregate:?}, split={split:?}, three={three_way:?}"
             );
             assert!(
-                four_way.winner_resolved_payout <= three_way.winner_resolved_payout
-                    && aggregate.winner_resolved_payout - four_way.winner_resolved_payout <= 3,
+                four_way.winner_payout <= three_way.winner_payout
+                    && aggregate.winner_payout - four_way.winner_payout <= 3,
                 "four-way public claim split escaped the three-floor rounding envelope for {open_route:?}/{close_route:?}: aggregate={aggregate:?}, three={three_way:?}, four={four_way:?}"
             );
             assert_eq!(

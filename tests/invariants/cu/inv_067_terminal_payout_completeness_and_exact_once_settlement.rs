@@ -1022,6 +1022,7 @@ fn v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value() {
         &[&provider],
     )
     .expect("withdraw terminal insurance");
+    assert_eq!(env.control_sequences(0).authority_epoch, authority_epoch + 1);
     for domain in [0u16, 1] {
         let backing = env.market_state().1.source_backing_buckets[domain as usize]
             .fresh_unliened_backing_num
@@ -1032,7 +1033,8 @@ fn v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value() {
                 ProgInstruction::WithdrawBackingBucket {
                     domain,
                     market_id,
-                    authority_epoch,
+                    // The insurance payout above consumed the epoch it was signed at.
+                    authority_epoch: env.control_sequences(domain as usize / 2).authority_epoch,
                     amount: backing,
                 },
                 vec![

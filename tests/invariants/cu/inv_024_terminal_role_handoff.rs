@@ -379,8 +379,12 @@ fn terminal_role_handoff(close_slab: bool) {
                     ],
                 );
                 // Raw batches use the post-handoff epoch, without helper rebinding.
+                // A successful insurance payout consumes its asset epoch, so a
+                // backing payout after it in the same batch binds the next epoch.
+                let first = usize::from(incoming_role == 1);
                 let epoch = epochs[asset as usize] + u64::from(asset == 0);
                 let withdrawal = |role: usize| {
+                    let epoch = epoch + u64::from(role == 0 && first == 1);
                     wrap(
                         if role == 0 {
                             ProgInstruction::WithdrawBackingBucket {
@@ -407,21 +411,23 @@ fn terminal_role_handoff(close_slab: bool) {
                         ],
                     )
                 };
-                let first = usize::from(incoming_role == 1);
-                let close = wrap(
-                    ProgInstruction::CloseSlab {
-                        authority_epoch: epochs[0] + 1,
-                    },
-                    vec![
-                        AccountMeta::new(incoming.pubkey(), true),
-                        AccountMeta::new(env.market, false),
-                        AccountMeta::new(env.vault, false),
-                        AccountMeta::new_readonly(env.vault_authority, false),
-                        AccountMeta::new(tokens[incoming_role], false),
-                        AccountMeta::new_readonly(spl_token::ID, false),
-                        AccountMeta::new(env.mint, false),
-                    ],
-                );
+                // Asset 0's epoch moves once for the handoff and once for whichever
+                // of the two terminal insurance payouts is drawn from asset 0.
+                let close_at = |authority_epoch: u64| {
+                    wrap(
+                        ProgInstruction::CloseSlab { authority_epoch },
+                        vec![
+                            AccountMeta::new(incoming.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(env.vault, false),
+                            AccountMeta::new_readonly(env.vault_authority, false),
+                            AccountMeta::new(tokens[incoming_role], false),
+                            AccountMeta::new_readonly(spl_token::ID, false),
+                            AccountMeta::new(env.mint, false),
+                        ],
+                    )
+                };
+                let close = close_at(epochs[0] + 2);
                 let mut valid = vec![handoff, withdrawal(first), withdrawal(1 - first)];
                 if close_slab {
                     let peer_asset = peer_domain / 2;
@@ -498,14 +504,15 @@ fn terminal_role_handoff(close_slab: bool) {
                     // A valid reserve payout cannot authorize final disposal of
                     // the other holder's remaining claim. Allow bounded scan
                     // progress across two assets before requiring the stock gate.
+                    let early_close = close_at(epochs[0] + 1 + u64::from(asset == 0 && first == 1));
                     batches.push((
                         Some((4..=6, PercolatorError::EngineLockActive, 1)),
                         vec![
                             valid[0].clone(),
                             valid[1].clone(),
-                            close.clone(),
-                            close.clone(),
-                            close,
+                            early_close.clone(),
+                            early_close.clone(),
+                            early_close,
                         ],
                     ));
                 }
@@ -617,7 +624,9 @@ fn terminal_role_handoff(close_slab: bool) {
                             );
                             assert_eq!(
                                 env.control_sequences(index).authority_epoch,
-                                epochs[index] + u64::from(!failed && index == 0)
+                                epochs[index]
+                                    + u64::from(!failed && index == 0)
+                                    + u64::from(!failed && index == asset as usize)
                             );
                         }
                     }

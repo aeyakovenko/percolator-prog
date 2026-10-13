@@ -291,12 +291,14 @@ fn permissionless_liquidation_composes_into_partial_receipt_across_all_trade_rou
                 && evidence.terminal.source_claim_domain_count == 3
                 && evidence.terminal.partial_receipt_face == 1_000
                 && evidence.terminal.partial_receipt_paid == 125
-                && evidence.terminal.post_receipt_payout == 126
-                && !evidence.terminal.terminal_receipt_present
-                && evidence.terminal.terminal_receipt_paid == 0
-                && !evidence.terminal.terminal_receipt_finalized
-                && evidence.terminal.final_engine_vault == 750
-                && evidence.terminal.final_spl_vault == 750
+                // The receipt stays open until the fresh backing lapses; the lapsed
+                // backing then raises it to its full face and it finalizes in place.
+                && evidence.terminal.post_receipt_payout == 875
+                && evidence.terminal.terminal_receipt_present
+                && evidence.terminal.terminal_receipt_paid == 1_000
+                && evidence.terminal.terminal_receipt_finalized
+                && evidence.terminal.final_engine_vault == 1
+                && evidence.terminal.final_spl_vault == 1
                 && evidence.terminal.max_compute_units != 0
                 && evidence.terminal.max_compute_units < 1_400_000
                 && evidence.terminal.terminal_actor_count == 5,
@@ -532,7 +534,7 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
     let evidence = run_bounded_reference_equivalence_graph()
         .expect("INV-086 bounded deployed/reference graph");
     assert_eq!(
-        evidence.depth_three_exact_state_count, 685,
+        evidence.depth_three_exact_state_count, 719,
         "the authenticated exact depth-three state frontier changed and must be reviewed"
     );
     assert_eq!(

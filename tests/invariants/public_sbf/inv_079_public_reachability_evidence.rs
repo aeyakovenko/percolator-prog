@@ -357,7 +357,7 @@ fn v16_every_public_trace_consumer_validates_reachability_evidence() {
         }
     }
     assert_eq!(
-        consumers, 115,
+        consumers, 131,
         "public-trace consumer inventory changed; inspect every new or removed consumer"
     );
 }
@@ -2374,8 +2374,15 @@ fn v16_invariant_charter_and_index_are_complete() {
         expected,
         "the normative charter must define INV-001 through INV-089 exactly once and in order"
     );
+    // Dated review notes above the index may cite owners in `| INV-` rows; only the
+    // `## Coverage status` table is the executable coverage index.
+    let readme = include_str!("../README.md");
+    let coverage_index = readme
+        .find("\n## Coverage status\n")
+        .map(|start| &readme[start..])
+        .expect("README must contain the executable coverage index section");
     assert_eq!(
-        invariant_ids(include_str!("../README.md"), "| INV-"),
+        invariant_ids(coverage_index, "| INV-"),
         expected,
         "the executable coverage index must account for every normative invariant"
     );

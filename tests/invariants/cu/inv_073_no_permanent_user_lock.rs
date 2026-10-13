@@ -6497,10 +6497,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
             .send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: u64::MAX,
-                    observations: vec![CrankObservationHint {
-                        asset_index: u16::MAX,
-                        oracle_accounts: u8::MAX,
-                    }],
+                    observations: vec![],
                 },
                 vec![
                     AccountMeta::new_readonly(victim_owner.pubkey(), true),
@@ -6561,10 +6558,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         let result = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: u64::MAX,
-                observations: vec![CrankObservationHint {
-                    asset_index: u16::MAX,
-                    oracle_accounts: u8::MAX,
-                }],
+                observations: vec![],
             },
             vec![
                 AccountMeta::new_readonly(cp_owner.pubkey(), true),
@@ -6798,7 +6792,7 @@ fn inv073_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str
 
 #[test]
 fn v16_program_terminal_disposition_and_administrative_retirement_are_source_complete() {
-    const ENGINE_PIN: &str = "94979ede7db934545e53a8f210dd063a9ea3ea63";
+    const ENGINE_PIN: &str = "4db11a8cb0053815e23a35d3a7d3edc265d8d866";
     const PHASES: &[Inv073TerminalPhase] = &[
         Inv073TerminalPhase {
             rank_lane: "economic-work",

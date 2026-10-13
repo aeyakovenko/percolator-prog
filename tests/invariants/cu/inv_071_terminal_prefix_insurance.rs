@@ -296,7 +296,9 @@ fn v16_program_scanned_insurance_withdrawals_preserve_peer_entitlements_across_l
                     }
                     .encode(),
                 };
-                let withdrawals: [Instruction; 2] = std::array::from_fn(|i| Instruction {
+                // Each successful payout consumes its asset's authority epoch, so a replay is
+                // rebuilt at the current epoch to reach the terminal allowance check.
+                let withdrawal = |env: &V16CuEnv, i: usize| Instruction {
                     program_id: env.program_id,
                     accounts: vec![
                         AccountMeta::new(owners[i].pubkey(), true),
@@ -313,7 +315,8 @@ fn v16_program_scanned_insurance_withdrawals_preserve_peer_entitlements_across_l
                             INSURANCE[i].into(),
                         )
                         .encode(),
-                });
+                };
+                let withdrawals: [Instruction; 2] = std::array::from_fn(|i| withdrawal(&env, i));
                 let tracked = [
                     env.market,
                     env.mint,
@@ -380,9 +383,10 @@ fn v16_program_scanned_insurance_withdrawals_preserve_peer_entitlements_across_l
                     ),
                     peer
                 );
+                let replay = withdrawal(&env, first);
                 peak = peak.max(land(
                     &mut env,
-                    &[withdrawals[first].clone()],
+                    &[replay],
                     &[&owners[first]],
                     &tracked,
                     &[],
@@ -397,9 +401,10 @@ fn v16_program_scanned_insurance_withdrawals_preserve_peer_entitlements_across_l
 
                 // Late reserve release cannot replenish the already withdrawn owner's allowance.
                 env.svm.warp_to_slot(EXPIRY + u64::from(late));
+                let replay = withdrawal(&env, first);
                 peak = peak.max(land(
                     &mut env,
-                    &[close.clone(), withdrawals[first].clone()],
+                    &[close.clone(), replay],
                     &[&admin, &owners[first]],
                     &tracked,
                     &[],
@@ -446,9 +451,10 @@ fn v16_program_scanned_insurance_withdrawals_preserve_peer_entitlements_across_l
                     asset_zero
                 );
                 for i in 0..2 {
+                    let replay = withdrawal(&env, i);
                     peak = peak.max(land(
                         &mut env,
-                        &[withdrawals[i].clone()],
+                        &[replay],
                         &[&owners[i]],
                         &tracked,
                         &[],

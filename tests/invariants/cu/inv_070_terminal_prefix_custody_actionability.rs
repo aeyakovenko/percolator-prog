@@ -52,28 +52,34 @@ fn v16_program_cached_prefix_custody_surplus_cannot_capitalize_spent_insurance()
                     peak: fixture_peak,
                 } = fixture(side, backing);
                 peak = peak.max(fixture_peak);
-                let close = wrap(
-                    &env,
-                    ProgInstruction::CloseSlab {
-                        authority_epoch: env.control_sequences(0).authority_epoch,
-                    },
-                    vec![
-                        AccountMeta::new(admin.pubkey(), true),
-                        AccountMeta::new(env.market, false),
-                        AccountMeta::new(env.vault, false),
-                        AccountMeta::new_readonly(env.vault_authority, false),
-                        AccountMeta::new(destination, false),
-                        AccountMeta::new_readonly(spl_token::ID, false),
-                        AccountMeta::new(env.mint, false),
-                    ],
-                );
-                let withdrawal = |amount: u64| {
+                // Each successful insurance payout consumes asset 0's authority epoch, which also
+                // guards CloseSlab, so post-payout steps are built at the advanced epoch.
+                let epoch = env.control_sequences(0).authority_epoch;
+                let close_at = |authority_epoch: u64| {
+                    wrap(
+                        &env,
+                        ProgInstruction::CloseSlab { authority_epoch },
+                        vec![
+                            AccountMeta::new(admin.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(env.vault, false),
+                            AccountMeta::new_readonly(env.vault_authority, false),
+                            AccountMeta::new(destination, false),
+                            AccountMeta::new_readonly(spl_token::ID, false),
+                            AccountMeta::new(env.mint, false),
+                        ],
+                    )
+                };
+                let close = close_at(epoch);
+                let close_partial = close_at(epoch + 1);
+                let close_paid = close_at(epoch + 2);
+                let withdrawal = |amount: u64, authority_epoch: u64| {
                     wrap(
                         &env,
                         ProgInstruction::WithdrawInsuranceAsset {
                             asset_index: 0,
                             market_id: env.asset_market_id(0),
-                            authority_epoch: env.control_sequences(0).authority_epoch,
+                            authority_epoch,
                             amount: amount.into(),
                         },
                         vec![
@@ -86,9 +92,9 @@ fn v16_program_cached_prefix_custody_surplus_cannot_capitalize_spent_insurance()
                         ],
                     )
                 };
-                let first = withdrawal(partial);
-                let tail = withdrawal(recovered - partial);
-                let excess = withdrawal(recovered + 1);
+                let first = withdrawal(partial, epoch);
+                let tail = withdrawal(recovered - partial, epoch + 1);
+                let excess = withdrawal(recovered + 1, epoch);
                 let transfer = spl_token::instruction::transfer(
                     &spl_token::ID,
                     &tokens[0],
@@ -258,7 +264,7 @@ fn v16_program_cached_prefix_custody_surplus_cannot_capitalize_spent_insurance()
                 assert!(partial_rank < expired_rank);
                 send(
                     &mut env,
-                    &[close.clone()],
+                    &[close_partial],
                     &[&admin],
                     &[],
                     Some((2, lock.clone())),
@@ -280,7 +286,7 @@ fn v16_program_cached_prefix_custody_surplus_cannot_capitalize_spent_insurance()
                 let token_calls = 1 + usize::from(burned != 0) + usize::from(donated);
                 send(
                     &mut env,
-                    &[close.clone(), bad_suffix],
+                    &[close_paid.clone(), bad_suffix],
                     &[&admin],
                     &[],
                     Some((3, InstructionError::InvalidInstructionData)),
@@ -288,9 +294,10 @@ fn v16_program_cached_prefix_custody_surplus_cannot_capitalize_spent_insurance()
                 );
                 check(&env, true, recovered, recovered, 0, transferred);
                 assert_eq!(rank(&env, side, recovered, reserve), paid_rank);
+                assert_eq!(env.control_sequences(0).authority_epoch, epoch + 2);
                 send(
                     &mut env,
-                    &[close],
+                    &[close_paid],
                     &[&admin],
                     &closing,
                     None,

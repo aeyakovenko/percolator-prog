@@ -46,7 +46,6 @@ fn main() {
     wcf!(permissionless_resolve_stale_slots, u64);
     wcf!(force_close_delay_slots, u64);
     wcf!(last_good_oracle_slot, u64);
-    wcf!(_reserved_insurance_withdraw_deposit_remaining, u128);
     wcf!(_reserved_insurance_withdraw_max_bps, u16);
     wcf!(liquidation_cranker_fee_share_bps, u16);
     wcf!(maintenance_cranker_fee_share_bps, u16);

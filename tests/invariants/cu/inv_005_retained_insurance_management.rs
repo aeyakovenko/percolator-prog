@@ -438,6 +438,8 @@ fn v16_program_retained_empty_insurance_management_rechecks_stock_before_ordered
                 max_withdrawal_cu = max_withdrawal_cu.max(meta.compute_units_consumed);
                 assert_books(&env, principal);
                 assert_eq!(profiles(&env), expected_profiles);
+                // The successful insurance debit consumes asset 0's authority epoch.
+                funded_sequences[0].authority_epoch += 1;
                 assert_eq!(
                     [env.control_sequences(0), env.control_sequences(1)],
                     funded_sequences

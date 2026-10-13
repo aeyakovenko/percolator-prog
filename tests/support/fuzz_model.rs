@@ -4400,6 +4400,15 @@ impl ScenarioRunner {
         actor: usize,
         route: TerminalRoute,
     ) -> Result<TerminalRouteResult, String> {
+        self.execute_terminal_route_hinted(actor, route, Vec::new())
+    }
+
+    fn execute_terminal_route_hinted(
+        &mut self,
+        actor: usize,
+        route: TerminalRoute,
+        crank_hints: Vec<CrankObservationHint>,
+    ) -> Result<TerminalRouteResult, String> {
         match route {
             TerminalRoute::Crank => self.coverage.resolved_crank_attempts += 1,
             TerminalRoute::Close => self.coverage.resolved_close_attempts += 1,
@@ -4418,7 +4427,7 @@ impl ScenarioRunner {
         let result = match route {
             TerminalRoute::Crank => {
                 self.env
-                    .crank_resolved_primary_signed(actor, self.env.current_slot(), Vec::new())
+                    .crank_resolved_primary_signed(actor, self.env.current_slot(), crank_hints)
             }
             TerminalRoute::Close => self.env.close_resolved_primary_signed(actor),
             TerminalRoute::Claim => self.env.claim_resolved_payout_topup_primary(actor),
@@ -4754,6 +4763,62 @@ impl ScenarioRunner {
             && (!close.active || (close.finalized && close.residual_remaining == 0)))
     }
 
+    /// A partial resolved receipt stays open while fresh source backing could still
+    /// raise its rate. The public continuation is to let that backing lapse and
+    /// normalize it with a hinted resolved crank (the hint names an asset, not the
+    /// source domain). Returns whether a lapsed bucket was normalized.
+    fn normalize_lapsed_terminal_backing(&mut self, round: usize) -> Result<bool, String> {
+        let group = self.env.primary_market_state().1;
+        let Some(expiry_slot) = group
+            .source_backing_buckets
+            .iter()
+            .filter(|bucket| bucket.status == BackingBucketStatusV16::Fresh)
+            .map(|bucket| bucket.expiry_slot)
+            .min()
+        else {
+            return Ok(false);
+        };
+        let fresh_before = group
+            .source_backing_buckets
+            .iter()
+            .filter(|bucket| bucket.status == BackingBucketStatusV16::Fresh)
+            .count();
+        let hint_assets = u16::try_from(group.source_backing_buckets.len())
+            .map_err(|_| "terminal source domain count exceeds u16")?;
+        self.env.warp_to_slot(expiry_slot);
+        for actor in 0..PRIMARY_ACTOR_COUNT {
+            for asset_index in 0..hint_assets {
+                let hint = CrankObservationHint {
+                    asset_index,
+                    oracle_accounts: 0,
+                };
+                if self
+                    .execute_terminal_route_hinted(actor, TerminalRoute::Crank, vec![hint])?
+                    .landed
+                {
+                    self.assert_global_invariants()?;
+                    let fresh_after = self
+                        .env
+                        .primary_market_state()
+                        .1
+                        .source_backing_buckets
+                        .iter()
+                        .filter(|bucket| bucket.status == BackingBucketStatusV16::Fresh)
+                        .count();
+                    if fresh_after >= fresh_before {
+                        return Err(format!(
+                            "hinted resolved crank at slot {expiry_slot} did not normalize lapsed backing on sweep {round}"
+                        ));
+                    }
+                    return Ok(true);
+                }
+            }
+        }
+        Err(format!(
+            "no hinted resolved crank normalized lapsed backing at slot {expiry_slot} on sweep {round}"
+        ))
+    }
+
     fn run_terminal_payout_campaign(&mut self) -> Result<(), String> {
         if self.env.primary_market_state().1.mode != MarketModeV16::Resolved {
             return Err("terminal payout campaign requires Resolved mode".into());
@@ -4781,6 +4846,9 @@ impl ScenarioRunner {
             }
             let after_round = self.snapshot();
             if after_round == before_round {
+                if !all_terminal && self.normalize_lapsed_terminal_backing(round)? {
+                    continue;
+                }
                 if !all_terminal {
                     let blocked = (0..PRIMARY_ACTOR_COUNT)
                         .filter(|actor| {
@@ -4789,8 +4857,28 @@ impl ScenarioRunner {
                                 .unwrap_or(true)
                         })
                         .collect::<Vec<_>>();
+                    let group = self.env.primary_market_state().1;
+                    let detail = blocked
+                        .iter()
+                        .map(|actor| {
+                            let account = self.env.primary_portfolio(*actor);
+                            format!(
+                                "actor {actor}: capital={} pnl={} receipt={:?} close={:?}",
+                                account.capital.get(),
+                                account.pnl.get(),
+                                account.resolved_payout_receipt.try_to_runtime(),
+                                account.close_progress.try_to_runtime(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let buckets = group
+                        .source_backing_buckets
+                        .iter()
+                        .map(|bucket| (bucket.status, bucket.expiry_slot))
+                        .collect::<Vec<_>>();
                     return Err(format!(
-                        "terminal public routes reached a fixed point with funded/nonterminal actors {blocked:?} on sweep {round}"
+                        "terminal public routes reached a fixed point with funded/nonterminal actors {blocked:?} on sweep {round}; slot={} buckets={buckets:?}; {detail:?}",
+                        self.env.current_slot()
                     ));
                 }
                 if !terminal_routes_quiescent {
@@ -13380,6 +13468,9 @@ fn bounded_lien_impairment_actions(
 #[derive(Clone, Copy, Debug)]
 enum BoundedReceiptConflictAction {
     Terminal { actor: usize, route: TerminalRoute },
+    /// Resolved crank naming each asset in turn; the public route that normalizes
+    /// backing lapsed at the seed slot so an open partial receipt can complete.
+    HintedCrank { actor: usize },
     CloseSlab,
 }
 
@@ -13504,10 +13595,7 @@ fn bounded_receipt_conflict_actions(
             actor: CLAIMANT,
             route: TerminalRoute::Close,
         },
-        BoundedReceiptConflictAction::Terminal {
-            actor: CLAIMANT,
-            route: TerminalRoute::Crank,
-        },
+        BoundedReceiptConflictAction::HintedCrank { actor: CLAIMANT },
         BoundedReceiptConflictAction::Terminal {
             actor: BACKED_WINNER,
             route: TerminalRoute::Close,
@@ -15020,6 +15108,19 @@ fn finish_close_to_partial_receipt_composition(
     );
     runner.run_terminal_payout_campaign()?;
     runner.assert_global_invariants()?;
+    if let Some(terminal_cleanup_slot) = terminal_cleanup_slot {
+        // The open partial receipt waits on fresh source backing, and the provider's
+        // pre-expiry withdrawal needs zero materialized portfolios (wrapper #451), so
+        // the payout campaign can only finish by letting that backing lapse.
+        if runner.env.current_slot() > terminal_cleanup_slot {
+            return Err(format!(
+                "INV-070 terminal payout could not finish by cleanup slot {terminal_cleanup_slot}: \
+                 the open receipt forced fresh provider backing to lapse at slot {} \
+                 (provider pre-expiry withdrawal blocked, wrapper #451)",
+                runner.env.current_slot()
+            ));
+        }
+    }
     let destination_after = u128::from(
         runner
             .env
@@ -15830,6 +15931,53 @@ fn run_underfunded_terminal_world(
             }
         }
         if !sweep_mutated {
+            // A partial receipt stays open while fresh source backing could still
+            // raise its rate; the only public continuation is to let that backing
+            // lapse and normalize it through a hinted resolved crank.
+            let node = runner.bounded_reference_node()?;
+            let bucket = &node.source_backing_buckets[BACKED_DOMAIN];
+            if bucket.status == BackingBucketStatusV16::Fresh as u8 {
+                let expiry_slot = bucket.expiry_slot;
+                if runner.env.current_slot() < expiry_slot {
+                    runner.env.warp_to_slot(expiry_slot);
+                }
+                // Source domains are not asset indices; the hint names the asset
+                // whose backing lapsed, so take the first asset the program accepts.
+                let now_slot = runner.env.current_slot();
+                let mut landed = Err(String::new());
+                for asset_index in 0..u16::try_from(node.source_backing_buckets.len())
+                    .map_err(|_| "INV-086 source domain count exceeds u16")?
+                {
+                    let hint = CrankObservationHint {
+                        asset_index,
+                        oracle_accounts: 0,
+                    };
+                    landed = runner.env.crank_resolved_primary_signed(
+                        JUNIOR_WINNER,
+                        now_slot,
+                        vec![hint],
+                    );
+                    if landed.is_ok() {
+                        break;
+                    }
+                }
+                landed.map_err(|error| {
+                    format!("INV-086 hinted expiry crank at sweep {sweep}: {error}")
+                })?;
+                runner.assert_global_invariants()?;
+                let after = runner.bounded_reference_node()?;
+                if after.source_backing_buckets[BACKED_DOMAIN].status
+                    == BackingBucketStatusV16::Fresh as u8
+                {
+                    return Err(format!(
+                        "INV-086 hinted crank did not normalize lapsed backing at sweep {sweep}"
+                    ));
+                }
+                expiry_normalized_on_edge = true;
+                nodes.insert(node);
+                nodes.insert(after);
+                continue;
+            }
             return Err(format!(
                 "INV-086 underfunded terminal graph fixed at nonterminal sweep {sweep}"
             ));
@@ -19331,6 +19479,29 @@ fn apply_bounded_receipt_conflict_action(
                 ..BoundedReceiptConflictActionResult::default()
             })
         }
+        BoundedReceiptConflictAction::HintedCrank { actor } => {
+            let mut result = TerminalRouteResult {
+                landed: false,
+                mutated: false,
+                payout: 0,
+            };
+            for asset_index in 0..ASSET_COUNT as u16 {
+                let hint = CrankObservationHint {
+                    asset_index,
+                    oracle_accounts: 0,
+                };
+                result =
+                    runner.execute_terminal_route_hinted(actor, TerminalRoute::Crank, vec![hint])?;
+                if result.landed {
+                    break;
+                }
+            }
+            Ok(BoundedReceiptConflictActionResult {
+                mutated: result.mutated,
+                payout: result.payout,
+                ..BoundedReceiptConflictActionResult::default()
+            })
+        }
         BoundedReceiptConflictAction::CloseSlab => {
             if runner
                 .env
@@ -19413,7 +19584,9 @@ fn assert_bounded_receipt_conflict_edge(
             "{label} violated monotonic exact-once receipt payment: {before:?}->{after:?}"
         ));
     }
-    Ok(false)
+    // A receipt paid to its full face finalizes in place (it is preserved rather
+    // than removed), which completes it exactly as a removal would.
+    Ok(!before.finalized && after.finalized)
 }
 
 pub fn run_bounded_receipt_conflict_reference_frontier(

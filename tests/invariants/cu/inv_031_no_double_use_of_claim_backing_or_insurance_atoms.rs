@@ -295,10 +295,12 @@ fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
     let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
 
     env.svm.expire_blockhash();
+    // The primary payout consumed the authority epoch; bind the current one so only the
+    // exhausted shared budget can reject the secondary-rail retry.
     let double_withdraw = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
-            market_id: 0,
-            authority_epoch: 0,
+            market_id: env.asset_market_id(0),
+            authority_epoch: env.control_sequences(0).authority_epoch,
             asset_index: 0,
             amount: 1,
         },
@@ -313,8 +315,11 @@ fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
         &[&admin],
     );
     assert!(
-        double_withdraw.is_err(),
-        "secondary reserve must not pay after the insurance budget is exhausted"
+        double_withdraw.as_ref().is_err_and(|error| error.contains(&format!(
+            "Custom({})",
+            PercolatorError::EngineLockActive as u32
+        ))),
+        "secondary reserve must not pay after the insurance budget is exhausted: {double_withdraw:?}"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(
@@ -332,8 +337,8 @@ fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
     env.svm.expire_blockhash();
     let legitimate_secondary = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
-            market_id: 0,
-            authority_epoch: 0,
+            market_id: env.asset_market_id(0),
+            authority_epoch: env.control_sequences(0).authority_epoch,
             asset_index: 0,
             amount: 1,
         },

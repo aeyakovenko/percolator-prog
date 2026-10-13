@@ -650,30 +650,36 @@ fn v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement() {
                         peak: fixture_peak,
                     } = fixture(side, backing);
                     peak = peak.max(fixture_peak);
-                    let close = wrap(
-                        &env,
-                        ProgInstruction::CloseSlab {
-                            authority_epoch: env.control_sequences(0).authority_epoch,
-                        },
-                        vec![
-                            AccountMeta::new(admin.pubkey(), true),
-                            AccountMeta::new(env.market, false),
-                            AccountMeta::new(env.vault, false),
-                            AccountMeta::new_readonly(env.vault_authority, false),
-                            AccountMeta::new(destination, false),
-                            AccountMeta::new_readonly(spl_token::ID, false),
-                            AccountMeta::new(env.mint, false),
-                        ],
-                    );
+                    // Each successful insurance payout consumes asset 0's authority epoch, which also
+                    // guards CloseSlab, so later steps are built at the post-payout epoch.
+                    let epoch = env.control_sequences(0).authority_epoch;
+                    let close_at = |authority_epoch: u64| {
+                        wrap(
+                            &env,
+                            ProgInstruction::CloseSlab { authority_epoch },
+                            vec![
+                                AccountMeta::new(admin.pubkey(), true),
+                                AccountMeta::new(env.market, false),
+                                AccountMeta::new(env.vault, false),
+                                AccountMeta::new_readonly(env.vault_authority, false),
+                                AccountMeta::new(destination, false),
+                                AccountMeta::new_readonly(spl_token::ID, false),
+                                AccountMeta::new(env.mint, false),
+                            ],
+                        )
+                    };
+                    let close = close_at(epoch);
+                    let close_paid = close_at(epoch + 1);
+                    let close_final = close_at(epoch + 2);
                     let recovered = CAPITAL[1].min(SPENT).min(backing);
                     let partial = recovered / 3;
-                    let withdrawal = |amount: u64| {
+                    let withdrawal = |amount: u64, authority_epoch: u64| {
                         wrap(
                             &env,
                             ProgInstruction::WithdrawInsuranceAsset {
                                 asset_index: 0,
                                 market_id: env.asset_market_id(0),
-                                authority_epoch: env.control_sequences(0).authority_epoch,
+                                authority_epoch,
                                 amount: amount.into(),
                             },
                             vec![
@@ -686,8 +692,8 @@ fn v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement() {
                             ],
                         )
                     };
-                    let first = withdrawal(partial);
-                    let tail = withdrawal(recovered - partial);
+                    let first = withdrawal(partial, epoch);
+                    let tail = withdrawal(recovered - partial, epoch + 1);
                     let mut tracked = vec![
                         env.market,
                         env.vault,
@@ -752,7 +758,7 @@ fn v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement() {
                     // Expiry, earlier-slot recredit and SPL payment all execute before the unpaid-claim suffix.
                     peak = peak.max(land(
                         &mut env,
-                        &[close.clone(), first.clone(), close.clone()],
+                        &[close.clone(), first.clone(), close_paid.clone()],
                         &[&admin],
                         &tracked,
                         &[],
@@ -788,7 +794,7 @@ fn v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement() {
                             "later expiry changes earlier actionability without writing its scanned slot");
                         peak = peak.max(land(
                             &mut env,
-                            &[first.clone(), close.clone()],
+                            &[first.clone(), close_paid],
                             &[&admin],
                             &tracked,
                             &[],
@@ -836,9 +842,10 @@ fn v16_program_later_expiry_recomputes_scanned_asset_insurance_entitlement() {
                     mint.supply -= backing - recovered;
                     Mint::pack(mint, &mut expected_mint.data).unwrap();
                     let closing = [env.market, env.vault, env.mint, admin.pubkey()];
+                    assert_eq!(env.control_sequences(0).authority_epoch, epoch + 2);
                     peak = peak.max(land(
                         &mut env,
-                        &[close],
+                        &[close_final],
                         &[&admin],
                         &tracked,
                         &closing,

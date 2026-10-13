@@ -200,12 +200,15 @@ fn v16_program_terminal_provider_roundtrip_preserves_intervening_fee_payouts() {
         let current = earnings(2, RETAINED, sequences.authority_epoch + 2, ledgers[0]);
         let remaining = EARNINGS - FIRST - intermediate;
         let exact = earnings(2, remaining, sequences.authority_epoch + 2, ledgers[0]);
-        let overdraw = earnings(2, remaining + 1, sequences.authority_epoch + 2, ledgers[0]);
-        let wrong_ledger = earnings(2, remaining, sequences.authority_epoch + 2, ledgers[1]);
-        let mut misdirected = exact.clone();
+        // Rejected suffixes follow a successful insurance prefix, which consumes
+        // one authority epoch, so they bind the post-prefix epoch.
+        let overdraw = earnings(2, remaining + 1, sequences.authority_epoch + 3, ledgers[0]);
+        let wrong_ledger = earnings(2, remaining, sequences.authority_epoch + 3, ledgers[1]);
+        let exact_after_prefix = earnings(2, remaining, sequences.authority_epoch + 3, ledgers[0]);
+        let mut misdirected = exact_after_prefix.clone();
         misdirected.accounts[0].is_signer = false;
         misdirected.accounts[3].pubkey = tokens[3];
-        let mut readonly = exact.clone();
+        let mut readonly = exact_after_prefix;
         readonly.accounts[2].is_writable = false;
         let insurance = wrap(
             ProgInstruction::WithdrawInsuranceAsset {
@@ -225,7 +228,8 @@ fn v16_program_terminal_provider_roundtrip_preserves_intervening_fee_payouts() {
         );
         let close = wrap(
             ProgInstruction::CloseSlab {
-                authority_epoch: sequences.authority_epoch + 2,
+                // The terminal insurance payout consumed one more authority epoch.
+                authority_epoch: sequences.authority_epoch + 3,
             },
             vec![
                 AccountMeta::new(wallets[4], true),
@@ -321,7 +325,8 @@ fn v16_program_terminal_provider_roundtrip_preserves_intervening_fee_payouts() {
                 expected_profile
             );
             let mut expected_sequences = sequences;
-            expected_sequences.authority_epoch += handoffs;
+            // Handoffs and the successful insurance payout each consume an epoch.
+            expected_sequences.authority_epoch += handoffs + u64::from(insurer_paid);
             assert_eq!(env.control_sequences(0), expected_sequences);
             state::market_view_mut(&mut env.svm.get_account(&env.market).unwrap().data)
                 .unwrap()

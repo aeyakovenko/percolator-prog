@@ -467,21 +467,80 @@ fn v16_program_spent_insurance_preserves_bounded_keeper_terminal_payouts() {
                     CAPITAL[1] * BOUND_SCALE
                 );
 
+                let mut backing_expired = false;
                 for actor in if winner_first { [0, 2] } else { [2, 0] } {
+                    let mut payouts = 0;
                     let mut payout_rollback = false;
                     while !resolved_portfolio_is_terminal(&world.env, world.portfolios[actor]) {
                         let crank = world.calls[actor] % 2 == usize::from(winner_first);
                         let instruction = world.payout(actor, crank);
                         let tx = world.transaction(instruction.clone());
                         let before = world.frame();
-                        let simulation = world.env.svm.simulate_transaction(tx.into()).unwrap();
+                        let simulation = match world.env.svm.simulate_transaction(tx.into()) {
+                            Ok(simulation) => simulation,
+                            Err(failure) => {
+                                // The haircut receipt stays open while the source backing
+                                // remainder is fresh. Once that bucket lapses, an asset-hinted
+                                // public crank expires it and the remainder becomes payable.
+                                assert_eq!(world.frame(), before);
+                                assert_eq!(
+                                    (actor, backing_expired, failure.err),
+                                    (
+                                        0,
+                                        false,
+                                        TransactionError::InstructionError(
+                                            2,
+                                            InstructionError::Custom(
+                                                PercolatorError::EngineNonProgress as u32
+                                            )
+                                        )
+                                    )
+                                );
+                                let bucket = world.env.market_state().1.source_backing_buckets
+                                    [source_domain];
+                                assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+                                world
+                                    .env
+                                    .svm
+                                    .warp_to_slot(bucket.expiry_slot.max(EXIT_SLOT));
+                                let mut hinted = world.payout(actor, true);
+                                hinted.data = ProgInstruction::PermissionlessCrank {
+                                    now_slot: 0,
+                                    observations: vec![CrankObservationHint {
+                                        asset_index: asset as u16,
+                                        oracle_accounts: 0,
+                                    }],
+                                }
+                                .encode();
+                                let tx = world.transaction(hinted);
+                                let meta = world
+                                    .env
+                                    .svm
+                                    .send_transaction(tx)
+                                    .expect("hinted crank expires the lapsed source backing");
+                                world.peak_cu = world.peak_cu.max(meta.compute_units_consumed);
+                                assert_eq!(
+                                    world.env.market_state().1.source_backing_buckets
+                                        [source_domain]
+                                        .status,
+                                    BackingBucketStatusV16::Expired
+                                );
+                                backing_expired = true;
+                                world.custody();
+                                continue;
+                            }
+                        };
                         assert_eq!(world.frame(), before);
                         if simulation
                             .logs
                             .iter()
                             .any(|line| *line == format!("Program {} success", spl_token::ID))
                         {
-                            assert!(!payout_rollback, "each owner has one input-derived payout");
+                            payouts += 1;
+                            assert!(
+                                payouts <= 1 + usize::from(actor == 0 && backing_expired),
+                                "each owner has one input-derived payout, plus the winner's expiry top-up"
+                            );
                             // This is a valid funded same-mint ATA belonging to the reserve owner.
                             // The wrapper must roll back its already computed payout/receipt.
                             for alias in [false, true] {
@@ -497,11 +556,12 @@ fn v16_program_spent_insurance_preserves_bounded_keeper_terminal_payouts() {
                         world.advance(actor, crank);
                     }
                     assert!(payout_rollback);
+                    // The source backing remainder reaches the winner after expiry.
                     assert_eq!(
                         u128::from(world.env.token_amount(world.tokens[actor])),
                         CAPITAL[actor]
                             + if actor == 0 {
-                                CONVERTED + JUNIOR_PAID
+                                CONVERTED + JUNIOR_PAID + BACKING_REMAINDER
                             } else {
                                 0
                             },
@@ -520,37 +580,34 @@ fn v16_program_spent_insurance_preserves_bounded_keeper_terminal_payouts() {
                 assert_eq!(group.c_tot, 0);
                 assert_eq!(group.source_claim_bound_total_num, 0);
                 assert_eq!(group.insurance_domain_spent[2 * asset], DEFICIT);
-                assert_eq!(
-                    group.vault,
-                    insurance - DEFICIT + FOREIGN_INSURANCE + BACKING_REMAINDER
-                );
-                assert_eq!(group.vault, group.insurance + BACKING_REMAINDER);
+                // No source backing atom is stranded once the winner's receipt is finalized.
+                assert!(backing_expired);
+                assert_eq!(group.vault, insurance - DEFICIT + FOREIGN_INSURANCE);
+                assert_eq!(group.vault, group.insurance);
                 let source = group.source_credit[source_domain];
                 assert_eq!(source.provider_receivable_num, CONVERTED * BOUND_SCALE);
                 assert_eq!(source.spent_backing_num, CONVERTED * BOUND_SCALE);
-                assert_eq!(
-                    source.fresh_reserved_backing_num,
-                    BACKING_REMAINDER * BOUND_SCALE
-                );
-                assert_eq!(
-                    group.source_backing_buckets[source_domain].fresh_unliened_backing_num,
-                    BACKING_REMAINDER * BOUND_SCALE
-                );
+                assert_eq!(source.fresh_reserved_backing_num, 0);
+                let bucket = group.source_backing_buckets[source_domain];
+                assert_eq!(bucket.fresh_unliened_backing_num, 0);
+                assert_eq!(bucket.status, BackingBucketStatusV16::Expired);
+                // The expired remainder joins the junior pool, lifting the rate to full face.
                 let ledger = group.resolved_payout_ledger;
                 assert_eq!(ledger.snapshot_slot, EXIT_SLOT);
-                assert_eq!(ledger.snapshot_residual, DEFICIT);
+                assert_eq!(ledger.snapshot_residual, DEFICIT + BACKING_REMAINDER);
                 assert_eq!(
                     ledger.terminal_claim_exact_receipts_num,
                     RECEIPT_FACE * BOUND_SCALE
                 );
                 assert_eq!(ledger.terminal_claim_bound_unreceipted_num, 0);
-                assert_eq!(ledger.current_payout_rate_num, DEFICIT * BOUND_SCALE);
+                assert_eq!(ledger.current_payout_rate_num, RECEIPT_FACE * BOUND_SCALE);
                 assert_eq!(ledger.current_payout_rate_den, RECEIPT_FACE * BOUND_SCALE);
                 assert!(!ledger.payout_halted);
-                assert_eq!(
-                    resolved_receipt(&world.env.portfolio_state(world.portfolios[0])),
-                    ResolvedPayoutReceiptV16::EMPTY
-                );
+                // The receipt finalizes only after paying its full face.
+                let receipt = resolved_receipt(&world.env.portfolio_state(world.portfolios[0]));
+                assert!(receipt.present && receipt.finalized);
+                assert_eq!(receipt.terminal_positive_claim_face, RECEIPT_FACE);
+                assert_eq!(receipt.paid_effective, RECEIPT_FACE);
                 assert_eq!(group.materialized_portfolio_count, 3);
                 assert!(group
                     .assets
@@ -560,7 +617,7 @@ fn v16_program_spent_insurance_preserves_bounded_keeper_terminal_payouts() {
                 peak_cu = peak_cu.max(world.peak_cu);
                 accepted += world.calls.iter().sum::<usize>();
                 refused += world.refusals;
-                println!("spent insurance asset={asset} funded={insurance} winner_first={winner_first}: calls={:?}, paid=[1299,0,137], insurance={}, backing={BACKING_REMAINDER}, peak={} CU", world.calls, group.insurance, world.peak_cu);
+                println!("spent insurance asset={asset} funded={insurance} winner_first={winner_first}: calls={:?}, paid=[1300,0,137], insurance={}, expired backing={BACKING_REMAINDER}, peak={} CU", world.calls, group.insurance, world.peak_cu);
             }
         }
     }

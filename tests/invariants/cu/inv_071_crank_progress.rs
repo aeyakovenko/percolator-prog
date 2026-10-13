@@ -1643,10 +1643,7 @@ fn v16_program_prospective_loss_expiry_matrix_keeps_resolved_exit_live() {
         let close = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: u64::MAX,
-                observations: vec![CrankObservationHint {
-                    asset_index: u16::MAX,
-                    oracle_accounts: u8::MAX,
-                }],
+                observations: vec![],
             },
             vec![
                 AccountMeta::new_readonly(owner.pubkey(), false),
@@ -1839,8 +1836,8 @@ fn v16_program_prospective_source_expiry_prerequisite_matrix_keeps_exit_live() {
             ProgInstruction::PermissionlessCrank {
                 now_slot: u64::MAX,
                 observations: vec![CrankObservationHint {
-                    asset_index: u16::MAX,
-                    oracle_accounts: u8::MAX,
+                    asset_index: 0,
+                    oracle_accounts: 0,
                 }],
             },
             vec![
@@ -2514,10 +2511,7 @@ fn v16_attack_resolved_permissionless_crank_survives_drained_owner_system_accoun
         .send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: u64::MAX,
-                observations: vec![CrankObservationHint {
-                    asset_index: u16::MAX,
-                    oracle_accounts: u8::MAX,
-                }],
+                observations: vec![],
             },
             vec![
                 AccountMeta::new_readonly(owner.pubkey(), false),
@@ -3420,7 +3414,7 @@ fn inv071_source_defines_kani_proof(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "94979ede7db934545e53a8f210dd063a9ea3ea63";
+    const ENGINE_PIN: &str = "4db11a8cb0053815e23a35d3a7d3edc265d8d866";
     const CLASSES: &[Inv071ProgressClass] = &[
         Inv071ProgressClass {
             class: "summary fidelity selector totality and wrapper dispatch",

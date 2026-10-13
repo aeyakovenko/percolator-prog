@@ -152,7 +152,8 @@ fn v16_program_repeated_active_rewards_preserve_renewed_observations_and_exact_e
                 let end = start + 64;
                 let prices = [PRICE + episode * 40_000, PRICE + episode * 50_000];
                 let keeper_price = PRICE + episode * 50_000;
-                let timestamp = 100 + episode as i64;
+                // Each slot boundary consumes a fresh authenticated report.
+                let timestamp = 99 + 2 * episode as i64;
                 set_test_clock(&mut env, start, timestamp);
                 env.push_auth_mark_for_asset_as_admin(1, u64::MAX, prices[1]);
                 env.push_auth_mark_for_asset_as_admin(2, u64::MAX, keeper_price);
@@ -169,7 +170,11 @@ fn v16_program_repeated_active_rewards_preserve_renewed_observations_and_exact_e
                 ));
                 history.push(checkpoint(&env, portfolios, tokens));
                 let before = frame(&env, &portfolios);
-                set_test_clock(&mut env, end, timestamp);
+                set_test_clock(&mut env, end, timestamp + 1);
+                let report =
+                    env.set_pyth_price_with_conf(&feed, prices[0] as i64, -6, 0, timestamp + 1);
+                tracked.push(report);
+                let stage = observation(&env, target, &owners[2], Some(keeper), report, &full);
                 peak = peak.max(transact(&mut env, &[&owners[2]], &[stage], &tracked, None));
                 assert_eq!(frame(&env, &portfolios), before, "market-only catchup");
                 assert_eq!(

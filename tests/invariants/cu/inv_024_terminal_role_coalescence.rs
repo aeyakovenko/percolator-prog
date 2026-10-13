@@ -45,6 +45,7 @@ struct Entitlements {
     paid: [u64; 5],
     holders: [usize; 2],
     principal: u64,
+    /// Authority epochs consumed by role handoffs and successful insurance debits.
     rotations: u64,
 }
 
@@ -55,6 +56,8 @@ impl Entitlements {
         } else {
             assert_eq!(self.holders[role], actor);
             self.remaining[role] -= amount;
+            // Every successful insurance payout consumes the asset authority epoch.
+            self.rotations += u64::from(role == INSURER);
         }
         self.paid[actor] += amount;
     }
@@ -399,6 +402,7 @@ fn v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements() {
                 let ix = payout(&world, role, 2, PREFIX[role], epoch, ledgers[0]);
                 execute(&mut world, &[ix], None);
                 expected.pay(role, 2, PREFIX[role]);
+                epoch = original_sequences.authority_epoch + expected.rotations;
                 check(&world, &expected);
             }
             assert_eq!(expected.paid[2], BACKING + PREFIX.iter().sum::<u64>());
@@ -407,7 +411,14 @@ fn v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements() {
             // SPL payout, including lazy successor-ledger initialization for fees.
             let handoff = rotate(&world, moved, 2, 3, epoch);
             let first_payment = payout(&world, moved, 3, 5, epoch + 1, ledgers[1]);
-            let suffix = rotate(&world, 1 - moved, 4, 3, epoch + 1);
+            // An insurance first payment consumes one more epoch before the suffix.
+            let suffix = rotate(
+                &world,
+                1 - moved,
+                4,
+                3,
+                epoch + 1 + u64::from(moved == INSURER),
+            );
             execute(
                 &mut world,
                 &[handoff.clone(), first_payment.clone(), suffix],
@@ -415,16 +426,22 @@ fn v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements() {
             );
             check(&world, &expected);
             execute(&mut world, &[handoff, first_payment], None);
-            epoch += 1;
             expected.rotations += 1;
             expected.holders[moved] = 3;
             expected.pay(moved, 3, 5);
+            epoch = original_sequences.authority_epoch + expected.rotations;
             check(&world, &expected);
 
             for owned in [moved, 1 - moved] {
                 let actor = expected.holders[owned];
                 let prefix = payout(&world, owned, actor, 1, epoch, ledgers[actor - 2]);
-                let wrong_role = payout(&world, 1 - owned, actor, 1, epoch, ledgers[actor - 2]);
+                let mut wrong_role = payout(&world, 1 - owned, actor, 1, epoch, ledgers[actor - 2]);
+                if 1 - owned == INSURER {
+                    // Resolved insurance pays only a token account owned by the configured
+                    // authority (else InvalidTokenAccount); aim there so the role-authority
+                    // check itself rejects the non-holder.
+                    wrong_role.accounts[2].pubkey = world.tokens[expected.holders[INSURER]];
+                }
                 execute(
                     &mut world,
                     &[prefix.clone(), wrong_role],
@@ -433,6 +450,7 @@ fn v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements() {
                 check(&world, &expected);
                 execute(&mut world, &[prefix], None);
                 expected.pay(owned, actor, 1);
+                epoch = original_sequences.authority_epoch + expected.rotations;
                 check(&world, &expected);
             }
             for role in [first, 1 - first] {
@@ -441,6 +459,7 @@ fn v16_program_terminal_coalesced_roles_split_only_unpaid_local_entitlements() {
                 let ix = payout(&world, role, actor, amount, epoch, ledgers[actor - 2]);
                 execute(&mut world, &[ix], None);
                 expected.pay(role, actor, amount);
+                epoch = original_sequences.authority_epoch + expected.rotations;
                 check(&world, &expected);
             }
             let fee_prefix = state::read_backing_domain_ledger(

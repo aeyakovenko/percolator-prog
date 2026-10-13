@@ -34,9 +34,8 @@ impl Stocks {
         self.insurance[2 * asset] -= long;
         self.insurance[2 * asset + 1] -= amount - long;
         self.wallets[recipient] += amount;
-        if self.mode == MarketModeV16::Live {
-            self.epochs[asset] += 1;
-        }
+        // Live and Resolved insurance debits both consume the asset authority epoch.
+        self.epochs[asset] += 1;
     }
 
     fn check(&self, env: &V16CuEnv) {
@@ -231,11 +230,13 @@ fn reserve(
 }
 
 fn slab_close(env: &V16CuEnv, destination: Pubkey) -> Instruction {
+    slab_close_at(env, destination, env.control_sequences(0).authority_epoch)
+}
+
+fn slab_close_at(env: &V16CuEnv, destination: Pubkey, authority_epoch: u64) -> Instruction {
     instruction(
         env,
-        ProgInstruction::CloseSlab {
-            authority_epoch: env.control_sequences(0).authority_epoch,
-        },
+        ProgInstruction::CloseSlab { authority_epoch },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -581,18 +582,20 @@ fn v16_program_shutdown_operator_departure_preserves_terminal_beneficiary_and_ba
                 amount: NEW_PAID,
             }
             .encode();
+            // Aim at the configured payee (the new operator) with the current epoch
+            // (the Live payout consumed epoch + 2), so only the authority gate rejects.
             let mut former = reserve(
                 &env,
                 asset,
                 old_operator.pubkey(),
-                tokens[3],
+                tokens[4],
                 1,
                 Some(ledger),
             );
             former.data = ProgInstruction::WithdrawInsuranceAsset {
                 asset_index: asset,
                 market_id: env.asset_market_id(asset),
-                authority_epoch: epoch + 2,
+                authority_epoch: epoch + 3,
                 amount: 1,
             }
             .encode();
@@ -651,20 +654,14 @@ fn v16_program_shutdown_operator_departure_preserves_terminal_beneficiary_and_ba
                 TERMINAL_PREFIX,
                 Some(ledger),
             );
+            // Departed operators aim at the terminal beneficiary's token account, the
+            // only admissible Resolved destination, so the authority gate rejects them.
             let departed_packets = [&old_operator, &new_operator].map(|operator| {
-                let index = if operator.pubkey() == actors[3] { 3 } else { 4 };
                 transaction(
                     &env,
                     &[
                         beneficiary_prefix.clone(),
-                        reserve(
-                            &env,
-                            asset,
-                            operator.pubkey(),
-                            tokens[index],
-                            1,
-                            Some(ledger),
-                        ),
+                        reserve(&env, asset, operator.pubkey(), tokens[0], 1, Some(ledger)),
                     ],
                     &[&beneficiary, operator],
                 )
@@ -747,7 +744,10 @@ fn v16_program_shutdown_operator_departure_preserves_terminal_beneficiary_and_ba
             // Scanning past the peer may commit progress before reaching fresh backing.
             // Put the bounded scan and its eventual denial in the same transaction.
             let mut premature_close = vec![beneficiary_prefix.clone()];
-            premature_close.extend((0..=asset).map(|_| slab_close(&env, tokens[7])));
+            // The prefix payout consumes the asset epoch; CloseSlab binds asset 0's.
+            let close_epoch = env.control_sequences(0).authority_epoch + u64::from(asset == 0);
+            premature_close
+                .extend((0..=asset).map(|_| slab_close_at(&env, tokens[7], close_epoch)));
             let tx = transaction(&env, &premature_close, &[&beneficiary, &env.admin]);
             execute(
                 &mut env,

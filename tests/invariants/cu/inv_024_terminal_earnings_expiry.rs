@@ -47,47 +47,60 @@ fn v16_program_terminal_expiry_preserves_earned_fees_and_bounded_signed_disposal
                 accounts,
                 data: ix.encode(),
             };
-            let reserve = |actor: usize, earnings: bool, insurance: bool, amount: u64| {
-                let mut accounts = vec![
-                    AccountMeta::new(wallets[actor], true),
-                    AccountMeta::new(env.market, false),
-                ];
-                if earnings {
-                    accounts.push(AccountMeta::new(ledger, false));
-                }
-                accounts.extend([
-                    AccountMeta::new(tokens[actor], false),
-                    AccountMeta::new(env.vault, false),
-                    AccountMeta::new_readonly(env.vault_authority, false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
-                ]);
-                let ix = if insurance {
-                    ProgInstruction::WithdrawInsuranceAsset {
-                        asset_index: 0,
-                        market_id: env.asset_market_id(0),
-                        authority_epoch: sequences.authority_epoch,
-                        amount: amount.into(),
+            let reserve_at =
+                |epoch: u64, actor: usize, earnings: bool, insurance: bool, amount: u64| {
+                    let mut accounts = vec![
+                        AccountMeta::new(wallets[actor], true),
+                        AccountMeta::new(env.market, false),
+                    ];
+                    if earnings {
+                        accounts.push(AccountMeta::new(ledger, false));
                     }
-                } else if earnings {
-                    ProgInstruction::WithdrawBackingBucketEarnings {
-                        domain: 1,
-                        market_id: env.asset_market_id(0),
-                        authority_epoch: sequences.authority_epoch,
-                        amount: amount.into(),
-                    }
-                } else {
-                    ProgInstruction::WithdrawBackingBucket {
-                        domain: 1,
-                        market_id: env.asset_market_id(0),
-                        authority_epoch: sequences.authority_epoch,
-                        amount: amount.into(),
-                    }
+                    accounts.extend([
+                        AccountMeta::new(tokens[actor], false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ]);
+                    let ix = if insurance {
+                        ProgInstruction::WithdrawInsuranceAsset {
+                            asset_index: 0,
+                            market_id: env.asset_market_id(0),
+                            authority_epoch: epoch,
+                            amount: amount.into(),
+                        }
+                    } else if earnings {
+                        ProgInstruction::WithdrawBackingBucketEarnings {
+                            domain: 1,
+                            market_id: env.asset_market_id(0),
+                            authority_epoch: epoch,
+                            amount: amount.into(),
+                        }
+                    } else {
+                        ProgInstruction::WithdrawBackingBucket {
+                            domain: 1,
+                            market_id: env.asset_market_id(0),
+                            authority_epoch: epoch,
+                            amount: amount.into(),
+                        }
+                    };
+                    wrap(ix, accounts)
                 };
-                wrap(ix, accounts)
+            let reserve = |actor: usize, earnings: bool, insurance: bool, amount: u64| {
+                reserve_at(
+                    sequences.authority_epoch,
+                    actor,
+                    earnings,
+                    insurance,
+                    amount,
+                )
             };
             let principal = reserve(2, false, false, PRINCIPAL_PAID);
             let late_principal = reserve(2, false, false, 1);
             let earnings = reserve(2, true, false, EARNINGS);
+            // A prior successful insurance payout consumes one authority epoch.
+            let earnings_after_insurance =
+                reserve_at(sequences.authority_epoch + 1, 2, true, false, EARNINGS);
             let insurance = reserve(4, false, true, INSURANCE);
             let admin_earnings = reserve(4, true, false, EARNINGS);
             let operator_insurance = reserve(3, false, true, INSURANCE);
@@ -193,7 +206,10 @@ fn v16_program_terminal_expiry_preserves_earned_fees_and_bounded_signed_disposal
                     state::read_asset_oracle_profile(&market.data, 0).unwrap(),
                     profile
                 );
-                assert_eq!(env.control_sequences(0), sequences);
+                // A successful Resolved insurance payout consumes the authority epoch.
+                let mut expected_sequences = sequences;
+                expected_sequences.authority_epoch += u64::from(paid[1]);
+                assert_eq!(env.control_sequences(0), expected_sequences);
                 assert_eq!(market.lamports, market_frame.lamports);
                 let account = env.svm.get_account(&ledger).unwrap();
                 if paid[0] {
@@ -331,7 +347,12 @@ fn v16_program_terminal_expiry_preserves_earned_fees_and_bounded_signed_disposal
             let mut paid = [false; 2];
             for kind in if insurance_first { [1, 0] } else { [0, 1] } {
                 let (ix, signer, destination) = if kind == 0 {
-                    (earnings.clone(), &provider, tokens[2])
+                    let ix = if paid[1] {
+                        earnings_after_insurance.clone()
+                    } else {
+                        earnings.clone()
+                    };
+                    (ix, &provider, tokens[2])
                 } else {
                     (insurance.clone(), &admin, tokens[4])
                 };
@@ -359,6 +380,12 @@ fn v16_program_terminal_expiry_preserves_earned_fees_and_bounded_signed_disposal
             let paid_ledger = env.svm.get_account(&ledger);
             let final_tokens = tokens.map(|key| env.svm.get_account(&key));
             let allowed = [env.market, env.vault, env.mint];
+            // CloseSlab binds the epoch consumed by the insurance payout.
+            let mut close = close;
+            close.data = ProgInstruction::CloseSlab {
+                authority_epoch: sequences.authority_epoch + 1,
+            }
+            .encode();
             peak = peak.max(land(
                 &mut env,
                 &[close],

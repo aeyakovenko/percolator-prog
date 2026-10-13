@@ -1185,6 +1185,9 @@ fn run_hybrid_price_cap_endpoint(crank_slots: &[u64]) -> u64 {
     for &slot in crank_slots {
         assert!(slot > previous_slot && slot <= 10);
         set_test_clock(&mut env, slot, 100 + slot as i64);
+        // Re-post the same target price: stale-account refresh consumes a report this slot.
+        let target =
+            env.set_pyth_price_with_conf(&feed, TARGET_PRICE as i64, -6, 0, 100 + slot as i64);
         env.svm.expire_blockhash();
         env.crank_with_oracle_tail(
             long,
@@ -1473,7 +1476,7 @@ fn inv052_source_defines_test(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_split_merge_operation_family_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "94979ede7db934545e53a8f210dd063a9ea3ea63";
+    const ENGINE_PIN: &str = "4db11a8cb0053815e23a35d3a7d3edc265d8d866";
     const CLASSES: &[Inv052PartitionClass] = &[
         Inv052PartitionClass {
             class: "trade withdrawal and owner-reduction partitions",

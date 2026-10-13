@@ -302,9 +302,14 @@ fn v16_retained_trade_and_payout_consent_diverge_across_live_recipient_successio
             let trade = f.trade(2, FILLED);
             let retained = sign(&mut f, &successor, &[trade.clone()]);
             let retained_bytes = bincode::serialize(&retained).unwrap();
-            let stale_ixs = [trade, f.insurance(asset, 1)];
+            let stale_ixs = [trade.clone(), f.insurance(asset, 1)];
             let stale = sign(&mut f, &successor, &stale_ixs);
             let stale_aba = aba.then(|| sign(&mut f, &successor, &stale_ixs));
+            // A's consent redirected to the successor's wallet passes the payee-owned
+            // destination check after succession, so A's revoked operator authority rejects.
+            let mut redirected_payout = f.insurance(asset, 1);
+            redirected_payout.accounts[2].pubkey = destination;
+            let redirected_ixs = [trade, redirected_payout];
             for tx in [&retained, &stale].into_iter().chain(stale_aba.iter()) {
                 let before = frame(&f, tx, &successor, destination);
                 let meta = f.env.svm.simulate_transaction(tx.clone().into()).unwrap();
@@ -333,11 +338,23 @@ fn v16_retained_trade_and_payout_consent_diverge_across_live_recipient_successio
             peaks[0] = peaks[0].max(land(&mut f, &successor, destination, tx, None, [1, 1, 0]));
             debit(&mut budgets, asset, 3);
             paid[2] += 3;
+            // A's retained payout names A's own wallet, which is no longer the payee's, so
+            // the destination owner check (before signer authority) rejects it.
             peaks[1] = peaks[1].max(land(
                 &mut f,
                 &successor,
                 destination,
                 stale,
+                Some(PercolatorError::InvalidTokenAccount),
+                [1, 0, 1],
+            ));
+            rejections += 1;
+            let redirected = sign(&mut f, &successor, &redirected_ixs);
+            peaks[1] = peaks[1].max(land(
+                &mut f,
+                &successor,
+                destination,
+                redirected,
                 Some(PercolatorError::Unauthorized),
                 [1, 0, 1],
             ));
@@ -488,6 +505,6 @@ fn v16_retained_trade_and_payout_consent_diverge_across_live_recipient_successio
             worlds += 1;
         }
     }
-    assert_eq!((worlds, rejections), (4, 6));
+    assert_eq!((worlds, rejections), (4, 10));
     println!("INV-014 retained recipient succession: {worlds} worlds, 10 initial simulations, {rejections} exact trade/matcher rollbacks; peak CU [success/simulation, rejection, policy, handoff]={peaks:?}");
 }

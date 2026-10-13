@@ -326,7 +326,7 @@ fn recipient_routes(cpi: bool, interrupted: bool) -> (Outcome, u64, usize) {
             }
             set_test_clock(&mut env, 0, 101);
             env.push_auth_mark_for_asset_as_admin(1, u64::MAX, CURRENT[1]);
-            let reports = [0, 1, 2].map(|i| {
+            let mut reports = [0, 1, 2].map(|i| {
                 env.set_pyth_price_with_conf(
                     &feeds[i],
                     [CURRENT[0], KEEPER_PRICE, PRICE][i] as i64,
@@ -338,6 +338,12 @@ fn recipient_routes(cpi: bool, interrupted: bool) -> (Outcome, u64, usize) {
             tracked.extend(reports);
             for slot in [0, 64] {
                 set_test_clock(&mut env, slot, 102);
+                if slot == 64 {
+                    // The target's stale-account refresh consumes an asset-0 report this slot.
+                    reports[0] =
+                        env.set_pyth_price_with_conf(&feeds[0], CURRENT[0] as i64, -6, 0, 102);
+                    tracked.push(reports[0]);
+                }
                 let before = frame(&env, &portfolios);
                 let ix = observation(
                     &env,

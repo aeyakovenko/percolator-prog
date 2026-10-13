@@ -94,6 +94,7 @@ struct Book {
     detached: [bool; 2],
     deleted: [bool; 5],
     converted: [Option<u128>; 2],
+    backing_expired: bool,
 }
 
 impl Book {
@@ -113,9 +114,23 @@ impl Book {
             }
     }
 
+    // Source backing not converted to claims; it stays reserved until its bucket expires.
+    fn fresh_backing(&self) -> u128 {
+        if self.backing_expired {
+            0
+        } else {
+            self.source_backing() - self.converted.iter().flatten().sum::<u128>()
+        }
+    }
+
     fn junior_pool(&self) -> u128 {
-        if self.recovery_peer {
+        (if self.recovery_peer {
             self.input.debts()[1]
+        } else {
+            0
+        }) + if self.backing_expired {
+            // Expired source rounding joins the terminal pool.
+            self.source_backing() - self.converted.iter().flatten().sum::<u128>()
         } else {
             0
         }
@@ -381,7 +396,7 @@ impl Book {
         );
         assert_eq!(
             source.fresh_reserved_backing_num,
-            (self.source_backing() - self.converted.iter().flatten().sum::<u128>()) * BOUND_SCALE
+            self.fresh_backing() * BOUND_SCALE
         );
         if group.payout_snapshot_captured && self.converted.iter().all(Option::is_some) {
             assert_eq!(
@@ -499,6 +514,56 @@ impl Book {
                 );
             }
         }
+        self.check(world);
+    }
+
+    // A haircut receipt stays open while fresh source backing could still raise its rate.
+    // Once the bucket lapses, an asset-hinted public crank expires it into the terminal pool.
+    fn expire_backing(&mut self, world: &mut AttributionWorld, actor: usize, peak: &mut u64) {
+        assert!(!self.backing_expired && self.fresh_backing() > 0);
+        let group = world.env.market_state().1;
+        let expiry = group.source_backing_buckets[2..4]
+            .iter()
+            .filter(|bucket| bucket.status == BackingBucketStatusV16::Fresh)
+            .map(|bucket| bucket.expiry_slot)
+            .max()
+            .expect("retained receipt waits on fresh source backing");
+        world.env.svm.warp_to_slot(expiry);
+        world.env.svm.expire_blockhash();
+        let before = world.frame();
+        let a = &world.actors[actor];
+        let cu = world
+            .env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 0,
+                    observations: vec![CrankObservationHint {
+                        asset_index: 1,
+                        oracle_accounts: 0,
+                    }],
+                },
+                vec![
+                    AccountMeta::new_readonly(a.owner.pubkey(), false),
+                    AccountMeta::new(world.env.market, false),
+                    AccountMeta::new(a.portfolio, false),
+                    AccountMeta::new(a.token, false),
+                    AccountMeta::new(world.env.vault, false),
+                    AccountMeta::new_readonly(world.env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[],
+            )
+            .expect("hinted crank expires lapsed source backing");
+        *peak = (*peak).max(cu);
+        self.backing_expired = true;
+        for (key, account) in before {
+            if key != world.env.market {
+                assert_eq!(world.env.svm.get_account(&key), account);
+            }
+        }
+        assert!(world.env.market_state().1.source_backing_buckets[2..4]
+            .iter()
+            .all(|bucket| bucket.status != BackingBucketStatusV16::Fresh));
         self.check(world);
     }
 
@@ -621,6 +686,7 @@ fn v16_program_fractional_cohort_residual_preserves_owner_floors_through_resolut
     let mut worlds = 0;
     let mut receipt_retries = 0;
     let mut receipt_floor_worlds = 0;
+    let mut expiry_worlds = 0;
     for (weights, residuals) in [
         ([450_003, 600_004], [7, 11]),
         ([300_003, 700_007], [10, 13]),
@@ -655,6 +721,7 @@ fn v16_program_fractional_cohort_residual_preserves_owner_floors_through_resolut
                                 detached: [false; 2],
                                 deleted: [false; 5],
                                 converted: [None; 2],
+                                backing_expired: false,
                             };
                             book.check(&world);
                             if live_booking {
@@ -687,7 +754,15 @@ fn v16_program_fractional_cohort_residual_preserves_owner_floors_through_resolut
                             book.close(&mut world, holders[0], &mut peak);
                             book.close(&mut world, 1, &mut peak);
                             book.delete(&mut world, 1, &mut peak);
-                            for _ in 0..6 {
+                            for round in 0..8 {
+                                if round == 6 && !book.deleted.iter().all(|deleted| *deleted) {
+                                    let holder = if book.deleted[holders[0]] {
+                                        holders[1]
+                                    } else {
+                                        holders[0]
+                                    };
+                                    book.expire_backing(&mut world, holder, &mut peak);
+                                }
                                 for actor in [holders[0], 3, holders[1], 4] {
                                     if book.deleted[actor] {
                                         continue;
@@ -735,9 +810,9 @@ fn v16_program_fractional_cohort_residual_preserves_owner_floors_through_resolut
                                 .map(|(full, paid)| full - paid)
                                 .sum();
                             receipt_floor_worlds += usize::from(shortfall != 0);
+                            expiry_worlds += usize::from(book.backing_expired);
                             assert_eq!(group.vault, input.cash_residue() + shortfall);
-                            let source_rounding = book.source_backing()
-                                - book.converted.iter().flatten().sum::<u128>();
+                            let source_rounding = book.fresh_backing();
                             let receipt_paid: u128 = (0..2)
                                 .map(|i| {
                                     paid[2 * i]
@@ -780,7 +855,9 @@ fn v16_program_fractional_cohort_residual_preserves_owner_floors_through_resolut
         }
     }
     assert_eq!(worlds, 64);
-    assert_eq!(receipt_floor_worlds, 16);
+    // Receipts retained until source backing expiry are topped up to full face; no floor remains.
+    assert_eq!(receipt_floor_worlds, 0);
+    assert_eq!(expiry_worlds, 16);
     assert!(receipt_retries > 0);
-    println!("INV-039 fractional residual: {worlds} worlds, {receipt_floor_worlds} input-predicted receipt-floor worlds, {receipt_retries} receipt retries, peak {peak} CU");
+    println!("INV-039 fractional residual: {worlds} worlds, {receipt_floor_worlds} input-predicted receipt-floor worlds, {expiry_worlds} backing-expiry top-up worlds, {receipt_retries} receipt retries, peak {peak} CU");
 }

@@ -6,7 +6,9 @@
 //! odd-atom refill changes the long/short stock distribution and consumes the
 //! shared funding lane. A later duplicate or SPL error must undo both changes,
 //! including lazy telemetry; alternate-route recovery must remain executable.
-//! Authority epochs and generation stay fixed throughout this bounded history.
+//! Generation and roles stay fixed; each successful insurance debit consumes the
+//! asset's authority epoch, so every envelope is signed at the epoch it will meet
+//! (a top-up after a debit in the same transaction binds the post-debit epoch).
 //!
 //! Row428 remains OPEN: the intrinsic sequence asserted here is the shared
 //! insurance TOP-UP sequence. Withdrawal has no stock-sequence field. Exhausted
@@ -114,20 +116,22 @@ fn v16_insurance_round_trip_consumption_survives_cross_route_retry() {
                 }
                 ix
             };
-            let withdrawal = append_ledger(Instruction {
+            let epoch = controls[0].authority_epoch;
+            let withdrawal_accounts = vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ];
+            let withdrawal_at = |authority_epoch| append_ledger(Instruction {
                 program_id,
-                accounts: vec![
-                    AccountMeta::new(env.admin.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(source, false),
-                    AccountMeta::new(env.vault, false),
-                    AccountMeta::new_readonly(env.vault_authority, false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
-                ],
+                accounts: withdrawal_accounts.clone(),
                 data: ProgInstruction::WithdrawInsuranceAsset {
                     asset_index: 0,
                     market_id: market_ids[0],
-                    authority_epoch: controls[0].authority_epoch,
+                    authority_epoch,
                     amount: AMOUNT.into(),
                 }
                 .encode(),
@@ -139,14 +143,14 @@ fn v16_insurance_round_trip_consumption_survives_cross_route_retry() {
                 AccountMeta::new(env.vault, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
             ];
-            let refill = |direct, intent_id| {
+            let refill = |direct, intent_id, authority_epoch| {
                 append_ledger(Instruction {
                     program_id,
                     accounts: top_up_accounts.clone(),
                     data: if direct {
                         ProgInstruction::TopUpInsurance {
                             market_id: market_ids[0],
-                            authority_epoch: controls[0].authority_epoch,
+                            authority_epoch,
                             intent_id,
                             amount: AMOUNT.into(),
                         }
@@ -154,7 +158,7 @@ fn v16_insurance_round_trip_consumption_survives_cross_route_retry() {
                         ProgInstruction::TopUpInsuranceDomain {
                             domain: 1,
                             market_id: market_ids[0],
-                            authority_epoch: controls[0].authority_epoch,
+                            authority_epoch,
                             intent_id,
                             amount: AMOUNT.into(),
                         }
@@ -162,8 +166,15 @@ fn v16_insurance_round_trip_consumption_survives_cross_route_retry() {
                     .encode(),
                 })
             };
-            let retained = [refill(direct_first, 2), refill(!direct_first, 2)];
-            let round_trip = |top_up: &Instruction| vec![withdrawal.clone(), top_up.clone()];
+            // Retained funding intent 2 on each route; the refill follows the debit that
+            // consumed `authority_epoch`, so it binds the next epoch.
+            let retained = [direct_first, !direct_first];
+            let round_trip = |direct, intent_id, authority_epoch| {
+                vec![
+                    withdrawal_at(authority_epoch),
+                    refill(direct, intent_id, authority_epoch + 1),
+                ]
+            };
             let signed = |env: &V16CuEnv, instructions: &[Instruction], nonce, unsigned| {
                 let mut message = vec![
                     heap_ix(),
@@ -217,6 +228,12 @@ fn v16_insurance_round_trip_consumption_survives_cross_route_retry() {
                 for asset in 0..2 {
                     let mut expected = controls[asset];
                     expected.insurance_top_up += if asset == 0 { rounds } else { 0 };
+                    // Each committed insurance debit consumes its asset's authority epoch.
+                    expected.authority_epoch += if asset == 0 {
+                        rounds + u64::from(target_paid)
+                    } else {
+                        u64::from(budgets[2] == 0)
+                    };
                     assert_eq!(env.control_sequences(asset), expected);
                     assert_eq!(group.assets[asset].market_id, market_ids[asset]);
                     assert_eq!(
@@ -317,20 +334,21 @@ fn v16_insurance_round_trip_consumption_survives_cross_route_retry() {
                 peak_cu = peak_cu.max(meta.compute_units_consumed);
             };
 
-            // Both alternate successful envelopes exist before any attempt; never rebind them.
+            // Both alternate envelopes exist before any attempt; never rebind them. Route 1
+            // lands first, so route 0 is pre-signed at the epoch its debit will then meet.
             let pending = [0, 1].map(|route| {
                 signed(
                     &env,
-                    &round_trip(&retained[route]),
+                    &round_trip(retained[route], 2, epoch + 1 - route as u64),
                     10 + route as u32,
                     false,
                 )
             });
             let pending_wire = pending.each_ref().map(|tx| bincode::serialize(tx).unwrap());
             check(&env, [AMOUNT.into(), 0, PEER.into(), 0], 0, false);
-            let mut duplicate = round_trip(&retained[0]);
+            let mut duplicate = round_trip(retained[0], 2, epoch);
             // The second withdrawal supplies a funded source for the stale top-up's preflight.
-            duplicate.extend(round_trip(&retained[1]));
+            duplicate.extend(round_trip(retained[1], 2, epoch + 1));
             let tx = signed(&env, &duplicate, 1, false);
             land(
                 &mut env,
@@ -339,7 +357,7 @@ fn v16_insurance_round_trip_consumption_survives_cross_route_retry() {
                 3,
             );
             check(&env, [AMOUNT.into(), 0, PEER.into(), 0], 0, false);
-            let mut late_error = round_trip(&retained[0]);
+            let mut late_error = round_trip(retained[0], 2, epoch);
             late_error.push(
                 spl_token::instruction::transfer(
                     &spl_token::ID,
@@ -383,12 +401,11 @@ fn v16_insurance_round_trip_consumption_survives_cross_route_retry() {
                 1,
             );
             check(&env, distribution(!direct_first), 1, false);
-            let fresh = refill(direct_first, 3);
-            let tx = signed(&env, &round_trip(&fresh), 3, false);
+            let tx = signed(&env, &round_trip(direct_first, 3, epoch + 1), 3, false);
             land(&mut env, tx, None, 2);
             check(&env, distribution(direct_first), 2, false);
-            for (route, top_up) in retained.iter().enumerate() {
-                let tx = signed(&env, &round_trip(top_up), 4 + route as u32, false);
+            for (route, direct) in retained.into_iter().enumerate() {
+                let tx = signed(&env, &round_trip(direct, 2, epoch + 2), 4 + route as u32, false);
                 land(
                     &mut env,
                     tx,
@@ -399,7 +416,9 @@ fn v16_insurance_round_trip_consumption_survives_cross_route_retry() {
             }
 
             // Cross the admission route with no role/epoch change and enough peer custody
-            // to pass token preflight. Rejection must come from this asset's depleted stock.
+            // to pass token preflight. Rejection must come from this asset's depleted stock:
+            // the retry binds the current (post-payout) epoch, so only stock can reject it.
+            let withdrawal = withdrawal_at(epoch + 2);
             let mut unsigned = withdrawal.clone();
             unsigned.accounts[0].is_signer = false;
             if direct_first {
@@ -414,10 +433,13 @@ fn v16_insurance_round_trip_consumption_survives_cross_route_retry() {
                 land(&mut env, tx, None, 1);
             }
             check(&env, [0, 0, PEER.into(), 0], 2, true);
+            let retry = withdrawal_at(epoch + 3);
             let retry = if direct_first {
+                let mut unsigned = retry;
+                unsigned.accounts[0].is_signer = false;
                 unsigned
             } else {
-                withdrawal.clone()
+                retry
             };
             let tx = signed(&env, &[retry], 8, direct_first);
             land(

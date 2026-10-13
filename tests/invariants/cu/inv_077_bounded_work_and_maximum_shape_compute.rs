@@ -2617,9 +2617,12 @@ fn v16_attack_public_14_leg_28_source_42_feed_refresh_stays_bounded() {
         .iter()
         .map(|asset| asset.oi_eff_short_q)
         .sum::<u128>();
+    // A stale account refresh needs every active Hybrid leg observed in the same slot, so the
+    // split observation calls ride on a flat observer; the LP then refreshes without a tail.
+    let split_observer = split_env.create_portfolio(&Keypair::new());
     let partial_cu = send_observations(
         &mut split_env,
-        split_lp,
+        split_observer,
         split_moved_slot,
         &all_assets[..all_assets.len() - 1],
         &split_moved_oracles,
@@ -2641,7 +2644,7 @@ fn v16_attack_public_14_leg_28_source_42_feed_refresh_stays_bounded() {
     );
     let finish_cu = send_observations(
         &mut split_env,
-        split_lp,
+        split_observer,
         split_moved_slot,
         &all_assets[all_assets.len() - 1..],
         &split_moved_oracles,
@@ -5493,17 +5496,40 @@ fn v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_sha
 
 #[test]
 fn v16_attack_max_source_maintenance_sync_stays_bounded() {
-    let (mut env, _taker_owner, _lp_owner, _taker, lp, _slot) = setup_max_source_live_pair(1, 1);
-    let before = env.portfolio_state(lp);
-    let group_before = env.market_state().1;
-    let custody_before = env.token_amount(env.vault);
-    let charge_slot = before
+    let (mut env, _taker_owner, _lp_owner, taker, lp, _slot) = setup_max_source_live_pair(1, 1);
+    let charge_slot = env
+        .portfolio_state(lp)
         .last_fee_slot
         .get()
         .checked_add(1)
         .expect("maintenance charge slot");
 
+    // The fee anchor is the loss-current slot of the retained active asset, so advance that asset
+    // through the counterparty before syncing; otherwise the elapsed fee window is empty.
+    let retained_asset = MAX_SOURCE_LIVE_ASSETS - 1;
     env.svm.warp_to_slot(charge_slot);
+    env.push_auth_mark_for_asset_as_admin(retained_asset, charge_slot, 100);
+    for _ in 0..64 {
+        if env.market_state().1.assets[usize::from(retained_asset)].slot_last >= charge_slot {
+            break;
+        }
+        env.svm.expire_blockhash();
+        env.crank(
+            taker,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: charge_slot,
+                observations: crank_observations(retained_asset),
+            },
+        );
+    }
+    assert_eq!(
+        env.market_state().1.assets[usize::from(retained_asset)].slot_last,
+        charge_slot
+    );
+    let before = env.portfolio_state(lp);
+    let group_before = env.market_state().1;
+    let custody_before = env.token_amount(env.vault);
+    assert_eq!(before.last_fee_slot.get() + 1, charge_slot);
     env.svm.expire_blockhash();
     let cu = env.sync_maintenance_fee_with_cu(lp, None, charge_slot);
     println!("v16 28-source-domain SyncMaintenanceFee CU: {cu}");

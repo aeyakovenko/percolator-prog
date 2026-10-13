@@ -51,13 +51,13 @@ fn v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution()
             let empty_ledger = env.svm.get_account(&ledger).unwrap();
             let mut paid = [0; 3];
             let mut insurance_paid = [0; 5];
-            let mut handoffs = 0;
+            let mut epochs = 0;
             let mut insurer = 4;
 
             let check = |env: &V16CuEnv,
                          paid: [u64; 3],
                          insurance_paid: [u64; 5],
-                         handoffs: u64,
+                         epochs: u64,
                          insurer: usize| {
                 assert_eq!(insurance_paid.iter().sum::<u64>(), paid[2]);
                 let amounts = [
@@ -146,7 +146,7 @@ fn v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution()
                     expected_profile
                 );
                 let mut expected_sequences = sequences;
-                expected_sequences.authority_epoch += handoffs;
+                expected_sequences.authority_epoch += epochs;
                 assert_eq!(env.control_sequences(0), expected_sequences);
                 let image = env.svm.get_account(&ledger).unwrap();
                 if paid[1] == 0 {
@@ -168,7 +168,7 @@ fn v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution()
                     .validate_shape()
                     .unwrap();
             };
-            check(&env, paid, insurance_paid, handoffs, insurer);
+            check(&env, paid, insurance_paid, epochs, insurer);
 
             // Each stage pays the same three economic classes. Only insurance changes owner.
             for stage in 0..3 {
@@ -211,8 +211,10 @@ fn v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution()
                     paid[kind] += amount;
                     if kind == 2 {
                         insurance_paid[insurer] += amount;
+                        // A successful insurance payout consumes the authority epoch.
+                        epochs += 1;
                     }
-                    check(&env, paid, insurance_paid, handoffs, insurer);
+                    check(&env, paid, insurance_paid, epochs, insurer);
                 }
                 if stage == 2 {
                     break;
@@ -232,7 +234,7 @@ fn v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution()
                     data: ProgInstruction::UpdateAssetAuthority {
                         asset_index: 0,
                         market_id: env.asset_market_id(0),
-                        authority_epoch: sequences.authority_epoch + handoffs,
+                        authority_epoch: sequences.authority_epoch + epochs,
                         kind: processor::ASSET_AUTH_INSURANCE,
                         new_pubkey: to.pubkey().to_bytes(),
                     }
@@ -249,9 +251,9 @@ fn v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution()
                     None,
                     None,
                 ));
-                handoffs += 1;
+                epochs += 1;
                 insurer = if stage == 0 { 2 } else { 3 };
-                check(&env, paid, insurance_paid, handoffs, insurer);
+                check(&env, paid, insurance_paid, epochs, insurer);
                 if stage == 0 && former_insurer_pays {
                     env.payer = admin.insecure_clone();
                 }
@@ -276,7 +278,7 @@ fn v16_program_terminal_insurer_merge_split_preserves_provider_fee_attribution()
                     AccountMeta::new(env.mint, false),
                 ],
                 data: ProgInstruction::CloseSlab {
-                    authority_epoch: sequences.authority_epoch + handoffs,
+                    authority_epoch: sequences.authority_epoch + epochs,
                 }
                 .encode(),
             };

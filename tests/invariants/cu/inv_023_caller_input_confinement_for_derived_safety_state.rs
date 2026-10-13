@@ -756,13 +756,13 @@ fn v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes() {
     }
     assert_eq!(role_variants, production_variants);
 
-    // INV-083 owns the 239 field-or-no-data boundary matrix. Source-lock the composition edge so
+    // INV-083 owns the 241 field-or-no-data boundary matrix. Source-lock the composition edge so
     // its closure cannot silently disappear while INV-023 continues to claim it.
     assert!(inv023_source_contains_test(
         BOUNDARY_TESTS,
         "v16_program_every_public_input_field_has_a_boundary_profile_and_executable_witness",
     ));
-    assert!(BOUNDARY_TESTS.contains("const EXPECTED_FIELD_COUNT: usize = 239;"));
+    assert!(BOUNDARY_TESTS.contains("const EXPECTED_FIELD_COUNT: usize = 241;"));
     assert!(BOUNDARY_TESTS.contains("const EXPECTED_TYPE_COUNT: usize = 52;"));
 
     let dispatcher = inv023_dispatcher_source(PRODUCTION);
@@ -898,9 +898,13 @@ fn v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes() {
         .next()
         .expect("permissionless crank handler boundary");
     assert!(crank_handler.contains("handle_permissionless_crank_zero_copy("));
-    assert!(
-        crank_handler.contains("handle_close_resolved(program_id, accounts, 0, Some(now_slot))")
-    );
+    // The resolved crank delegates with a zero fee and the authenticated slot; its only
+    // caller-selected input is a validated, oracle-free backing-asset hint.
+    let crank_tokens = crank_handler.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(crank_tokens.contains(
+        "handle_close_resolved( program_id, accounts, 0, Some(now_slot), backing_asset_hint, )"
+    ));
+    assert!(crank_tokens.contains("if hint.oracle_accounts == 0 && usize::from(hint.asset_index) < max_market_slots"));
     assert!(PRODUCTION.contains(
         "build_actionable_summary_at_slot(&portfolio.as_view(), authenticated_now_slot)"
     ));

@@ -969,8 +969,7 @@ fn v16_program_pending_close_bad_hints_roll_back_then_canonical_crank_progresses
 
 #[test]
 fn v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded() {
-    let (fixture, settle_b_oracle) =
-        public_asset1_bankrupt_close_fixture_with_asset0_external_oracle();
+    let (fixture, _) = public_asset1_bankrupt_close_fixture_with_asset0_external_oracle();
     let PublicActiveCloseFixture {
         mut env,
         loss,
@@ -1024,7 +1023,11 @@ fn v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded() {
     // Compose the selected SettleB step with a real external-oracle tail for
     // the unrelated live asset. The observation may update authenticated
     // market state, but it must not suppress or replace higher-priority B
-    // progress on the target account.
+    // progress on the target account. Stale-account refresh consumes a report in the
+    // current slot, so the same fixture price is re-published with a newer timestamp.
+    let slot = env.svm.get_sysvar::<Clock>().slot;
+    set_test_clock(&mut env, slot, 101);
+    let settle_b_oracle = env.set_pyth_price_with_conf(&[0x58; 32], 100, -6, 0, 101);
     for _ in 0..3 {
         let catchup_cu = env.crank_with_oracle_tail(
             live_peer,
@@ -1153,47 +1156,12 @@ fn v16_program_recovery_and_resolved_dispatch_treat_hints_as_discovery_only() {
     let counterparty_before = env.svm.get_account(&live_counterparty).unwrap();
     let peer_before = env.svm.get_account(&live_peer).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
-    env.svm.expire_blockhash();
-    let hostile = env.send(
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 0,
-            observations: vec![
-                CrankObservationHint {
-                    asset_index: 0,
-                    oracle_accounts: 0,
-                },
-                CrankObservationHint {
-                    asset_index: 0,
-                    oracle_accounts: 0,
-                },
-            ],
-        },
-        vec![
-            AccountMeta::new_readonly(env.payer.pubkey(), false),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(loss, false),
-        ],
-        &[],
-    );
-    assert!(
-        hostile.is_err(),
-        "duplicate Recovery hints must reject atomically"
-    );
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-    assert_eq!(env.svm.get_account(&loss).unwrap(), loss_before);
-    assert_eq!(
-        env.svm.get_account(&live_counterparty).unwrap(),
-        counterparty_before
-    );
-    assert_eq!(env.svm.get_account(&live_peer).unwrap(), peer_before);
-    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
-
-    env.svm.expire_blockhash();
-    let finalize_cu = env
-        .send(
+    let recovery_crank = |env: &mut V16CuEnv, observations: Vec<CrankObservationHint>| {
+        env.svm.expire_blockhash();
+        env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 0,
-                observations: vec![],
+                observations,
             },
             vec![
                 AccountMeta::new_readonly(env.payer.pubkey(), false),
@@ -1202,7 +1170,33 @@ fn v16_program_recovery_and_resolved_dispatch_treat_hints_as_discovery_only() {
             ],
             &[],
         )
-        .expect("empty-hint Recovery crank must finalize to Resolved");
+    };
+    // Recovery dispatch ignores hints: measure the no-hint finalization, restore its two
+    // writable Accounts, then require duplicate hints to produce identical bytes.
+    recovery_crank(&mut env, vec![]).expect("empty-hint Recovery crank must finalize to Resolved");
+    let no_hint = [env.market, loss].map(|key| env.svm.get_account(&key).unwrap());
+    assert_ne!(no_hint[0], market_before);
+    env.svm.set_account(env.market, market_before).unwrap();
+    env.svm.set_account(loss, loss_before).unwrap();
+    let finalize_cu = recovery_crank(
+        &mut env,
+        vec![
+            CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            },
+            CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            },
+        ],
+    )
+    .expect("duplicate Recovery hints are discovery-only and cannot block finalization");
+    assert_eq!(
+        [env.market, loss].map(|key| env.svm.get_account(&key).unwrap()),
+        no_hint,
+        "hinted Recovery finalization is byte-identical to the no-hint crank"
+    );
     assert_cu_within(
         "INV-056 Recovery finalization retry",
         finalize_cu,
@@ -1226,21 +1220,12 @@ fn v16_program_recovery_and_resolved_dispatch_treat_hints_as_discovery_only() {
     );
 
     let duplicate_hint_dest = env.token_account(live_counterparty_owner.pubkey(), 0);
-    env.svm.expire_blockhash();
-    let duplicate_hint_cu = env
-        .send(
+    let resolved_close = |env: &mut V16CuEnv, observations: Vec<CrankObservationHint>| {
+        env.svm.expire_blockhash();
+        env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 0,
-                observations: vec![
-                    CrankObservationHint {
-                        asset_index: 0,
-                        oracle_accounts: 0,
-                    },
-                    CrankObservationHint {
-                        asset_index: 0,
-                        oracle_accounts: 0,
-                    },
-                ],
+                observations,
             },
             vec![
                 AccountMeta::new(live_counterparty_owner.pubkey(), true),
@@ -1253,9 +1238,31 @@ fn v16_program_recovery_and_resolved_dispatch_treat_hints_as_discovery_only() {
             ],
             &[&live_counterparty_owner],
         )
-        .expect("Resolved dispatch must ignore economically irrelevant duplicate hints");
+    };
+    let hint = CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: 0,
+    };
+    // Resolved dispatch accepts at most one backing-discovery hint; a duplicate list is
+    // malformed and rejects atomically before any claimant economics run.
+    let resolved_keys = [
+        env.market,
+        live_counterparty,
+        duplicate_hint_dest,
+        env.vault,
+    ];
+    let resolved_before = resolved_keys.map(|key| env.svm.get_account(&key));
+    let duplicate = resolved_close(&mut env, vec![hint, hint])
+        .expect_err("Resolved dispatch rejects a duplicate hint list");
+    assert!(duplicate.contains("Custom(9)"), "{duplicate}");
+    assert_eq!(
+        resolved_keys.map(|key| env.svm.get_account(&key)),
+        resolved_before
+    );
+    let duplicate_hint_cu = resolved_close(&mut env, vec![hint])
+        .expect("Resolved dispatch must ignore an economically irrelevant backing hint");
     assert_cu_within(
-        "INV-056 Resolved duplicate-hint close",
+        "INV-056 Resolved hinted close",
         duplicate_hint_cu,
         CRANK_CU_LIMIT,
     );

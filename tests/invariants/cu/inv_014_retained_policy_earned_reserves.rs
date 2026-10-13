@@ -601,9 +601,11 @@ fn v16_retained_close_policy_return_preserves_earned_reserves_through_terminal_p
             let mut wrong = payout(&h.world, INSURER, 3, 1, controls.authority_epoch, h.ledger);
             wrong.accounts[0].is_signer = false;
             let failed = h.sign(&[fee_tail.clone(), wrong]);
+            // Resolved insurance payout is permissionless (no signer gate); the wrong
+            // role's own token account is not owned by the configured payee.
             h.deliver(
                 failed,
-                Some((3, PercolatorError::ExpectedSigner)),
+                Some((3, PercolatorError::InvalidTokenAccount)),
                 [1, 1, 0],
             );
             h.check(paid, true, 0, PAID_PREFIX, 0);
@@ -625,6 +627,10 @@ fn v16_retained_close_policy_return_preserves_earned_reserves_through_terminal_p
                 }
                 h.call(&[ix], [1, 1, 0]);
                 paid[actor] += amount;
+                if role == INSURER {
+                    // The Resolved insurance payout consumes the authority epoch.
+                    controls.authority_epoch += 1;
+                }
                 h.check(
                     paid,
                     true,

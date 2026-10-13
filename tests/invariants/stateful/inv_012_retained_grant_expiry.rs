@@ -101,7 +101,6 @@ fn v16_program_retained_grant_admission_binds_delivery_time_expiry() {
                 let old_consumer = retained_capability_trade(&mut env, route, size);
                 let retained = retained_grant(&env, original[LP], EXPIRY, 1);
                 let retry = retained_grant(&env, original[LP], EXPIRY, 2);
-                let repaired = retained_grant(&env, original[LP], REPAIRED_EXPIRY, 3);
                 assert_eq!(
                     retained.message.instructions[1], retry.message.instructions[1],
                     "identical wrapper consent on independent unsent transports"
@@ -126,6 +125,10 @@ fn v16_program_retained_grant_admission_binds_delivery_time_expiry() {
                     // Failed renewals cannot poison the independently retained live grant.
                     land_capability_trade(&mut env, &mut history, old_consumer, &original, size);
                     preserved_fills += 1;
+                    // The preserved fill advances the LP position epoch that grants bind,
+                    // so the expiry-only repair is signed against the post-fill episode.
+                    let repaired = retained_grant(&env, history.replay()[LP], REPAIRED_EXPIRY, 3);
+                    assert_eq!(history.replay()[LP].sequence, original[LP].sequence);
                     deliver_grant(&mut env, &mut history, repaired, REPAIRED_EXPIRY, true);
                 }
                 let current = history.replay();

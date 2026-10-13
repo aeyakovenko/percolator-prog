@@ -64,6 +64,8 @@ struct Evidence {
     successful_aborted_wrappers: usize,
     payments: usize,
     detach_only: usize,
+    topups: usize,
+    expiries: usize,
     custody_closes: usize,
     recreations: usize,
     peak: u64,
@@ -474,6 +476,9 @@ fn run(
         }
         .encode(),
     };
+    // Actual atoms paid per portfolio. A winner paid before its sibling winner's claim is
+    // recorded receives the pre-sibling rate and keeps an open receipt for the remainder.
+    let mut amounts = vec![0u64; portfolios.len()];
     let mut paid = vec![false; portfolios.len()];
     let mut detached = vec![false; portfolios.len()];
     let mut deleted = vec![false; portfolios.len()];
@@ -483,6 +488,7 @@ fn run(
     let mut present = [true; 2];
     let mut prior: [Option<usize>; 2] = [None; 2];
     let check = |env: &V16CuEnv,
+                 amounts: &[u64],
                  paid: &[bool],
                  detached: &[bool],
                  deleted: &[bool],
@@ -492,9 +498,12 @@ fn run(
                  present: [bool; 2]| {
         let market = env.svm.get_account(&env.market).unwrap();
         let (cfg, group) = env.market_state();
+        for i in 0..paid.len() {
+            assert!(amounts[i] <= history.entitlement(i));
+            assert_eq!(paid[i], amounts[i] == history.entitlement(i));
+        }
         let remaining: u64 = (0..paid.len())
-            .filter(|i| !paid[*i])
-            .map(|i| history.entitlement(i))
+            .map(|i| history.entitlement(i) - amounts[i])
             .sum();
         assert_eq!(group.mode, MarketModeV16::Resolved);
         assert_eq!(cfg.terminal_slab_scan_progress, 0);
@@ -525,11 +534,7 @@ fn run(
         assert_reservation_encumbrance_census("shared custody terminal ledger", &group, &ps)
             .unwrap();
         for owner in 0..2 {
-            let expected_paid: u64 = (owner..paid.len())
-                .step_by(2)
-                .filter(|i| paid[*i])
-                .map(|i| history.entitlement(i))
-                .sum();
+            let expected_paid: u64 = (owner..paid.len()).step_by(2).map(|i| amounts[i]).sum();
             assert_eq!(archived[owner] + custody[owner], expected_paid);
             if present[owner] {
                 token_frame(
@@ -572,7 +577,7 @@ fn run(
                 absent(env, *portfolio);
             } else {
                 assert_eq!(resolved_portfolio_is_terminal(env, *portfolio), paid[i]);
-                if detached[i] && !paid[i] {
+                if detached[i] && amounts[i] == 0 {
                     let account = env.portfolio_state(*portfolio);
                     assert_eq!(account.capital.get(), history.capital[i].into());
                     assert_eq!(
@@ -606,7 +611,7 @@ fn run(
         }
     };
     check(
-        &env, &paid, &detached, &deleted, archived, custody, closes, present,
+        &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
     );
     step(
         &mut env,
@@ -619,7 +624,7 @@ fn run(
         evidence,
     );
     // One fresh leg per portfolio: the first pass detaches every leg. Earlier
-    // winners then receive their exact claims in a second, finite pass.
+    // winners then receive their claims in a second, finite pass (topped up below).
     let mut schedule = history.order.clone();
     schedule.extend(
         history
@@ -631,6 +636,26 @@ fn run(
     );
     for &i in &schedule {
         let owner = i % 2;
+        if owner == history.winner && detached.iter().filter(|d| !**d).count() <= 1 {
+            // The last zero-conversion winner stays locked while source backing is fresh.
+            let mut probe = Vec::new();
+            if !present[owner] {
+                probe.push(creations[owner].clone());
+            }
+            probe.push(payouts[i].clone());
+            if simulate_error(&mut env, &probe) == Some(PercolatorError::EngineLockActive as u32) {
+                expire_source_backing(
+                    &mut env,
+                    owner_keys[owner],
+                    portfolios[i],
+                    &tracked,
+                    evidence,
+                );
+                check(
+                    &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
+                );
+            }
+        }
         let mut prefix = Vec::new();
         let needs_creation = !present[owner];
         if needs_creation {
@@ -649,7 +674,7 @@ fn run(
                 evidence,
             );
             check(
-                &env, &paid, &detached, &deleted, archived, custody, closes, present,
+                &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
             );
         }
         prefix.push(payouts[i].clone());
@@ -666,7 +691,7 @@ fn run(
             evidence,
         );
         check(
-            &env, &paid, &detached, &deleted, archived, custody, closes, present,
+            &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
         );
         let changed = [env.market, portfolios[i], env.vault, destinations[owner]];
         step(
@@ -682,17 +707,25 @@ fn run(
         evidence.recreations += usize::from(needs_creation);
         detached[i] = true;
         let pays = owner != history.winner || detached.iter().all(|d| *d);
+        let delta = env.token_amount(destinations[owner]) - custody[owner];
         if pays {
+            // Losers exit exactly; a winner may be paid below face until its sibling closes.
+            assert!(delta > 0);
+            if owner != history.winner {
+                assert_eq!(delta, history.entitlement(i));
+            }
             evidence.payments += 1;
-            paid[i] = true;
-            custody[owner] += history.entitlement(i);
+            amounts[i] += delta;
+            paid[i] = amounts[i] == history.entitlement(i);
+            custody[owner] += delta;
             prior[owner] = Some(i);
         } else {
+            assert_eq!(delta, 0);
             evidence.detach_only += 1;
         }
         present[owner] = true;
         check(
-            &env, &paid, &detached, &deleted, archived, custody, closes, present,
+            &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
         );
         if recycle && pays {
             dispose(
@@ -710,7 +743,84 @@ fn run(
                 evidence,
             );
             check(
-                &env, &paid, &detached, &deleted, archived, custody, closes, present,
+                &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
+            );
+        }
+    }
+    // After every sibling claim is recorded, a plain CloseResolved pays each retained
+    // receipt's remainder to its owner's (possibly recreated) custody.
+    // A retained remainder can also wait on fresh source backing rounding.
+    let pending: Vec<usize> = (0..portfolios.len())
+        .filter(|i| !paid[*i] && amounts[*i] > 0)
+        .collect();
+    let ledger = env.market_state().1.resolved_payout_ledger;
+    if !pending.is_empty() && ledger.current_payout_rate_num < ledger.current_payout_rate_den {
+        let i = pending[0];
+        expire_source_backing(
+            &mut env,
+            owner_keys[i % 2],
+            portfolios[i],
+            &tracked,
+            evidence,
+        );
+        check(
+            &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
+        );
+    }
+    for i in pending {
+        let owner = i % 2;
+        assert_eq!(owner, history.winner);
+        let needs_creation = !present[owner];
+        let mut prefix = Vec::new();
+        if needs_creation {
+            prefix.push(creations[owner].clone());
+        }
+        let mut topup = payouts[i].clone();
+        topup.data = ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        }
+        .encode();
+        prefix.push(topup);
+        let changed = [env.market, portfolios[i], env.vault, destinations[owner]];
+        step(
+            &mut env,
+            &prefix,
+            &[],
+            &tracked,
+            &changed,
+            if needs_creation { rent } else { 0 },
+            None,
+            evidence,
+        );
+        evidence.recreations += usize::from(needs_creation);
+        evidence.topups += 1;
+        let delta = env.token_amount(destinations[owner]) - custody[owner];
+        assert_eq!(amounts[i] + delta, history.entitlement(i));
+        amounts[i] += delta;
+        paid[i] = true;
+        custody[owner] += delta;
+        prior[owner] = Some(i);
+        present[owner] = true;
+        check(
+            &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
+        );
+        if recycle {
+            dispose(
+                &mut env,
+                owner,
+                native,
+                &owners,
+                destinations,
+                bank_keys,
+                &tracked,
+                &mut custody,
+                &mut archived,
+                &mut closes,
+                &mut present,
+                evidence,
+            );
+            check(
+                &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
             );
         }
     }
@@ -731,7 +841,7 @@ fn run(
                 evidence,
             );
             check(
-                &env, &paid, &detached, &deleted, archived, custody, closes, present,
+                &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
             );
         }
     }
@@ -750,7 +860,7 @@ fn run(
             evidence,
         );
         check(
-            &env, &paid, &detached, &deleted, archived, custody, closes, present,
+            &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
         );
     }
     let mut deletion_order = history.order.clone();
@@ -785,7 +895,7 @@ fn run(
             evidence,
         );
         check(
-            &env, &paid, &detached, &deleted, archived, custody, closes, present,
+            &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
         );
         let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
         let portfolio_rent = env.svm.get_account(&portfolios[i]).unwrap().lamports;
@@ -837,7 +947,7 @@ fn run(
                 market_before.lamports + portfolio_rent
             );
             check(
-                &env, &paid, &detached, &deleted, archived, custody, closes, present,
+                &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
             );
         }
         assert_eq!(env.svm.get_account(&admin.pubkey()), Some(expected_admin));
@@ -848,6 +958,67 @@ fn run(
     );
     assert_cu_within("shared terminal history peak", evidence.peak, LIMIT);
     archived
+}
+
+fn simulate_error(env: &mut V16CuEnv, ixs: &[Instruction]) -> Option<u32> {
+    let mut instructions = vec![
+        heap_ix(),
+        ComputeBudgetInstruction::set_compute_unit_limit(LIMIT as u32),
+    ];
+    instructions.extend_from_slice(ixs);
+    let tx = Transaction::new_signed_with_payer(
+        &instructions,
+        Some(&env.payer.pubkey()),
+        &[&env.payer],
+        env.svm.latest_blockhash(),
+    );
+    match env.svm.simulate_transaction(tx.into()) {
+        Ok(_) => None,
+        Err(failed) => match failed.err {
+            TransactionError::InstructionError(_, InstructionError::Custom(code)) => Some(code),
+            other => panic!("unexpected simulation failure {other:?}"),
+        },
+    }
+}
+
+// A resolved claim waits while fresh source backing could still change its rate. Once the
+// bucket lapses, an asset-hinted public crank expires it without moving custody.
+fn expire_source_backing(
+    env: &mut V16CuEnv,
+    owner: Pubkey,
+    portfolio: Pubkey,
+    tracked: &[Pubkey],
+    evidence: &mut Evidence,
+) {
+    let expiry = env.market_state().1.source_backing_buckets[..2]
+        .iter()
+        .filter(|bucket| bucket.status == BackingBucketStatusV16::Fresh)
+        .map(|bucket| bucket.expiry_slot)
+        .max()
+        .expect("a waiting resolved claim has fresh source backing");
+    env.svm.warp_to_slot(expiry);
+    let hinted = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(owner, false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        data: ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        }
+        .encode(),
+    };
+    let market = env.market;
+    step(env, &[hinted], &[], tracked, &[market], 0, None, evidence);
+    evidence.expiries += 1;
+    assert!(env.market_state().1.source_backing_buckets[..2]
+        .iter()
+        .all(|bucket| bucket.status != BackingBucketStatusV16::Fresh));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -936,11 +1107,15 @@ fn v16_program_generated_shared_custody_recreation_preserves_terminal_owner_valu
     assert_eq!(winning_sides, 3);
     assert_eq!(evidence.payments, 192);
     assert_eq!(evidence.detach_only, 64);
-    assert_eq!(evidence.recreations, 64);
-    assert_eq!(evidence.custody_closes, 128);
+    // Winners paid before their sibling's claim is recorded keep a receipt that a later
+    // plain CloseResolved tops up; recycled custody is recreated and disposed again for it.
+    assert_eq!(evidence.topups, 64);
+    assert_eq!(evidence.expiries, 24);
+    assert_eq!(evidence.recreations, 96);
+    assert_eq!(evidence.custody_closes, 160);
     assert_eq!(evidence.rollbacks, 608);
     assert_eq!(evidence.successful_aborted_wrappers, 480);
-    println!("row418 shared custody: worlds={worlds}, payments={}, detach_only={}, custody_closes={}, recreations={}, rollbacks={}, aborted_wrapper_successes={}, commits={}, peak_CU={}, limit={LIMIT}",
-        evidence.payments, evidence.detach_only, evidence.custody_closes, evidence.recreations, evidence.rollbacks,
+    println!("row418 shared custody: worlds={worlds}, payments={}, detach_only={}, topups={}, expiries={}, custody_closes={}, recreations={}, rollbacks={}, aborted_wrapper_successes={}, commits={}, peak_CU={}, limit={LIMIT}",
+        evidence.payments, evidence.detach_only, evidence.topups, evidence.expiries, evidence.custody_closes, evidence.recreations, evidence.rollbacks,
         evidence.successful_aborted_wrappers, evidence.commits, evidence.peak);
 }

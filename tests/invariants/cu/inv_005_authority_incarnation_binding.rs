@@ -4888,7 +4888,9 @@ fn v16_program_funded_insurance_handoff_preserves_incumbent_oracle_and_operator(
             epoch,
             next_control_sequence(observation),
         ),
-        withdrawal(&env, incoming.pubkey(), wallets[1]),
+        // Aim at the operator's wallet so the incoming insurer is rejected by the
+        // authority check rather than the payee-owned destination check.
+        withdrawal(&env, incoming.pubkey(), wallets[2]),
     ] {
         let meta = land(
             &mut env,
@@ -4905,6 +4907,8 @@ fn v16_program_funded_insurance_handoff_preserves_incumbent_oracle_and_operator(
     let meta = land(&mut env, &[ix], &[&operator], &changed, None);
     peak_cu = peak_cu.max(meta.compute_units_consumed);
     assert_eq!(profile(&env), current);
+    // The successful operator debit consumes the asset's authority epoch.
+    expected_sequences.authority_epoch += 1;
     assert_eq!(env.control_sequences(0), expected_sequences);
     assert_stock(&env, INSURANCE);
     eprintln!("INV-005 funded insurance role split: one history, three exact rejections, one atomic handoff/observation, one operator payout, peak {peak_cu} CU");

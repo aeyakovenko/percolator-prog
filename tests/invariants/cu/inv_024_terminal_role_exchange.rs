@@ -208,7 +208,7 @@ fn v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_o
                 if transferring {
                     let handoff = rotate(&world, role, ORIGINAL[role], actor, epoch);
                     let payment = reserve(&world, role, actor, amount, epoch + 1, ledgers[index]);
-                    let old_role = reserve(
+                    let mut old_role = reserve(
                         &world,
                         role,
                         ORIGINAL[role],
@@ -216,6 +216,12 @@ fn v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_o
                         epoch + 1,
                         ledgers[2 * role],
                     );
+                    if role == INSURER {
+                        // Resolved insurance pays only a token account owned by the configured
+                        // authority (else InvalidTokenAccount); aim there so the role-authority
+                        // check itself rejects the former holder.
+                        old_role.accounts[2].pubkey = world.tokens[actor];
+                    }
                     execute(
                         &mut world,
                         &[handoff.clone(), payment.clone(), old_role],
@@ -226,12 +232,12 @@ fn v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_o
                     execute(&mut world, &[handoff, payment], None);
                     expected.holders[role] = actor;
                     expected.rotations += 1;
-                    epoch += 1;
                 } else {
                     let ix = reserve(&world, role, actor, amount, epoch, ledgers[index]);
                     execute(&mut world, &[ix], None);
                 }
                 expected.pay(role, actor, amount);
+                epoch = original_sequences.authority_epoch + expected.rotations;
                 withdrawn[index] += amount;
                 observed[index] = Some(expected.remaining[role]);
                 check(&world, &expected, withdrawn, observed);
@@ -242,7 +248,15 @@ fn v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_o
             for role in [FEES, INSURER] {
                 let peer = 1 - role;
                 let prefix = reserve(&world, peer, NEXT[peer], 1, epoch, ledgers[2 * peer + 1]);
-                let wrong_record = reserve(&world, role, NEXT[role], 1, epoch, ledgers[2 * role]);
+                // A successful insurance prefix consumes an epoch before the ledger check.
+                let wrong_record = reserve(
+                    &world,
+                    role,
+                    NEXT[role],
+                    1,
+                    epoch + u64::from(peer == INSURER),
+                    ledgers[2 * role],
+                );
                 execute(
                     &mut world,
                     &[prefix.clone(), wrong_record],
@@ -251,6 +265,7 @@ fn v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_o
                 check(&world, &expected, withdrawn, observed);
                 execute(&mut world, &[prefix], None);
                 expected.pay(peer, NEXT[peer], 1);
+                epoch = original_sequences.authority_epoch + expected.rotations;
                 withdrawn[2 * peer + 1] += 1;
                 observed[2 * peer + 1] = Some(expected.remaining[peer]);
                 check(&world, &expected, withdrawn, observed);
@@ -282,6 +297,7 @@ fn v16_program_terminal_role_exchange_preserves_reserves_across_payout_handoff_o
                 if role == FEES {
                     expected.pay(PRINCIPAL, NEXT[role], expected.principal);
                 }
+                epoch = original_sequences.authority_epoch + expected.rotations;
                 check(&world, &expected, withdrawn, observed);
             }
             assert_eq!(

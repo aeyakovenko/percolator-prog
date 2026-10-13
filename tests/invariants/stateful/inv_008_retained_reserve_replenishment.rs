@@ -1,6 +1,6 @@
 //! INV-008/014/024/064/080: a paid reserve request stays bound across replenishment
-//! and operator succession. Authority ABA supplies the stale-request boundary;
-//! standalone withdrawal consumption without an authority update remains unproved.
+//! and operator succession. The paid withdrawal itself bumps the asset authority
+//! epoch; the authority ABA must not restore the stale-request boundary.
 //! Funded insurer succession also composes with rolled-back payout prefixes when
 //! the unchanged operator shares a peer asset or the provider's identity.
 
@@ -200,6 +200,8 @@ impl Books {
         self.budgets[long] -= from_long;
         self.budgets[long + 1] -= amount - from_long;
         self.paid[owner] += amount;
+        // Every successful insurance withdrawal consumes the asset's authority epoch.
+        self.sequences[asset].authority_epoch += 1;
     }
 
     fn credit(&mut self, domain: usize, amount: u128) {
@@ -597,7 +599,8 @@ fn v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_suc
                     data: ProgInstruction::UpdateAssetAuthority {
                         asset_index: ASSET as u16,
                         market_id: books.market_ids[ASSET],
-                        authority_epoch: books.sequences[ASSET].authority_epoch,
+                        // Bound after the payout prefix consumes one epoch.
+                        authority_epoch: books.sequences[ASSET].authority_epoch + 1,
                         kind: processor::ASSET_AUTH_INSURANCE,
                         new_pubkey: env.actors[SUCCESSOR].signer.pubkey().to_bytes(),
                     }
@@ -614,7 +617,7 @@ fn v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_suc
                     partial.message.instructions[2],
                     stale.message.instructions[2]
                 );
-                for tx in [&partial, &peer_tx, &handoff] {
+                for tx in [&partial, &peer_tx] {
                     simulate(&mut env, tx, &mut evidence);
                 }
 
@@ -668,6 +671,7 @@ fn v16_program_retained_insurance_payout_prefix_survives_rolled_back_insurer_suc
                 assert_eq!(&books.budgets[2..4], &[137, 175]);
 
                 assert_eq!(bincode::serialize(&handoff).unwrap(), retained_wire[3]);
+                simulate(&mut env, &handoff, &mut evidence);
                 books.sequences[ASSET].authority_epoch += 1;
                 books.profiles[ASSET].insurance_authority =
                     env.actors[SUCCESSOR].signer.pubkey().to_bytes();

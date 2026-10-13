@@ -137,100 +137,104 @@ fn v16_program_stale_insurance_retry_restores_fee_stock_and_exhausted_portfolio(
             .map(|key| (key, env.svm.get_account(&key)))
             .collect();
 
-        let check =
-            |env: &V16Svm, charged: bool, rotated: bool, paid: [u128; PRIMARY_ACTOR_COUNT]| {
-                let charged_fee = if charged { fee } else { 0 };
-                let owner_capital = capital - charged_fee - paid[SUCCESSOR];
-                let mut budgets = [0; ASSET_COUNT * 2];
-                budgets[0] = ORIGINAL + charged_fee / 2;
-                budgets[1] = charged_fee - charged_fee / 2;
-                let long_paid = paid[OPERATOR].min(budgets[0]);
-                budgets[0] -= long_paid;
-                budgets[1] -= paid[OPERATOR] - long_paid;
-                budgets[3] = PEER_STOCK - paid[PEER];
-                let insurance = budgets.iter().sum::<u128>();
-                let vault = owner_capital + insurance;
-                let group = env.primary_market_state().1;
-                assert_eq!(group.mode, percolator::MarketModeV16::Live);
-                assert_eq!(
-                    (group.c_tot, group.insurance, group.vault),
-                    (owner_capital, insurance, vault)
-                );
-                assert_eq!(group.insurance_domain_budget, budgets);
-                assert_eq!(group.insurance_domain_budget_remaining_total, insurance);
-                assert_eq!(group.insurance_domain_spent, [0; ASSET_COUNT * 2]);
-                assert_eq!(
-                    group.materialized_portfolio_count,
-                    PRIMARY_ACTOR_COUNT as u64 - u64::from(charged && deleted)
-                );
-                assert_eq!(group.pnl_pos_tot, 0);
-                assert_eq!(group.source_claim_bound_total_num, 0);
-                assert_eq!(group.source_insurance_credit_reserved_total_atoms, 0);
-                for asset in 0..ASSET_COUNT {
-                    let mut expected = sequences[asset];
-                    let mut profile = profiles[asset];
-                    if asset == 0 && rotated {
-                        expected.authority_epoch += 1;
-                        profile.insurance_authority =
-                            env.actors[SUCCESSOR].signer.pubkey().to_bytes();
-                    }
-                    assert_eq!(env.primary_control_sequences(asset), expected);
-                    assert_eq!(env.primary_profile(asset), profile);
+        let check = |env: &V16Svm,
+                     charged: bool,
+                     rotated: bool,
+                     paid: [u128; PRIMARY_ACTOR_COUNT],
+                     withdrawals: [u64; ASSET_COUNT]| {
+            let charged_fee = if charged { fee } else { 0 };
+            let owner_capital = capital - charged_fee - paid[SUCCESSOR];
+            let mut budgets = [0; ASSET_COUNT * 2];
+            budgets[0] = ORIGINAL + charged_fee / 2;
+            budgets[1] = charged_fee - charged_fee / 2;
+            let long_paid = paid[OPERATOR].min(budgets[0]);
+            budgets[0] -= long_paid;
+            budgets[1] -= paid[OPERATOR] - long_paid;
+            budgets[3] = PEER_STOCK - paid[PEER];
+            let insurance = budgets.iter().sum::<u128>();
+            let vault = owner_capital + insurance;
+            let group = env.primary_market_state().1;
+            assert_eq!(group.mode, percolator::MarketModeV16::Live);
+            assert_eq!(
+                (group.c_tot, group.insurance, group.vault),
+                (owner_capital, insurance, vault)
+            );
+            assert_eq!(group.insurance_domain_budget, budgets);
+            assert_eq!(group.insurance_domain_budget_remaining_total, insurance);
+            assert_eq!(group.insurance_domain_spent, [0; ASSET_COUNT * 2]);
+            assert_eq!(
+                group.materialized_portfolio_count,
+                PRIMARY_ACTOR_COUNT as u64 - u64::from(charged && deleted)
+            );
+            assert_eq!(group.pnl_pos_tot, 0);
+            assert_eq!(group.source_claim_bound_total_num, 0);
+            assert_eq!(group.source_insurance_credit_reserved_total_atoms, 0);
+            for asset in 0..ASSET_COUNT {
+                let mut expected = sequences[asset];
+                let mut profile = profiles[asset];
+                // Every successful insurance withdrawal consumes one authority epoch.
+                expected.authority_epoch += withdrawals[asset];
+                if asset == 0 && rotated {
+                    expected.authority_epoch += 1;
+                    profile.insurance_authority = env.actors[SUCCESSOR].signer.pubkey().to_bytes();
                 }
-                if charged && deleted {
-                    assert_eq!(env.svm.get_account(&source).map_or(0, |a| a.lamports), 0);
-                } else {
-                    let p = env.primary_portfolio(SUCCESSOR);
-                    assert_eq!(p.capital.get(), owner_capital);
-                    assert_eq!(
-                        p.last_fee_slot.get(),
-                        if charged { due_slot } else { fee_slot }
-                    );
-                    assert_eq!(p.pnl.get(), 0);
-                    assert_eq!(
-                        env.svm.get_account(&source).unwrap().lamports,
+                assert_eq!(env.primary_control_sequences(asset), expected);
+                assert_eq!(env.primary_profile(asset), profile);
+            }
+            if charged && deleted {
+                assert_eq!(env.svm.get_account(&source).map_or(0, |a| a.lamports), 0);
+            } else {
+                let p = env.primary_portfolio(SUCCESSOR);
+                assert_eq!(p.capital.get(), owner_capital);
+                assert_eq!(
+                    p.last_fee_slot.get(),
+                    if charged { due_slot } else { fee_slot }
+                );
+                assert_eq!(p.pnl.get(), 0);
+                assert_eq!(
+                    env.svm.get_account(&source).unwrap().lamports,
+                    portfolio_before.lamports
+                );
+            }
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap().lamports,
+                market_lamports
+                    + if charged && deleted {
                         portfolio_before.lamports
-                    );
-                }
-                assert_eq!(
-                    env.svm.get_account(&env.market).unwrap().lamports,
-                    market_lamports
-                        + if charged && deleted {
-                            portfolio_before.lamports
-                        } else {
-                            0
-                        }
-                );
-                for (key, original) in token_keys.iter().zip(&tokens) {
-                    let mut expected = original.clone();
-                    let mut token = TokenAccount::unpack(&expected.data).unwrap();
-                    if *key == env.vault {
-                        token.amount = vault.try_into().unwrap();
-                    } else if let Some(actor) =
-                        env.actors.iter().position(|a| a.destination_token == *key)
-                    {
-                        token.amount += u64::try_from(paid[actor]).unwrap();
+                    } else {
+                        0
                     }
-                    TokenAccount::pack(token, &mut expected.data).unwrap();
-                    assert_eq!(env.svm.get_account(key), Some(expected));
+            );
+            for (key, original) in token_keys.iter().zip(&tokens) {
+                let mut expected = original.clone();
+                let mut token = TokenAccount::unpack(&expected.data).unwrap();
+                if *key == env.vault {
+                    token.amount = vault.try_into().unwrap();
+                } else if let Some(actor) =
+                    env.actors.iter().position(|a| a.destination_token == *key)
+                {
+                    token.amount += u64::try_from(paid[actor]).unwrap();
                 }
-                for (key, account) in &bystanders {
-                    assert_eq!(
-                        env.svm.get_account(key),
-                        *account,
-                        "unrelated economic account {key}"
-                    );
-                }
-                assert_eq!(env.svm.get_account(&env.mint), Some(mint.clone()));
-                assert_eq!(env.token_supply_observed(), env.initial_token_supply);
-                assert_eq!(u128::from(env.mint_supply()), env.initial_token_supply);
+                TokenAccount::pack(token, &mut expected.data).unwrap();
+                assert_eq!(env.svm.get_account(key), Some(expected));
+            }
+            for (key, account) in &bystanders {
                 assert_eq!(
-                    vault + paid.iter().sum::<u128>(),
-                    capital + ORIGINAL + PEER_STOCK
+                    env.svm.get_account(key),
+                    *account,
+                    "unrelated economic account {key}"
                 );
-                assert_public_stock_census("insurance fee reclassification", env).unwrap();
-                assert_public_encumbrance_census("insurance fee reclassification", env).unwrap();
-            };
+            }
+            assert_eq!(env.svm.get_account(&env.mint), Some(mint.clone()));
+            assert_eq!(env.token_supply_observed(), env.initial_token_supply);
+            assert_eq!(u128::from(env.mint_supply()), env.initial_token_supply);
+            assert_eq!(
+                vault + paid.iter().sum::<u128>(),
+                capital + ORIGINAL + PEER_STOCK
+            );
+            assert_public_stock_census("insurance fee reclassification", env).unwrap();
+            assert_public_encumbrance_census("insurance fee reclassification", env).unwrap();
+        };
 
         let stale_ix = withdraw(&env, 0, OPERATOR, ORIGINAL);
         let retained = sign(&env, &[stale_ix.clone()], 101);
@@ -239,11 +243,13 @@ fn v16_program_stale_insurance_retry_restores_fee_stock_and_exhausted_portfolio(
         let peer_wire = bincode::serialize(&peer).unwrap();
         simulate(&mut env, &retained, &mut evidence);
         let mut paid = [0; PRIMARY_ACTOR_COUNT];
-        check(&env, false, false, paid);
+        let mut withdrawals = [0; ASSET_COUNT];
+        check(&env, false, false, paid, withdrawals);
         let first = sign(&env, &[stale_ix.clone()], 103);
         deliver(&mut env, first, None, 1, &mut evidence);
         paid[OPERATOR] = ORIGINAL;
-        check(&env, false, false, paid);
+        withdrawals[0] += 1;
+        check(&env, false, false, paid, withdrawals);
         env.update_asset_authority_between_actors(
             0,
             processor::ASSET_AUTH_INSURANCE,
@@ -251,7 +257,7 @@ fn v16_program_stale_insurance_retry_restores_fee_stock_and_exhausted_portfolio(
             SUCCESSOR,
         )
         .unwrap();
-        check(&env, false, true, paid);
+        check(&env, false, true, paid, withdrawals);
         env.warp_to_slot(due_slot);
 
         // Only authenticated elapsed time supplies new insurance: no custody
@@ -276,30 +282,33 @@ fn v16_program_stale_insurance_retry_restores_fee_stock_and_exhausted_portfolio(
         ] {
             let tx = sign(&env, &ixs, nonce);
             deliver(&mut env, tx, Some(index), transfers, &mut evidence);
-            check(&env, false, true, paid);
+            check(&env, false, true, paid, withdrawals);
         }
         assert_eq!(bincode::serialize(&fresh).unwrap(), fresh_wire);
         deliver(&mut env, fresh, None, 1, &mut evidence);
         paid[OPERATOR] += ORIGINAL;
-        check(&env, true, true, paid);
+        withdrawals[0] += 1;
+        check(&env, true, true, paid, withdrawals);
         assert_eq!(bincode::serialize(&retained).unwrap(), retained_wire);
         deliver(&mut env, retained, Some(2), 0, &mut evidence);
-        check(&env, true, true, paid);
+        check(&env, true, true, paid, withdrawals);
 
         let remaining = fee - ORIGINAL;
         let finish = sign(&env, &[withdraw(&env, 0, OPERATOR, remaining)], 107);
         deliver(&mut env, finish, None, 1, &mut evidence);
         paid[OPERATOR] += remaining;
-        check(&env, true, true, paid);
+        withdrawals[0] += 1;
+        check(&env, true, true, paid, withdrawals);
         assert_eq!(bincode::serialize(&peer).unwrap(), peer_wire);
         deliver(&mut env, peer, None, 1, &mut evidence);
         paid[PEER] = PEER_STOCK;
-        check(&env, true, true, paid);
+        withdrawals[1] += 1;
+        check(&env, true, true, paid, withdrawals);
         if !deleted {
             env.withdraw_primary(SUCCESSOR, capital - fee).unwrap();
             paid[SUCCESSOR] = capital - fee;
         }
-        check(&env, true, true, paid);
+        check(&env, true, true, paid, withdrawals);
         assert_eq!(env.token_amount(env.vault), 0);
     }
     assert_eq!(
