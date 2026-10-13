@@ -80,10 +80,16 @@ impl Model {
         };
         let bucket = group.source_backing_buckets[self.domain];
         assert_eq!(group.config.h_max, DEBT_BACKING_HORIZON);
+        // Loser-capital backing created after resolution is anchored at the
+        // resolved slot, not the later settlement slot (#219).
+        let deadline = group.resolved_slot + DEBT_BACKING_HORIZON;
+        assert_eq!(resolved_backing_deadline(&group), deadline);
+        assert!(self.settlement_slot > group.resolved_slot);
+        assert!(EXPIRY < deadline);
         assert_eq!(
             bucket.expiry_slot,
             if self.basis[1] == 0 {
-                self.settlement_slot + DEBT_BACKING_HORIZON
+                deadline
             } else {
                 EXPIRY
             }

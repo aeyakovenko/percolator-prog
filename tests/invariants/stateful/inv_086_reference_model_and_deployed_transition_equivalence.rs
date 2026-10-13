@@ -160,7 +160,7 @@ use crate::support::fuzz_model::{
     verify_close_to_partial_receipt_composition, verify_constructible_crank_observation_subset,
     verify_expired_backing_terminal_cleanup_compositions,
     verify_insurance_liquidation_to_partial_receipt_compositions,
-    verify_liquidation_to_partial_receipt_compositions,
+    verify_liquidation_to_partial_receipt_compositions, LiquidationToPartialReceiptEvidence,
 };
 
 #[test]
@@ -313,6 +313,49 @@ fn permissionless_liquidation_composes_into_partial_receipt_across_all_trade_rou
     );
 }
 
+/// Wrapper #451 controls shared by the insurance-bearing terminal worlds: at resolution the
+/// provider may take only Fresh backing above the resolved reserve, the reserve rolls back
+/// exactly on a one-atom overdraw, CloseSlab waits for the open receipt, and the reserve
+/// that lapses is exactly the junior need, so the receipt finishes at full face.
+fn assert_resolved_reserve_controls(evidence: &LiquidationToPartialReceiptEvidence, landing: u64) {
+    let terminal = &evidence.terminal;
+    let unpaid = terminal.partial_receipt_face - terminal.partial_receipt_paid;
+    assert!(
+        terminal.resolved_junior_need >= unpaid
+            && terminal.resolved_surplus_withdrawn
+                == terminal
+                    .pre_expiry_fresh_backing
+                    .saturating_sub(terminal.resolved_junior_need)
+            && terminal.pre_expiry_fresh_backing - terminal.resolved_surplus_withdrawn
+                == terminal.resolved_junior_need,
+        "the provider must keep exactly the junior reserve and withdraw only surplus: {evidence:?}"
+    );
+    assert_eq!(
+        (
+            terminal.resolved_junior_need,
+            terminal.pre_expiry_fresh_backing,
+            terminal.resolved_surplus_withdrawn,
+            terminal.surplus_overdraw_rejections,
+            terminal.pre_expiry_slab_close_rejected,
+            terminal.payout_campaign_start_slot,
+        ),
+        (1_751, 1_751, 0, 2, true, landing),
+        "both Fresh buckets are fully pledged; overdraws and early CloseSlab roll back: {evidence:?}"
+    );
+    assert!(
+        terminal.terminal_receipt_present
+            && terminal.terminal_receipt_finalized
+            && terminal.terminal_receipt_paid == terminal.partial_receipt_face
+            && terminal.post_receipt_payout == unpaid,
+        "the lapsed reserve must pay the claimant its full entitlement: {evidence:?}"
+    );
+    assert!(
+        terminal.terminal_landing_slot > landing
+            && terminal.terminal_landing_slot == 111,
+        "wind-down waits for the last pledged bucket's #224-bounded lapse: {evidence:?}"
+    );
+}
+
 #[test]
 fn insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_payout() {
     let discoveries = verify_insurance_liquidation_to_partial_receipt_compositions()
@@ -353,6 +396,7 @@ fn insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_pay
                 Some(12),
                 "the pre-expiry control must land one slot before backing expiry"
             );
+            assert_resolved_reserve_controls(evidence, 12);
             assert_eq!(
                 (
                     evidence.pre_liquidation_effective_oi,
@@ -377,9 +421,11 @@ fn insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_pay
                     0,
                     1_125,
                     198,
-                    176,
-                    751,
-                    751,
+                    // #451: the pledged reserve lapses into the open receipt, which is paid
+                    // to full face; nothing is left in custody for the provider or a sweep.
+                    1_125 - 198,
+                    0,
+                    0,
                     5,
                 ),
                 "the insurance-bearing close must reach its exact partial receipt, later payout, and terminal custody: {evidence:?}"
@@ -399,8 +445,8 @@ fn insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_pay
                     evidence.terminal.slab_custody_burned,
                     evidence.terminal.slab_closed,
                 ),
-                (5, 751, 0, 0, 1, 0, true),
-                "the cursor must park before live backing, roll back while blocked, then close after provider withdrawal: {evidence:?}"
+                (5, 0, 0, 0, 0, 0, true),
+                "with the reserve consumed by the receipt, wind-down closes empty custody in one step: {evidence:?}"
             );
             assert!(
                 evidence.terminal.slab_close_compute_units != 0
@@ -429,6 +475,11 @@ fn insurance_spend_composes_through_liquidation_partial_receipt_and_terminal_pay
                 evidence.terminal.slab_progress_steps as u128,
                 evidence.terminal.slab_custody_burned,
                 u128::from(evidence.terminal.slab_closed),
+                evidence.terminal.resolved_junior_need,
+                evidence.terminal.pre_expiry_fresh_backing,
+                evidence.terminal.resolved_surplus_withdrawn,
+                evidence.terminal.surplus_overdraw_rejections as u128,
+                u128::from(evidence.terminal.terminal_landing_slot),
             ]
         })
         .collect::<Vec<_>>();
@@ -476,8 +527,19 @@ fn expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup
                     evidence.terminal.final_engine_vault,
                     evidence.terminal.final_spl_vault,
                 ),
-                (123, 123, 2_600, 751, 751),
+                (123, 123, 2_600, 0, 0),
                 "the public liquidation prefix must retain the exact terminal accounting world: {evidence:?}"
+            );
+            let landing = evidence.terminal.terminal_cleanup_slot.expect("cleanup slot");
+            assert_resolved_reserve_controls(evidence, landing);
+            assert_eq!(
+                (
+                    evidence.terminal.partial_receipt_face,
+                    evidence.terminal.partial_receipt_paid,
+                    evidence.terminal.post_receipt_payout,
+                ),
+                (1_125, 198, 1_125 - 198),
+                "exact or late reserve expiry must pay the open receipt its full face: {evidence:?}"
             );
             assert_eq!(
                 (
@@ -489,8 +551,11 @@ fn expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup
                     evidence.terminal.slab_custody_burned,
                     evidence.terminal.slab_closed,
                 ),
-                (5, 1, 750, 123, 2, 627, true),
-                "expiry, insurance restoration, and terminal surplus must partition custody exactly: {evidence:?}"
+                // #451: the 750 expired atoms and the 1 fresh atom were the open receipt's
+                // reserve. They now reach the claimant, so no claim-free residual remains to
+                // recredit spent insurance or to burn as terminal surplus.
+                (5, 0, 0, 0, 0, 0, true),
+                "expiry must route the reserve to the receipt and leave no custody to partition: {evidence:?}"
             );
             assert!(
                 evidence.liquidation_compute_units <= 340_000
@@ -520,6 +585,11 @@ fn expired_backing_composes_through_insurance_recredit_and_terminal_slab_cleanup
                 evidence.terminal.slab_progress_steps as u128,
                 evidence.terminal.slab_custody_burned,
                 u128::from(evidence.terminal.slab_closed),
+                evidence.terminal.resolved_junior_need,
+                evidence.terminal.pre_expiry_fresh_backing,
+                evidence.terminal.resolved_surplus_withdrawn,
+                evidence.terminal.surplus_overdraw_rejections as u128,
+                u128::from(evidence.terminal.terminal_landing_slot),
             ]
         })
         .collect::<Vec<_>>();

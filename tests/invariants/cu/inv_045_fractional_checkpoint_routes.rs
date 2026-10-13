@@ -287,8 +287,8 @@ fn v16_program_fractional_checkpoint_retries_preserve_four_route_owner_residues(
                         world.max_cu = world.max_cu.max(meta.compute_units_consumed);
                         ledger.settle(0);
                         ledger.settle(1);
-                        ledger.q[0][0] -= 3 * SCALE / 8;
-                        ledger.q[1][0] += 3 * SCALE / 8;
+                        ledger.resize(0, 0, -3 * SCALE / 8);
+                        ledger.resize(1, 0, 3 * SCALE / 8);
                         ledger.check(&world);
                         assert_eq!(carry_transport_exit::profiles(&world), profiles);
                         for slot in boundary + 1..=boundary + 4 {
@@ -301,8 +301,8 @@ fn v16_program_fractional_checkpoint_retries_preserve_four_route_owner_residues(
                             reduce(&mut world, &mut ledger, actor, q, true, batch, None, false);
                         }
                         let residue_num = ledger.residue_num.iter().flatten().sum::<i128>();
-                        assert_eq!(residue_num % SCALE, 0);
-                        let residue = u128::try_from(residue_num / SCALE).unwrap();
+                        assert_eq!(residue_num % DEN, 0);
+                        let residue = u128::try_from(residue_num / DEN).unwrap();
                         assert!(residue > 0);
                         assert!(ledger.residue_num.iter().any(|r| r[0] > 0 && r[1] > 0));
                         assert!(ledger.latent_checks > 0);

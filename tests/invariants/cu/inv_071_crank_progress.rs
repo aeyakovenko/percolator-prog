@@ -2446,20 +2446,59 @@ fn v16_attack_risk_reducing_trade_cannot_erase_canonical_price_movement_remainde
     let interleaved = run_trade_interleaved_price_remainder_world(true);
     eprintln!("canonical={canonical:?}\ninterleaved={interleaved:?}");
 
-    assert_eq!(canonical.effective_price, 101);
-    assert_eq!(canonical.price_move_remainder_bps_num, 2_000);
-    assert_eq!(canonical.victim_withdrawn, 1_000_100);
-    assert_eq!(canonical.attacker_withdrawn, 999_900);
-    assert_eq!(canonical.wash_withdrawn, 2_000_000);
-    assert_eq!(canonical.vault_tokens, 0);
-    assert_eq!(
-        canonical.victim_withdrawn + canonical.attacker_withdrawn + canonical.wash_withdrawn,
-        4_000_000
-    );
+    // Mirrors run_trade_interleaved_price_remainder_world.
+    const DEPOSIT: u128 = 1_000_000;
+    const MAIN_UNITS: u128 = 100;
+    const FINAL_SLOT: u128 = 5;
+    const FUNDING_RATE_E9: u128 = 1_000;
+    const MAX_EFFECTIVE_PRICE: u128 = 101;
+    const PRICE_GAIN: u128 = MAIN_UNITS * (101 - 100);
+    // Exact funding (prog#458): the +100% premium caps the rate at 1_000 e9/slot, so the
+    // victim's long pays at most 100 units * 101 * 1_000 * 5 / 1e9 = 0.0505 atoms. That is
+    // nonzero and below one atom: the payer rounds up to exactly one atom, and the attacker's
+    // short receives the floor, zero. The old whole-unit floor made both sides exactly zero.
+    let victim_exact_funding_num = MAIN_UNITS * MAX_EFFECTIVE_PRICE * FUNDING_RATE_E9 * FINAL_SLOT;
+    assert!(victim_exact_funding_num > 0 && victim_exact_funding_num < percolator::FUNDING_DEN);
+    let victim_funding_debt = victim_exact_funding_num.div_ceil(percolator::FUNDING_DEN);
+    assert_eq!(victim_funding_debt, 1);
+    let attacker_funding_credit = victim_exact_funding_num / percolator::FUNDING_DEN;
+    assert_eq!(attacker_funding_credit, 0);
+
+    for outcome in [&canonical, &interleaved] {
+        // The canonical price-movement remainder survives the risk-reducing trade route.
+        assert_eq!(outcome.effective_price, 101);
+        assert_eq!(outcome.price_move_remainder_bps_num, 2_000);
+        assert_eq!(
+            outcome.victim_withdrawn,
+            DEPOSIT + PRICE_GAIN - victim_funding_debt
+        );
+        assert_eq!(
+            outcome.attacker_withdrawn,
+            DEPOSIT - PRICE_GAIN + attacker_funding_credit
+        );
+        // The wash pair can only lose its own conservative funding rounding: at most one atom
+        // per wash-long settlement (open, FINAL_SLOT - 1 resizes) and never a gain.
+        let wash_dust = 2 * DEPOSIT - outcome.wash_withdrawn;
+        assert!(outcome.wash_withdrawn <= 2 * DEPOSIT);
+        assert!(wash_dust <= FINAL_SLOT, "wash funding dust {wash_dust}");
+        // Every unpaid atom is unowned funding dust left in the vault (CloseSlab sweeps it).
+        assert_eq!(
+            u128::from(outcome.vault_tokens),
+            victim_funding_debt - attacker_funding_credit + wash_dust
+        );
+        assert_eq!(
+            outcome.victim_withdrawn
+                + outcome.attacker_withdrawn
+                + outcome.wash_withdrawn
+                + u128::from(outcome.vault_tokens),
+            4 * DEPOSIT
+        );
+    }
+    // The attacked pair is exactly route-order independent. The wash pair resizes every slot,
+    // and each resize drops a sub-atom funding remainder by design, so its dust may differ by
+    // the cadence of crank-versus-trade accrual (bounded above), never in its favor.
     assert_eq!(interleaved.victim_withdrawn, canonical.victim_withdrawn);
     assert_eq!(interleaved.attacker_withdrawn, canonical.attacker_withdrawn);
-    assert_eq!(interleaved.wash_withdrawn, canonical.wash_withdrawn);
-    assert_eq!(interleaved.vault_tokens, canonical.vault_tokens);
     assert_eq!(interleaved.effective_price, canonical.effective_price);
     assert_eq!(
         interleaved.price_move_remainder_bps_num,

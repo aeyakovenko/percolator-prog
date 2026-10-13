@@ -428,16 +428,37 @@ pub mod state {
             let k_delta = price_delta
                 .checked_mul(percolator::ADL_ONE as i128)
                 .ok_or(V16Error::ArithmeticOverflow)?;
-            let funding_delta = if funding_active {
+            // Mirrors the engine's exact funding accrual (prog#458): the exact numerator
+            // rate * dt * price is A-scaled and floored ONCE per side, so the payer's index
+            // falls by at least, and the receiver's rises by at most, the exact transfer.
+            let funding_num = if funding_active {
                 funding_rate_e9
                     .checked_mul(segment_dt as i128)
                     .and_then(|v| v.checked_mul(effective_price as i128))
-                    .map(|v| v / percolator::FUNDING_DEN as i128)
-                    .and_then(|v| v.checked_mul(percolator::ADL_ONE as i128))
                     .ok_or(V16Error::ArithmeticOverflow)?
             } else {
                 0
             };
+            // Floor toward minus infinity: a negative numerator rounds its magnitude up.
+            let floor_den = |n: i128| -> Result<i128, V16Error> {
+                let den = percolator::FUNDING_DEN as i128;
+                let magnitude = n.checked_abs().ok_or(V16Error::ArithmeticOverflow)?;
+                let carry = if n < 0 { den - 1 } else { 0 };
+                let quotient = magnitude
+                    .checked_add(carry)
+                    .ok_or(V16Error::ArithmeticOverflow)?
+                    / den;
+                Ok(if n < 0 { -quotient } else { quotient })
+            };
+            let scaled_num = funding_num
+                .checked_mul(percolator::ADL_ONE as i128)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            let funding_delta_long = floor_den(
+                scaled_num
+                    .checked_neg()
+                    .ok_or(V16Error::ArithmeticOverflow)?,
+            )?;
+            let funding_delta_short = floor_den(scaled_num)?;
             let mut asset = old;
             asset.k_long = asset
                 .k_long
@@ -449,11 +470,11 @@ pub mod state {
                 .ok_or(V16Error::ArithmeticOverflow)?;
             asset.f_long_num = asset
                 .f_long_num
-                .checked_sub(funding_delta)
+                .checked_add(funding_delta_long)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             asset.f_short_num = asset
                 .f_short_num
-                .checked_add(funding_delta)
+                .checked_add(funding_delta_short)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             asset.effective_price = effective_price;
             asset.fund_px_last = effective_price;

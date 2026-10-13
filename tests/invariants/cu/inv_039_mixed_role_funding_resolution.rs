@@ -13,13 +13,40 @@
 
 use super::*;
 
-const ENTRY: i128 = 1_000_000;
-const TARGET_MOVE: i128 = 200_000;
+// Exact funding (engine #458) accrues `RATE * price` per unit per slot in 1e-9 price units with
+// no whole-unit floor, and the payer settles the ceiling while the receiver settles the floor.
+// The 20.0 entry price and 10_000 e9/slot cap keep every six-slot path an exact whole number of
+// atoms even for the 3.5-lot creditor (see `exact_funding_per_unit`), so funding introduces no
+// payer/receiver dust and the fixture's own receipt-rounding atom remains the only rounding.
+const ENTRY: i128 = 20_000_000;
+const TARGET_MOVE: i128 = 4_000_000;
 const SETTLE_SLOT: u64 = 6;
-const SETTLE_MOVE: i128 = 60_000;
-const FUNDING_RATE_E9: u64 = 1_000;
+const SETTLE_MOVE: i128 = 1_200_000;
+const FUNDING_RATE_E9: u64 = 10_000;
 const CREDITOR_LOTS_Q: i128 = 7 * POS_SCALE as i128 / 2;
 const DEBTOR_LOTS_Q: i128 = 2 * POS_SCALE as i128;
+/// The parent mixed-role deposits scaled with the 20x entry price.
+const FUNDED_DEPOSITS: [u128; 5] = [8_000_000, 3_600_000, 6_000_000, 5_000_000, 777];
+
+/// Every reported step has a premium beyond the configured rate cap. Each one-slot
+/// interval accrues the exact `sign * RATE * price / 1e9` at its post-move price;
+/// the six-slot sum is a whole number of price units per unit, and 3.5 or 2 lots of
+/// it are whole atoms, so the paying ceiling and the receiving floor coincide.
+fn exact_funding_per_unit(sign: i128) -> i128 {
+    let numerator: i128 = (1..=SETTLE_SLOT)
+        .map(|slot| {
+            let price = ENTRY + sign * i128::from(slot) * ENTRY / 100;
+            sign * FUNDING_RATE_E9 as i128 * price
+        })
+        .sum();
+    assert_eq!(numerator % 1_000_000_000, 0, "funding path must be exact");
+    let funding = numerator / 1_000_000_000;
+    assert_eq!(funding, sign * 1_200 + 42);
+    for lots_q in [CREDITOR_LOTS_Q, DEBTOR_LOTS_Q] {
+        assert_eq!(lots_q * funding % POS_SCALE as i128, 0, "whole-atom lot funding");
+    }
+    funding
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct Outcome {
@@ -28,7 +55,7 @@ struct Outcome {
 }
 
 fn setup(reverse: bool) -> AttributionWorld {
-    setup_with_inputs(reverse, DEPOSITS, CREDITOR_LOTS_Q, false)
+    setup_with_inputs(reverse, FUNDED_DEPOSITS, CREDITOR_LOTS_Q, false)
 }
 
 fn setup_with_inputs(
@@ -411,20 +438,12 @@ fn close_all_checked(
 
 #[test]
 fn v16_program_solvent_mixed_funding_preserves_input_derived_owner_entitlements() {
-    const DEPOSITS: [u128; 5] = [500_000, 500_000, 500_000, 250_000, 777];
+    const DEPOSITS: [u128; 5] = [10_000_000, 10_000_000, 10_000_000, 5_000_000, 777];
     const LOTS: [i128; 2] = [4, 2];
     let mut peak = 0;
     let mut checkpoints = 0;
     for sign in [-1i128, 1] {
-        // Every reported step has a premium beyond the configured rate cap.
-        // Floor each signed one-slot payment before scaling the funding index.
-        let funding: i128 = (1..=SETTLE_SLOT)
-            .map(|slot| {
-                let price = ENTRY + sign * i128::from(slot) * ENTRY / 100;
-                (sign * FUNDING_RATE_E9 as i128 * price).div_euclid(1_000_000_000)
-            })
-            .sum();
-        assert_eq!(funding, sign * 6);
+        let funding = exact_funding_per_unit(sign);
         let per_lot = SETTLE_MOVE - sign * funding;
         let gains = LOTS.map(|lots| (lots * per_lot) as u128);
         let expected = [
@@ -612,18 +631,20 @@ fn v16_program_live_booked_mixed_funding_preserves_underfunded_receipt_entitleme
     let mut checkpoints = 0;
     for reverse in [false, true] {
         let sign = if reverse { -1i128 } else { 1 };
-        let funding: i128 = (1..=SETTLE_SLOT)
-            .map(|slot| {
-                let price = ENTRY + sign * i128::from(slot) * ENTRY / 100;
-                (sign * FUNDING_RATE_E9 as i128 * price).div_euclid(1_000_000_000)
-            })
-            .sum();
-        assert_eq!(funding, sign * 6);
+        const DEPOSITS: [u128; 5] = FUNDED_DEPOSITS;
+        let funding = exact_funding_per_unit(sign);
         let per_lot = (SETTLE_MOVE - sign * funding) as u128;
         let credit = CREDITOR_LOTS_Q as u128 * per_lot / POS_SCALE;
         let debt = DEBTOR_LOTS_Q as u128 * per_lot / POS_SCALE;
         let residual = credit - DEPOSITS[1];
-        assert_eq!((credit, debt, residual), (209_979, 119_988, 29_979));
+        assert_eq!(
+            (credit, debt, residual),
+            if reverse {
+                (4_195_947, 2_397_684, 595_947)
+            } else {
+                (4_195_653, 2_397_516, 595_653)
+            }
+        );
         // The bankrupt peer contributes only its deposit; the mixed owner pays
         // its own funding-adjusted debt in full. Receipt rounding cannot move
         // the remaining backing atom to a different owner at expiry.

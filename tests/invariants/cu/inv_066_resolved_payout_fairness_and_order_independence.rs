@@ -860,7 +860,12 @@ fn v16_bpf_force_close_pair_order_preserves_terminal_user_payouts() {
 
 #[test]
 fn v16_attack_resolved_two_public_winners_are_close_order_independent() {
-    fn run(winner_attempts_first: bool) -> (u128, u128, u128) {
+    // Exact funding (prog#458): each side floors once, so the payer's index falls by at least
+    // and the receiver's rises by at most the exact transfer, and a leg's credit-only sub-atom
+    // remainder is dropped when its size changes. Each of the three funded legs (two winners,
+    // one loser) therefore leaves strictly less than one atom of unclaimed funding in the vault.
+    const FUNDED_LEGS: u128 = 3;
+    fn run(winner_attempts_first: bool) -> (u128, u128, u128, u128) {
         let mut env = V16CuEnv::new_with_init_params(production_risk_params());
         env.configure_auth_mark_with_cu(0, 1_000_000);
 
@@ -987,15 +992,29 @@ fn v16_attack_resolved_two_public_winners_are_close_order_independent() {
         let (_, group) = env.market_state();
         assert_eq!(group.materialized_portfolio_count, 0);
         assert_eq!(group.c_tot, 0);
-        assert_eq!(group.vault, 0);
-        (winner_a_paid, winner_b_paid, loser_paid)
+        assert_eq!(group.insurance, 0);
+        // Only the conservative funding dust is left unowned; CloseSlab sweeps it once c_tot == 0.
+        let dust = group.vault;
+        assert!(
+            dust < FUNDED_LEGS,
+            "funding dust {dust} exceeds one atom per funded leg"
+        );
+        assert_eq!(
+            winner_a_paid + winner_b_paid + loser_paid + dust,
+            3_000_000,
+            "every deposited atom is either paid out or bounded funding dust"
+        );
+        (winner_a_paid, winner_b_paid, loser_paid, dust)
     }
 
     let loser_first = run(false);
     let premature_winner_first = run(true);
     assert_eq!(premature_winner_first, loser_first);
     assert_eq!(loser_first.0, loser_first.1);
-    assert_eq!(loser_first.0 + loser_first.1 + loser_first.2, 3_000_000);
+    assert_eq!(
+        loser_first.0 + loser_first.1 + loser_first.2 + loser_first.3,
+        3_000_000
+    );
     assert!(loser_first.0 > 1_000_000 && loser_first.2 < 1_000_000);
 }
 

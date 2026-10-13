@@ -1690,8 +1690,13 @@ fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
         funded_group.assets[0].effective_price, 1_200_000,
         "the two-slot movement envelope is linear from the stable trajectory anchor"
     );
-    assert_eq!(funded_group.assets[0].f_long_num, -(ADL_ONE as i128));
-    assert_eq!(funded_group.assets[0].f_short_num, ADL_ONE as i128);
+    // The +25% internal premium clamps to the 1_000 e9/slot cap; funding accrues the
+    // exact (#458) A-scaled transfer cap * dt * effective_price * ADL_ONE / FUNDING_DEN
+    // at the accrued price, i.e. 1.2 price units, not a whole-unit floor.
+    let exact_f = 1_000i128 * 1_200_000 * ADL_ONE as i128 / 1_000_000_000;
+    assert_eq!(exact_f, 12 * ADL_ONE as i128 / 10);
+    assert_eq!(funded_group.assets[0].f_long_num, -exact_f);
+    assert_eq!(funded_group.assets[0].f_short_num, exact_f);
 }
 
 #[test]

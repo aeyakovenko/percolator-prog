@@ -105,10 +105,22 @@ impl Book {
         expected
     }
 
+    // Engine #228 (prog#450): a Recovery-forfeited leg's capital-covered K/F loss becomes
+    // fresh backing in the payer's source domain, capped at what that domain's claimants
+    // own (unbacked claims + advanced provider receivable, here zero). At the peer forfeit
+    // both holders' gains are claims and only the bankrupt debtor's capital backs them.
+    fn recovery_peer_backing(&self) -> u128 {
+        if !self.recovery_peer {
+            return 0;
+        }
+        let unbacked_claims = self.input.gains().iter().sum::<u128>() - self.input.deposits()[1];
+        self.input.debts()[1].min(unbacked_claims)
+    }
+
     fn source_backing(&self) -> u128 {
         self.input.deposits()[1]
             + if self.recovery_peer {
-                0
+                self.recovery_peer_backing()
             } else {
                 self.input.debts()[1]
             }
@@ -124,8 +136,9 @@ impl Book {
     }
 
     fn junior_pool(&self) -> u128 {
+        // Only forfeit debt beyond the source-domain cap stays unassigned residual.
         (if self.recovery_peer {
-            self.input.debts()[1]
+            self.input.debts()[1] - self.recovery_peer_backing()
         } else {
             0
         }) + if self.backing_expired {
@@ -685,6 +698,8 @@ fn v16_program_fractional_cohort_residual_preserves_owner_floors_through_resolut
     let mut peak = 0;
     let mut worlds = 0;
     let mut receipt_retries = 0;
+    let mut pre_snapshot_claim_rejections = 0;
+    let mut recovery_backed_worlds = 0;
     let mut receipt_floor_worlds = 0;
     let mut expiry_worlds = 0;
     for (weights, residuals) in [
@@ -792,6 +807,25 @@ fn v16_program_fractional_cohort_residual_preserves_owner_floors_through_resolut
                                             );
                                             assert_eq!(world.frame(), before);
                                             receipt_retries += 1;
+                                        } else if !world
+                                            .env
+                                            .market_state()
+                                            .1
+                                            .payout_snapshot_captured
+                                        {
+                                            // Backing-paid holder with no junior receipt: the
+                                            // top-up claim is the specified pre-snapshot
+                                            // rejection, with exact rollback.
+                                            let before = world.frame();
+                                            let error = world
+                                                .payout(actor, true)
+                                                .expect_err("pre-snapshot claim must reject");
+                                            assert!(
+                                                error.contains("InstructionError(2, Custom(21))"),
+                                                "{error}"
+                                            );
+                                            assert_eq!(world.frame(), before);
+                                            pre_snapshot_claim_rejections += 1;
                                         }
                                         book.delete(&mut world, actor, &mut peak);
                                     }
@@ -811,6 +845,10 @@ fn v16_program_fractional_cohort_residual_preserves_owner_floors_through_resolut
                                 .sum();
                             receipt_floor_worlds += usize::from(shortfall != 0);
                             expiry_worlds += usize::from(book.backing_expired);
+                            recovery_backed_worlds += usize::from(
+                                book.recovery_peer
+                                    && book.recovery_peer_backing() == input.debts()[1],
+                            );
                             assert_eq!(group.vault, input.cash_residue() + shortfall);
                             let source_rounding = book.fresh_backing();
                             let receipt_paid: u128 = (0..2)
@@ -840,6 +878,14 @@ fn v16_program_fractional_cohort_residual_preserves_owner_floors_through_resolut
                                 (paid, group.vault),
                                 "raw owner payouts and stock must agree across orders within each route"
                             );
+                            if let [Some(matched), Some(recovery)] = route_baselines {
+                                if book.recovery_peer_backing() == input.debts()[1] {
+                                    assert_eq!(
+                                        recovery, matched,
+                                        "fully source-backed Recovery forfeit pays exactly as the matched exit"
+                                    );
+                                }
+                            }
                             let normalized = (
                                 std::array::from_fn::<_, 5, _>(|i| {
                                     paid[i] + (input.payouts()[i] - book.payouts()[i])
@@ -857,7 +903,14 @@ fn v16_program_fractional_cohort_residual_preserves_owner_floors_through_resolut
     assert_eq!(worlds, 64);
     // Receipts retained until source backing expiry are topped up to full face; no floor remains.
     assert_eq!(receipt_floor_worlds, 0);
-    assert_eq!(expiry_worlds, 16);
-    assert!(receipt_retries > 0);
-    println!("INV-039 fractional residual: {worlds} worlds, {receipt_floor_worlds} input-predicted receipt-floor worlds, {expiry_worlds} backing-expiry top-up worlds, {receipt_retries} receipt retries, peak {peak} CU");
+    // Engine #228 (prog#450): the Recovery peer's forfeit debt fully backs the source domain
+    // (it is below the claimants' unbacked claims), so no junior receipt waits on expiry.
+    assert_eq!(recovery_backed_worlds, worlds / 2);
+    assert_eq!(expiry_worlds, 0);
+    assert_eq!(receipt_retries, 0, "no world creates a junior receipt");
+    assert!(
+        pre_snapshot_claim_rejections > 0,
+        "backing-paid holders must exercise the pre-snapshot claim rejection"
+    );
+    println!("INV-039 fractional residual: {worlds} worlds, {receipt_floor_worlds} input-predicted receipt-floor worlds, {expiry_worlds} backing-expiry top-up worlds, {recovery_backed_worlds} recovery-backed worlds, {receipt_retries} receipt retries, {pre_snapshot_claim_rejections} pre-snapshot claim rejections, peak {peak} CU");
 }

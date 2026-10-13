@@ -2037,6 +2037,9 @@ pub struct AccrualOrderingDiscovery {
     pub terminal_positive_claimants: u8,
     pub max_destination_payout_loss: u128,
     pub destination_payout_gain: u128,
+    /// Public backing-expiry waits each paired world needed before every user was terminal.
+    pub control_backing_expiry_waits: u8,
+    pub reordered_backing_expiry_waits: u8,
     pub terminal_evidence: PairedTerminalPayoutEvidence,
 }
 
@@ -2121,6 +2124,11 @@ pub struct PairedTerminalPayoutEvidence {
     pub victim_destinations: Vec<Pubkey>,
     pub counterparty_destinations: Vec<Pubkey>,
     pub terminal_rounding_residue_bound: u128,
+    /// Terminal vault SPL above insurance in each world (exact-funding rounding dust, #458).
+    /// Zero, with a zero bound, for every evidence that does not opt into dust accounting.
+    pub control_vault_dust: u128,
+    pub reordered_vault_dust: u128,
+    pub vault_dust_bound: u128,
     pub users_terminal: bool,
     pub terminal_classification: PublicTerminalClassification,
     pub control_public_trace: PublicTraceEvidence,
@@ -2149,6 +2157,9 @@ pub struct ProspectiveAccrualDiscovery {
     pub coalition_payout_gain: u128,
     pub control_total_payout: u128,
     pub reordered_total_payout: u128,
+    /// Terminal vault SPL above insurance (exact-funding rounding dust, #458).
+    pub control_vault_dust: u128,
+    pub reordered_vault_dust: u128,
     pub final_mark: u64,
     pub final_effective_price: u64,
     pub terminal_evidence: PairedTerminalPayoutEvidence,
@@ -3577,12 +3588,19 @@ impl PairedTerminalPayoutEvidence {
         else {
             return false;
         };
+        // Without opted-in dust (both zero, bound zero) this is exact coalition and total
+        // equality. With exact funding the only admitted difference is the coalition's own
+        // bounded payer-side rounding dust that one world leaves in the vault.
         victim_payout_loss == 0
             && control_victim == reordered_victim
-            && control_coalition == reordered_coalition
+            && self.control_vault_dust <= self.vault_dust_bound
+            && self.reordered_vault_dust <= self.vault_dust_bound
+            && control_coalition.checked_add(self.control_vault_dust)
+                == reordered_coalition.checked_add(self.reordered_vault_dust)
             && control_victim.checked_add(control_coalition) == Some(control_total_payout)
             && reordered_victim.checked_add(reordered_coalition) == Some(reordered_total_payout)
-            && control_total_payout == reordered_total_payout
+            && control_total_payout.checked_add(self.control_vault_dust)
+                == reordered_total_payout.checked_add(self.reordered_vault_dust)
             && self.users_terminal
             && matches!(
                 self.terminal_classification,
@@ -3723,6 +3741,41 @@ fn build_paired_terminal_payout_evidence(
     control_public_trace: PublicTraceEvidence,
     public_trace: PublicTraceEvidence,
 ) -> Result<PairedTerminalPayoutEvidence, String> {
+    build_paired_terminal_payout_evidence_with_vault_dust(
+        context,
+        victim_destinations,
+        counterparty_destinations,
+        terminal_rounding_residue_bound,
+        [0, 0],
+        0,
+        users_terminal,
+        victim_payout_loss,
+        counterparty_payout_gain,
+        control_total_payout,
+        reordered_total_payout,
+        control_public_trace,
+        public_trace,
+    )
+}
+
+/// `vault_dust` is `[control, reordered]` terminal vault SPL above insurance. Only bounded-exit
+/// certification admits it, and only as the coalition-side difference (see
+/// `certifies_bounded_exit`).
+fn build_paired_terminal_payout_evidence_with_vault_dust(
+    context: &str,
+    victim_destinations: Vec<Pubkey>,
+    counterparty_destinations: Vec<Pubkey>,
+    terminal_rounding_residue_bound: u128,
+    vault_dust: [u128; 2],
+    vault_dust_bound: u128,
+    users_terminal: bool,
+    victim_payout_loss: u128,
+    counterparty_payout_gain: u128,
+    control_total_payout: u128,
+    reordered_total_payout: u128,
+    control_public_trace: PublicTraceEvidence,
+    public_trace: PublicTraceEvidence,
+) -> Result<PairedTerminalPayoutEvidence, String> {
     if !users_terminal {
         return Err(format!(
             "{context} did not terminalize every payout participant"
@@ -3769,6 +3822,9 @@ fn build_paired_terminal_payout_evidence(
         victim_destinations,
         counterparty_destinations,
         terminal_rounding_residue_bound,
+        control_vault_dust: vault_dust[0],
+        reordered_vault_dust: vault_dust[1],
+        vault_dust_bound,
         users_terminal,
         terminal_classification,
         control_public_trace,
@@ -11814,6 +11870,7 @@ struct AccrualOrderingWorld {
     rejected_exact_rollback: bool,
     retry_landed: bool,
     users_terminal: bool,
+    backing_expiry_waits: u8,
     victim_destination: Pubkey,
     coalition_destinations: Vec<Pubkey>,
     public_trace: PublicTraceEvidence,
@@ -11836,16 +11893,20 @@ fn is_engine_stale_error(error: &str) -> bool {
     error.contains("Custom(19)") || error.contains("custom program error: 0x13")
 }
 
+// Exact funding (engine #458) moves each unit by rate * price / 1e9 = 2e-5 atom per slot at the
+// cap rate and price 2. Funding pairs hold multiples of 50_000 units so every elapsed slot is an
+// exact whole-atom transfer (payer-up and receiver-down rounding coincide) and paid == received
+// certifies a real transfer rather than the retired per-unit floor's 1-unit rounding gift.
 fn zero_move_funding_discovery_world(seed: [u8; 32]) -> Result<V16Svm, String> {
     const PRICE: u64 = 2;
-    const DEPOSIT: u128 = 1_000_000;
+    const DEPOSIT: u128 = 10_000_000;
     Ok(V16Svm::new(
         seed,
         MarketConfig {
             initial_price: PRICE,
             max_price_move_bps_per_slot: 24,
             max_accrual_dt_slots: 1,
-            max_abs_funding_e9_per_slot: 1_000,
+            max_abs_funding_e9_per_slot: 10_000,
             min_funding_lifetime_slots: 1,
             actor_deposits: [DEPOSIT, DEPOSIT, DEPOSIT, DEPOSIT, USER_DEPOSIT],
             ..MarketConfig::default()
@@ -11960,7 +12021,10 @@ fn finish_accrual_ordering_world(
             .checked_add(1)
             .ok_or_else(|| format!("{context} terminal slot overflow"))?,
     );
-    let payouts = drain_resolved_discovery_actors(env, ACTORS)?;
+    // A reordered recovery path can leave a positive claim partly backed by fresh source backing
+    // whose lifetime has not lapsed; its public exit is the committed bucket expiry (bounded wait).
+    let (payouts, backing_expiry_waits) =
+        drain_resolved_discovery_actors_after_backing_expiry(env, ACTORS, 1)?;
     let victim_payout = payouts[victim];
     let total_payout = payouts.into_iter().try_fold(0u128, |sum, payout| {
         sum.checked_add(payout)
@@ -12013,6 +12077,7 @@ fn finish_accrual_ordering_world(
         rejected_exact_rollback,
         retry_landed,
         users_terminal,
+        backing_expiry_waits,
         victim_destination,
         coalition_destinations,
         public_trace,
@@ -12056,7 +12121,7 @@ fn run_trade_accrual_ordering_world(
     recover_rejected_action: bool,
 ) -> Result<AccrualOrderingWorld, String> {
     const PRICE: u64 = 2;
-    const Q: i128 = 100 * POS_SCALE as i128;
+    const Q: i128 = 50_000 * POS_SCALE as i128;
     let mut env = zero_move_funding_discovery_world(seed)?;
     env.begin_public_trace();
     let supply_before = env.token_supply_observed();
@@ -12109,7 +12174,7 @@ fn run_rebalance_accrual_ordering_world(
     recover_rejected_action: bool,
 ) -> Result<AccrualOrderingWorld, String> {
     const PRICE: u64 = 2;
-    const Q: i128 = 100 * POS_SCALE as i128;
+    const Q: i128 = 50_000 * POS_SCALE as i128;
     let mut env = zero_move_funding_discovery_world(seed)?;
     env.begin_public_trace();
     let supply_before = env.token_supply_observed();
@@ -12163,8 +12228,8 @@ fn run_forfeit_accrual_ordering_world(
     recover_rejected_action: bool,
 ) -> Result<AccrualOrderingWorld, String> {
     const PRICE: u64 = 2;
-    const Q_ATTACKER: i128 = 5 * POS_SCALE as i128;
-    const Q_WHALE: i128 = 95 * POS_SCALE as i128;
+    const Q_ATTACKER: i128 = 50_000 * POS_SCALE as i128;
+    const Q_WHALE: i128 = 950_000 * POS_SCALE as i128;
     let mut env = zero_move_funding_discovery_world(seed)?;
     env.begin_public_trace();
     let supply_before = env.token_supply_observed();
@@ -12249,8 +12314,8 @@ fn discover_one_accrual_ordering_violation(
             recover_rejected_action,
         ),
     };
-    let control = run(false)?;
-    let reordered = run(true)?;
+    let control = run(false).map_err(|error| format!("{kind:?} control world: {error}"))?;
+    let reordered = run(true).map_err(|error| format!("{kind:?} reordered world: {error}"))?;
     if control.victim_destination != reordered.victim_destination
         || control.coalition_destinations != reordered.coalition_destinations
     {
@@ -12346,6 +12411,8 @@ fn discover_one_accrual_ordering_violation(
         terminal_positive_claimants: control.positive_claimant_count,
         max_destination_payout_loss,
         destination_payout_gain,
+        control_backing_expiry_waits: control.backing_expiry_waits,
+        reordered_backing_expiry_waits: reordered.backing_expiry_waits,
         terminal_evidence,
     })
 }
@@ -12380,7 +12447,9 @@ fn run_partial_liquidation_accrual_world(
             initial_margin_bps: 10_000,
             max_price_move_bps_per_slot: 1,
             max_accrual_dt_slots: 1,
-            max_abs_funding_e9_per_slot: 1_000,
+            // Exact funding (#458): 100 units * price 1_000 * 1e-5 = 1 atom per elapsed slot, so
+            // the two pending slots owe exactly 2 atoms with no payer/receiver rounding split.
+            max_abs_funding_e9_per_slot: 10_000,
             min_funding_lifetime_slots: 1,
             actor_deposits: [VICTIM_CAPITAL, 1_000_000, 1_000_000, 1_000_000, 1_000_000],
             ..MarketConfig::default()
@@ -12519,6 +12588,76 @@ pub fn discover_multi_segment_accrual_ordering_violations(
         .collect()
 }
 
+const RESOLVED_FIXED_POINT_ERROR: &str = "resolved payout rails reached a nonterminal fixed point";
+
+/// Drains resolved actors like `drain_resolved_discovery_actors`, but a nonterminal fixed point
+/// whose only remaining blocker is unexpired fresh source backing takes the public exit route:
+/// wait for the earliest committed bucket expiry and crank each waiting claimant at exactly that
+/// authenticated slot. Returns the payouts and the number of expiry waits (bounded by
+/// `max_waits`). A fixed point without a future expiry, or an expiry crank that makes no
+/// progress, is still reported as a liveness failure.
+fn drain_resolved_discovery_actors_after_backing_expiry<const N: usize>(
+    env: &mut V16Svm,
+    actors: [usize; N],
+    max_waits: u8,
+) -> Result<([u128; N], u8), String> {
+    let destinations = actors.map(|actor| env.actors[actor].destination_token);
+    let payouts_before = destinations.map(|destination| env.token_amount(destination));
+    let mut waits = 0u8;
+    loop {
+        match drain_resolved_discovery_actors(env, actors) {
+            Ok(_) => break,
+            Err(error) if error.starts_with(RESOLVED_FIXED_POINT_ERROR) && waits < max_waits => {
+                let now = env.current_slot();
+                let (_, group) = env.primary_market_state();
+                let (expiry, domain) = (0..group.source_credit.len())
+                    .filter(|domain| {
+                        group.source_credit[*domain].fresh_reserved_backing_num != 0
+                            && group.source_backing_buckets[*domain].expiry_slot > now
+                    })
+                    .map(|domain| (group.source_backing_buckets[domain].expiry_slot, domain))
+                    .min()
+                    .ok_or_else(|| format!("{error}; no future backing expiry can release it"))?;
+                env.warp_to_slot(expiry);
+                let mut released = false;
+                for actor in actors {
+                    if discovery_portfolio_is_terminal(&env.primary_portfolio(actor))? {
+                        continue;
+                    }
+                    released |= env
+                        .crank_if_actionable(
+                            actor,
+                            expiry,
+                            vec![CrankObservationHint {
+                                asset_index: u16::try_from(domain / 2)
+                                    .map_err(|_| "backing domain asset overflow".to_string())?,
+                                oracle_accounts: 0,
+                            }],
+                        )
+                        .map_err(|crank| format!("{error}; expiry crank at {expiry}: {crank}"))?
+                        .is_some();
+                }
+                if !released {
+                    return Err(format!(
+                        "{error}; backing expiry at {expiry} released no waiting claimant"
+                    ));
+                }
+                waits += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let mut payouts = [0u128; N];
+    for index in 0..N {
+        payouts[index] = u128::from(
+            env.token_amount(destinations[index])
+                .checked_sub(payouts_before[index])
+                .ok_or_else(|| format!("resolved actor {} payout decreased", actors[index]))?,
+        );
+    }
+    Ok((payouts, waits))
+}
+
 fn drain_resolved_discovery_actors<const N: usize>(
     env: &mut V16Svm,
     actors: [usize; N],
@@ -12579,7 +12718,7 @@ fn drain_resolved_discovery_actors<const N: usize>(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             return Err(format!(
-                "resolved payout rails reached a nonterminal fixed point: {}; rejected={}",
+                "{RESOLVED_FIXED_POINT_ERROR}: {}; rejected={}",
                 summaries.join("; "),
                 rejected_routes.join(" | ")
             ));
@@ -13241,7 +13380,9 @@ pub fn discover_shutdown_catchup_liveness(
     const ORACLE: usize = 2;
     const PRICE: u64 = 2;
     const MARK: u64 = 1;
-    const SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    // Exact funding (#458): 50_000 units * price 2 * 1e-5 = 1 whole atom per catch-up slot, so
+    // the payer-up/receiver-down rounding coincides and the users' terminal total is exact.
+    const SIZE_Q: i128 = 50_000 * POS_SCALE as i128;
     const DEPOSIT: u128 = 1_000_000;
     const PUBLISH_SLOT: u64 = 2;
     const SHUTDOWN_SLOT: u64 = 5;
@@ -13253,7 +13394,7 @@ pub fn discover_shutdown_catchup_liveness(
             initial_price: PRICE,
             max_price_move_bps_per_slot: 24,
             max_accrual_dt_slots: 1,
-            max_abs_funding_e9_per_slot: 1_000,
+            max_abs_funding_e9_per_slot: 10_000,
             min_funding_lifetime_slots: 1,
             actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
             ..MarketConfig::default()
@@ -13504,6 +13645,7 @@ struct ProspectiveAccrualWorld {
     final_effective_price: u64,
     f_short_num: i128,
     total_payout: u128,
+    vault_dust: u128,
     users_terminal: bool,
     victim_destination: Pubkey,
     coalition_destinations: [Pubkey; 3],
@@ -13645,6 +13787,10 @@ fn run_prospective_accrual_world(
     if env.token_supply_observed() != supply_before {
         return Err("prospective funding world changed SPL supply".into());
     }
+    let (_, terminal_group) = env.primary_market_state();
+    let vault_dust = u128::from(env.token_amount(env.vault))
+        .checked_sub(terminal_group.insurance)
+        .ok_or_else(|| "prospective terminal vault is below insurance".to_string())?;
     let users_terminal = (0..4).try_fold(true, |all_terminal, actor| {
         discovery_portfolio_is_terminal(&env.primary_portfolio(actor))
             .map(|terminal| all_terminal && terminal)
@@ -13681,12 +13827,17 @@ fn run_prospective_accrual_world(
         final_effective_price: group_after.assets[0].effective_price,
         f_short_num: group_after.assets[0].f_short_num,
         total_payout,
+        vault_dust,
         users_terminal,
         victim_destination,
         coalition_destinations,
         public_trace,
     })
 }
+
+/// Exact funding (#458) floors each funded leg's settlement once, so the four funded legs of a
+/// prospective-accrual world can leave at most one atom each of payer-up/receiver-down dust.
+pub const PROSPECTIVE_FUNDING_DUST_BOUND: u128 = 4;
 
 fn discover_one_prospective_accrual_violation(
     mut seed: [u8; 32],
@@ -13721,11 +13872,13 @@ fn discover_one_prospective_accrual_violation(
         .coalition_payout
         .checked_sub(control.coalition_payout)
         .ok_or_else(|| "trade-first ordering decreased coalition payout".to_string())?;
-    let terminal_evidence = build_paired_terminal_payout_evidence(
+    let terminal_evidence = build_paired_terminal_payout_evidence_with_vault_dust(
         &format!("{route:?} prospective accrual ordering"),
         vec![reordered.victim_destination],
         reordered.coalition_destinations.to_vec(),
         0,
+        [control.vault_dust, reordered.vault_dust],
+        PROSPECTIVE_FUNDING_DUST_BOUND,
         control.users_terminal && reordered.users_terminal,
         victim_payout_loss,
         coalition_payout_gain,
@@ -13742,6 +13895,8 @@ fn discover_one_prospective_accrual_violation(
         coalition_payout_gain,
         control_total_payout: control.total_payout,
         reordered_total_payout: reordered.total_payout,
+        control_vault_dust: control.vault_dust,
+        reordered_vault_dust: reordered.vault_dust,
         final_mark: reordered.final_mark,
         final_effective_price: reordered.final_effective_price,
         terminal_evidence,
@@ -20863,7 +21018,10 @@ fn build_full_refresh_discovery_world(
             max_abs_funding_e9_per_slot: 10_000,
             min_funding_lifetime_slots: 1,
             actor_deposits: [
-                3_115_000,
+                // Exact rescue funding (prog#458) is 100_000 units * 100 * 10_000 / 1e9 = 100
+                // atoms. 3_214_250 = 3_115_000 + 99_250 leaves a 50-atom pre-rescue deficit that
+                // the 100-atom rescue more than cures (the old floor gifted 100_000 atoms).
+                3_214_250,
                 50_000_000,
                 USER_DEPOSIT,
                 USER_DEPOSIT,

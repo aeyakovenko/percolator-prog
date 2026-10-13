@@ -79,11 +79,23 @@ fn v16_program_pr380_trade_order_preserves_elapsed_funding() {
         );
         assert!(reproduction.stamp_fee > 0);
         assert_eq!(reproduction.victim_payout_loss, 0);
+        let bound = crate::support::fuzz_model::PR380_FUNDING_DUST_BOUND;
+        assert!(reproduction.control_vault_dust <= bound, "{reproduction:?}");
+        assert!(reproduction.attack_vault_dust <= bound, "{reproduction:?}");
         if matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
-            assert_eq!(reproduction.attacker_coalition_gain, 0);
+            // Exact funding (#458): the victim is order-independent; the only order-dependent
+            // atoms are the coalition's own payer-side rounding dust that the vault retains.
             assert_eq!(
-                reproduction.control_total_payout,
-                reproduction.attack_total_payout
+                reproduction.attacker_coalition_gain,
+                reproduction
+                    .control_vault_dust
+                    .saturating_sub(reproduction.attack_vault_dust),
+                "{reproduction:?}"
+            );
+            assert!(reproduction.attacker_coalition_gain <= 1, "{reproduction:?}");
+            assert_eq!(
+                reproduction.control_total_payout + reproduction.control_vault_dust,
+                reproduction.attack_total_payout + reproduction.attack_vault_dust
             );
         }
     }
@@ -228,6 +240,8 @@ fn v16_program_multi_segment_funding_requires_catchup_before_reduction() {
         assert_eq!(discovery.reordered_received, discovery.control_received);
         assert_eq!(discovery.victim_payout_loss, 0);
         assert_eq!(discovery.coalition_payout_gain, 0);
+        assert_eq!(discovery.control_backing_expiry_waits, 0, "{discovery:?}");
+        assert_eq!(discovery.reordered_backing_expiry_waits, 0, "{discovery:?}");
     }
 }
 

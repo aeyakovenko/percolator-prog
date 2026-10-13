@@ -286,11 +286,44 @@ fn v16_program_paid_rediscovery_revokes_prior_reward_authentication_until_recatc
 fn run_report_cadence(max_funding: u64) {
     const REPORT: u64 = 980_000;
     const SHARE: u128 = 3_333;
-    // Slot 6 accrues the paid mark's negative capped premium at the accepted
-    // price. Subsequent nonnegative premiums floor to zero at this rate bound.
-    let funding_per_lot =
-        -(-i128::from(max_funding) * i128::from(ENTRY - 2_400)).div_euclid(1_000_000_000);
-    assert_eq!(funding_per_lot, i128::from(max_funding != 0));
+    // Funding accrues exactly (#458), one path step per slot: each side's A-scaled
+    // index moves by its own floor of rate * price * ADL_ONE / FUNDING_DEN, and a
+    // leg settles floor(lots * index / ADL_ONE) atoms. Slot 6 accrues the paid
+    // mark's negative capped premium at the accepted price (longs receive). After
+    // slot 6 an eager history republishes every slot, so its funding mark tracks
+    // the accepted path and the premium is zero; a lazy history keeps the slot-6
+    // mark through the gap, above the falling path, so the positive capped premium
+    // charges longs every step. (The old whole-unit floor rounded those sub-unit
+    // positive steps to zero, which is what made the two cadences agree.)
+    let path_price = |slot: u64| (ENTRY - ENTRY * 24 * (slot - 5) / 10_000).max(REPORT);
+    let funding_index_at = |slot: u64, eager: bool| {
+        let mut index = [0i128; 2];
+        for step in 6..=slot {
+            let price = i128::from(path_price(step));
+            let mark = i128::from(match (step, eager) {
+                (6, _) => MARK,
+                (_, true) => path_price(step),
+                (_, false) => path_price(6),
+            });
+            let cap = i128::from(max_funding);
+            let rate = ((mark - price) * 1_000_000_000 / price).clamp(-cap, cap);
+            index[0] += (-rate * price * ADL_ONE as i128).div_euclid(1_000_000_000);
+            index[1] += (rate * price * ADL_ONE as i128).div_euclid(1_000_000_000);
+        }
+        index
+    };
+    // [target long 100, peer short 100, trader_a long 1, trader_b short 1]
+    let funding_atoms_at = |slot: u64, eager: bool| {
+        let index = funding_index_at(slot, eager);
+        let settled = |lots: i128, side: usize| (lots * index[side]).div_euclid(ADL_ONE as i128);
+        [settled(100, 0), settled(100, 1), settled(1, 0), settled(1, 1)]
+    };
+    if max_funding != 0 {
+        assert_eq!(funding_index_at(6, true), [997_600_000_000_000, -997_600_000_000_000]);
+        assert_eq!(funding_atoms_at(6, false), [99, -100, 0, -1]);
+    } else {
+        assert_eq!(funding_atoms_at(14, false), [0; 4]);
+    }
     let mut peak_cu = 0;
     let mut liquidations = 0;
     let mut rollbacks = 0;
@@ -391,11 +424,10 @@ fn run_report_cadence(max_funding: u64) {
                 );
                 assert_eq!(group.assets[0].raw_oracle_target_price, REPORT);
                 assert_eq!(group.assets[0].slot_last, slot);
-                let funding_index = funding_per_lot * ADL_ONE as i128;
                 assert_eq!(
-                    (group.assets[0].f_long_num, group.assets[0].f_short_num),
-                    (funding_index, -funding_index),
-                    "slot={slot}, eager={eager}: input-derived signed funding floor"
+                    [group.assets[0].f_long_num, group.assets[0].f_short_num],
+                    funding_index_at(slot, eager),
+                    "slot={slot}, eager={eager}: input-derived signed per-side funding floor"
                 );
                 assert_eq!(profile.mark_ewma_e6, price);
                 assert_eq!(profile.oracle_target_publish_time, now);
@@ -410,7 +442,8 @@ fn run_report_cadence(max_funding: u64) {
             }
             assert_eq!(publications, if eager { endpoint - 5 } else { 2 });
 
-            let price = (ENTRY - ENTRY * 24 * (endpoint - 5) / 10_000).max(REPORT);
+            let price = path_price(endpoint);
+            let funding_atoms = funding_atoms_at(endpoint, eager);
             let caught_up = price == REPORT;
             let profile = state::read_asset_oracle_profile(
                 &env.svm.get_account(&env.market).unwrap().data,
@@ -483,14 +516,18 @@ fn run_report_cadence(max_funding: u64) {
                 assert_eq!(
                     after_values[0],
                     FUNDS[0] as i128
-                        - 100 * (i128::from(ENTRY - price) - funding_per_lot)
+                        - 100 * i128::from(ENTRY - price)
+                        + funding_atoms[0]
                         - penalty as i128
                 );
                 let account = env.portfolio_state(target);
-                assert_eq!(account.funding_long_paid_atoms_total.get(), 0);
+                assert_eq!(
+                    account.funding_long_paid_atoms_total.get(),
+                    (-funding_atoms[0]).max(0) as u128
+                );
                 assert_eq!(
                     account.funding_long_received_atoms_total.get(),
-                    100 * funding_per_lot as u128
+                    funding_atoms[0].max(0) as u128
                 );
                 assert_eq!(after.insurance, discovery + penalty - reward);
                 let retained = if caught_up { penalty - reward } else { 0 };
@@ -522,11 +559,11 @@ fn run_report_cadence(max_funding: u64) {
                 }
             }
             assert!(census(&env, portfolios).iter().all(|value| *value));
-            let loss = i128::from(ENTRY - price) - funding_per_lot;
-            expected[0] -= 100 * loss + result.1 as i128;
-            expected[1] += 100 * loss;
-            expected[2] -= loss;
-            expected[3] += loss;
+            let price_loss = i128::from(ENTRY - price);
+            expected[0] -= 100 * price_loss - funding_atoms[0] + result.1 as i128;
+            expected[1] += 100 * price_loss + funding_atoms[1];
+            expected[2] -= price_loss - funding_atoms[2];
+            expected[3] += price_loss + funding_atoms[3];
             expected[4] += result.2 as i128;
             assert_eq!(values(&env, portfolios), expected);
             let payout = u128::from(FUNDS[4]) + result.2;

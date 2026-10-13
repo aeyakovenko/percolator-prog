@@ -5221,6 +5221,20 @@ fn is_engine_non_progress_error(error: &str) -> bool {
     error.contains("Custom(22)") || error.contains("custom program error: 0x16")
 }
 
+/// Engine #219: once Resolved, every backing bucket's effective expiry is
+/// `min(expiry_slot, resolved_slot + H)` with
+/// `H = max(max_accrual_dt_slots, h_max, max_bankrupt_close_lifetime_slots, 1)`.
+fn resolved_backing_deadline(group: &MarketGroupV16) -> u64 {
+    assert_eq!(group.mode, MarketModeV16::Resolved);
+    let config = &group.config;
+    let horizon = config
+        .max_accrual_dt_slots
+        .max(config.h_max)
+        .max(config.max_bankrupt_close_lifetime_slots)
+        .max(1);
+    group.resolved_slot.saturating_add(horizon)
+}
+
 fn resolved_portfolio_is_terminal(env: &V16CuEnv, portfolio: Pubkey) -> bool {
     let account = env.portfolio_state(portfolio);
     let receipt = resolved_receipt(&account);
@@ -8995,3 +9009,6 @@ mod inv_088_global_summaries_are_not_account_local_proofs;
 
 #[path = "invariants/cu/inv_089_activation_reactivation_and_initialization_equivalence.rs"]
 mod inv_089_activation_reactivation_and_initialization_equivalence;
+
+#[path = "invariants/cu/inv_070_issue289_bankruptcy_residual_recredit.rs"]
+mod inv_070_issue289_bankruptcy_residual_recredit;

@@ -110,6 +110,85 @@ fn released_support(env: &V16Svm, actor: usize) -> u128 {
         .sum()
 }
 
+/// A loser whose bounded marks move past its capital settles once, after the winner has
+/// settled every generation, so its finite principal is the only source backing for a claim
+/// twice its size (the INV-031 half-backed construction). The winner's released conversion is
+/// therefore truly source-limited and must pay exactly the independently reconstructed support.
+fn source_limited_conversion(peak_cu: &mut u64) -> usize {
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const CLOSER: usize = 2;
+    const DOMAIN: usize = 1;
+    const START: u64 = 100;
+    const SETTLED: u64 = 150;
+    const POSITION_Q: i128 = 40 * POS_SCALE as i128;
+    const PRINCIPAL: u128 = 1_000;
+    const CLAIM: u128 = 2_000;
+    let mut env = V16Svm::new(
+        [0x4f; 32],
+        MarketConfig {
+            initial_price: START,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [PRINCIPAL; crate::support::v16_svm::PRIMARY_ACTOR_COUNT],
+            ..MarketConfig::default()
+        },
+    );
+    let hint = |env: &V16Svm| {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: env.primary_profile(0).oracle_leg_count,
+        }]
+    };
+    env.trade_no_cpi(WINNER, LOSER, 0, POSITION_Q, START, 0)
+        .expect("claim-bearing position opens");
+    for (offset, price) in (105..=SETTLED).step_by(5).enumerate() {
+        let slot = 2 + offset as u64;
+        env.warp_to_slot(slot);
+        env.push_auth_mark(0, slot, price)
+            .expect("bounded favorable mark");
+        let hints = hint(&env);
+        let success = env.crank(WINNER, slot, hints).expect("winner settles");
+        *peak_cu = (*peak_cu).max(success.compute_units);
+    }
+    let slot = 1 + (SETTLED - START) / 5;
+    let hints = hint(&env);
+    env.crank(LOSER, slot, hints).expect("loser settles once");
+    env.trade_no_cpi(WINNER, CLOSER, 0, -POSITION_Q, SETTLED, 0)
+        .expect("winner flattens");
+    let group = env.primary_market_state().1;
+    assert_eq!(
+        group.source_credit[DOMAIN].positive_claim_bound_num,
+        CLAIM * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_credit[DOMAIN].fresh_reserved_backing_num,
+        PRINCIPAL * BOUND_SCALE,
+        "the bankrupt loser's principal is the only source"
+    );
+    let released = env.primary_portfolio(WINNER).pnl.get();
+    assert_eq!(released, CLAIM as i128);
+    let released = released as u128;
+    let support = released_support(&env, WINNER);
+    assert_eq!(support, PRINCIPAL);
+    let capital_before = env.primary_portfolio(WINNER).capital.get();
+    let conversion = env
+        .convert_released_pnl(WINNER, support)
+        .unwrap_or_else(|error| panic!("source-limited conversion: {error}"));
+    *peak_cu = (*peak_cu).max(conversion.compute_units);
+    assert_eq!(
+        env.primary_portfolio(WINNER).capital.get(),
+        capital_before + support
+    );
+    assert_eq!(claim(&env, WINNER), 0);
+    assert_public_stock_census("source-limited conversion", &env).unwrap();
+    assert_public_encumbrance_census("source-limited conversion", &env).unwrap();
+    usize::from(support < released)
+}
+
 fn retain_exit(env: &mut V16Svm, batch: bool, size: i128, limit: u64) -> Transaction {
     if batch {
         env.build_retained_batch_cpi_trade(0, 1, 0, size, limit)
@@ -360,14 +439,17 @@ fn v16_program_retained_exits_survive_extreme_paid_mark_source_repricing() {
                         let before_conversion = env.primary_portfolio(actor);
                         let released = env.primary_portfolio(actor).pnl.get().max(0) as u128;
                         let support = released_support(&env, actor);
-                        assert!(support <= released);
-                        discounted_conversions += usize::from(support < released);
+                        // percolator-prog#457: once every leg is settled, a reversal's give-back
+                        // moved its twin backing to the loss domain, so no completed claim here
+                        // is source-limited; payouts equal input-derived entitlements.
+                        assert_eq!(support, released, "{context}: actor={actor} full support");
                         if released != 0 {
                             let conversion = env.convert_released_pnl(actor, released).unwrap();
                             peak_cu = peak_cu.max(conversion.compute_units);
                         }
                         let capital = env.primary_portfolio(actor).capital.get();
                         assert_eq!(capital, before_conversion.capital.get() + support);
+                        assert_eq!(capital as i128, all_values[actor], "{context}: actor={actor}");
                         assert_eq!(claim(&env, actor), 0);
                         let destination = env.actors[actor].destination_token;
                         let before = env.token_amount(destination);
@@ -398,6 +480,9 @@ fn v16_program_retained_exits_survive_extreme_paid_mark_source_repricing() {
             }
         }
     }
+    // The released-support oracle must also be exercised where a domain is genuinely
+    // under-backed: a bankrupt loser's finite principal backs only half of a claim.
+    discounted_conversions += source_limited_conversion(&mut peak_cu);
     peak_cu = peak_cu.max(peak_move_cu).max(peak_exit_cu);
     assert_eq!(worlds, 16);
     assert!(

@@ -9,6 +9,11 @@ use rand_xorshift::XorShiftRng;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
 const SCALE: i128 = POS_SCALE as i128;
+// Value numerators are in 1 / (POS_SCALE * ADL_ONE) atoms: the engine settles a
+// leg as floor(|basis| * index_delta / (a_basis * POS_SCALE)) with a_basis = ADL_ONE,
+// and #458 funding indices carry sub-unit (non-ADL_ONE-aligned) F deltas.
+const DEN: i128 = SCALE * ADL_ONE as i128;
+const ADL: i128 = ADL_ONE as i128;
 
 #[path = "inv_045_fractional_reset_histories.rs"]
 mod fractional_reset_histories;
@@ -23,8 +28,10 @@ struct Ledger {
     // Each owner's two lanes are K and F; these are not transferable claims.
     residue_num: [[i128; 2]; 4],
     price: [u64; 2],
+    // Long-side F index (ADL-scaled); the short index is its exact negation.
     funding: [i128; 2],
     snap_price: [[u64; 2]; 4],
+    // Long-side-signed F snapshot: a leg stores `signum(q) * snap_funding`.
     snap_funding: [[i128; 2]; 4],
     funding_flows: [[u128; 4]; 4],
     slot: u64,
@@ -36,6 +43,8 @@ struct Ledger {
     rate_cap: i128,
     latent_checks: usize,
     separate_floor_checks: usize,
+    // Checks at which a live leg carried a nonzero sub-atom F remainder (#458).
+    carried_remainder_checks: usize,
 }
 
 impl Ledger {
@@ -43,7 +52,7 @@ impl Ledger {
         Self {
             q: OPEN_LOTS.map(|q| q.map(|lots| lots * SCALE)),
             value: PRINCIPAL.map(i128::from),
-            ideal_num: PRINCIPAL.map(|p| i128::from(p) * SCALE),
+            ideal_num: PRINCIPAL.map(|p| i128::from(p) * DEN),
             residue_num: [[0; 2]; 4],
             price: ANCHORS,
             funding: [0; 2],
@@ -63,6 +72,7 @@ impl Ledger {
             rate_cap,
             latent_checks: 0,
             separate_floor_checks: 0,
+            carried_remainder_checks: 0,
         }
     }
 
@@ -105,10 +115,12 @@ impl Ledger {
                     + distance.signum() * i128::from(movement);
                 let rate = ((self.funding_targets[asset] - price) * 1_000_000_000 / price)
                     .clamp(-self.rate_cap, self.rate_cap);
-                let funding = -(rate * price).div_euclid(1_000_000_000);
+                // #458: per-side floor of the exact A-scaled numerator, no whole-unit floor.
+                let funding = (-rate * price * ADL).div_euclid(1_000_000_000);
+                assert_eq!((rate * price * ADL).div_euclid(1_000_000_000), -funding);
                 for actor in 0..4 {
-                    self.ideal_num[actor] +=
-                        self.q[actor][asset] * (price - i128::from(self.price[asset]) + funding);
+                    self.ideal_num[actor] += self.q[actor][asset]
+                        * ((price - i128::from(self.price[asset])) * ADL + funding);
                 }
                 self.price[asset] = price as u64;
                 self.funding[asset] += funding;
@@ -126,26 +138,52 @@ impl Ledger {
     fn pending(&self, actor: usize, asset: usize) -> [i128; 2] {
         [
             self.q[actor][asset]
-                * (i128::from(self.price[asset]) - i128::from(self.snap_price[actor][asset])),
+                * (i128::from(self.price[asset]) - i128::from(self.snap_price[actor][asset]))
+                * ADL,
             self.q[actor][asset] * (self.funding[asset] - self.snap_funding[actor][asset]),
         ]
+    }
+
+    /// Basis change: the engine first settles, then drops the sub-atom F remainder
+    /// (`f_snap = F_target`) so it is never revalued at the new basis (#458).
+    fn resize(&mut self, actor: usize, asset: usize, delta: i128) {
+        let remainder = self.pending(actor, asset)[1];
+        assert!((0..DEN).contains(&remainder), "settled before resize");
+        self.residue_num[actor][1] += remainder;
+        self.snap_funding[actor][asset] = self.funding[asset];
+        self.q[actor][asset] += delta;
     }
 
     fn settle(&mut self, actor: usize) {
         for asset in 0..2 {
             let pending = self.pending(actor, asset);
-            let atoms = pending.map(|n| n.div_euclid(SCALE));
+            let atoms = pending.map(|n| n.div_euclid(DEN));
             self.separate_floor_checks += usize::from(
-                atoms.iter().sum::<i128>() != pending.iter().sum::<i128>().div_euclid(SCALE),
+                atoms.iter().sum::<i128>() != pending.iter().sum::<i128>().div_euclid(DEN),
             );
             for lane in 0..2 {
                 self.value[actor] += atoms[lane];
-                self.residue_num[actor][lane] += pending[lane].rem_euclid(SCALE);
+            }
+            // K: the snapshot jumps to the target and the floor remainder is lost.
+            self.residue_num[actor][0] += pending[0].rem_euclid(DEN);
+            self.snap_price[actor][asset] = self.price[asset];
+            // F (#458): the side snapshot advances by the signed ceiling of
+            // atoms * den / |basis|; only that ceiling overshoot is lost, and the
+            // sub-atom remainder stays latent in F_target - f_snap.
+            let q = self.q[actor][asset];
+            if q == 0 {
+                self.snap_funding[actor][asset] = self.funding[asset];
+            } else {
+                let abs_q = q.abs();
+                let step = (atoms[1] * DEN).div_euclid(abs_q)
+                    + i128::from((atoms[1] * DEN).rem_euclid(abs_q) != 0);
+                self.residue_num[actor][1] += abs_q * step - atoms[1] * DEN;
+                self.snap_funding[actor][asset] += q.signum() * step;
+                let remainder = self.pending(actor, asset)[1];
+                assert!((0..DEN).contains(&remainder), "sub-atom F credit");
             }
             let side = if self.q[actor][asset] >= 0 { 0 } else { 2 };
             self.funding_flows[actor][side + usize::from(atoms[1] >= 0)] += atoms[1].unsigned_abs();
-            self.snap_price[actor][asset] = self.price[asset];
-            self.snap_funding[actor][asset] = self.funding[asset];
         }
     }
 
@@ -179,7 +217,7 @@ impl Ledger {
                     .unwrap_or((0, 0))
             );
             let k = (i128::from(self.price[asset]) - i128::from(ANCHORS[asset])) * ADL_ONE as i128;
-            let f = self.funding[asset] * ADL_ONE as i128;
+            let f = self.funding[asset];
             assert_eq!(
                 (a.k_long, a.k_short, a.f_long_num, a.f_short_num),
                 (k, -k, f, -f)
@@ -219,10 +257,9 @@ impl Ledger {
                             - i128::from(ANCHORS[asset]))
                             * ADL_ONE as i128
                     );
-                    assert_eq!(
-                        leg.f_snap,
-                        sign * self.snap_funding[actor][asset] * ADL_ONE as i128
-                    );
+                    assert_eq!(leg.f_snap, sign * self.snap_funding[actor][asset]);
+                    self.carried_remainder_checks +=
+                        usize::from(self.snap_funding[actor][asset] != self.funding[asset]);
                 } else {
                     assert_eq!(self.q[actor][asset], 0);
                 }
@@ -239,7 +276,7 @@ impl Ledger {
                 world.trace
             );
             assert_eq!(
-                self.value[actor] * SCALE
+                self.value[actor] * DEN
                     + latent_num
                     + self.residue_num[actor].iter().sum::<i128>(),
                 self.ideal_num[actor]
@@ -257,7 +294,7 @@ impl Ledger {
             positive_pnl += account.pnl.get().max(0) as u128;
         }
         let total = PRINCIPAL.map(u128::from).iter().sum::<u128>();
-        assert_eq!(self.ideal_num.iter().sum::<i128>(), total as i128 * SCALE);
+        assert_eq!(self.ideal_num.iter().sum::<i128>(), total as i128 * DEN);
         assert_eq!((group.c_tot, group.pnl_pos_tot), (capital, positive_pnl));
         assert_eq!(
             (group.insurance, group.backing_provider_earnings_total),
@@ -280,6 +317,61 @@ impl Ledger {
             mint.mint_authority,
             solana_program::program_option::COption::None
         );
+    }
+}
+
+/// Terminal custody after every owner exited at its exact entitlement. Under #457
+/// the K/F floor dust is booked as loss-domain Fresh backing (not junior pool):
+/// the leftover Fresh backing must be exactly the vault dust, no source domain
+/// may retain a claimant, and nothing may be liened, impaired, or fee-earning.
+fn assert_terminal_backing_is_vault_dust(world: &World, dust: u128) {
+    let group = world.env.market_state().1;
+    assert_eq!(
+        (group.vault, group.c_tot, group.pnl_pos_tot, group.insurance),
+        (dust, 0, 0, 0)
+    );
+    assert_eq!(group.backing_provider_earnings_total, 0);
+    let fresh_num = group
+        .source_backing_buckets
+        .iter()
+        .filter(|b| b.status == percolator::BackingBucketStatusV16::Fresh)
+        .map(|b| b.fresh_unliened_backing_num)
+        .sum::<u128>();
+    assert!(
+        fresh_num <= dust * BOUND_SCALE,
+        "leftover Fresh backing exceeds vault dust"
+    );
+    assert_eq!(
+        fresh_num % BOUND_SCALE,
+        0,
+        "leftover Fresh backing is whole atoms"
+    );
+    for bucket in &group.source_backing_buckets {
+        assert_eq!(
+            (
+                bucket.valid_liened_backing_num,
+                bucket.impaired_liened_backing_num,
+                bucket.utilization_fee_earnings
+            ),
+            (0, 0, 0)
+        );
+    }
+    for credit in &group.source_credit {
+        assert_eq!(
+            (
+                credit.positive_claim_bound_num,
+                credit.exact_positive_claim_num,
+                credit.valid_liened_backing_num,
+                credit.impaired_liened_backing_num
+            ),
+            (0, 0, 0, 0),
+            "no claimant may hold unpaid source entitlement"
+        );
+    }
+    assert_eq!(group.source_claim_bound_total_num, 0);
+    for key in world.portfolios {
+        let account = world.env.portfolio_state(key);
+        assert_eq!((account.capital.get(), account.pnl.get()), (0, 0));
     }
 }
 
@@ -499,8 +591,8 @@ fn reduce(
         ledger.settle(actor);
         ledger.settle(actor + 1);
         for asset in assets {
-            ledger.q[actor][asset] -= amounts[asset];
-            ledger.q[actor + 1][asset] += amounts[asset];
+            ledger.resize(actor, asset, -amounts[asset]);
+            ledger.resize(actor + 1, asset, amounts[asset]);
         }
         ledger.check(world);
         assert_eq!(carry_transport_exit::profiles(world), profiles);
@@ -620,6 +712,10 @@ fn v16_program_generated_fractional_kf_routes_preserve_carry_owner_value_and_res
                     ledger.check(&world);
                 }
                 assert!(ledger.latent_checks > 0);
+                assert!(
+                    ledger.carried_remainder_checks > 0,
+                    "sub-atom F remainders must be carried across settlements"
+                );
                 assert!(ledger
                     .price
                     .iter()
@@ -640,8 +736,8 @@ fn v16_program_generated_fractional_kf_routes_preserve_carry_owner_value_and_res
                     );
                 }
                 let residue_num = ledger.residue_num.iter().flatten().sum::<i128>();
-                assert_eq!(residue_num % SCALE, 0);
-                let residue = (residue_num / SCALE) as u128;
+                assert_eq!(residue_num % DEN, 0);
+                let residue = (residue_num / DEN) as u128;
                 assert!(residue > 2, "multiple K/F floors must contribute");
                 assert!(ledger.residue_num.iter().any(|r| r[0] > 0 && r[1] > 0));
                 separate_floors += ledger.separate_floor_checks;
@@ -663,25 +759,7 @@ fn v16_program_generated_fractional_kf_routes_preserve_carry_owner_value_and_res
                     |_, _, _| {},
                 );
                 assert_eq!(paid.map(i128::from), ledger.value);
-                let group = world.env.market_state().1;
-                assert_eq!(
-                    (group.insurance, group.backing_provider_earnings_total),
-                    (0, 0)
-                );
-                for bucket in &group.source_backing_buckets {
-                    assert!(
-                        bucket.status != percolator::BackingBucketStatusV16::Fresh
-                            || bucket.fresh_unliened_backing_num == 0
-                    );
-                    assert_eq!(
-                        (
-                            bucket.valid_liened_backing_num,
-                            bucket.impaired_liened_backing_num,
-                            bucket.utilization_fee_earnings
-                        ),
-                        (0, 0, 0)
-                    );
-                }
+                assert_terminal_backing_is_vault_dust(&world, residue);
                 let result = (endpoint, ledger.residue_num, ledger.funding_flows, paid);
                 if let Some(expected) = &reference {
                     assert_eq!(&result, expected);
@@ -713,6 +791,7 @@ fn v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjust
     let mut rejection_cu = 0;
     let mut rollbacks = 0;
     let mut cadence_differences = 0;
+    let mut negative_deltas = 0;
     for direction in [-1, 1] {
         let mut deferred: Option<(Ledger, [u64; 4], u128)> = None;
         for eager in [false, true] {
@@ -755,20 +834,30 @@ fn v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjust
                 false,
             );
             let mut extra_frontiers = 0;
+            let mut eager_settlements = 0;
             for slot in 1..=12 {
                 world.env.svm.warp_to_slot(slot);
                 ledger.advance(slot);
                 // Market accrual and signed quantities are identical in both worlds.
                 crank(&mut world, &mut ledger, 2, false);
-                if slot == 3 || slot == 7 {
+                // Exact funding (#458) carries each payer's ceiling overshoot as
+                // sub-atom F credit, so one slot after an eager frontier (slot 3)
+                // an owner may owe no whole atom. Reject owner cranks at slots
+                // where a K step has landed since that owner last settled, so
+                // the rolled-back prefix moves real value in both cadences.
+                if slot == 5 || slot == 7 {
                     let actor = usize::from(slot == 7);
                     let pending = [0, 1].map(|asset| ledger.pending(actor, asset));
-                    assert!(pending.iter().flatten().any(|n| n.rem_euclid(SCALE) != 0));
+                    assert!(pending.iter().flatten().any(|n| n.rem_euclid(DEN) != 0));
+                    assert!(
+                        pending.iter().any(|lanes| lanes[0] != 0),
+                        "a K step is pending"
+                    );
                     assert_ne!(
                         pending
                             .iter()
                             .flatten()
-                            .map(|n| n.div_euclid(SCALE))
+                            .map(|n| n.div_euclid(DEN))
                             .sum::<i128>(),
                         0,
                         "the rejected prefix must settle a real fractional obligation"
@@ -791,14 +880,30 @@ fn v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjust
                     ledger.check(&world);
                 }
                 if slot % 2 == 0 {
-                    // Keep source-credit consumption outside this K/F floor oracle.
+                    // Negative K/F deltas (e.g. exact funding paid by actor 0's long
+                    // leg) are in scope: #457 settles them by at-par netting,
+                    // rate-1 realization, or free capital, all of which keep owner
+                    // value exact (checked by `Ledger::check`). Only support-and-burn
+                    // (a loss beyond free capital) is outside this oracle, so require
+                    // every settling owner's whole loss to fit in its free capital.
                     for actor in [0, 1] {
-                        for asset in [0, 1] {
-                            let net = ledger.pending(actor, asset).map(|n| n.div_euclid(SCALE));
-                            assert!(
-                                net.iter().sum::<i128>() * if actor == 0 { 1 } else { -1 } >= 0
-                            );
-                        }
+                        let loss = (0..2)
+                            .flat_map(|asset| ledger.pending(actor, asset))
+                            .map(|n| (-n.div_euclid(DEN)).max(0))
+                            .sum::<i128>();
+                        negative_deltas +=
+                            usize::from((0..2).any(|asset| {
+                                ledger.pending(actor, asset).iter().sum::<i128>() < 0
+                            }));
+                        let capital = world
+                            .env
+                            .portfolio_state(world.portfolios[actor])
+                            .capital
+                            .get();
+                        assert!(
+                            loss <= capital as i128,
+                            "owner={actor}: loss {loss} would reach support-and-burn"
+                        );
                     }
                 }
                 if slot % 4 == 0 {
@@ -816,6 +921,11 @@ fn v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjust
                 } else if eager && slot % 2 == 0 {
                     let profiles = carry_transport_exit::profiles(&world);
                     for actor in [0, 1] {
+                        eager_settlements += usize::from(
+                            (0..2)
+                                .flat_map(|asset| ledger.pending(actor, asset))
+                                .any(|n| n.div_euclid(DEN) != 0),
+                        );
                         crank(&mut world, &mut ledger, actor, false);
                     }
                     assert_eq!(carry_transport_exit::profiles(&world), profiles);
@@ -836,11 +946,12 @@ fn v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjust
                 );
             }
             let residue_num = ledger.residue_num.iter().flatten().sum::<i128>();
-            assert_eq!(residue_num % SCALE, 0);
-            let residue = u128::try_from(residue_num / SCALE).unwrap();
+            assert_eq!(residue_num % DEN, 0);
+            let residue = u128::try_from(residue_num / DEN).unwrap();
             assert!(residue > 0);
             assert!(ledger.latent_checks > 0);
             assert!(ledger.separate_floor_checks > 0);
+            assert!(ledger.carried_remainder_checks > 0);
             let endpoint = Economics {
                 price: ledger.price,
                 carry: ledger.carry(),
@@ -857,25 +968,8 @@ fn v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjust
                 residue,
                 |_, _, _| {},
             );
-            let group = world.env.market_state().1;
-            assert_eq!(
-                (group.insurance, group.backing_provider_earnings_total),
-                (0, 0)
-            );
-            for bucket in &group.source_backing_buckets {
-                assert!(
-                    bucket.status != percolator::BackingBucketStatusV16::Fresh
-                        || bucket.fresh_unliened_backing_num == 0
-                );
-                assert_eq!(
-                    (
-                        bucket.valid_liened_backing_num,
-                        bucket.impaired_liened_backing_num,
-                        bucket.utilization_fee_earnings,
-                    ),
-                    (0, 0, 0)
-                );
-            }
+            assert_eq!(paid.map(i128::from), ledger.value);
+            assert_terminal_backing_is_vault_dust(&world, residue);
             let result = (
                 endpoint.price,
                 endpoint.carry,
@@ -894,22 +988,19 @@ fn v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjust
                     "cadence preserves canonical accrual and rational value"
                 );
                 assert_eq!(extra_frontiers, 3);
-                let mut payout_difference = 0;
+                // Nonvacuity: every inserted owner frontier settled whole atoms.
+                assert_eq!(eager_settlements, 2 * extra_frontiers);
+                // Each K step lands once between the shared reductions, and #458
+                // carries every sub-atom F remainder, so the inserted frontiers
+                // are value-neutral: identical floors, payouts, and vault dust.
                 for actor in 0..4 {
                     let delta = i128::from(baseline_paid[actor]) - i128::from(paid[actor]);
                     let lost_fraction = ledger.residue_num[actor].iter().sum::<i128>()
                         - baseline.residue_num[actor].iter().sum::<i128>();
-                    assert_eq!(delta * SCALE, lost_fraction, "owner={actor}");
-                    // Each inserted frontier can add at most one floor atom per K/F lane/asset.
-                    let bound = if actor < 2 { 4 * extra_frontiers } else { 0 };
-                    assert!((0..=bound).contains(&delta), "owner={actor}, delta={delta}");
-                    payout_difference += delta;
+                    assert_eq!(delta * DEN, lost_fraction, "owner={actor}");
+                    assert_eq!(delta, 0, "owner={actor}: cadence changed payout");
                 }
-                assert!(
-                    payout_difference > 0,
-                    "the changed owner cadence must be nonvacuous"
-                );
-                assert_eq!(residue - *baseline_vault, payout_difference as u128);
+                assert_eq!(residue, *baseline_vault);
                 cadence_differences += 1;
             } else {
                 deferred = Some((ledger, paid, residue));
@@ -919,6 +1010,7 @@ fn v16_program_fractional_owner_crank_cadence_preserves_carry_and_residue_adjust
         }
     }
     assert_eq!(cadence_differences, 2);
+    assert!(negative_deltas > 0, "negative K/F deltas must be exercised");
     assert_eq!(rollbacks, 20);
     assert_cu_within("fractional owner cadence", peak_cu, 1_400_000);
     assert_cu_within("fractional owner cadence rollback", rejection_cu, 1_400_000);
