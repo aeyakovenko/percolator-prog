@@ -260,9 +260,9 @@ proptest! {
         for (expected, discovery) in AccrualOrderingKind::ALL.into_iter().zip(&discoveries) {
             prop_assert_eq!(discovery.kind, expected);
             prop_assert!(discovery.certifies_terminal_value(), "{discovery:?}");
-            // The settle-first control exits immediately. Only forfeit-before-settlement may
-            // leave a partly source-backed claim, and its exit is one committed backing expiry
-            // (a bounded public wait, not a lock or a value change).
+            // The settle-first control exits immediately. Before engine #228 forfeit-before-
+            // settlement could leave a partly source-backed claim exiting via one committed
+            // backing expiry; the per-world bound stays, the aggregate below must now be 0.
             prop_assert_eq!(discovery.control_backing_expiry_waits, 0, "{:?}", discovery);
             prop_assert!(discovery.reordered_backing_expiry_waits <= 1, "{discovery:?}");
             if discovery.reordered_backing_expiry_waits != 0 {
@@ -307,7 +307,22 @@ proptest! {
             violations.is_empty(),
             "accrual-ordering invariant violations remain: {violations:?}"
         );
-        prop_assert_eq!(expiry_waits, 1, "the forfeit-first world must exercise backing expiry");
+        // Engine #228 (prog#450): the forfeit-first world's capital-covered K/F loss now backs
+        // the payer's source domain directly (capped at the claimants' unbacked claims), so
+        // the receiver is fully source-backed and no backing-expiry wait remains.
+        prop_assert_eq!(expiry_waits, 0, "forfeit debt must back the source domain without expiry");
+        let forfeit = discoveries
+            .iter()
+            .find(|discovery| discovery.kind == AccrualOrderingKind::RecoveryForfeit)
+            .expect("forfeit-first world");
+        prop_assert_eq!(
+            forfeit.reordered_total_payout,
+            forfeit.control_total_payout,
+            "forfeit-first and settle-first orderings pay identically: {:?}",
+            forfeit
+        );
+        prop_assert_eq!(forfeit.victim_payout_loss, 0, "{:?}", forfeit);
+        prop_assert_eq!(forfeit.max_destination_payout_loss, 0, "{:?}", forfeit);
     }
 
     #[test]

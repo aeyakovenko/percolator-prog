@@ -248,13 +248,7 @@ fn v16_program_pending_obligation_cannot_follow_withdraw_transfer_redeposit() {
                     &world.env,
                     world.actors[i].portfolio
                 ));
-                let before = world.frame();
-                world.payout(i, true).expect("settled claim retry");
-                assert_eq!(
-                    world.frame(),
-                    before,
-                    "no repeated terminal value extraction"
-                );
+                world.assert_terminal_claim_retry_is_inert(i, "settled claim retry");
             }
             assert_eq!(world.env.market_state().1.vault, 0);
             for actor in &world.actors {
