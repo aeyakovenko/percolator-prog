@@ -989,9 +989,9 @@ market reclaim (`CloseSlab`) requires a live market authority.
 # before treating this artifact as deployable.
 cargo build-sbf --tools-version v1.52
 
-# Legacy local compatibility build without the Anchor v2 entrypoint. Written to its
-# own directory so it does not replace the .so the tests load.
-cargo build-sbf --no-default-features --sbf-out-dir target/deploy-legacy
+# Only the default build above is supported. `--no-default-features` (no Anchor v2
+# entrypoint) is not tested: it uses more compute and hits heap access violations on
+# some paths (#459).
 
 # Matcher programs the tests load. Build once (and after changing them); without
 # these, hundreds of tests fail with missing-.so panics. The external matcher is
