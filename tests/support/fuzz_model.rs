@@ -15109,14 +15109,15 @@ fn finish_close_to_partial_receipt_composition(
     runner.run_terminal_payout_campaign()?;
     runner.assert_global_invariants()?;
     if let Some(terminal_cleanup_slot) = terminal_cleanup_slot {
-        // The open partial receipt waits on fresh source backing, and the provider's
-        // pre-expiry withdrawal needs zero materialized portfolios (wrapper #451), so
-        // the payout campaign can only finish by letting that backing lapse.
+        // The open partial receipt waits on fresh source backing. Since wrapper #451 the
+        // provider may withdraw resolved surplus early, but the backing the receipt still
+        // needs to reach full face stays pledged, so the payout campaign can only finish by
+        // letting that backing lapse.
         if runner.env.current_slot() > terminal_cleanup_slot {
             return Err(format!(
                 "INV-070 terminal payout could not finish by cleanup slot {terminal_cleanup_slot}: \
                  the open receipt forced fresh provider backing to lapse at slot {} \
-                 (provider pre-expiry withdrawal blocked, wrapper #451)",
+                 (the receipt still needs that pledged backing, wrapper #451)",
                 runner.env.current_slot()
             ));
         }

@@ -1274,6 +1274,7 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
         Inv088EngineCallsite { owner: "handle_top_up_insurance", method: "deposit_domain_insurance_not_atomic", count: 1, summary_family: "insurance-budget", witness: "v16_attack_live_insurance_asset_withdraw_uniform_for_asset0_and_permissionless_asset" },
         Inv088EngineCallsite { owner: "handle_top_up_backing_bucket", method: "deposit_fresh_counterparty_backing_not_atomic", count: 1, summary_family: "fresh-backing", witness: "v16_program_fresh_backing_global_summary_is_exact_in_every_four_domain_touch_order" },
         Inv088EngineCallsite { owner: "handle_withdraw_backing_bucket", method: "withdraw_fresh_counterparty_backing_not_atomic", count: 1, summary_family: "fresh-backing", witness: "v16_program_fresh_backing_global_summary_is_exact_in_every_four_domain_touch_order" },
+        Inv088EngineCallsite { owner: "handle_withdraw_backing_bucket", method: "withdraw_resolved_counterparty_backing_surplus_not_atomic", count: 1, summary_family: "fresh-backing", witness: "v16_attack_resolved_backing_withdraw_is_limited_to_surplus_before_wind_down" },
         Inv088EngineCallsite { owner: "handle_withdraw_backing_bucket_earnings", method: "withdraw_backing_provider_earnings_not_atomic", count: 1, summary_family: "backing-earnings", witness: "v16_public_backing_earnings_withdrawal_matches_spl_and_internal_quote_deltas" },
         Inv088EngineCallsite { owner: "handle_withdraw_insurance_asset", method: "recredit_terminal_claim_free_residual_for_asset_not_atomic", count: 1, summary_family: "insurance-budget", witness: "v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_close" },
         Inv088EngineCallsite { owner: "handle_close_slab", method: "advance_terminal_slab_not_atomic", count: 1, summary_family: "terminal-scan-stock", witness: "v16_bpf_terminal_claim_free_surplus_close_stays_bounded_on_10m_market" },
@@ -1427,8 +1428,8 @@ fn v16_program_every_wrapper_engine_transition_callsite_has_summary_disposition_
     }
     assert_eq!(
         certificate_disposition_classes,
-        [18, 16, 11, 5],
-        "all 50 wrapper-to-engine callsite classes need an explicit, nonvacuous certificate disposition",
+        [19, 16, 11, 5],
+        "all 51 wrapper-to-engine callsite classes need an explicit, nonvacuous certificate disposition",
     );
     assert_eq!(
         actual, expected,

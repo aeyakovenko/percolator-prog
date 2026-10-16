@@ -10622,16 +10622,20 @@ pub mod processor {
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             require_asset_generation_view(&group, domain_usize / 2, expected_market_id)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
+            // Resolved: with no portfolio or capital left, nothing can claim the backing.
+            // Otherwise the provider may take only the engine's resolved surplus: backing
+            // that no domain source claim or junior receipt can still need. Unsigned resolved
+            // reserve payments keep requiring the full wind-down; the early surplus exit needs
+            // the provider's own consent.
+            let resolved_surplus_only = group.header.mode == 1
+                && (group.header.materialized_portfolio_count.get() != 0
+                    || group.header.c_tot.get() != 0);
+            if resolved_surplus_only && !authority.is_signer {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
             let shutdown_drain = match group.header.mode {
                 0 => live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize)?,
-                1 => {
-                    if group.header.materialized_portfolio_count.get() != 0
-                        || group.header.c_tot.get() != 0
-                    {
-                        return Err(PercolatorError::EngineLockActive.into());
-                    }
-                    false
-                }
+                1 => false,
                 _ => return Err(PercolatorError::EngineLockActive.into()),
             };
             let local_authorized =
@@ -10677,9 +10681,13 @@ pub mod processor {
             } else {
                 None
             };
-            group
-                .withdraw_fresh_counterparty_backing_not_atomic(domain_usize, amount)
-                .map_err(map_v16_error)?;
+            if resolved_surplus_only {
+                group
+                    .withdraw_resolved_counterparty_backing_surplus_not_atomic(domain_usize, amount)
+            } else {
+                group.withdraw_fresh_counterparty_backing_not_atomic(domain_usize, amount)
+            }
+            .map_err(map_v16_error)?;
             if let Some((ledger, _)) = ledger_state.as_mut() {
                 ledger.total_principal_atoms = ledger
                     .total_principal_atoms

@@ -376,8 +376,11 @@ fn run_terminal_provider_and_insurance(exit: ProviderExit) {
             );
         }
 
-        // User claims are paid permissionlessly after the exit window. Provider funds cannot
-        // leave even after payment until both now-empty portfolios are publicly closed.
+        // User claims are paid permissionlessly after the exit window. Insurance cannot leave
+        // even after payment until both now-empty portfolios are publicly closed. Provider
+        // principal no claim can need is withdrawable before that (percolator-prog#451, see
+        // v16_program_resolved_provider_withdraws_unneeded_backing_before_expiry); this retry
+        // world keeps it in place so both roles' later retries stay comparable.
         env.svm.warp_to_slot(7);
         let payout = |env: &V16CuEnv, index: usize| Instruction {
             program_id: env.program_id,
@@ -426,7 +429,7 @@ fn run_terminal_provider_and_insurance(exit: ProviderExit) {
             [1_100, 900, 0, 0, 0]
         );
         assert_eq!(env.market_state().1.c_tot, 0);
-        for role in 0..2 {
+        for role in 1..2 {
             reject(
                 &mut env,
                 &[retained[role].clone()],

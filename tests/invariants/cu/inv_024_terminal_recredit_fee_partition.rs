@@ -798,3 +798,153 @@ fn v16_program_terminal_recredit_preserves_earned_fee_partition_across_payout_or
     }
     eprintln!("row410 fee-protected recredit: 12 histories, 78 exact rollbacks, peak_CU={peak}");
 }
+
+// percolator-prog#451: after resolution the provider withdraws Fresh backing that no claim
+// can need, while a partial receipt is outstanding and portfolios stay open. The backing
+// the receipt still needs stays pledged and pays the claimant in full at expiry.
+#[test]
+fn v16_program_resolved_provider_withdraws_unneeded_backing_before_expiry() {
+    let (mut world, _users, _insurer, _admin_token) = terminal_fee_loss_prefix(false, None);
+    let user_ix =
+        |world: &TerminalEarningsWorld, actor: usize, instruction: ProgInstruction| Instruction {
+            program_id: world.env.program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(world.wallets[actor], false),
+                AccountMeta::new(world.env.market, false),
+                AccountMeta::new(world.portfolios[actor], false),
+                AccountMeta::new(world.tokens[actor], false),
+                AccountMeta::new(world.env.vault, false),
+                AccountMeta::new_readonly(world.env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: instruction.encode(),
+        };
+    let withdraw = |world: &mut TerminalEarningsWorld, domain: u16, amount: u128| {
+        world.env.svm.expire_blockhash();
+        world.env.send(
+            ProgInstruction::WithdrawBackingBucket {
+                domain,
+                market_id: world.env.asset_market_id(0),
+                authority_epoch: world.env.control_sequences(0).authority_epoch,
+                amount,
+            },
+            vec![
+                AccountMeta::new_readonly(world.wallets[2], true),
+                AccountMeta::new(world.env.market, false),
+                AccountMeta::new(world.tokens[2], false),
+                AccountMeta::new(world.env.vault, false),
+                AccountMeta::new_readonly(world.env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&world.incumbent],
+        )
+    };
+    let lock_active = format!("Custom({})", PercolatorError::EngineLockActive as u32);
+    let send_user = |world: &mut TerminalEarningsWorld, actor: usize, instruction| {
+        world.env.svm.expire_blockhash();
+        let metas = user_ix(world, actor, ProgInstruction::ClaimResolvedPayoutTopup).accounts;
+        world.env.send(instruction, metas, &[])
+    };
+
+    // Both users progress once; the winner's receipt keeps a one-atom residue and the
+    // loser's flat portfolio stays open (nobody calls ClosePortfolio).
+    for actor in [0, 1] {
+        send_user(
+            &mut world,
+            actor,
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+    }
+    let receipt = resolved_receipt(&world.env.portfolio_state(world.portfolios[1]));
+    assert!(receipt.present && !receipt.finalized);
+    assert_eq!(
+        receipt.terminal_positive_claim_face - receipt.paid_effective,
+        1
+    );
+    assert!(resolved_portfolio_is_terminal(
+        &world.env,
+        world.portfolios[0]
+    ));
+    let group = world.env.market_state().1;
+    assert_eq!(group.materialized_portfolio_count, 2);
+    assert_eq!(group.current_slot, 61);
+    let ledger = group.resolved_payout_ledger;
+    assert_eq!(
+        (
+            ledger.terminal_claim_bound_unreceipted_num,
+            ledger.snapshot_residual
+        ),
+        (0, 5_073)
+    );
+    assert_eq!(ledger.current_payout_rate_den, 5_074 * BOUND_SCALE);
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        u128::from(BACKING) * BOUND_SCALE
+    );
+    assert_eq!(group.source_backing_buckets[1].expiry_slot, 100);
+    assert_eq!(
+        group.source_backing_buckets[0].fresh_unliened_backing_num,
+        u128::from(SOURCE_PRINCIPAL) * BOUND_SCALE
+    );
+
+    // The atom the receipt still needs stays pledged in each bucket.
+    let err = withdraw(&mut world, 1, u128::from(BACKING)).unwrap_err();
+    assert!(format!("{err:?}").contains(&lock_active), "{err:?}");
+    let err = withdraw(&mut world, 0, u128::from(SOURCE_PRINCIPAL)).unwrap_err();
+    assert!(format!("{err:?}").contains(&lock_active), "{err:?}");
+    // Everything above it is surplus, withdrawable now with both portfolios open.
+    withdraw(&mut world, 1, u128::from(BACKING - 1)).unwrap();
+    assert_eq!(world.env.token_amount(world.tokens[2]), BACKING - 1);
+    let err = withdraw(&mut world, 1, 1).unwrap_err();
+    assert!(format!("{err:?}").contains(&lock_active), "{err:?}");
+    let group = world.env.market_state().1;
+    assert_eq!(group.materialized_portfolio_count, 2);
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        BOUND_SCALE
+    );
+    let user_paid = world.env.token_amount(world.tokens[1]);
+    assert_eq!(user_paid, USER_PAID[1]);
+
+    // At expiry the kept atom alone takes the receipt to full face: the claimant gets
+    // exactly what the whole 100,000-atom bucket would have given it.
+    world.env.svm.warp_to_slot(100);
+    send_user(
+        &mut world,
+        1,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 100,
+            observations: crank_observations(0),
+        },
+    )
+    .unwrap();
+    let ledger = world.env.market_state().1.resolved_payout_ledger;
+    assert_eq!(
+        ledger.current_payout_rate_num,
+        ledger.current_payout_rate_den
+    );
+    send_user(&mut world, 1, ProgInstruction::ClaimResolvedPayoutTopup).unwrap();
+    let receipt = resolved_receipt(&world.env.portfolio_state(world.portfolios[1]));
+    assert!(receipt.finalized);
+    assert_eq!(receipt.paid_effective, receipt.terminal_positive_claim_face);
+    assert_eq!(
+        world.env.token_amount(world.tokens[1]),
+        USER_PAID[1] + SOURCE_PRINCIPAL
+    );
+    // With every claim at full face, the other bucket's atom is surplus too.
+    assert_eq!(world.env.market_state().1.materialized_portfolio_count, 2);
+    withdraw(&mut world, 0, u128::from(SOURCE_PRINCIPAL)).unwrap();
+    assert_eq!(
+        world.env.token_amount(world.tokens[2]),
+        BACKING - 1 + SOURCE_PRINCIPAL
+    );
+    let mut image = world.env.svm.get_account(&world.env.market).unwrap();
+    state::market_view_mut(&mut image.data)
+        .unwrap()
+        .1
+        .validate_shape()
+        .unwrap();
+}

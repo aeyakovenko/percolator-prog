@@ -104,23 +104,19 @@ fn v16_attack_resolved_asset_insurance_withdraw_requires_full_wind_down() {
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
 }
 
-// security.md sweep — resolved-mode backing withdrawal wind-down gate (SOL-021/022): LP backing is the
-// loss-absorption layer behind users. In RESOLVED mode handle_withdraw_backing_bucket (v16_program 7834)
-// permits a withdrawal ONLY once materialized_portfolio_count == 0 AND c_tot == 0 — i.e. every user has
-// been paid out and closed. If the backing_bucket_authority (or marketauth) could pull backing while
-// resolved users still hold capital/claims, the vault would drop below what those users are owed (LOF).
-// This is the backing parallel of v16_attack_withdraw_insurance_requires_full_wind_down (insurance), but a
-// DISTINCT code path with a distinct condition (count+c_tot vs insurance wind-down). It was untested:
-// 15135 covers the LIVE liened-winner case, not resolved-mode open capital. Non-vacuous: the same
-// withdrawal succeeds on the live empty market first.
+// security.md sweep — resolved-mode backing withdrawal (SOL-021/022, percolator-prog#451): LP backing
+// principal is a senior stock class excluded from the junior payout pool. After resolution, while users
+// still hold capital or claims, the provider may withdraw only the engine's resolved surplus, i.e. backing
+// that no domain source claim or junior receipt can still need, and only with its own signature. User
+// capital (c_tot) stays fully covered. Here the user holds only capital, so all remaining backing is
+// surplus. More than the bucket holds, or an unsigned payment, still rejects with no state change.
 #[test]
-fn v16_attack_resolved_backing_withdraw_requires_full_user_wind_down() {
+fn v16_attack_resolved_backing_withdraw_is_limited_to_surplus_before_wind_down() {
     let mut env = V16CuEnv::new();
     env.top_up_backing_bucket(1, 1_000, 100_000); // domain 1 (asset-0 short) backing, admin-authorized
     let dest = env.token_account(env.admin.pubkey(), 0);
 
-    // Sanity: on a live, user-free market the backing authority CAN withdraw — proves authority + path
-    // are fine, so the resolved-mode rejection below is caused by the wind-down gate, not a precondition.
+    // Sanity: on a live, user-free market the backing authority CAN withdraw.
     env.svm.expire_blockhash();
     env.withdraw_backing_bucket_to_admin_token_with_cu(dest, 1, 100);
 
@@ -131,51 +127,61 @@ fn v16_attack_resolved_backing_withdraw_requires_full_user_wind_down() {
     env.resolve();
     let g = env.market_state().1;
     assert_eq!(g.mode, percolator::MarketModeV16::Resolved, "resolved");
-    assert!(
-        g.c_tot > 0,
-        "user capital still open after resolve (non-vacuous gate)"
-    );
+    assert!(g.c_tot > 0, "user capital still open after resolve");
     assert!(
         g.materialized_portfolio_count > 0,
         "user portfolio still materialized after resolve"
     );
 
-    let vault_before = g.vault;
-    let dest_before = env.token_amount(dest);
-    env.svm.expire_blockhash();
-    let r = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::WithdrawBackingBucket {
-            domain: 1,
-            market_id: g.assets[0].market_id,
-            authority_epoch: 0,
-            amount: 100,
-        },
-        vec![
-            AccountMeta::new(env.admin.pubkey(), true),
+    let withdraw = |env: &mut V16CuEnv, amount: u128, signed: bool| {
+        env.svm.expire_blockhash();
+        let admin = env.admin.insecure_clone();
+        let signers: Vec<&Keypair> = if signed { vec![&admin] } else { vec![] };
+        let market_id = env.market_state().1.assets[0].market_id;
+        let accounts = vec![
+            AccountMeta::new(env.admin.pubkey(), signed),
             AccountMeta::new(env.market, false),
             AccountMeta::new(dest, false),
             AccountMeta::new(env.vault, false),
             AccountMeta::new_readonly(env.vault_authority, false),
             AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[&env.admin.insecure_clone()],
-    );
-    assert!(
-        r.is_err(),
-        "resolved-mode backing withdrawal must reject while users still hold capital/claims"
-    );
+        ];
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::WithdrawBackingBucket {
+                domain: 1,
+                market_id,
+                authority_epoch: 0,
+                amount,
+            },
+            accounts,
+            &signers,
+        )
+    };
+    let vault_before = g.vault;
+    let dest_before = env.token_amount(dest);
+    for (amount, signed) in [(901, true), (900, false)] {
+        assert!(
+            withdraw(&mut env, amount, signed).is_err(),
+            "resolved backing withdrawal of {amount} (signed={signed}) must reject before wind-down"
+        );
+        let g_after = env.market_state().1;
+        assert_eq!(
+            g_after.vault, vault_before,
+            "rejection leaves the vault untouched"
+        );
+        assert_eq!(env.token_amount(dest), dest_before);
+    }
+    withdraw(&mut env, 900, true).expect("unneeded resolved backing is withdrawable");
     let g_after = env.market_state().1;
+    assert_eq!(g_after.vault, vault_before - 900);
+    assert_eq!(env.token_amount(dest), dest_before + 900);
+    assert_eq!(g_after.c_tot, g.c_tot, "user capital is untouched");
     assert_eq!(
-        g_after.vault, vault_before,
-        "rejected resolved backing withdrawal must leave the vault untouched"
-    );
-    assert_eq!(
-        env.token_amount(dest),
-        dest_before,
-        "no backing tokens may leave to the authority before users are wound down"
+        g_after.materialized_portfolio_count,
+        g.materialized_portfolio_count
     );
     assert!(
         g_after.vault >= g_after.c_tot + g_after.insurance,
