@@ -1301,19 +1301,51 @@ fn v16_program_source_lien_fast_certificate_matches_public_full_refresh() {
                         3,
                         &[WINNING_ASSET, ADVERSE_ASSET],
                     );
+                    // Since engine #242 (fix for #230) the winner's fixed-point crank first
+                    // expires the bucket (Fresh -> Impaired) and then, in its own K/F
+                    // settlement, reconciles the sole lien: the exact face moves into the
+                    // winner's impaired-claim lane and the bucket ends Expired with no residual
+                    // impaired encumbrance.
                     let (_, impaired_market) = env.primary_market_state();
+                    let reconciled_source = *env
+                        .primary_portfolio(WINNER)
+                        .source_domains
+                        .iter()
+                        .find(|source| {
+                            source.is_occupied() && source.domain.get() as usize == source_domain
+                        })
+                        .expect("winner must retain the reconciled source-domain attribution");
                     assert_eq!(
                         impaired_market.source_backing_buckets[source_domain].status,
-                        BackingBucketStatusV16::Impaired
+                        BackingBucketStatusV16::Expired
                     );
                     assert_eq!(
                         impaired_market.source_credit[source_domain].valid_liened_backing_num,
                         0
                     );
-                    assert!(
-                        impaired_market.source_credit[source_domain].impaired_liened_backing_num
-                            > 0
+                    assert_eq!(
+                        impaired_market.source_credit[source_domain].impaired_liened_backing_num,
+                        0
                     );
+                    assert_eq!(
+                        impaired_market.source_backing_buckets[source_domain]
+                            .impaired_liened_backing_num,
+                        0
+                    );
+                    assert_eq!(
+                        reconciled_source.source_claim_counterparty_liened_num.get(),
+                        0
+                    );
+                    assert_eq!(
+                        reconciled_source.source_lien_counterparty_backing_num.get(),
+                        0
+                    );
+                    assert_eq!(
+                        reconciled_source.source_claim_impaired_num.get(),
+                        account_source.source_claim_impaired_num.get()
+                            + account_source.source_claim_counterparty_liened_num.get()
+                    );
+                    assert!(reconciled_source.source_claim_impaired_num.get() > 0);
 
                     if matches!(
                         route,
@@ -1337,12 +1369,24 @@ fn v16_program_source_lien_fast_certificate_matches_public_full_refresh() {
                             "{route:?}/winner_long={winner_long} impaired-lien reduction failed: {error}"
                         )
                     });
-                    let (_, after_reduction_market) = env.primary_market_state();
-                    assert!(
-                        after_reduction_market.source_credit[source_domain]
-                            .impaired_liened_backing_num
-                            > 0,
-                        "strict reduction must retain the still-attributed impaired lien"
+                    let after_reduction_source = *env
+                        .primary_portfolio(WINNER)
+                        .source_domains
+                        .iter()
+                        .find(|source| {
+                            source.is_occupied() && source.domain.get() as usize == source_domain
+                        })
+                        .expect("strict reduction must retain the source-domain attribution");
+                    assert_eq!(
+                        after_reduction_source.source_claim_impaired_num,
+                        reconciled_source.source_claim_impaired_num,
+                        "strict reduction must retain the still-attributed impaired claim"
+                    );
+                    assert_eq!(
+                        env.primary_market_state().1.source_credit[source_domain]
+                            .impaired_liened_backing_num,
+                        0,
+                        "the reconciled lien must not be re-impaired by the reduction"
                     );
                     (
                         env.primary_portfolio(WINNER)

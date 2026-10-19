@@ -346,7 +346,7 @@ fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
     assert_eq!(settled.b_stale_state, 0);
     assert_eq!(env.market_state().1.b_stale_account_count, 0);
     assert_eq!(
-        max_cu, 566_297,
+        max_cu, 566_314,
         "remeasure the documented default-feature SBF peak on a new pin"
     );
     println!(

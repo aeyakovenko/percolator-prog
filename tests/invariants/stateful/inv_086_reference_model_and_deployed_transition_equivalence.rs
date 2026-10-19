@@ -1042,12 +1042,25 @@ fn v16_program_lien_impairment_seeded_frontier_preserves_bounded_owner_exit() {
         evidence.second_position_state_changes[5],
         "the exact source-credit-dependent increase must reject from both initial impaired seeds: {evidence:?}"
     );
+    // Since engine #242 (fix for #230) only the lien owner's own K/F settlement (actor-0 crank
+    // with complete/empty hints, matched risk reduction, owner rebalance reduction) may lower the
+    // domain's impaired backing, and the replay rejects any decrease that is not exactly the
+    // owner's lien moving into its own impaired-claim lane. Every other action stays at zero.
+    const OWNER_RECONCILING_ACTIONS: [usize; 4] = [0, 1, 6, 7];
     assert!(
         evidence
             .impaired_lien_reducing_edges
             .iter()
-            .all(|reductions| *reductions == 0),
+            .enumerate()
+            .all(|(action, reductions)| OWNER_RECONCILING_ACTIONS.contains(&action)
+                || *reductions == 0),
         "Live-state actions must not silently erase impaired provider attribution before terminal reconciliation: {evidence:?}"
+    );
+    assert!(
+        OWNER_RECONCILING_ACTIONS
+            .iter()
+            .all(|action| evidence.impaired_lien_reducing_edges[*action] != 0),
+        "every owner settlement action must exercise the exact attributed lien reconcile: {evidence:?}"
     );
     assert_ne!(evidence.coverage.loaded_program_hash, [0; 32]);
     assert!(

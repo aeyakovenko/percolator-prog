@@ -19342,9 +19342,34 @@ pub fn run_bounded_lien_impairment_reference_frontier(
         let mut before_exact = runner.authenticated_graph_state();
         let mut before_economic = runner.bounded_reference_node()?;
         graph.nodes.insert(before_exact.clone());
+        fn lien_owner_fields(source: percolator::PortfolioSourceDomainV16Account) -> [u128; 7] {
+            [
+                source.source_claim_bound_num.get(),
+                source.source_claim_liened_num.get(),
+                source.source_claim_counterparty_liened_num.get(),
+                source.source_lien_counterparty_backing_num.get(),
+                source.source_lien_effective_reserved.get(),
+                source.source_claim_impaired_num.get(),
+                u128::from(source.source_lien_fee_last_slot.get()),
+            ]
+        }
+        // The seed's lien holder (BoundedLienImpairment WINNER).
+        const LIEN_OWNER: usize = 0;
+        let owner_source = |runner: &ScenarioRunner| {
+            runner
+                .env
+                .primary_portfolio(LIEN_OWNER)
+                .source_domains
+                .iter()
+                .find(|source| {
+                    source.is_occupied() && source.domain.get() as usize == source_domain
+                })
+                .copied()
+        };
         for (position, (action_index, action)) in word.iter().enumerate() {
             let impaired_before = runner.env.primary_market_state().1.source_credit[source_domain]
                 .impaired_liened_backing_num;
+            let owner_before = owner_source(&runner);
             apply_bounded_lien_impairment_action(&mut runner, winner_side, action).map_err(
                 |error| {
                     format!(
@@ -19374,6 +19399,34 @@ pub fn run_bounded_lien_impairment_reference_frontier(
                 }
             }
             if impaired_after < impaired_before {
+                // Since engine #242 (fix for #230) the owner's own Live K/F settlement reconciles
+                // its counterparty lien off the Impaired bucket. A domain-impaired decrease is
+                // admitted ONLY when it is exactly that owner's lien backing and the exact claim
+                // face moves into the owner's own impaired-claim lane (attribution preserved).
+                let owner_after = owner_source(&runner);
+                let exact_owner_reconcile = match (owner_before, owner_after) {
+                    (Some(before), Some(after)) => {
+                        let face = before.source_claim_counterparty_liened_num.get();
+                        let backing = before.source_lien_counterparty_backing_num.get();
+                        face != 0
+                            && backing != 0
+                            && impaired_before - impaired_after == backing
+                            && after.source_claim_counterparty_liened_num.get() == 0
+                            && after.source_lien_counterparty_backing_num.get() == 0
+                            && after.source_claim_impaired_num.get()
+                                == before.source_claim_impaired_num.get() + face
+                            && after.source_claim_liened_num.get()
+                                == before.source_claim_liened_num.get() - face
+                    }
+                    _ => false,
+                };
+                if !exact_owner_reconcile {
+                    return Err(format!(
+                        "INV-031 {winner_side:?} action {action_index} erased impaired provider attribution {impaired_before}->{impaired_after} without an exact owner reconcile: owner_before={:?}, owner_after={:?}",
+                        owner_before.map(lien_owner_fields),
+                        owner_after.map(lien_owner_fields)
+                    ));
+                }
                 graph.impaired_lien_reducing_edges[*action_index] += 1;
             }
             if position == 1 {
