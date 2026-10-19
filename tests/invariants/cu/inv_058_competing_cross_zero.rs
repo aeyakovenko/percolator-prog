@@ -1,6 +1,8 @@
 //! INV-058 / row 427: direct cross-zero at a cap shared by three disjoint pairs.
-//! A retained flip competes at the transient attach boundary, including a
-//! rolled-back competing refill and bounded close/reopen at the cap.
+//! The side-OI cap binds the net post-fill OI (engine #221): an OI-neutral flip
+//! at full side OI is accepted in both directions, while a flip that grows the
+//! side by one atom competes for released headroom, including a rolled-back
+//! competing refill and bounded close/reopen at the cap.
 //! Public construction, fixed mark, unit ADL, zero fees.
 
 use super::*;
@@ -89,19 +91,15 @@ fn v16_program_direct_cross_zero_competes_for_shared_side_oi_headroom() {
                 }
                 checkpoint(&w, 0);
 
-                // The engine attaches the first new-side leg before removing
-                // its peer's old leg, so even a net-neutral flip needs headroom.
-                let neutral = w.instructions(0, flip_route, &[(0, -direction * 2 * q)], 0);
-                packet_bytes(&mut w, &neutral);
-                admissible(&w, 0, -direction * 2 * q);
-                w.reject(
-                    &neutral,
-                    PercolatorError::EngineInvalidLeg as u32,
-                    0,
-                    cpis(flip_route),
-                );
-                rollbacks += 1;
-                checkpoint(&w, 0);
+                // The cap is checked on net post-fill OI, not at leg attach:
+                // a net-neutral flip at full side OI needs no headroom and is
+                // accepted in both directions without moving either side.
+                for sign in [-direction, direction] {
+                    fill(&mut w, 0, flip_route, sign * 2 * q);
+                    assert_eq!(w.positions[0][0], sign * q);
+                    checkpoint(&w, 0);
+                    flips += 1;
+                }
 
                 let cross = -direction * (2 * q + 1);
                 admissible(&w, 0, cross);
@@ -119,14 +117,17 @@ fn v16_program_direct_cross_zero_competes_for_shared_side_oi_headroom() {
 
                 let release_q = -direction * (q + 1);
                 admissible(&w, releaser, release_q);
-                admissible(&w, competitor, direction);
                 let release = w.instructions(releaser, release_route, &[(0, release_q)], 0);
                 packet_bytes(&mut w, &release);
                 w.accept(&release, &[releaser]);
                 w.record(releaser, &[(0, release_q)], 0, 1);
                 checkpoint(&w, (q + 1) as u128);
 
-                let compete = w.instructions(competitor, competing_route, &[(0, direction)], 0);
+                // The cross grows each side by one net atom. A competitor that
+                // consumes all released headroom first leaves it none.
+                admissible(&w, competitor, direction * (q + 1));
+                let compete =
+                    w.instructions(competitor, competing_route, &[(0, direction * (q + 1))], 0);
                 let mut bundle = compete;
                 bundle.extend(retained.clone());
                 max_bundle_bytes = max_bundle_bytes.max(packet_bytes(&mut w, &bundle));
@@ -148,6 +149,7 @@ fn v16_program_direct_cross_zero_competes_for_shared_side_oi_headroom() {
                     w.positions[competitor][0],
                     direction * initial[competitor / 2]
                 );
+                // Net growth of one atom per side from q + 1 released atoms.
                 checkpoint(&w, q as u128);
                 flips += 1;
 
@@ -208,7 +210,7 @@ fn v16_program_direct_cross_zero_competes_for_shared_side_oi_headroom() {
     }
     assert_eq!(
         (worlds, flips, split_reversals, rollbacks),
-        (16, 32, 16, 64)
+        (16, 64, 16, 48)
     );
     println!("INV-058 competing cross-zero: {worlds} worlds, {flips} direct flips, {split_reversals} bounded split reversals, {rollbacks} exact rollbacks; peak CU [reject, trade, custody]={peaks:?}; max bundle bytes={max_bundle_bytes}");
 }

@@ -545,7 +545,14 @@ pub struct ProspectiveFundingRewriteReproduction {
     pub attacker_coalition_gain: u128,
     pub control_total_payout: u128,
     pub attack_total_payout: u128,
+    /// Terminal vault SPL above insurance: exact-funding payer-ceiling/receiver-floor dust (#458).
+    pub control_vault_dust: u128,
+    pub attack_vault_dust: u128,
 }
+
+/// Exact funding (#458) floors each side's settlement, so every funded leg can leave less than
+/// one atom of payer-up/receiver-down dust in the vault. The PR 380 worlds hold four funded legs.
+pub const PR380_FUNDING_DUST_BOUND: u128 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResolveBeforeCommittedAccrualReproduction {
@@ -14095,6 +14102,13 @@ pub struct CloseToPartialReceiptEvidence {
     pub slab_custody_burned: u128,
     pub slab_close_compute_units: u64,
     pub slab_closed: bool,
+    pub resolved_junior_need: u128,
+    pub pre_expiry_fresh_backing: u128,
+    pub resolved_surplus_withdrawn: u128,
+    pub surplus_overdraw_rejections: usize,
+    pub pre_expiry_slab_close_rejected: bool,
+    pub terminal_landing_slot: u64,
+    pub payout_campaign_start_slot: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15106,22 +15120,110 @@ fn finish_close_to_partial_receipt_composition(
             .env
             .token_amount(runner.env.actors[JUNIOR_WINNER].destination_token),
     );
-    runner.run_terminal_payout_campaign()?;
-    runner.assert_global_invariants()?;
+    let mut max_compute_units_pre = 0u64;
+    let mut resolved_junior_need = 0u128;
+    let mut pre_expiry_fresh_backing = 0u128;
+    let mut resolved_surplus_withdrawn = 0u128;
+    let mut surplus_overdraw_rejections = 0usize;
+    let mut pre_expiry_slab_close_rejected = false;
     if let Some(terminal_cleanup_slot) = terminal_cleanup_slot {
-        // The open partial receipt waits on fresh source backing. Since wrapper #451 the
-        // provider may withdraw resolved surplus early, but the backing the receipt still
-        // needs to reach full face stays pledged, so the payout campaign can only finish by
-        // letting that backing lapse.
-        if runner.env.current_slot() > terminal_cleanup_slot {
-            return Err(format!(
-                "INV-070 terminal payout could not finish by cleanup slot {terminal_cleanup_slot}: \
-                 the open receipt forced fresh provider backing to lapse at slot {} \
-                 (the receipt still needs that pledged backing, wrapper #451)",
-                runner.env.current_slot()
-            ));
+        // Wrapper #451: after resolution the provider may withdraw (signed) only the Fresh
+        // backing above the resolved reserve. Each bucket keeps the junior need
+        // ceil(B / BOUND_SCALE) - R plus its own domain source claims at full face; the
+        // reserve stays pledged until it lapses and then pays the open receipt in full.
+        let (_, group) = runner.env.primary_market_state();
+        let ledger = group.resolved_payout_ledger;
+        let claim_bound = ledger
+            .terminal_claim_exact_receipts_num
+            .checked_add(ledger.terminal_claim_bound_unreceipted_num)
+            .ok_or("INV-086 resolved claim-bound overflow")?;
+        resolved_junior_need = claim_bound
+            .div_ceil(BOUND_SCALE)
+            .checked_sub(ledger.snapshot_residual)
+            .ok_or("INV-086 resolved residual exceeds the claim bound")?;
+        for (domain, bucket) in group.source_backing_buckets.iter().enumerate() {
+            if bucket.status != BackingBucketStatusV16::Fresh
+                || bucket.fresh_unliened_backing_num == 0
+            {
+                continue;
+            }
+            if bucket.fresh_unliened_backing_num % BOUND_SCALE != 0 {
+                return Err(format!(
+                    "INV-086 pre-expiry domain {domain} backing is not atom-aligned: {}",
+                    bucket.fresh_unliened_backing_num
+                ));
+            }
+            let fresh = bucket.fresh_unliened_backing_num / BOUND_SCALE;
+            pre_expiry_fresh_backing = pre_expiry_fresh_backing
+                .checked_add(fresh)
+                .ok_or("INV-086 pre-expiry backing sum overflow")?;
+            let reserve = resolved_junior_need
+                .checked_add(group.source_credit[domain].positive_claim_bound_num.div_ceil(BOUND_SCALE))
+                .ok_or("INV-086 resolved reserve overflow")?;
+            let surplus = fresh.saturating_sub(reserve);
+            if surplus != 0 {
+                let destination_before =
+                    u128::from(runner.env.token_amount(runner.env.provider_destination_token));
+                let withdraw = runner
+                    .env
+                    .withdraw_backing_bucket(domain as u16, surplus)
+                    .map_err(|error| {
+                        format!("INV-086 resolved surplus withdrawal domain {domain}: {error}")
+                    })?;
+                max_compute_units_pre = max_compute_units_pre.max(withdraw.compute_units);
+                if u128::from(runner.env.token_amount(runner.env.provider_destination_token))
+                    != destination_before + surplus
+                {
+                    return Err(format!(
+                        "INV-086 resolved surplus withdrawal domain {domain} moved the wrong amount"
+                    ));
+                }
+                resolved_surplus_withdrawn += surplus;
+                assert_public_stock_census(
+                    &format!("INV-086 resolved surplus withdrawal {domain}"),
+                    &runner.env,
+                )?;
+            }
+            // One atom beyond the surplus is the receipt's reserve and must roll back exactly.
+            let market_before = runner.env.svm.get_account(&runner.env.market);
+            let vault_before = runner.env.svm.get_account(&runner.env.vault);
+            runner
+                .env
+                .withdraw_backing_bucket(domain as u16, 1)
+                .expect_err("INV-086 pledged resolved reserve must not be withdrawable");
+            if runner.env.svm.get_account(&runner.env.market) != market_before
+                || runner.env.svm.get_account(&runner.env.vault) != vault_before
+            {
+                return Err(format!(
+                    "INV-086 rejected reserve withdrawal on domain {domain} did not roll back exactly"
+                ));
+            }
+            surplus_overdraw_rejections += 1;
+        }
+        // With the receipt open, terminal wind-down cannot sweep the pledged reserve.
+        let market_before = runner.env.svm.get_account(&runner.env.market);
+        let vault_before = runner.env.svm.get_account(&runner.env.vault);
+        let supply_before = runner.env.mint_supply();
+        runner
+            .env
+            .close_primary_slab()
+            .expect_err("INV-086 CloseSlab must wait for the open partial receipt");
+        if runner.env.svm.get_account(&runner.env.market) != market_before
+            || runner.env.svm.get_account(&runner.env.vault) != vault_before
+            || runner.env.mint_supply() != supply_before
+        {
+            return Err("INV-086 blocked pre-expiry CloseSlab did not roll back exactly".into());
+        }
+        pre_expiry_slab_close_rejected = true;
+        // Exact and late expiry landings: the payout campaign starts at the cleanup slot.
+        if runner.env.current_slot() < terminal_cleanup_slot {
+            runner.env.warp_to_slot(terminal_cleanup_slot);
         }
     }
+    let payout_campaign_start_slot = runner.env.current_slot();
+    runner.run_terminal_payout_campaign()?;
+    runner.assert_global_invariants()?;
+    let mut terminal_landing_slot = runner.env.current_slot();
     let destination_after = u128::from(
         runner
             .env
@@ -15138,7 +15240,7 @@ fn finish_close_to_partial_receipt_composition(
         .map_err(|error| format!("INV-086 close bridge terminal receipt decode: {error:?}"))?;
     let final_engine_vault = runner.env.primary_market_state().1.vault;
     let final_spl_vault = u128::from(runner.env.token_amount(runner.env.vault));
-    let mut max_compute_units = runner.coverage.max_cu;
+    let mut max_compute_units = runner.coverage.max_cu.max(max_compute_units_pre);
     let terminal_actor_count = (0..PRIMARY_ACTOR_COUNT)
         .map(|actor| runner.portfolio_is_economically_terminal(actor))
         .collect::<Result<Vec<_>, _>>()?
@@ -15160,7 +15262,11 @@ fn finish_close_to_partial_receipt_composition(
     let mut slab_close_compute_units = 0u64;
     let mut slab_closed = false;
     if let Some(terminal_cleanup_slot) = terminal_cleanup_slot {
+        // The open receipt held the reserve until it lapsed, so cleanup lands no earlier
+        // than the requested slot and no earlier than the lapse the campaign reached.
+        let terminal_cleanup_slot = terminal_cleanup_slot.max(runner.env.current_slot());
         runner.env.warp_to_slot(terminal_cleanup_slot);
+        terminal_landing_slot = terminal_cleanup_slot;
         for actor in 0..PRIMARY_ACTOR_COUNT {
             let close = runner
                 .env
@@ -15433,6 +15539,13 @@ fn finish_close_to_partial_receipt_composition(
         slab_custody_burned,
         slab_close_compute_units,
         slab_closed,
+        resolved_junior_need,
+        pre_expiry_fresh_backing,
+        resolved_surplus_withdrawn,
+        surplus_overdraw_rejections,
+        pre_expiry_slab_close_rejected,
+        terminal_landing_slot,
+        payout_campaign_start_slot,
     })
 }
 
@@ -19229,9 +19342,34 @@ pub fn run_bounded_lien_impairment_reference_frontier(
         let mut before_exact = runner.authenticated_graph_state();
         let mut before_economic = runner.bounded_reference_node()?;
         graph.nodes.insert(before_exact.clone());
+        fn lien_owner_fields(source: percolator::PortfolioSourceDomainV16Account) -> [u128; 7] {
+            [
+                source.source_claim_bound_num.get(),
+                source.source_claim_liened_num.get(),
+                source.source_claim_counterparty_liened_num.get(),
+                source.source_lien_counterparty_backing_num.get(),
+                source.source_lien_effective_reserved.get(),
+                source.source_claim_impaired_num.get(),
+                u128::from(source.source_lien_fee_last_slot.get()),
+            ]
+        }
+        // The seed's lien holder (BoundedLienImpairment WINNER).
+        const LIEN_OWNER: usize = 0;
+        let owner_source = |runner: &ScenarioRunner| {
+            runner
+                .env
+                .primary_portfolio(LIEN_OWNER)
+                .source_domains
+                .iter()
+                .find(|source| {
+                    source.is_occupied() && source.domain.get() as usize == source_domain
+                })
+                .copied()
+        };
         for (position, (action_index, action)) in word.iter().enumerate() {
             let impaired_before = runner.env.primary_market_state().1.source_credit[source_domain]
                 .impaired_liened_backing_num;
+            let owner_before = owner_source(&runner);
             apply_bounded_lien_impairment_action(&mut runner, winner_side, action).map_err(
                 |error| {
                     format!(
@@ -19261,6 +19399,34 @@ pub fn run_bounded_lien_impairment_reference_frontier(
                 }
             }
             if impaired_after < impaired_before {
+                // Since engine #242 (fix for #230) the owner's own Live K/F settlement reconciles
+                // its counterparty lien off the Impaired bucket. A domain-impaired decrease is
+                // admitted ONLY when it is exactly that owner's lien backing and the exact claim
+                // face moves into the owner's own impaired-claim lane (attribution preserved).
+                let owner_after = owner_source(&runner);
+                let exact_owner_reconcile = match (owner_before, owner_after) {
+                    (Some(before), Some(after)) => {
+                        let face = before.source_claim_counterparty_liened_num.get();
+                        let backing = before.source_lien_counterparty_backing_num.get();
+                        face != 0
+                            && backing != 0
+                            && impaired_before - impaired_after == backing
+                            && after.source_claim_counterparty_liened_num.get() == 0
+                            && after.source_lien_counterparty_backing_num.get() == 0
+                            && after.source_claim_impaired_num.get()
+                                == before.source_claim_impaired_num.get() + face
+                            && after.source_claim_liened_num.get()
+                                == before.source_claim_liened_num.get() - face
+                    }
+                    _ => false,
+                };
+                if !exact_owner_reconcile {
+                    return Err(format!(
+                        "INV-031 {winner_side:?} action {action_index} erased impaired provider attribution {impaired_before}->{impaired_after} without an exact owner reconcile: owner_before={:?}, owner_after={:?}",
+                        owner_before.map(lien_owner_fields),
+                        owner_after.map(lien_owner_fields)
+                    ));
+                }
                 graph.impaired_lien_reducing_edges[*action_index] += 1;
             }
             if position == 1 {
@@ -21022,10 +21188,23 @@ pub fn verify_favorable_funding_claim_bound_route_matrix(seed: [u8; 32]) -> Resu
     const ACTOR_A: usize = 0;
     const ACTOR_B: usize = 1;
     const ASSET: u16 = 0;
-    const PRICE: u64 = 2;
-    const TARGET: u64 = 1;
-    const Q: i128 = 100 * POS_SCALE as i128;
+    // Exact (#458) funding: the premium (TARGET - PRICE) / PRICE = -50% clamps the
+    // rate to FUNDING_CAP, so one slot moves exactly
+    // Q_LOTS * FUNDING_CAP * PRICE / FUNDING_DEN whole atoms with no sub-atom dust.
+    // PRICE * MOVE_BPS * 3 slots < 10_000 keeps the mark envelope from moving the
+    // effective price, isolating a zero-mark-move funding transfer.
+    const PRICE: u64 = 2_000;
+    const TARGET: u64 = 1_000;
+    const MOVE_BPS: u64 = 1;
+    const FUNDING_CAP: u64 = 10_000;
+    const Q_LOTS: u128 = 250;
+    const Q: i128 = Q_LOTS as i128 * POS_SCALE as i128;
     const DEPOSIT: u128 = 1_000_000;
+    const EXPECTED_FUNDING: u128 = Q_LOTS * FUNDING_CAP as u128 * PRICE as u128 / 1_000_000_000;
+    const _: () = assert!(
+        EXPECTED_FUNDING > 0
+            && (Q_LOTS * FUNDING_CAP as u128 * PRICE as u128) % 1_000_000_000 == 0
+    );
 
     let mut world_count = 0u64;
     for route in [
@@ -21044,9 +21223,9 @@ pub fn verify_favorable_funding_claim_bound_route_matrix(seed: [u8; 32]) -> Resu
                 world_seed,
                 MarketConfig {
                     initial_price: PRICE,
-                    max_price_move_bps_per_slot: 24,
+                    max_price_move_bps_per_slot: MOVE_BPS,
                     max_accrual_dt_slots: 1,
-                    max_abs_funding_e9_per_slot: 1_000,
+                    max_abs_funding_e9_per_slot: FUNDING_CAP,
                     min_funding_lifetime_slots: 1,
                     actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
                     actor_token_balances: [DEPOSIT as u64, DEPOSIT as u64, 1, 1, 1],
@@ -21144,6 +21323,11 @@ pub fn verify_favorable_funding_claim_bound_route_matrix(seed: [u8; 32]) -> Resu
             let payer = if winner == ACTOR_A { ACTOR_B } else { ACTOR_A };
             let winner_pnl = u128::try_from(env.primary_portfolio(winner).pnl.get())
                 .map_err(|_| format!("{label}: positive funding PnL does not fit u128"))?;
+            if winner_pnl != EXPECTED_FUNDING {
+                return Err(format!(
+                    "{label}: funding transfer is not the exact clamped-rate amount: pnl={winner_pnl}, expected={EXPECTED_FUNDING}"
+                ));
+            }
             let expected_claim_num = winner_pnl
                 .checked_mul(BOUND_SCALE)
                 .ok_or_else(|| format!("{label}: funding claim scale overflow"))?;
@@ -23955,9 +24139,24 @@ pub fn reproduce_prospective_funding_rewrite(
         .coalition_payout
         .checked_sub(control.coalition_payout)
         .ok_or("PR 380 trade-first ordering decreased coalition payout")?;
+    let vault_dust = |world: &ProspectiveFundingWorld| {
+        world
+            .vault_residual
+            .checked_sub(world.insurance_residual)
+            .filter(|dust| *dust <= PR380_FUNDING_DUST_BOUND)
+            .ok_or_else(|| {
+                format!("PR 380 terminal vault dust is not bounded funding rounding: {world:?}")
+            })
+    };
+    let control_vault_dust = vault_dust(&control)?;
+    let attack_vault_dust = vault_dust(&attack)?;
+    // With fixed execution prices, SPL value is order-independent once the bounded rounding
+    // dust retained by the vault is counted: the coalition can only gain what the victim lost
+    // plus the reduction of its own payer-side rounding dust.
     if fixed_execution_price
-        && (victim_payout_loss != attacker_coalition_gain
-            || control.total_payout != attack.total_payout)
+        && (control.total_payout + control_vault_dust != attack.total_payout + attack_vault_dust
+            || attacker_coalition_gain
+                != victim_payout_loss + control_vault_dust.saturating_sub(attack_vault_dust))
     {
         return Err(format!(
             "PR 380 prospective worlds do not conserve order-independent SPL value: \
@@ -23976,6 +24175,8 @@ pub fn reproduce_prospective_funding_rewrite(
         attacker_coalition_gain,
         control_total_payout: control.total_payout,
         attack_total_payout: attack.total_payout,
+        control_vault_dust,
+        attack_vault_dust,
     })
 }
 
@@ -31140,6 +31341,11 @@ struct ProspectiveFundingWorld {
     final_effective_price: u64,
     f_short_num: i128,
     total_payout: u128,
+    /// Terminal payouts by actor: attacker, victim, stamper long, stamper short.
+    payouts: [u128; 4],
+    /// SPL left in the vault after every actor is terminal (insurance plus dust).
+    vault_residual: u128,
+    insurance_residual: u128,
 }
 
 fn run_prospective_funding_world(
@@ -31308,6 +31514,14 @@ fn run_prospective_funding_world(
         final_effective_price: group_after.assets[0].effective_price,
         f_short_num: group_after.assets[0].f_short_num,
         total_payout,
+        payouts: [
+            attacker_payout,
+            victim_payout,
+            stamper_long_payout,
+            stamper_short_payout,
+        ],
+        vault_residual: u128::from(env.token_amount(env.vault)),
+        insurance_residual: env.primary_market_state().1.insurance,
     })
 }
 
@@ -34124,9 +34338,14 @@ pub fn verify_counterparty_encumbrance_route_matrix(mut seed: [u8; 32]) -> Resul
     Ok(())
 }
 
+// Funding accrues exactly (engine #458): per side `floor(A * rate * dt * price / 1e9)` with the
+// payer rounded up and the receiver down. The cap-rate (10_000 e9/slot) at price 2 moves each unit
+// by 2e-5 atom per slot, so the funding pairs below hold multiples of 50_000 units to make every
+// elapsed slot an exact whole-atom transfer. Balanced paid == received is then a real transfer,
+// not the retired whole-price-unit floor's rounding gift.
 fn zero_move_funding_world(seed: [u8; 32]) -> Result<V16Svm, String> {
     const PRICE: u64 = 2;
-    const DEPOSIT: u128 = 1_000_000;
+    const DEPOSIT: u128 = 10_000_000;
 
     Ok(V16Svm::new(
         seed,
@@ -34134,7 +34353,7 @@ fn zero_move_funding_world(seed: [u8; 32]) -> Result<V16Svm, String> {
             initial_price: PRICE,
             max_price_move_bps_per_slot: 24,
             max_accrual_dt_slots: 1,
-            max_abs_funding_e9_per_slot: 1_000,
+            max_abs_funding_e9_per_slot: 10_000,
             min_funding_lifetime_slots: 1,
             actor_deposits: [
                 DEPOSIT,
@@ -34190,7 +34409,7 @@ fn run_trade_funding_order_world(
     close_before_crank: bool,
 ) -> Result<(u64, u64, i128, i128), String> {
     const PRICE: u64 = 2;
-    const Q: i128 = 100 * POS_SCALE as i128;
+    const Q: i128 = 50_000 * POS_SCALE as i128;
 
     let mut env = zero_move_funding_world(seed)?;
     execute_trade_route(&mut env, route, 0, 1, 0, -Q, PRICE, 0)
@@ -34236,7 +34455,7 @@ fn run_rebalance_funding_order_world(
     reduce_before_crank: bool,
 ) -> Result<(u64, u128, u128, u128), String> {
     const PRICE: u64 = 2;
-    const Q: i128 = 100 * POS_SCALE as i128;
+    const Q: i128 = 50_000 * POS_SCALE as i128;
 
     let mut env = zero_move_funding_world(seed)?;
     env.trade_no_cpi(0, 1, 0, -Q, PRICE, 0)
@@ -34279,8 +34498,8 @@ fn run_forfeit_funding_order_world(
     forfeit_before_crank: bool,
 ) -> Result<(u64, i128, u128, u128), String> {
     const PRICE: u64 = 2;
-    const Q_ATTACKER: i128 = 5 * POS_SCALE as i128;
-    const Q_WHALE: i128 = 95 * POS_SCALE as i128;
+    const Q_ATTACKER: i128 = 50_000 * POS_SCALE as i128;
+    const Q_WHALE: i128 = 950_000 * POS_SCALE as i128;
 
     let mut env = zero_move_funding_world(seed)?;
     env.trade_no_cpi(1, 2, 0, -Q_WHALE, PRICE, 0)
@@ -35237,7 +35456,10 @@ fn build_omitted_rescue_world(seed: [u8; 32]) -> Result<(V16Svm, u128, u128), St
             max_abs_funding_e9_per_slot: 10_000,
             min_funding_lifetime_slots: 1,
             actor_deposits: [
-                3_115_000,
+                // Exact rescue funding (prog#458) is 100_000 units * 100 * 10_000 / 1e9 = 100
+                // atoms. 3_214_250 = 3_115_000 + 99_250 leaves a 50-atom pre-rescue deficit that
+                // the 100-atom rescue more than cures (the old floor gifted 100_000 atoms).
+                3_214_250,
                 50_000_000,
                 super::v16_svm::USER_DEPOSIT,
                 super::v16_svm::USER_DEPOSIT,

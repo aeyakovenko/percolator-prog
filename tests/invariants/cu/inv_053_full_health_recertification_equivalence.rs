@@ -29,12 +29,17 @@ fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
     const ATTACK_SLOT: u64 = 3;
     const ADVERSE_SIZE_Q: i128 = (50 * POS_SCALE) as i128;
     const RESCUE_SIZE_Q: i128 = (100_000 * POS_SCALE) as i128;
+    const RESCUE_RATE_E9: u128 = 10_000;
+    const RESCUE_FUNDING: u128 =
+        (RESCUE_SIZE_Q as u128 / POS_SCALE) * RESCUE_PRICE as u128 * RESCUE_RATE_E9
+            / percolator::FUNDING_DEN;
 
     let mut params = production_risk_params();
     params.max_portfolio_assets = 2;
     params.max_accrual_dt_slots = 1;
-    params.max_abs_funding_e9_per_slot = 10_000;
+    params.max_abs_funding_e9_per_slot = RESCUE_RATE_E9 as u64;
     params.min_funding_lifetime_slots = 1;
+    assert_eq!(RESCUE_FUNDING, 100);
     let mut env = V16CuEnv::new_with_init_params(params);
     env.svm.warp_to_slot(OPEN_SLOT);
     env.configure_auth_mark_for_asset_as_admin(0, OPEN_SLOT, RESCUE_PRICE);
@@ -46,7 +51,10 @@ fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
     let user_account = env.create_portfolio(&user);
     let counterparty_account = env.create_portfolio(&counterparty);
     let observer = env.create_portfolio(&observer_owner);
-    env.deposit(&user, user_account, 3_115_000);
+    // Exact one-slot rescue funding (prog#458) is RESCUE_FUNDING atoms. The deposit leaves a
+    // RESCUE_FUNDING/2 pre-rescue deficit (3_115_000 left 99_300), so only the booked rescue
+    // funding cures the account; the old whole-unit floor gifted 100_000 atoms instead.
+    env.deposit(&user, user_account, 3_115_000 + 99_300 - RESCUE_FUNDING / 2);
     env.deposit(&counterparty, counterparty_account, 50_000_000);
     env.top_up_backing_bucket(1, 200_000, 10);
 
@@ -185,6 +193,14 @@ fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
         },
     );
     let healthy = env.portfolio_state(user_account);
+    // The exact rescue credit is the only PnL and is fully backed: the certified slack is
+    // RESCUE_FUNDING / 2, so without it the account carries RESCUE_FUNDING / 2 of deficit.
+    assert_eq!(healthy.pnl.get(), RESCUE_FUNDING as i128);
+    assert_eq!(
+        health_cert(&healthy).certified_equity
+            - health_cert(&healthy).certified_maintenance_req as i128,
+        (RESCUE_FUNDING / 2) as i128
+    );
     assert_eq!(health_cert(&healthy).certified_liq_deficit, 0);
     assert_eq!(
         active_leg_for_asset(&healthy, 1).basis_pos_q.unsigned_abs(),

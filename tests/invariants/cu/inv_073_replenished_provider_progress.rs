@@ -264,7 +264,12 @@ pub(super) fn verify(
         ),
         (0, 0)
     );
-    assert_eq!(bucket.expiry_slot, 1_000);
+    // The provider's far expiry (1_000) is capped at the bounded resolved
+    // horizon (#219), which still lies beyond this terminal suffix.
+    let deadline = resolved_backing_deadline(&settled);
+    assert!(deadline < 1_000);
+    assert_eq!(bucket.expiry_slot, deadline);
+    assert!(env.svm.get_sysvar::<solana_sdk::clock::Clock>().slot < deadline);
     assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
     for (position, actor) in order.into_iter().enumerate() {
         let ix = wrap(

@@ -3352,13 +3352,43 @@ fn run_source_lien_partition(
         observations.clone(),
         &mut max_compute_units,
     )?;
-    if env.primary_market_state().1.source_backing_buckets[SOURCE_DOMAIN].status
-        != percolator::BackingBucketStatusV16::Impaired
+    // Since engine #242 (fix for #230) the expiry actor's own K/F settlement reconciles its
+    // counterparty lien off the Impaired bucket. The bucket therefore stays Impaired by exactly
+    // the still-unsettled sibling targets' lien backing and becomes Expired once no holder
+    // remains (always in the aggregate partition). The reconciled face stays attributed to the
+    // expiry actor as an impaired claim.
     {
-        return Err(format!(
-            "source-lien partition did not normalize at authenticated slot {landing_slot}: {:?}",
-            env.primary_market_state().1.source_backing_buckets[SOURCE_DOMAIN]
-        ));
+        let group = env.primary_market_state().1;
+        let bucket = group.source_backing_buckets[SOURCE_DOMAIN];
+        let expiry_local =
+            source_lien_partition_local_totals(&env, &[expiry_actor], SOURCE_DOMAIN)?;
+        let others = active_targets
+            .iter()
+            .copied()
+            .filter(|actor| *actor != expiry_actor)
+            .collect::<Vec<_>>();
+        let others_local = source_lien_partition_local_totals(&env, &others, SOURCE_DOMAIN)?;
+        let expected_status = if others_local[5] != 0 {
+            percolator::BackingBucketStatusV16::Impaired
+        } else {
+            percolator::BackingBucketStatusV16::Expired
+        };
+        if bucket.status != expected_status
+            || bucket.fresh_unliened_backing_num != 0
+            || bucket.valid_liened_backing_num != 0
+            || bucket.impaired_liened_backing_num != others_local[5]
+            || group.source_credit[SOURCE_DOMAIN].valid_liened_backing_num != 0
+            || group.source_credit[SOURCE_DOMAIN].impaired_liened_backing_num != others_local[5]
+            || expiry_local[2] != 0
+            || expiry_local[5] != 0
+            || expiry_local[7] == 0
+            || others_local[2] + expiry_local[7] != peak_local[2] + peak_local[7]
+        {
+            return Err(format!(
+                "source-lien partition did not normalize/reconcile at authenticated slot {landing_slot}: expected={expected_status:?}, expiry_local={expiry_local:?}, others_local={others_local:?}, peak_local={peak_local:?}, bucket={bucket:?}, source={:?}",
+                group.source_credit[SOURCE_DOMAIN]
+            ));
+        }
     }
 
     let mut exit_order = active_targets.to_vec();
@@ -3786,16 +3816,33 @@ fn run_multi_domain_source_lien_partition_with_fees_and_expiries(
     }
     let expired_group = env.primary_market_state().1;
     for (domain_slot, domain) in DOMAINS.into_iter().enumerate() {
-        let expected_status = if expiry_slots[domain_slot] <= landing_slot {
-            percolator::BackingBucketStatusV16::Impaired
+        // Since engine #242 (fix for #230) every target's own K/F settlement in the fixed-point
+        // cranks above reconciles its counterparty lien off the Impaired bucket; once the last
+        // holder reconciles, a lapsed liened bucket is Expired (not Impaired) with no residual
+        // impaired encumbrance, and every reconciled face stays attributed as an impaired claim.
+        let lapsed = expiry_slots[domain_slot] <= landing_slot;
+        let expected_status = if lapsed {
+            percolator::BackingBucketStatusV16::Expired
         } else {
             percolator::BackingBucketStatusV16::Fresh
         };
-        if expired_group.source_backing_buckets[domain].status != expected_status {
+        let bucket = expired_group.source_backing_buckets[domain];
+        let source = expired_group.source_credit[domain];
+        let local = source_lien_partition_local_totals(&env, active_targets, domain)?;
+        let reconciled_exactly = !lapsed
+            || (bucket.fresh_unliened_backing_num == 0
+                && bucket.valid_liened_backing_num == 0
+                && bucket.impaired_liened_backing_num == 0
+                && source.valid_liened_backing_num == 0
+                && source.impaired_liened_backing_num == 0
+                && local[2] == 0
+                && local[5] == 0
+                && local[7] == peak_local[domain_slot][2] + peak_local[domain_slot][7]);
+        if bucket.status != expected_status || !reconciled_exactly {
             return Err(format!(
-                "multi-domain source {domain} did not normalize to {expected_status:?} at slot {landing_slot} with expiry {}: {:?}",
+                "multi-domain source {domain} did not normalize to {expected_status:?} at slot {landing_slot} with expiry {}: local={local:?}, peak_local={:?}, source={source:?}, bucket={bucket:?}",
                 expiry_slots[domain_slot],
-                expired_group.source_backing_buckets[domain]
+                peak_local[domain_slot],
             ));
         }
     }

@@ -1,8 +1,9 @@
 //! INV-039: two unequal pending domains share one portfolio and terminal entitlement.
 //! Public construction crosses resolution placement, debtor deletion order and
 //! partial holder detachment. Removing one weight must not discharge the other
-//! domain or turn the combined claim into an early payout. Early debt becomes
-//! junior receipt face; late debt is source-realized. Their sum is unchanged.
+//! domain or turn the combined claim into an early payout. Early (live-forfeit) and
+//! late debt are both source-realized, capped at the claimants' unbacked claim; only an
+//! excess would become junior receipt face. Their sum is unchanged.
 
 use super::*;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
@@ -409,7 +410,15 @@ fn v16_program_shared_holder_pending_domains_survive_partial_detach_and_debtor_c
                     let mut world = AttributionWorld::new(reverse_sides);
                     let mut model = Model {
                         sign: if reverse_sides { -1 } else { 1 },
-                        junior_face: if early_settlement { debts()[first] } else { 0 },
+                        // Engine #228 (prog#450): early forfeit debt becomes source backing,
+                        // capped at the claimants' unbacked claim on that domain (the holder's
+                        // face `debts()[first]`). Only the excess would reach junior liquidity.
+                        junior_face: if early_settlement {
+                            let (debt, holder_unbacked_claim) = (debts()[first], debts()[first]);
+                            debt - debt.min(holder_unbacked_claim)
+                        } else {
+                            0
+                        },
                         pending: [true; 2],
                         settled: [false; 2],
                         deleted: [false; 5],
@@ -483,7 +492,23 @@ fn v16_program_shared_holder_pending_domains_survive_partial_detach_and_debtor_c
                         Some((2, PercolatorError::EngineLockActive)),
                     ));
                     if early_settlement {
+                        let backing = |world: &AttributionWorld| -> u128 {
+                            world
+                                .env
+                                .market_state()
+                                .1
+                                .source_credit
+                                .iter()
+                                .map(|domain| domain.fresh_reserved_backing_num)
+                                .sum()
+                        };
+                        let backing_before = backing(&world);
                         world.forfeit(DEBTORS[first]);
+                        assert_eq!(
+                            backing(&world) - backing_before,
+                            (debts()[first] - model.junior_face) * BOUND_SCALE,
+                            "early forfeit debt backs the holder's source claim (prog#450)"
+                        );
                         model.settled[first] = true;
                         model.check(&world);
                     }
@@ -581,12 +606,13 @@ fn v16_program_shared_holder_pending_domains_survive_partial_detach_and_debtor_c
                     assert_eq!(world.env.token_amount(world.actors[0].token), 228_005);
                     assert_eq!(
                         world.env.market_state().1.payout_snapshot_captured,
-                        early_settlement
+                        model.junior_face != 0
                     );
                     let before_retry = world.frame();
-                    // Live forfeit pays into junior liquidity; resolved settlement funds the
-                    // source domain. Only the early debt needs a terminal junior receipt.
-                    if early_settlement {
+                    // Live forfeit and resolved settlement both fund the source domain (capped
+                    // at the claimants' unbacked claim). Only an uncapped excess would need a
+                    // terminal junior receipt.
+                    if model.junior_face != 0 {
                         let ledger = world.env.market_state().1.resolved_payout_ledger;
                         assert_eq!(ledger.snapshot_residual, model.junior_face);
                         assert_eq!(

@@ -20,7 +20,7 @@
 //! shared Recovery-order verifier below. It reaches the same shutdown state entirely through
 //! public instructions, executes both winner-first and loser-first forfeiture schedules, and proves
 //! that zero-basis loss weight remains durable until its counterparty settles. Both orders produce
-//! the same 8,424-atom social loss, payouts, provider loss partition, bounded continuation, and
+//! the same 8,447-atom social loss (8,424 price residual plus 23 exact-funding atoms), payouts, provider loss partition, bounded continuation, and
 //! terminal exits. This remains cross-invariant evidence for INV-041 and INV-073 without running a
 //! duplicate expensive lifecycle.
 //!
@@ -2169,6 +2169,22 @@ fn assert_pending_obligation_blocks_close(
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
 }
 
+/// `(paid, received)` funding atoms for the one-unit Recovery-order pair: the paying long
+/// settles the ceiling and the receiving short the floor of the exact F transfer (#458).
+fn recovery_forfeit_funding_atoms(asset: &percolator::AssetStateV16) -> (u128, u128) {
+    assert_eq!(asset.f_long_num, -asset.f_short_num);
+    assert!(asset.f_long_num < 0, "the long loser pays premium funding");
+    let exact_num = asset.f_short_num.unsigned_abs() * POS_SCALE;
+    let den = percolator::ADL_ONE * POS_SCALE;
+    let funding = (exact_num.div_ceil(den), exact_num / den);
+    // A real sub-cap transfer: 22.27 atoms over the ten premium slots, not a rounding gift.
+    assert_eq!(funding, RECOVERY_FORFEIT_FUNDING_ATOMS);
+    funding
+}
+
+/// `(paid, received)`: the exact 22.274414-atom premium transfer rounded against each side.
+const RECOVERY_FORFEIT_FUNDING_ATOMS: (u128, u128) = (23, 22);
+
 fn run_recovery_forfeit_order(winner_first: bool) -> RecoveryForfeitOrderOutcome {
     const PRICE: u64 = 1_000_000;
     const ASSET: u16 = 1;
@@ -2322,7 +2338,24 @@ fn run_recovery_forfeit_order(winner_first: bool) -> RecoveryForfeitOrderOutcome
     assert_eq!(loser_state.capital.get(), 0);
     assert_eq!(loser_state.pnl.get(), 0);
     assert_eq!(loser_crystallized_loss, 51_000);
-    assert_eq!(env.portfolio_state(winner).pnl.get(), 51_000);
+    // Exact funding (#458): the one-unit long loser pays the ceiling and the short winner
+    // receives the floor of the accrued per-unit F index; the difference is vault dust.
+    let (funding_paid, funding_received) = recovery_forfeit_funding_atoms(&settled_asset);
+    assert_eq!(
+        loser_state.funding_long_paid_atoms_total.get(),
+        funding_paid,
+        "{label}: loser funding payment"
+    );
+    let winner_state = env.portfolio_state(winner);
+    assert_eq!(
+        winner_state.funding_short_received_atoms_total.get(),
+        funding_received,
+        "{label}: winner funding receipt"
+    );
+    assert_eq!(
+        winner_state.pnl.get(),
+        (51_000 - (funding_paid - funding_received)) as i128
+    );
 
     let close_base_cu = env.trade_asset_with_cu(
         0,
@@ -2353,7 +2386,8 @@ fn run_recovery_forfeit_order(winner_first: bool) -> RecoveryForfeitOrderOutcome
         ],
         label,
     );
-    assert_eq!(payouts, vec![151_000, 0, 100_000]);
+    let funding_dust = funding_paid - funding_received;
+    assert_eq!(payouts, vec![151_000 - funding_dust, 0, 100_000]);
 
     for (owner, portfolio) in [
         (&winner_owner, winner),
@@ -2390,7 +2424,11 @@ fn run_recovery_forfeit_order(winner_first: bool) -> RecoveryForfeitOrderOutcome
     assert_eq!(source.valid_liened_backing_num, 0);
     assert_eq!(bucket.fresh_unliened_backing_num, 0);
     assert_eq!(bucket.valid_liened_backing_num, 0);
-    assert_eq!(source.provider_receivable_num, 51_000 * BOUND_SCALE);
+    // The provider backed exactly the winner's funding-adjusted claim.
+    assert_eq!(
+        source.provider_receivable_num,
+        (51_000 - funding_dust) * BOUND_SCALE
+    );
     assert_eq!(source.spent_backing_num, source.provider_receivable_num);
     assert_eq!(
         bucket.consumed_liened_backing_num,
@@ -2425,18 +2463,34 @@ pub(super) fn verify_recovery_forfeit_orders_preserve_loss_and_terminal_exit() {
         winner_first, loser_first,
         "public Recovery exit order changed payouts, loss attribution, or terminal custody"
     );
-    assert_eq!(winner_first.winner_payout, 151_000);
+    // Exact funding (#458): the loser's 23-atom payment deepens its residual, the winner
+    // receives 22, and the single payer-ceiling/receiver-floor atom stays in custody.
+    let (funding_paid, funding_received) = RECOVERY_FORFEIT_FUNDING_ATOMS;
+    let funding_dust = funding_paid - funding_received;
+    assert_eq!(winner_first.winner_payout, 151_000 - funding_dust);
     assert_eq!(winner_first.loser_payout, 0);
     assert_eq!(winner_first.base_peer_payout, 100_000);
-    assert_eq!(winner_first.provider_withdrawal, 97_000);
-    assert_eq!(winner_first.vault_remaining, 3_000);
+    // The provider's 100_000 backing returns as withdrawal plus retained custody; custody
+    // additionally holds the single funding dust atom. Both orders must agree exactly.
+    assert_eq!(winner_first.provider_withdrawal, 97_020);
+    assert_eq!(winner_first.vault_remaining, 2_981);
+    assert_eq!(
+        winner_first.provider_withdrawal + winner_first.vault_remaining,
+        100_000 + funding_dust
+    );
     assert_eq!(winner_first.loser_crystallized_loss, 51_000);
-    assert_eq!(winner_first.provider_receivable_num, 51_000 * BOUND_SCALE);
-    assert_eq!(winner_first.spent_backing_num, 51_000 * BOUND_SCALE);
+    assert_eq!(
+        winner_first.provider_receivable_num,
+        (51_000 - funding_dust) * BOUND_SCALE
+    );
+    assert_eq!(
+        winner_first.spent_backing_num,
+        (51_000 - funding_dust) * BOUND_SCALE
+    );
     assert_eq!(
         winner_first.b_long_num + winner_first.b_short_num,
-        8_424 * percolator::SOCIAL_LOSS_DEN / POS_SCALE,
-        "the 8,424-atom residual must be booked exactly once regardless of exit order"
+        (8_424 + funding_paid) * percolator::SOCIAL_LOSS_DEN / POS_SCALE,
+        "the 8,424-atom price residual plus the loser's funding payment must be booked exactly once regardless of exit order"
     );
 }
 
