@@ -14574,7 +14574,20 @@ pub mod processor {
         if dt == 0 {
             return Ok(());
         }
-        let target = profile.mark_ewma_e6;
+        // #461 fix: measure the omitted observation against the committed oracle target, not
+        // `mark_ewma_e6`. A bounded catch-up crank overwrites the mark with the partial effective
+        // price it reached, so comparing against the mark makes a mid-catch-up omission look like
+        // "no movement" while `raw_oracle_target_price` is still ahead. Mirror the old_target rule
+        // of canonical_accrual_path_for_target_view: the stored committed target, falling back to
+        // the effective price when no target has been staged.
+        let target = {
+            let stored = asset.raw_oracle_target_price.get();
+            if stored == 0 {
+                asset.effective_price.get()
+            } else {
+                stored
+            }
+        };
         if target == 0 {
             return Err(PercolatorError::OracleInvalid.into());
         }

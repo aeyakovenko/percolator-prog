@@ -6214,3 +6214,237 @@ fn v16_program_composite_provider_roles_cross_lifecycles_and_freshness_boundarie
         "composite provider-role lifecycle matrix: {worlds} worlds, oracle max {max_oracle_cu} CU"
     );
 }
+
+// Issue #461 regression - a split (hinted-then-omitted) catch-up must not bypass the #426 Hybrid
+// health guard. `reject_incomplete_asset_health_observation_view` measures an omitted observation
+// against the committed oracle target; before the fix it read `profile.mark_ewma_e6`, which a
+// bounded catch-up crank (`canonical_accrual_path_for_target_view`) had already overwritten with
+// the partial effective price while also stamping `last_good_oracle_slot = now`. A follow-up crank
+// with no hints in the same slot then saw target == effective == current, passed the guard, and
+// let the engine refresh the exposed account at the partial price, committing a flat segment the
+// authenticated oracle never authorized. Driven entirely through the public instructions
+// `ConfigureHybridOracle` / `TradeNoCpi` / `PermissionlessCrank` against the real compiled SBF
+// program, this pins the intended behavior: while the Hybrid asset is still short of its committed
+// target in normal (non-matured) mode, the hint-less crank must reject (EngineNonProgress) with
+// exact rollback.
+
+const ROW461_PRICE_E6: u64 = 1_000_000;
+// Full committed downward target. 15% below the opening mark: far enough that one bounded
+// (min(32, max_accrual_dt_slots) == 1)-step catch-up at the 100 bps/slot cap cannot reach it.
+const ROW461_COMMITTED_TARGET_E6: u64 = 850_000;
+const ROW461_IDLE_GAP_SLOTS: u64 = 300;
+
+fn row461_omitted_hybrid_catchup_params() -> V16CuMarketParams {
+    // The #426 guard rejects an omitted observation if it would move price OR change funding.
+    // Nonzero funding would reject on the funding leg and mask the price-omission defect under
+    // test, so funding is zeroed to isolate it. Zero funding plus 100% maintenance margin and no
+    // liquidation fee satisfies the engine's exact-solvency envelope (the same early-accept path
+    // the default harness config uses), so the market initializes cleanly. A 1-slot accrual window
+    // with a 100 bps/slot move cap reproduces the issue's "small max_dt" variant: one hinted crank
+    // advances exactly one bounded step and leaves the effective price ~1% below the opening mark,
+    // far above the 15% committed target.
+    V16CuMarketParams {
+        max_portfolio_assets: 1,
+        h_max: 6_480_000,
+        initial_price: ROW461_PRICE_E6,
+        min_nonzero_mm_req: 1,
+        min_nonzero_im_req: 2,
+        maintenance_margin_bps: 10_000,
+        initial_margin_bps: 10_000,
+        max_trading_fee_bps: 10_000,
+        liquidation_fee_bps: 0,
+        liquidation_fee_cap: 0,
+        min_liquidation_abs: 0,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    }
+}
+
+fn row461_single_pyth_feed() -> [u8; 32] {
+    [0x61u8; 32]
+}
+
+/// Configure asset 0 as a single-leg Hybrid Pyth oracle and establish a fresh mark at the opening
+/// price, so `last_good_oracle_slot` / `raw_oracle_target_price` settle before the idle gap.
+fn row461_setup_hybrid_and_prime(env: &mut V16CuEnv) {
+    let feed = row461_single_pyth_feed();
+    let mut feeds = [[0u8; 32]; 3];
+    feeds[0] = feed;
+
+    // Configure at slot 1 with an initial fresh report at the opening price.
+    set_test_clock(env, 1, 100);
+    let initial = env.set_pyth_price(&feed, ROW461_PRICE_E6 as i64, -6, 100);
+    env.try_configure_hybrid_with_cu(
+        1,
+        0,
+        feeds,
+        std::slice::from_ref(&initial),
+        1,
+        100,
+        0,
+        0,
+        // hybrid_soft_stale_slots far larger than any idle gap here: the live oracle never matures
+        // into the mark fallback, so the #426 normal-mode clause governs the whole test.
+        1_000_000,
+    )
+    .expect("configure single-leg hybrid oracle");
+
+    // Prime a fresh mark at slot 2.
+    set_test_clock(env, 2, 101);
+    let fresh = env.set_pyth_price(&feed, ROW461_PRICE_E6 as i64, -6, 101);
+    let keeper = Keypair::new();
+    let keeper_portfolio = env.create_portfolio(&keeper);
+    env.crank_with_oracle_tail(
+        keeper_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+        std::slice::from_ref(&fresh),
+    );
+
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.last_good_oracle_slot, 2, "prime must mark oracle fresh");
+    assert_eq!(
+        group.assets[0].effective_price, ROW461_PRICE_E6,
+        "prime must settle the effective price at the opening mark"
+    );
+    assert_eq!(
+        group.assets[0].raw_oracle_target_price, ROW461_PRICE_E6,
+        "prime must settle the committed target at the opening mark"
+    );
+}
+
+#[test]
+fn v16_bpf_hybrid_split_catchup_omitted_refresh_rejects_partial_price() {
+    let mut env = V16CuEnv::new_with_init_params(row461_omitted_hybrid_catchup_params());
+    row461_setup_hybrid_and_prime(&mut env);
+
+    let feed = row461_single_pyth_feed();
+
+    // Open an exposed long position at the opening mark (victim long vs. maker short), so the asset
+    // carries nonzero OI and the omitted-observation price step runs with `exposed = true`.
+    let victim_owner = Keypair::new();
+    let maker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let maker = env.create_portfolio(&maker_owner);
+    env.deposit(&victim_owner, victim, 10_000_000);
+    env.deposit(&maker_owner, maker, 10_000_000);
+    env.try_trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &maker_owner,
+        maker,
+        POS_SCALE as i128,
+        ROW461_PRICE_E6,
+        0,
+    )
+    .expect("open victim long vs maker short at the opening mark");
+
+    // Idle past the bounded-catch-up horizon, then commit the full downward target via a fresh
+    // authenticated Pyth report.
+    let attack_slot = 2 + ROW461_IDLE_GAP_SLOTS;
+    set_test_clock(&mut env, attack_slot, 101 + ROW461_IDLE_GAP_SLOTS as i64);
+    let committed = env.set_pyth_price(
+        &feed,
+        ROW461_COMMITTED_TARGET_E6 as i64,
+        -6,
+        101 + ROW461_IDLE_GAP_SLOTS as i64,
+    );
+
+    // One hinted crank: it performs only the bounded catch-up and returns early, but it has already
+    // set last_good_oracle_slot = now and overwritten mark_ewma_e6 with the partial effective
+    // price, while raw_oracle_target_price carries the full committed target.
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    env.crank_with_oracle_tail(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: attack_slot,
+            observations: crank_observations(0),
+        },
+        std::slice::from_ref(&committed),
+    );
+
+    let (cfg_after_hint, group_after_hint) = env.market_state();
+    let partial_price = group_after_hint.assets[0].effective_price;
+    let committed_target = group_after_hint.assets[0].raw_oracle_target_price;
+    let asset_slot_after_hint = group_after_hint.assets[0].slot_last;
+
+    // Confirm the state is genuinely mid-catch-up at a PARTIAL price (the precondition the guard
+    // must defend):
+    assert_eq!(
+        cfg_after_hint.last_good_oracle_slot, attack_slot,
+        "hinted crank must stamp the oracle fresh for the current slot"
+    );
+    assert!(
+        committed_target < ROW461_PRICE_E6,
+        "fresh report must have committed the downward target"
+    );
+    assert!(
+        partial_price > committed_target,
+        "one bounded crank must stop ABOVE the committed target (partial catch-up): \
+         effective={partial_price} target={committed_target}"
+    );
+    assert!(
+        asset_slot_after_hint < attack_slot,
+        "bounded catch-up must leave the asset still stale (slot_last {asset_slot_after_hint} < now {attack_slot})"
+    );
+    assert_eq!(
+        cfg_after_hint.mark_ewma_e6, partial_price,
+        "the pre-fix guard target (mark_ewma_e6) carries the partial price, so only the committed \
+         raw_oracle_target_price can expose the pending movement"
+    );
+
+    // A crank with NO hints on the victim, in the same slot: the engine selects RefreshAccount and
+    // fills the missing observation with (effective, 0). The guard must reject it - the
+    // authenticated target is still ahead of the partial price with dt > 0 - rolling back exactly.
+    let before = env.svm.get_account(&env.market);
+    let victim_before = env.svm.get_account(&victim);
+    let result = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: attack_slot,
+            observations: Vec::new(),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[],
+    );
+
+    match result {
+        Err(error) if is_engine_non_progress_error(&error) => {
+            assert_eq!(
+                env.svm.get_account(&env.market),
+                before,
+                "rejected omitted-observation crank must roll back the market exactly"
+            );
+            assert_eq!(
+                env.svm.get_account(&victim),
+                victim_before,
+                "rejected omitted-observation crank must roll back the victim exactly"
+            );
+        }
+        Ok(_) => {
+            let (_, group_after) = env.market_state();
+            panic!(
+                "issue #461 regressed: hint-less crank on the exposed victim was ACCEPTED \
+                 mid-catch-up and committed a flat segment at the PARTIAL price. The guard must \
+                 compare the committed raw_oracle_target_price({committed_target}) rather than \
+                 mark_ewma_e6({partial_price}). asset_slot_last advanced {} -> {} at price {} \
+                 while the authenticated target was still {}.",
+                asset_slot_after_hint,
+                group_after.assets[0].slot_last,
+                group_after.assets[0].effective_price,
+                group_after.assets[0].raw_oracle_target_price,
+            );
+        }
+        Err(other) => panic!("unexpected error from hint-less victim crank: {other}"),
+    }
+}
