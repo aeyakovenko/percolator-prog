@@ -1970,10 +1970,10 @@ fn v16_program_reference_model_dimension_composition_is_source_complete() {
         callsite_roster
             .matches("Inv088EngineCallsite { owner:")
             .count(),
-        50,
+        51,
         "wrapper-to-engine transition class count drift",
     );
-    assert!(callsite_roster.contains("certificate_disposition_classes,\n        [18, 16, 11, 5]"));
+    assert!(callsite_roster.contains("certificate_disposition_classes,\n        [18, 16, 12, 5]"));
     assert!(callsite_roster.contains("actual, expected,"));
 
     let instruction_roster = include_str!("../public_sbf/inv_079_public_reachability_evidence.rs");

@@ -322,7 +322,7 @@ fn v16_program_funding_and_maintenance_precede_new_asset_after_route_rollback() 
                     assert_eq!(group.insurance, 2 * FEE);
                     assert_eq!(
                         &group.insurance_domain_budget[..2],
-                        &[2 * (FEE / 2), 2 * (FEE - FEE / 2)]
+                        &[FEE, FEE]
                     );
                     assert!(group.insurance_domain_budget[2..]
                         .iter()

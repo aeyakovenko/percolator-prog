@@ -36,10 +36,13 @@ struct FeeBook {
 impl FeeBook {
     fn collect(&mut self, case: FeeCase, owner: usize, slot: u64) {
         let amount = case.rate * u128::from(slot - self.cursors[owner]);
+        // Maintenance splits by cumulative total (issue #386 carry).
+        let before = self.maintenance.iter().sum::<u128>();
+        let long = (before + amount) / 2 - before / 2;
         self.maintenance[owner] += amount;
         self.cursors[owner] = slot;
-        self.budgets[0] += amount / 2;
-        self.budgets[1] += amount - amount / 2;
+        self.budgets[0] += long;
+        self.budgets[1] += amount - long;
     }
 
     fn trade(&mut self, fee: u128, position: i128) {

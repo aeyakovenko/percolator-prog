@@ -320,8 +320,9 @@ fn v16_program_maintenance_policy_interleaving_preserves_each_owners_live_entitl
         let paid = tokens.map(|token| env.token_amount(token));
         let group = env.market_state().1;
         assert_eq!((group.c_tot, group.insurance, group.vault), (0, 190, 190));
-        // The two 7-atom withdrawal fees each leave their odd atom on the short side.
-        assert_eq!(group.insurance_domain_budget, vec![94, 96]);
+        // Maintenance splits by cumulative total (issue #386): the two odd withdrawal-fee atoms
+        // land on opposite sides.
+        assert_eq!(group.insurance_domain_budget, vec![95, 95]);
         outcomes.push((
             paid,
             group.insurance_domain_budget,

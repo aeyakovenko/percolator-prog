@@ -40,10 +40,13 @@ struct LiabilityBook {
 impl LiabilityBook {
     fn collect(&mut self, case: LiabilityCase, owner: usize, slot: u64) {
         let charge = case.rate * u128::from(slot - self.cursors[owner]);
+        // Maintenance splits by cumulative total (issue #386 carry).
+        let before = self.fees.iter().sum::<u128>();
+        let long = (before + charge) / 2 - before / 2;
         self.fees[owner] += charge;
         self.cursors[owner] = slot;
-        self.budgets[0] += charge / 2;
-        self.budgets[1] += charge - charge / 2;
+        self.budgets[0] += long;
+        self.budgets[1] += charge - long;
     }
 }
 

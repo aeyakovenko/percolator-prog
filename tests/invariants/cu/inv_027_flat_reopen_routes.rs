@@ -321,8 +321,10 @@ fn v16_program_flat_reopen_route_switch_preserves_fee_history_and_senior_exit() 
                         (group.pnl_pos_tot, group.source_claim_bound_total_num),
                         (0, 0)
                     );
-                    let long_fees = 2 * (collected / 2)
-                        + settled.iter().filter(|&&done| done).count() as u128 * (pending / 2);
+                    // Cumulative split of all maintenance collected (issue #386 carry).
+                    let long_fees = (2 * collected
+                        + settled.iter().filter(|&&done| done).count() as u128 * pending)
+                        / 2;
                     assert_eq!(
                         &group.insurance_domain_budget[..2],
                         &[long_fees, group.insurance - long_fees]

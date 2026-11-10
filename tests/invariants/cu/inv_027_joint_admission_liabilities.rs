@@ -670,7 +670,7 @@ fn v16_program_joint_accrued_liabilities_precede_risk_admission() {
                     assert_eq!(group.source_claim_bound_total_num, 0);
                     // Account-level maintenance belongs to the canonical base insurance,
                     // independently of the old/new leg or the party bearing adverse lag.
-                    for (domain, expected) in [2 * (FEE / 2), 2 * (FEE - FEE / 2), 0, 0]
+                    for (domain, expected) in [FEE, FEE, 0, 0]
                         .into_iter()
                         .enumerate()
                     {

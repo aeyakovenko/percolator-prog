@@ -21,8 +21,11 @@ struct FeeModel {
 impl FeeModel {
     fn settle(&mut self, world: &AttributionWorld, actor: usize) {
         let fee = RATE * u128::from(RESOLVED - self.fee_slots[actor]);
-        self.budgets[0] += fee / 2;
-        self.budgets[1] += fee - fee / 2;
+        // Maintenance splits by cumulative total (issue #386 carry).
+        let before = self.budgets[0] + self.budgets[1];
+        let long = (before + fee) / 2 - before / 2;
+        self.budgets[0] += long;
+        self.budgets[1] += fee - long;
         self.fee_slots[actor] = RESOLVED;
         if actor < 4 {
             if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio) {
@@ -400,7 +403,7 @@ fn v16_program_pending_cohort_terminal_fees_stop_at_resolution_and_reach_insuran
                     }
                 }
                 assert_eq!(model.fee_slots, [RESOLVED; 5]);
-                assert_eq!(model.budgets, [400, 405]);
+                assert_eq!(model.budgets, [402, 403]);
                 assert_eq!(world.env.market_state().1.vault, TOTAL_FEES);
                 let expected: [u64; 5] = std::array::from_fn(|actor| {
                     let pnl = match actor {

@@ -894,6 +894,12 @@ fn v16_program_truncating_arithmetic_surface_has_a_semantic_owner() {
             evidence: "INV-034",
         },
         RoundingOwner {
+            function: "split",
+            operations: 1,
+            class: "EXACT_PARTITION",
+            evidence: "v16_program_maintenance_fee_split_is_cadence_independent",
+        },
+        RoundingOwner {
             function: "scale_decimal_exponent_to_e6",
             operations: 1,
             class: "ORACLE",
@@ -1900,4 +1906,37 @@ fn v16_regression_premium_funding_settlement_conserves_vault() {
         g.assets[0].f_long_num < 0 && g.assets[0].f_short_num > 0,
         "longs pay shorts under mark premium"
     );
+}
+
+fn inv038_maintenance_domains_after_syncs(syncs: &[u64]) -> (u128, u128) {
+    use crate::support::v16_svm::{MarketConfig, V16Svm};
+    let mut env = V16Svm::new(
+        [0x36; 32],
+        MarketConfig {
+            maintenance_fee_per_slot: 1,
+            ..MarketConfig::default()
+        },
+    );
+    let start = env.current_slot();
+    for &offset in syncs {
+        env.warp_to_slot(start + offset);
+        env.sync_maintenance_fee(0, start + offset)
+            .expect("permissionless maintenance sync");
+    }
+    let (_, group) = env.primary_market_state();
+    (group.insurance_domain_budget[0], group.insurance_domain_budget[1])
+}
+
+/// Issue #386: side-neutral maintenance revenue splits by cumulative total, so the long/short
+/// allocation cannot be steered by the permissionless sync cadence. The persisted one-bit carry
+/// (`split`) alternates odd atoms between the two domains across calls.
+#[test]
+fn v16_program_maintenance_fee_split_is_cadence_independent() {
+    let once = inv038_maintenance_domains_after_syncs(&[11]);
+    let every_slot = inv038_maintenance_domains_after_syncs(&(1..=11).collect::<Vec<_>>());
+    let mixed = inv038_maintenance_domains_after_syncs(&[3, 4, 11]);
+    assert_eq!(once.0 + once.1, 11, "the whole fee reaches asset-0 insurance");
+    assert_eq!(once, (5, 6), "long receives floor(T/2) of the cumulative total");
+    assert_eq!(once, every_slot, "one-atom syncs must split like one sync");
+    assert_eq!(once, mixed, "odd partitions must split like one sync");
 }

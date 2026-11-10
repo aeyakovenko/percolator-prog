@@ -122,7 +122,7 @@ fn check_book(
     assert_eq!(group.pnl_pos_tot, 0);
     assert_eq!(
         &group.insurance_domain_budget[..],
-        &[fees / FEE * (FEE / 2), fees / FEE * (FEE - FEE / 2), 0, 0]
+        &[fees / 2, fees - fees / 2, 0, 0]
     );
     assert!(group.insurance_domain_spent.iter().all(|&spent| spent == 0));
     let mint_account = env.svm.get_account(&env.mint).unwrap();

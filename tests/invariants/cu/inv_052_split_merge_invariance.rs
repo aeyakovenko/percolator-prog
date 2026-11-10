@@ -568,7 +568,8 @@ fn v16_program_fee_adjusted_withdraw_all_matches_owner_local_partitions() {
                         }
                         let insurance: u128 = collected.iter().sum();
                         let payout: u128 = paid.iter().sum();
-                        let domain_zero: u128 = collected.iter().map(|fee| fee / 2).sum();
+                        // Maintenance splits by cumulative total (issue #386 carry).
+                        let domain_zero: u128 = collected.iter().sum::<u128>() / 2;
                         assert_eq!(group.insurance, insurance);
                         assert_eq!(
                             &group.insurance_domain_budget[..2],

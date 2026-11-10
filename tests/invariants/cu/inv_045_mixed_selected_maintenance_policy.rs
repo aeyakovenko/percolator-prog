@@ -23,8 +23,12 @@ impl Maintenance {
         }
         self.fees[actor] += charge;
         self.receipts[4] += reward;
-        self.domains[0] += (charge - reward) / 2;
-        self.domains[1] += (charge - reward).div_ceil(2);
+        // Retained maintenance splits by cumulative total (issue #386 carry).
+        let retained = charge - reward;
+        let before = self.domains[0] + self.domains[1];
+        let long = (before + retained) / 2 - before / 2;
+        self.domains[0] += long;
+        self.domains[1] += retained - long;
         reward
     }
 

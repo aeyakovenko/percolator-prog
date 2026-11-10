@@ -292,7 +292,12 @@ fn v16_program_late_fee_reclassification_preserves_receipt_faces_and_claimant_or
                     assert_eq!(world.env.market_state().1.resolved_payout_ledger, ledger);
                     assert_eq!(
                         world.env.market_state().1.insurance_domain_budget,
-                        vec![budgets[0] + RATE / 2, budgets[1] + RATE - RATE / 2, 0, 0]
+                        // Maintenance splits by cumulative total (issue #386 carry).
+                        {
+                            let before = budgets[0] + budgets[1];
+                            let long = (before + RATE) / 2 - before / 2;
+                            vec![budgets[0] + long, budgets[1] + RATE - long, 0, 0]
+                        }
                     );
                     world.assert_frame_except(
                         &before,

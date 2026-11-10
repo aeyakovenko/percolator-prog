@@ -244,8 +244,8 @@ fn v16_program_flat_first_admission_fee_prefix_is_atomic_and_entitled() {
             assert_eq!(group.pnl_pos_tot, 0);
             assert_eq!(group.source_claim_bound_total_num, 0);
             let payers = fees / FEE;
-            assert_eq!(group.insurance_domain_budget[0], payers * (FEE / 2));
-            assert_eq!(group.insurance_domain_budget[1], payers * (FEE - FEE / 2));
+            assert_eq!(group.insurance_domain_budget[0], payers * FEE / 2);
+            assert_eq!(group.insurance_domain_budget[1], payers * FEE - payers * FEE / 2);
             for party in 0..2 {
                 let account = &accounts[party];
                 let fee = if charged[party] { FEE } else { 0 };
@@ -681,8 +681,8 @@ fn v16_program_flat_withdrawal_fees_precede_first_admission_and_roll_back_custod
             assert_eq!(group.assets[0].effective_price, PRICE);
             assert_eq!(group.assets[0].raw_oracle_target_price, PRICE);
             assert_eq!(group.insurance, 2 * fee, "{label}");
-            assert_eq!(group.insurance_domain_budget[0], 2 * (fee / 2));
-            assert_eq!(group.insurance_domain_budget[1], 2 * (fee - fee / 2));
+            assert_eq!(group.insurance_domain_budget[0], fee);
+            assert_eq!(group.insurance_domain_budget[1], fee);
             assert_eq!(group.c_tot, total - payout - 2 * fee, "{label}");
             assert_eq!(group.vault, total - payout);
             assert_eq!(group.vault, group.c_tot + group.insurance);
