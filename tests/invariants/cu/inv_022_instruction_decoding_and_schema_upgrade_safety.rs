@@ -282,6 +282,7 @@ fn inv_022_known_public_tag(tag: u8) -> bool {
             | 67
             | 68
             | 69
+            | 70
     )
 }
 
@@ -619,6 +620,11 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             observation_sequence: 3,
             authority_epoch: 0,
         },
+        ProgInstruction::CanonicalizeSpentBackingHistory {
+            asset_index: 1,
+            market_id: 2,
+            authority_epoch: 0,
+        },
     ]
 }
 
@@ -718,7 +724,7 @@ fn v16_program_encoded_public_instruction_roster_rejects_trailing_bytes() {
 #[test]
 fn v16_host_decoder_exhausts_single_edit_neighborhood_for_every_schema() {
     let representatives = inv_022_representative_public_instructions();
-    assert_eq!(representatives.len(), 49, "every public schema is owned");
+    assert_eq!(representatives.len(), 50, "every public schema is owned");
 
     let mut proper_prefixes = 0usize;
     let mut byte_deletions = 0usize;
@@ -817,7 +823,7 @@ fn v16_host_decoder_exhausts_single_edit_neighborhood_for_every_schema() {
     );
     assert_eq!(proper_prefixes, canonical_bytes);
     assert_eq!(byte_deletions, canonical_bytes);
-    assert_eq!(byte_insertions, (canonical_bytes + 49) * 256);
+    assert_eq!(byte_insertions, (canonical_bytes + 50) * 256);
     assert_eq!(byte_substitutions, canonical_bytes * 255);
     assert!(
         accepted_canonical_mutations > 0,
@@ -834,7 +840,7 @@ fn v16_host_decoder_canonicalizes_structured_multi_edit_neighborhood_for_every_s
     const REPLACEMENTS: [u8; 8] = [0x00, 0x01, 0x55, 0x7f, 0x80, 0xaa, 0xfe, 0xff];
 
     let representatives = inv_022_representative_public_instructions();
-    assert_eq!(representatives.len(), 49, "every public schema is owned");
+    assert_eq!(representatives.len(), 50, "every public schema is owned");
     let mut exercised = 0usize;
     let mut accepted = 0usize;
     for instruction in representatives {
@@ -898,7 +904,7 @@ fn v16_program_deployed_decoder_bit_mutation_matrix_is_total_canonical_and_atomi
         .collect();
     assert_eq!(
         canonical_tags.len(),
-        49,
+        50,
         "mutation roster must own every public instruction tag",
     );
 

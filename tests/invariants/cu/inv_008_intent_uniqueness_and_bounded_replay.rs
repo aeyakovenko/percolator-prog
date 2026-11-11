@@ -129,7 +129,7 @@ fn v16_public_replay_disposition_roster_is_source_complete() {
     let source_variants = instruction_variants(source);
     assert_eq!(
         source_variants.len(),
-        49,
+        50,
         "production instruction roster changed"
     );
 

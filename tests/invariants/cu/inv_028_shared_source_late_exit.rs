@@ -711,8 +711,8 @@ fn v16_program_paid_claimant_preserves_peer_latent_capacity_and_late_exit() {
 #[test]
 fn v16_program_full_source_tables_preserve_partial_receipt_through_peer_exit() {
     assert!(include_str!("../../../Cargo.lock").contains(
-        "git+https://github.com/aeyakovenko/percolator?rev=4db11a8cb0053815e23a35d3a7d3edc265d8d866#\
-         4db11a8cb0053815e23a35d3a7d3edc265d8d866"
+        "git+https://github.com/aeyakovenko/percolator?rev=c24895c541245a28e774ce3d0ecd62d9631b50fd#\
+         c24895c541245a28e774ce3d0ecd62d9631b50fd"
     ));
     let mut h = SharedHistory::new();
     for asset in 0..ASSETS {
@@ -978,8 +978,8 @@ fn v16_program_full_source_tables_preserve_partial_receipt_through_peer_exit() {
 fn v16_program_shared_history_preserves_late_claimant_capacity_and_exact_exit() {
     // Revalidate this control locally without recertifying the shared roster.
     assert!(include_str!("../../../Cargo.lock").contains(
-        "git+https://github.com/aeyakovenko/percolator?rev=4db11a8cb0053815e23a35d3a7d3edc265d8d866#\
-         4db11a8cb0053815e23a35d3a7d3edc265d8d866"
+        "git+https://github.com/aeyakovenko/percolator?rev=c24895c541245a28e774ce3d0ecd62d9631b50fd#\
+         c24895c541245a28e774ce3d0ecd62d9631b50fd"
     ));
     let mut peak_cu = 0;
     let mut peak_packet = 0;

@@ -801,10 +801,10 @@ fn v16_program_entitlement_effect_roster_is_source_complete() {
             .collect(),
         "entitlement dispositions must cover the production enum, independently of the public TSV"
     );
-    assert_eq!(entitlement_rows.len(), 49);
+    assert_eq!(entitlement_rows.len(), 50);
     assert_eq!(
         entitlement_owners.len(),
-        18,
+        19,
         "INV-024 entitlement evidence owner roster drift"
     );
     for (owner_path, owner_test) in entitlement_owners {

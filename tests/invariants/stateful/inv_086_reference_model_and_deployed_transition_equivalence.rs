@@ -1597,7 +1597,7 @@ fn inv086_source_section<'a>(source: &'a str, start: &str, end: &str) -> &'a str
 
 #[test]
 fn v16_program_reference_model_dimension_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "4db11a8cb0053815e23a35d3a7d3edc265d8d866";
+    const ENGINE_PIN: &str = "c24895c541245a28e774ce3d0ecd62d9631b50fd";
     const DIMENSIONS: &[Inv086ModelDimension] = &[
         Inv086ModelDimension {
             dimension: "public transition census and per-step independent oracle",
@@ -1970,10 +1970,10 @@ fn v16_program_reference_model_dimension_composition_is_source_complete() {
         callsite_roster
             .matches("Inv088EngineCallsite { owner:")
             .count(),
-        51,
+        52,
         "wrapper-to-engine transition class count drift",
     );
-    assert!(callsite_roster.contains("certificate_disposition_classes,\n        [18, 16, 12, 5]"));
+    assert!(callsite_roster.contains("certificate_disposition_classes,\n        [18, 16, 13, 5]"));
     assert!(callsite_roster.contains("actual, expected,"));
 
     let instruction_roster = include_str!("../public_sbf/inv_079_public_reachability_evidence.rs");

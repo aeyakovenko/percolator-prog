@@ -135,7 +135,7 @@ fn v16_program_every_public_route_has_an_explicit_history_relation() {
             "duplicate public tag {tag}"
         );
     }
-    assert_eq!(public_routes.len(), 49, "public instruction census drift");
+    assert_eq!(public_routes.len(), 50, "public instruction census drift");
 
     let mut dispositions = std::collections::BTreeMap::new();
     let mut used_classes = std::collections::BTreeSet::new();
@@ -197,7 +197,7 @@ fn v16_program_every_public_route_has_an_explicit_history_relation() {
         );
     }
 
-    assert_eq!(dispositions.len(), 49, "history disposition census drift");
+    assert_eq!(dispositions.len(), 50, "history disposition census drift");
     assert_eq!(
         dispositions
             .keys()

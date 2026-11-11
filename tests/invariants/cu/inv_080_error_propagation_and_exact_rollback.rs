@@ -109,8 +109,9 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
         // Recovery committed-state selection, terminal insurance payout, and current mark/reward
         // custody updates expanded the propagated engine-result census from its prior 133-call
         // baseline; every future drift still requires an INV-080 disposition review. The per-side
-        // maintenance credit (issue #386) adds two.
-        139,
+        // maintenance credit (issue #386) and the spent-history canonicalization route
+        // (issue #170, tag 70) add two each.
+        141,
         "engine-result mapping drift requires an INV-080 disposition review"
     );
     let recovery_handler = production
@@ -214,8 +215,8 @@ fn v16_program_dispatch_and_entrypoints_preserve_every_handler_error() {
     }
     assert_eq!(
         dispatcher.matches("handle_").count(),
-        49,
-        "all 49 public variants must return a handler result"
+        50,
+        "all 50 public variants must return a handler result"
     );
     for (shared_handler, variant_count) in [
         ("handle_top_up_insurance(", 2),
@@ -231,13 +232,13 @@ fn v16_program_dispatch_and_entrypoints_preserve_every_handler_error() {
     }
     assert_eq!(
         handlers.len(),
-        43,
+        44,
         "dispatcher implementation count drift requires a shared-handler review"
     );
     assert_eq!(
         dispatcher.matches("Instruction::").count(),
-        50,
-        "the dispatcher must contain decode plus exactly 49 variant arms"
+        51,
+        "the dispatcher must contain decode plus exactly 50 variant arms"
     );
     for forbidden in ["Ok(())", ".ok()", "is_err()", "unwrap_or", "let _ ="] {
         assert!(

@@ -442,6 +442,11 @@ const INV005_AUTHORITY_ROUTE_DISPOSITIONS: &[(&str, Inv005AuthorityDisposition, 
         Inv005AuthorityDisposition::EpochMatrix,
         "SecondaryReserveSwap",
     ),
+    (
+        "CanonicalizeSpentBackingHistory",
+        Inv005AuthorityDisposition::EpochMatrix,
+        "SpentHistoryCanonicalization",
+    ),
 ];
 
 #[test]
@@ -518,7 +523,7 @@ fn v16_program_adversarial_role_containment_matrix_is_source_complete() {
     let functions = inv005_processor_functions(production);
     let public_handlers = inv005_public_route_handlers(production);
     let configured_handlers = inv005_authority_route_handlers(production);
-    assert_eq!(public_handlers.len(), 49, "public handler census drift");
+    assert_eq!(public_handlers.len(), 50, "public handler census drift");
     assert_eq!(
         configured_handlers.len(),
         29,

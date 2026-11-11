@@ -1761,6 +1761,7 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         ArithmeticOwner { function: "backing_domain_parts_view", class: "STRUCTURAL", evidence: "INV-034" },
         ArithmeticOwner { function: "verify_domain_withdrawal_preflight", class: "STRUCTURAL", evidence: "INV-034" },
         ArithmeticOwner { function: "handle_top_up_backing_bucket", class: "STRUCTURAL", evidence: "INV-034" },
+        ArithmeticOwner { function: "handle_canonicalize_spent_backing_history", class: "STRUCTURAL", evidence: "INV-034" },
         ArithmeticOwner { function: "handle_withdraw_insurance_asset", class: "STRUCTURAL", evidence: "INV-064" },
         ArithmeticOwner { function: "hybrid_trade_fee_quote_view", class: "COMPOSITE", evidence: "v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered" },
         ArithmeticOwner { function: "trade_fee_budgeted_amounts_with_mark_externality_view", class: "COMPOSITE", evidence: "v16_program_pr225_mark_movement_fee_is_nonwithdrawable_and_terminally_burned" },

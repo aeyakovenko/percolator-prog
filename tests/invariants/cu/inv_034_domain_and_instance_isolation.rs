@@ -7,7 +7,7 @@
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: the source-locked role roster covers all 49 current public variants. Its 20
+//! Guarantee boundary: the source-locked role roster covers all 50 current public variants. Its 21
 //! single-instance-anchor rows have no type-correct foreign role, while all 29 mixed-role rows bind
 //! every current instance-owned account to a mutating same-instance control and exact-rollback
 //! foreign-instance rejection. The public multi-asset loss campaign and pinned engine contracts
@@ -121,7 +121,7 @@ fn v16_program_cross_instance_role_roster_is_source_complete() {
         roster, public_registry,
         "every public variant needs one row"
     );
-    assert_eq!(status_counts.get("NO_MIXED_ROLE"), Some(&20));
+    assert_eq!(status_counts.get("NO_MIXED_ROLE"), Some(&21));
     assert_eq!(status_counts.get("EXHAUSTIVE"), Some(&29));
     assert_eq!(status_counts.get("PARTIAL").copied().unwrap_or_default(), 0);
     assert_eq!(status_counts.get("OPEN").copied().unwrap_or_default(), 0);
