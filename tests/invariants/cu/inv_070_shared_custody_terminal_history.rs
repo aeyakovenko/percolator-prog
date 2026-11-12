@@ -1107,12 +1107,14 @@ fn v16_program_generated_shared_custody_recreation_preserves_terminal_owner_valu
     assert_eq!(winning_sides, 3);
     assert_eq!(evidence.payments, 192);
     assert_eq!(evidence.detach_only, 64);
-    // Winners paid before their sibling's claim is recorded keep a receipt that a later
-    // plain CloseResolved tops up; recycled custody is recreated and disposed again for it.
-    assert_eq!(evidence.topups, 64);
-    assert_eq!(evidence.expiries, 24);
-    assert_eq!(evidence.recreations, 96);
-    assert_eq!(evidence.custody_closes, 160);
+    // Engine S2 (#246): the losing cohorts' Resolved losses join the funded provider domain in
+    // full, so every winner is paid at face by its first paying close. In these worlds no
+    // winner keeps a receipt for a later top-up and none waits on the fresh bucket's expiry;
+    // recycled custody is still disposed and recreated between the accumulating payments.
+    assert_eq!(evidence.topups, 0);
+    assert_eq!(evidence.expiries, 0);
+    assert_eq!(evidence.recreations, 64);
+    assert_eq!(evidence.custody_closes, 128);
     assert_eq!(evidence.rollbacks, 608);
     assert_eq!(evidence.successful_aborted_wrappers, 480);
     println!("row418 shared custody: worlds={worlds}, payments={}, detach_only={}, topups={}, expiries={}, custody_closes={}, recreations={}, rollbacks={}, aborted_wrapper_successes={}, commits={}, peak_CU={}, limit={LIMIT}",

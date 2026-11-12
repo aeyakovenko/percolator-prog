@@ -1,6 +1,9 @@
 //! INV-024/025/028/063/066/067/070/073: resolved debt above a source's remaining
-//! backing need belongs to junior residual. Carry that partition into actual receipts,
-//! source conversion, late expiry, owner payouts and bounded portfolio deletion.
+//! backing need still reaches the junior receipt holders. Since engine S2 (#246) it first
+//! joins the funded provider domain in full and is released to the junior pool when that
+//! bucket lapses, so every owner's final payout is unchanged and only the receipt's first
+//! installment is smaller. Carry that partition into actual receipts, source conversion,
+//! late expiry, owner payouts and bounded portfolio deletion.
 
 use super::*;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
@@ -311,9 +314,17 @@ impl History {
         FACE[4] + FACE[self.waiting()]
     }
     fn pool(self, expired: bool) -> u128 {
-        // Both original debtors realize 250 losses in total. Only 250 - backing
-        // can fill their source; the remainder joins the unrelated debtor's 50 + 1.
-        self.backing + DEPOSITS[5] + 1 + if expired { FACE[self.waiting()] } else { 0 }
+        // Both original debtors realize 250 losses in total, and the whole 250 joins the
+        // funded provider domain (engine S2, #246). Until that bucket lapses the junior pool
+        // holds only the unrelated debtor's 50 + 1; at expiry the provider's unconsumed
+        // backing and the waiting winner's demoted claim backing join it.
+        DEPOSITS[5]
+            + 1
+            + if expired {
+                self.backing + FACE[self.waiting()]
+            } else {
+                0
+            }
     }
     fn junior(self, actor: usize, expired: bool) -> u128 {
         FACE[actor] * self.pool(expired).min(self.denominator()) / self.denominator()
@@ -402,10 +413,12 @@ impl History {
             paid[self.waiting()] = DEPOSITS[self.waiting()] + self.junior(self.waiting(), true);
         }
         let fresh = [
+            // Engine S2 (#246): a Resolved loss on a Fresh, funded, pre-snapshot provider
+            // domain is booked there in full, as in Live, not capped at the support gap.
             if stage >= 8 {
                 0
             } else {
-                (self.backing + settled_loss).min(250) - converted
+                self.backing + settled_loss - converted
             },
             if stage >= 6 { 0 } else { DEPOSITS[5] + 1 },
         ];
@@ -413,7 +426,13 @@ impl History {
             if stage >= 9 { 0 } else { 250 - converted },
             if stage >= 7 { 0 } else { FACE[4] },
         ];
-        let overflow = (self.backing + settled_loss).saturating_sub(250);
+        // The debt beyond the 250 of source faces stays pinned in the provider bucket by the
+        // underpaid junior receipt and reaches the junior residual only when it lapses.
+        let overflow = if stage >= 8 {
+            self.backing + settled_loss - 250
+        } else {
+            0
+        };
         let released = if stage >= 6 { DEPOSITS[5] + 1 } else { 0 }
             + if stage >= 8 { FACE[self.waiting()] } else { 0 };
         let junior_paid = if stage >= 7 { paid[4] - DEPOSITS[4] } else { 0 }
@@ -469,7 +488,7 @@ impl History {
             assert_eq!(
                 source.fresh_reserved_backing_num,
                 fresh[index] * BOUND_SCALE,
-                "late debt must fund only the source support gap, stage {stage}"
+                "late debt joins the funded provider domain in full, stage {stage}"
             );
             assert_eq!(
                 bucket.fresh_unliened_backing_num,
