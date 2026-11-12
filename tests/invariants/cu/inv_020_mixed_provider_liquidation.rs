@@ -240,6 +240,10 @@ fn v16_program_mixed_provider_liquidation_omissions_preserve_exact_entitlements(
                     );
                 }
                 set_test_clock(&mut env, 2, 102);
+                // Stale-account refresh consumes authenticated reports in the current slot.
+                for (i, leg) in legs.iter().enumerate() {
+                    write_epoch_matrix_leg(&mut env, *leg, CURRENT[i], 102, 2);
+                }
                 let old_pyth = EpochMatrixLeg {
                     account: Pubkey::new_unique(),
                     ..legs[0]

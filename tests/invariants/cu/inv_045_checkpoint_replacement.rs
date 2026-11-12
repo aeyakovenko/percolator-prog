@@ -61,14 +61,12 @@ impl Journal {
                 RATE,
                 "both premiums saturate the public rate cap"
             );
-            let funding = -(rate * price).div_euclid(1_000_000_000);
             for actor in 0..4 {
-                self.value.value[actor] +=
-                    self.value.lots[actor][asset] * (price - old_price + funding);
+                self.value.value[actor] += self.value.lots[actor][asset] * (price - old_price);
             }
+            self.value.accrue_funding(asset, rate, price);
             self.value.price[asset] = price as u64;
             self.value.carry[asset] = numerator % 10_000;
-            self.value.funding[asset] += funding;
         }
         self.value.slot = next;
     }
@@ -291,6 +289,10 @@ fn crank(
     let absent = [0, 1, 3].map(|actor| world.env.svm.get_account(&world.portfolios[actor]));
     transact(world, matcher, &[instruction], false);
     journal.advance();
+    // A bounded partial catch-up does not settle the supplied portfolio.
+    if journal.value.slot == world.env.svm.get_sysvar::<Clock>().slot {
+        journal.value.settle_f(2);
+    }
     journal.check(world);
     assert_eq!(
         [0, 1, 3].map(|actor| world.env.svm.get_account(&world.portfolios[actor])),
@@ -410,9 +412,11 @@ fn reduce(
         }
         let absent = [2, 3].map(|actor| world.env.svm.get_account(&world.portfolios[actor]));
         transact(world, matcher, &[instruction], false);
+        journal.value.settle_f(0);
+        journal.value.settle_f(1);
         for asset in assets {
-            journal.value.lots[0][asset as usize] -= 1;
-            journal.value.lots[1][asset as usize] += 1;
+            journal.value.resize(0, asset as usize, -1);
+            journal.value.resize(1, asset as usize, 1);
         }
         journal.check(world);
         assert_eq!(carry_transport_exit::profiles(world), profiles);
@@ -512,9 +516,15 @@ fn v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolv
                     crank(&mut world, &mut journal, matcher, batch, rollback);
                 }
                 assert_eq!(journal.value.carry, [7_200, 9_000]);
+                // Saturated premiums: F_long = sum of -signum(premium) * RATE * price *
+                // ADL_ONE / 1e9 over slots 1..=7 (#458 exact sub-unit accrual).
                 assert_eq!(
                     journal.value.funding,
-                    if direction == 1 { [2, 5] } else { [5, 2] }
+                    if direction == 1 {
+                        [-3_000_000_000_000, 3_750_000_000_000]
+                    } else {
+                        [3_000_000_000_000, -3_750_000_000_000]
+                    }
                 );
                 reduce(&mut world, &mut journal, matcher, history, false, rollback);
                 for slot in 8..=9 {
@@ -525,16 +535,22 @@ fn v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolv
                 assert_eq!(journal.value.price, targets(direction, 1));
                 assert_eq!(
                     journal.value.funding,
-                    if direction == 1 { [2, 7] } else { [7, 2] }
+                    if direction == 1 {
+                        [-5_010_000_000_000, 6_230_000_000_000]
+                    } else {
+                        [4_990_000_000_000, -6_270_000_000_000]
+                    }
                 );
                 reduce(&mut world, &mut journal, matcher, history, true, rollback);
                 assert_eq!(world.env.svm.get_account(&world.portfolios[3]), passive);
                 assert!(journal.value.latent_checks >= 16);
+                assert!(journal.value.carried_remainder_checks > 0);
+                let (entitlement, dust) = journal.value.closed_out();
                 let endpoint = Economics {
                     price: journal.value.price,
                     carry: journal.value.carry,
                     lots: journal.value.lots,
-                    entitlement: journal.value.value,
+                    entitlement,
                     vault: PRINCIPAL.map(u128::from).iter().sum(),
                 };
                 let accrual = |world: &World| {
@@ -559,7 +575,7 @@ fn v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolv
                     &endpoint,
                     batch,
                     100,
-                    0,
+                    dust,
                     |world, actor, instruction| {
                         if rollback {
                             let payments =
@@ -600,6 +616,8 @@ fn v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolv
         }
     }
     assert_eq!(worlds, 8);
-    assert_eq!(rollbacks, 88);
+    // Pinned public rollback evidence: 42 trade/crank prefixes plus 11 resolved
+    // close attempts in each of the 4 rollback worlds (#457 general netting).
+    assert_eq!(rollbacks, 86);
     eprintln!("row425 overlapping checkpoints: worlds={worlds}, rollbacks={rollbacks}, SPL prefixes rolled back={spl_rollbacks}, payouts={}, peak CU={peak_cu}, bound={CU_LIMIT}", worlds * 4);
 }

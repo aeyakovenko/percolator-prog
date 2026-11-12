@@ -122,6 +122,18 @@ fn grant(h: &History, id: u64, sequence: u64) -> Instruction {
     }
 }
 
+/// Rebind a grant to the position epoch a preceding fill in the same bundle produces.
+fn after_fill(mut ix: Instruction, epoch: u64) -> Instruction {
+    let mut data = ProgInstruction::decode(&ix.data).unwrap();
+    if let ProgInstruction::SetMatcherConfig { position_epoch, .. } = &mut data {
+        *position_epoch = epoch;
+    } else {
+        unreachable!();
+    }
+    ix.data = data.encode();
+    ix
+}
+
 fn custody(h: &History, actor: usize, deposit: bool) -> Instruction {
     let mut accounts = vec![
         AccountMeta::new(h.owners[actor].pubkey(), true),
@@ -376,7 +388,10 @@ fn v16_program_funded_owner_roundtrip_rejects_old_grant_after_current_cpi_prefix
             }
             let current = h.sign(&future_fill);
             let current_bytes = bincode::serialize(&current).unwrap();
-            let retained_bundle = sign(&h, &[cpi(&h, &future_fill), retained_ix.clone()]);
+            // The bundled grant follows B's fill, so it binds the post-fill position epoch;
+            // it then differs from an admissible grant only by the portfolio ID.
+            let retained_bundle_ix = after_fill(retained_ix.clone(), 1);
+            let retained_bundle = sign(&h, &[cpi(&h, &future_fill), retained_bundle_ix.clone()]);
             let bundle_bytes = bincode::serialize(&retained_bundle).unwrap();
             for cycle in 0..2 {
                 // B opens and exits a real position episode between the two A incarnations.
@@ -509,10 +524,11 @@ fn v16_program_funded_owner_roundtrip_rejects_old_grant_after_current_cpi_prefix
                 h.env.svm.latest_blockhash(),
                 retained.message.recent_blockhash
             );
-            // All original grant fields and metas coincide except the portfolio ID.
-            let fresh_grant = grant(&h, 4, 3);
-            assert_eq!(retained_ix.accounts, fresh_grant.accounts);
-            let mut repaired = ProgInstruction::decode(&retained_ix.data).unwrap();
+            // All bundled grant fields and metas coincide except the portfolio ID. The fresh
+            // grant also follows B's fill, so it binds position epoch 1.
+            let fresh_grant = after_fill(grant(&h, 4, 3), 1);
+            assert_eq!(retained_bundle_ix.accounts, fresh_grant.accounts);
+            let mut repaired = ProgInstruction::decode(&retained_bundle_ix.data).unwrap();
             if let ProgInstruction::SetMatcherConfig { portfolio_id, .. } = &mut repaired {
                 *portfolio_id = 4;
             } else {

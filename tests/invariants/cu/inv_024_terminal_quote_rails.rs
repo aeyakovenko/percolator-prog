@@ -210,20 +210,25 @@ fn v16_program_terminal_cross_rail_reserves_preserve_holder_claims_and_surplus()
             )
             .unwrap();
             let mint_frames = mints.map(|mint| env.svm.get_account(&mint));
-            let withdrawal = |holder: usize, rail: usize, amount: u64| {
+            // Each successful insurance payout consumes one authority epoch.
+            let epoch_after = |paid: [[u64; 2]; 2]| {
+                sequences.authority_epoch
+                    + paid[1].iter().filter(|amount| **amount != 0).count() as u64
+            };
+            let withdrawal = |holder: usize, rail: usize, amount: u64, authority_epoch: u64| {
                 wrap(
                     if holder == 0 {
                         ProgInstruction::WithdrawBackingBucket {
                             domain: 1,
                             market_id,
-                            authority_epoch: sequences.authority_epoch,
+                            authority_epoch,
                             amount: amount.into(),
                         }
                     } else {
                         ProgInstruction::WithdrawInsuranceAsset {
                             asset_index: 0,
                             market_id,
-                            authority_epoch: sequences.authority_epoch,
+                            authority_epoch,
                             amount: amount.into(),
                         }
                     },
@@ -237,21 +242,21 @@ fn v16_program_terminal_cross_rail_reserves_preserve_holder_claims_and_surplus()
                     ],
                 )
             };
-            let close = wrap(
-                ProgInstruction::CloseSlab {
-                    authority_epoch: sequences.authority_epoch,
-                },
-                vec![
-                    AccountMeta::new(wallets[ADMIN], true),
-                    AccountMeta::new(market_key, false),
-                    AccountMeta::new(vaults[0], false),
-                    AccountMeta::new_readonly(authority, false),
-                    AccountMeta::new(tokens[ADMIN][0], false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
-                    AccountMeta::new(vaults[1], false),
-                    AccountMeta::new(tokens[ADMIN][1], false),
-                ],
-            );
+            let close = |authority_epoch: u64| {
+                wrap(
+                    ProgInstruction::CloseSlab { authority_epoch },
+                    vec![
+                        AccountMeta::new(wallets[ADMIN], true),
+                        AccountMeta::new(market_key, false),
+                        AccountMeta::new(vaults[0], false),
+                        AccountMeta::new_readonly(authority, false),
+                        AccountMeta::new(tokens[ADMIN][0], false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                        AccountMeta::new(vaults[1], false),
+                        AccountMeta::new(tokens[ADMIN][1], false),
+                    ],
+                )
+            };
             let mut frame_keys = vec![market_key, portfolio, authority, env.payer.pubkey()];
             frame_keys.extend(mints);
             frame_keys.extend(vaults);
@@ -391,7 +396,9 @@ fn v16_program_terminal_cross_rail_reserves_preserve_holder_claims_and_surplus()
                 }
                 let (cfg, group) = env.market_state();
                 assert_eq!(cfg.marketauth, wallets[ADMIN].to_bytes());
-                assert_eq!(env.control_sequences(0), sequences);
+                let mut expected_sequences = sequences;
+                expected_sequences.authority_epoch = epoch_after(paid);
+                assert_eq!(env.control_sequences(0), expected_sequences);
                 assert_eq!(
                     state::read_asset_oracle_profile(
                         &env.svm.get_account(&market_key).unwrap().data,
@@ -429,7 +436,12 @@ fn v16_program_terminal_cross_rail_reserves_preserve_holder_claims_and_surplus()
             for holder in 0..2 {
                 land(
                     &mut env,
-                    vec![withdrawal(holder, first_rail, PREFIX[holder])],
+                    vec![withdrawal(
+                        holder,
+                        first_rail,
+                        PREFIX[holder],
+                        epoch_after(paid),
+                    )],
                     None,
                     &[market_key, vaults[first_rail], tokens[holder][first_rail]],
                 );
@@ -437,13 +449,19 @@ fn v16_program_terminal_cross_rail_reserves_preserve_holder_claims_and_surplus()
                 check(&env, paid, false);
             }
             let last_rail = 1 - first_rail;
-            let suffix = [0, 1]
-                .map(|holder| withdrawal(holder, last_rail, RESERVES[holder] - PREFIX[holder]));
+            let suffix = [0, 1].map(|holder| {
+                withdrawal(
+                    holder,
+                    last_rail,
+                    RESERVES[holder] - PREFIX[holder],
+                    epoch_after(paid),
+                )
+            });
             // Even with ample raw stock on both rails, the unpaid insurer's claim
             // prevents a provider payout prefix from turning into an admin sweep.
             land(
                 &mut env,
-                vec![suffix[0].clone(), close.clone()],
+                vec![suffix[0].clone(), close(epoch_after(paid))],
                 Some((3, PercolatorError::EngineLockActive)),
                 &[],
             );
@@ -479,7 +497,7 @@ fn v16_program_terminal_cross_rail_reserves_preserve_holder_claims_and_surplus()
             let admin_lamports = env.svm.get_account(&wallets[ADMIN]).unwrap().lamports;
             let fee = land(
                 &mut env,
-                vec![close],
+                vec![close(epoch_after(paid))],
                 None,
                 &[
                     market_key,

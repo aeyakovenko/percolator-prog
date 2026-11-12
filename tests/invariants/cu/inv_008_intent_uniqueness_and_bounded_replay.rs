@@ -793,19 +793,21 @@ fn v16_insurance_refund_does_not_revive_consumed_cross_route_intent() {
             AccountMeta::new(env.vault, false),
             AccountMeta::new_readonly(spl_token::ID, false),
         ];
-        let top_up = |direct: bool, intent_id| Instruction {
+        // The successful refund consumes the authority epoch, so top-ups that follow it bind
+        // the next epoch; their rejection must then come from the intent watermark alone.
+        let top_up_at = |direct: bool, intent_id, authority_epoch| Instruction {
             program_id,
             accounts: accounts.clone(),
             data: if direct {
                 ProgInstruction::TopUpInsurance {
-                    authority_epoch: sequences_before.authority_epoch,
+                    authority_epoch,
                     intent_id,
                     market_id,
                     amount: AMOUNT as u128,
                 }
             } else {
                 ProgInstruction::TopUpInsuranceDomain {
-                    authority_epoch: sequences_before.authority_epoch,
+                    authority_epoch,
                     intent_id,
                     market_id,
                     domain: 1,
@@ -814,11 +816,16 @@ fn v16_insurance_refund_does_not_revive_consumed_cross_route_intent() {
             }
             .encode(),
         };
+        let epoch = sequences_before.authority_epoch;
         let retained = [
-            top_up(direct_first, intent_id),
-            top_up(!direct_first, intent_id),
+            top_up_at(direct_first, intent_id, epoch),
+            top_up_at(!direct_first, intent_id, epoch),
         ];
-        let fresh = top_up(!direct_first, next_control_sequence(intent_id));
+        let post_refund = [
+            top_up_at(direct_first, intent_id, epoch + 1),
+            top_up_at(!direct_first, intent_id, epoch + 1),
+        ];
+        let fresh = top_up_at(!direct_first, next_control_sequence(intent_id), epoch + 1);
         let refund = Instruction {
             program_id,
             accounts: vec![
@@ -880,7 +887,7 @@ fn v16_insurance_refund_does_not_revive_consumed_cross_route_intent() {
             max_cu = max_cu.max(meta.compute_units_consumed);
             result
         };
-        let assert_insurance = |env: &V16CuEnv, total: u128, long: u128, intent| {
+        let assert_insurance = |env: &V16CuEnv, total: u128, long: u128, intent, debits| {
             let (_, group) = env.market_state();
             assert_eq!(group.mode, MarketModeV16::Live);
             assert_eq!(group.vault, total);
@@ -894,23 +901,24 @@ fn v16_insurance_refund_does_not_revive_consumed_cross_route_intent() {
             assert_eq!(env.token_amount(source) as u128, FUNDING as u128 - total);
             let mut expected_sequences = sequences_before;
             expected_sequences.insurance_top_up = intent;
+            expected_sequences.authority_epoch += debits;
             assert_eq!(env.control_sequences(0), expected_sequences);
             assert_eq!(group.assets[0].market_id, market_id);
             assert_eq!(env.svm.get_account(&env.mint).unwrap(), custody_before[2]);
         };
 
-        assert_insurance(&env, 0, 0, sequences_before.insurance_top_up);
+        assert_insurance(&env, 0, 0, sequences_before.insurance_top_up, 0);
         execute(&mut env, vec![retained[0].clone()]).expect("first retained top-up lands");
         let initial_long = if direct_first { AMOUNT / 2 } else { 0 };
-        assert_insurance(&env, AMOUNT as u128, initial_long as u128, intent_id);
+        assert_insurance(&env, AMOUNT as u128, initial_long as u128, intent_id, 0);
 
         // Unlike the existing duplicate-top-up bundles, the other operation here reverses
         // the original debit. Neither instruction order may erase its consumed watermark.
-        for retry in &retained {
+        for (retry, after_refund) in retained.iter().zip(&post_refund) {
             for refund_first in [false, true] {
                 let before = frame(&env);
                 let bundle = if refund_first {
-                    vec![refund.clone(), retry.clone()]
+                    vec![refund.clone(), after_refund.clone()]
                 } else {
                     vec![retry.clone(), refund.clone()]
                 };
@@ -949,7 +957,7 @@ fn v16_insurance_refund_does_not_revive_consumed_cross_route_intent() {
             custody_before,
             "public refund restores original token accounts"
         );
-        assert_insurance(&env, 0, 0, intent_id);
+        assert_insurance(&env, 0, 0, intent_id, 1);
 
         for after_fresh in [false, true] {
             if after_fresh {
@@ -961,9 +969,10 @@ fn v16_insurance_refund_does_not_revive_consumed_cross_route_intent() {
                     AMOUNT as u128,
                     fresh_long as u128,
                     next_control_sequence(intent_id),
+                    1,
                 );
             }
-            for retry in &retained {
+            for retry in &post_refund {
                 assert!(
                     env.token_amount(source) >= AMOUNT,
                     "retry remains fully funded"

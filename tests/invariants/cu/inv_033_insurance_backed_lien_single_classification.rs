@@ -415,7 +415,8 @@ fn v16_program_mixed_reserve_payout_bundle_preserves_live_lien_classification() 
                     data: ProgInstruction::WithdrawBackingBucket {
                         domain: DOMAIN as u16,
                         market_id: env.asset_market_id(0),
-                        authority_epoch: epoch,
+                        // The preceding insurance debit consumed `epoch`.
+                        authority_epoch: epoch + 1,
                         amount,
                     }
                     .encode(),

@@ -1492,9 +1492,10 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
                         AccountMeta::new_readonly(spl_token::ID, false),
                     ],
                 ),
+                // The preceding insurance payout consumes asset 0's authority epoch.
                 wrap(
                     ProgInstruction::CloseSlab {
-                        authority_epoch: env.control_sequences(0).authority_epoch,
+                        authority_epoch: env.control_sequences(0).authority_epoch + 1,
                     },
                     vec![
                         AccountMeta::new(env.admin.pubkey(), true),
@@ -2916,7 +2917,7 @@ fn inv070_braced_body_after<'a>(source: &'a str, marker: &str) -> &'a str {
 
 #[test]
 fn v16_program_terminal_stock_and_close_slab_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "94979ede7db934545e53a8f210dd063a9ea3ea63";
+    const ENGINE_PIN: &str = "4db11a8cb0053815e23a35d3a7d3edc265d8d866";
     const CLASSES: &[Inv070TerminalCompositionClass] = &[
         Inv070TerminalCompositionClass {
             class: "unsettled accounts, capital, positive claims, and payout receipts",

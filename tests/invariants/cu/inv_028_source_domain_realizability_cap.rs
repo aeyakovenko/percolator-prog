@@ -722,6 +722,7 @@ fn run_expired_source_lien_route_matrix(now_slot: u64, hinted_first: bool) {
         "liened expiry must become an impaired bucket"
     );
     let impaired_source = env.portfolio_state(portfolio).source_domains[0];
+    let impaired_market = env.market_state().1;
     assert!(impaired_source.source_claim_counterparty_liened_num.get() > 0);
     assert!(impaired_source.source_lien_counterparty_backing_num.get() > 0);
     assert_eq!(env.token_amount(env.vault), vault_before);
@@ -770,11 +771,37 @@ fn run_expired_source_lien_route_matrix(now_slot: u64, hinted_first: bool) {
     let after_principal = env.portfolio_state(portfolio);
     assert_eq!(after_principal.capital.get(), 0);
     assert_eq!(after_principal.pnl.get(), 5_000);
-    assert!(
-        after_principal.source_domains[0]
-            .source_claim_liened_num
-            .get()
-            > 0
+    // Since engine #242 (fix for #230) the owner's K/F settlement in the reduction reconciles
+    // the lien off the Impaired bucket: the exact counterparty face moves into the owner's
+    // impaired-claim lane (still attributed, still locked until terminal reconciliation) and the
+    // bucket/domain impaired encumbrance drops by exactly this lien's backing.
+    let reconciled = after_principal.source_domains[0];
+    assert_eq!(reconciled.source_claim_liened_num.get(), 0);
+    assert_eq!(reconciled.source_claim_counterparty_liened_num.get(), 0);
+    assert_eq!(reconciled.source_lien_counterparty_backing_num.get(), 0);
+    assert_eq!(
+        reconciled.source_claim_impaired_num.get(),
+        impaired_source.source_claim_impaired_num.get()
+            + impaired_source.source_claim_counterparty_liened_num.get()
+    );
+    assert_eq!(
+        reconciled.source_claim_bound_num,
+        impaired_source.source_claim_bound_num
+    );
+    let reconciled_market = env.market_state().1;
+    assert_eq!(
+        reconciled_market.source_backing_buckets[1].impaired_liened_backing_num,
+        impaired_market.source_backing_buckets[1].impaired_liened_backing_num
+            - impaired_source.source_lien_counterparty_backing_num.get()
+    );
+    assert_eq!(
+        reconciled_market.source_credit[1].impaired_liened_backing_num,
+        reconciled_market.source_backing_buckets[1].impaired_liened_backing_num
+    );
+    assert_eq!(
+        reconciled_market.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Expired,
+        "the sole holder's reconcile ends the bucket's impairment"
     );
     let market_before_conversion = env.svm.get_account(&env.market).unwrap();
     let portfolio_before_conversion = env.svm.get_account(&portfolio).unwrap();

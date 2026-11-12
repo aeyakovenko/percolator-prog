@@ -12,7 +12,10 @@ use percolator::SOCIAL_LOSS_DEN;
 const ENTRY: i128 = 1_000_000;
 const STEP: i128 = 10_000;
 const SLOTS: u64 = 20;
-const RATE: i128 = 1_000;
+// Exact funding (engine #458) accrues RATE * price / 1e9 per unit per slot with no per-slot
+// floor. At the 10_000 e9/slot cap every twenty-slot path below sums to a whole number of price
+// units per unit (200 +/- 21), so holder payment and debtor receipt coincide without dust.
+const RATE: i128 = 10_000;
 
 struct Inputs {
     prices: [i128; 2],
@@ -27,22 +30,34 @@ impl Inputs {
         let directions = [sign, -sign];
         let prices = directions.map(|d| ENTRY + d * STEP * i128::from(SLOTS));
         // A target published before the first crank activates all twenty
-        // capped intervals. Signed funding floors per interval, before scaling.
+        // capped intervals. Each interval accrues the exact RATE * price / 1e9
+        // at its post-move price; the sum is exact (no sub-unit remainder), so
+        // the payer's ceiling and the receiver's floor agree atom for atom.
         let funding = directions.map(|d| {
-            (1..=SLOTS)
-                .map(|slot| {
-                    (d * RATE * (ENTRY + d * STEP * i128::from(slot))).div_euclid(1_000_000_000)
-                })
-                .sum::<i128>()
+            let numerator = (1..=SLOTS)
+                .map(|slot| d * RATE * (ENTRY + d * STEP * i128::from(slot)))
+                .sum::<i128>();
+            assert_eq!(numerator % 1_000_000_000, 0, "funding path must be exact");
+            numerator / 1_000_000_000
         });
-        assert_eq!(funding, directions.map(|d| d * i128::from(SLOTS)));
+        assert_eq!(funding, directions.map(|d| d * 200 + 21));
         let gains = std::array::from_fn(|pair| {
             ((pair as i128 + 1) * directions[pair] * (prices[pair] - ENTRY - funding[pair])) as u128
         });
-        assert_eq!(gains, [199_980, 399_960]);
-        // Exact 9/10 and 3/4 source rates keep conversion rounding out of this
-        // funding/residual join. Both debtors start solvent and end bankrupt.
-        let deposits = [200_000, gains[0] * 9 / 10, 300_000, gains[1] * 3 / 4, 777];
+        assert_eq!(
+            gains,
+            if reverse {
+                [199_821, 2 * 199_779]
+            } else {
+                [199_779, 2 * 199_821]
+            }
+        );
+        // Exact 2/3 and 5/6 source rates (both gains are multiples of 3) keep
+        // conversion rounding out of this funding/residual join. Both debtors
+        // start solvent and end bankrupt.
+        let deposits = [200_000, gains[0] * 2 / 3, 300_000, gains[1] * 5 / 6, 777];
+        assert_eq!(deposits[1] * 3, gains[0] * 2);
+        assert_eq!(deposits[3] * 6, gains[1] * 5);
         Self {
             prices,
             funding,
@@ -309,7 +324,16 @@ fn v16_program_funded_bankrupt_domains_preserve_input_derived_pending_debt() {
             let paid: [u128; 5] = std::array::from_fn(|actor| {
                 world.env.token_amount(world.actors[actor].token) as u128
             });
-            assert_eq!(paid, [379_982, 0, 599_970, 0, 777]);
+            assert_eq!(
+                paid,
+                [
+                    inputs.deposits[0] + inputs.deposits[1],
+                    0,
+                    inputs.deposits[2] + inputs.deposits[3],
+                    0,
+                    inputs.deposits[4]
+                ]
+            );
             assert_eq!(world.env.market_state().1.vault, 0);
             for actor in 0..5 {
                 assert!(resolved_portfolio_is_terminal(
@@ -375,11 +399,16 @@ fn v16_program_funded_bankrupt_domains_preserve_input_derived_pending_debt() {
                 ),
                 (0, 0, 0, 0)
             );
-            outcomes.push(paid);
+            outcomes.push((reverse, paid));
             worlds += 1;
         }
     }
     assert_eq!(worlds, 4);
-    assert!(outcomes.windows(2).all(|pair| pair[0] == pair[1]));
+    // Resolution order cannot change payouts. Mirrored worlds differ only by the
+    // exact, direction-dependent funding path (221 vs 179 per unit), so compare the
+    // two early/late orders within each orientation.
+    assert!(outcomes
+        .chunks(2)
+        .all(|orders| orders[0].0 == orders[1].0 && orders[0].1 == orders[1].1));
     println!("INV-039 funded bankrupt domains: {worlds} worlds, 16 prefix/wait rollbacks, 20 terminal retries/deletions; peak CU setup={peak_setup}, terminal={peak_terminal}");
 }

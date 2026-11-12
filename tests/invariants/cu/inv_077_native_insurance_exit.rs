@@ -327,7 +327,7 @@ fn verify_native_insurance_exit(quorum_pair: Option<[usize; 2]>) {
             let market_lamports = env.svm.get_account(&env.market).unwrap().lamports;
             let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
 
-            let check = |env: &V16CuEnv, paid: u64, custody_amount: u64| {
+            let check = |env: &V16CuEnv, paid: u64, payouts: u64, custody_amount: u64| {
                 let market = env.svm.get_account(&env.market).unwrap();
                 let (current_cfg, group) = state::read_market(&market.data).unwrap();
                 let remaining = INSURANCE - paid;
@@ -356,7 +356,10 @@ fn verify_native_insurance_exit(quorum_pair: Option<[usize; 2]>) {
                     state::read_asset_oracle_profile(&market.data, 0).unwrap(),
                     profile
                 );
-                assert_eq!(env.control_sequences(0), sequences);
+                // Every successful terminal insurance payout consumes the asset authority epoch.
+                let mut expected_sequences = sequences;
+                expected_sequences.authority_epoch += payouts;
+                assert_eq!(env.control_sequences(0), expected_sequences);
                 if quorum_pair.is_some() {
                     assert_eq!(env.svm.get_account(&beneficiary_key), beneficiary_frame);
                 }
@@ -387,7 +390,7 @@ fn verify_native_insurance_exit(quorum_pair: Option<[usize; 2]>) {
                     .validate_shape()
                     .unwrap();
             };
-            check(&env, 0, 0);
+            check(&env, 0, 0, 0);
             let mut paid = 0;
             for (index, amount) in [first, INSURANCE - first].into_iter().enumerate() {
                 let rank_before = env.market_state().1.insurance;
@@ -433,7 +436,7 @@ fn verify_native_insurance_exit(quorum_pair: Option<[usize; 2]>) {
                         &members[pair[0]],
                         &tracked,
                     ));
-                    check(&env, paid, 0);
+                    check(&env, paid, index as u64, 0);
                 }
                 peak = peak.max(run(
                     &mut env,
@@ -444,7 +447,7 @@ fn verify_native_insurance_exit(quorum_pair: Option<[usize; 2]>) {
                 let rank_after = env.market_state().1.insurance;
                 assert_eq!(rank_before - rank_after, amount.into());
                 assert!(rank_after < rank_before);
-                check(&env, paid, amount);
+                check(&env, paid, index as u64 + 1, amount);
 
                 let frame_keys = [
                     env.market,
@@ -483,7 +486,7 @@ fn verify_native_insurance_exit(quorum_pair: Option<[usize; 2]>) {
                 assert_eq!(frame_keys.map(|key| env.svm.get_account(&key)), frame);
                 if index == 0 {
                     peak = peak.max(recreate_custody(&mut env, beneficiary_key, destination));
-                    check(&env, paid, 0);
+                    check(&env, paid, index as u64 + 1, 0);
                     assert_eq!(frame_keys.map(|key| env.svm.get_account(&key)), frame);
                 }
             }
@@ -512,10 +515,14 @@ fn verify_native_insurance_exit(quorum_pair: Option<[usize; 2]>) {
                     AccountMeta::new_readonly(spl_token::ID, false),
                 ],
                 data: ProgInstruction::CloseSlab {
-                    authority_epoch: sequences.authority_epoch,
+                    authority_epoch: env.control_sequences(0).authority_epoch,
                 }
                 .encode(),
             };
+            assert_eq!(
+                env.control_sequences(0).authority_epoch,
+                sequences.authority_epoch + 2
+            );
             peak = peak.max(run(&mut env, vec![close], &[&admin]));
             let tombstone = env.svm.get_account(&env.market).unwrap();
             assert_closed_market_tombstone(&tombstone);

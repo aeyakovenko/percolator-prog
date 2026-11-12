@@ -113,7 +113,9 @@ fn land(
     meta.compute_units_consumed
 }
 
-fn check_frozen(world: &AttributionWorld, price: i128, funding: i128) {
+/// `funding_index` is the exact per-side F index numerator (#458): longs at `-funding_index`,
+/// shorts at `+funding_index`.
+fn check_frozen(world: &AttributionWorld, price: i128, funding_index: i128) {
     let group = world.env.market_state().1;
     assert_eq!(group.mode, MarketModeV16::Resolved);
     assert_eq!(group.resolved_slot, RESOLVED);
@@ -123,7 +125,7 @@ fn check_frozen(world: &AttributionWorld, price: i128, funding: i128) {
         assert_eq!(asset.slot_last, RESOLVED);
         assert_eq!(
             (asset.f_long_num, asset.f_short_num),
-            (-funding * ADL_ONE as i128, funding * ADL_ONE as i128)
+            (-funding_index, funding_index)
         );
         assert_eq!((asset.b_long_num, asset.b_short_num), (0, 0));
     }
@@ -171,14 +173,26 @@ fn v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders(
     let mut worlds = 0;
     for sign in [-1i128, 1] {
         // The unchanged target retains ENTRY as its cap anchor. Only the second
-        // step has an active premium; signed funding floors before index scaling.
+        // step has an active premium. Exact funding (#458) accrues RATE * price
+        // per unit in 1e-9 price units with no whole-unit floor: 1.02 (sign +1) or
+        // 0.98 (sign -1) atoms per lot. The paying holder settles the ceiling and
+        // the receiving debtor the floor, so each pair leaves one dust atom.
         let first_price = ENTRY + sign * ENTRY / 100;
         let final_price = ENTRY + sign * 2 * ENTRY / 100;
-        let funding = (sign * RATE * final_price).div_euclid(1_000_000_000);
-        let debt_per_lot = sign * (final_price - ENTRY - funding);
-        assert_eq!(funding, sign);
-        assert!(debt_per_lot > 0);
-        let expected_debt = [debt_per_lot as u128, 2 * debt_per_lot as u128];
+        let funding_e9 = sign * RATE * final_price;
+        assert_eq!(funding_e9.unsigned_abs(), if sign > 0 { 1_020_000_000 } else { 980_000_000 });
+        let funding = funding_e9 * (ADL_ONE / 1_000_000_000) as i128;
+        let move_per_lot = (sign * (final_price - ENTRY)) as u128;
+        let lots = [1u128, 2];
+        let paid = lots.map(|lot| (lot * funding_e9.unsigned_abs()).div_ceil(1_000_000_000));
+        let received = lots.map(|lot| lot * funding_e9.unsigned_abs() / 1_000_000_000);
+        assert_eq!(paid, if sign > 0 { [2, 3] } else { [1, 2] });
+        assert_eq!(received, if sign > 0 { [1, 2] } else { [0, 1] });
+        let expected_debt = [0, 1].map(|pair| lots[pair] * move_per_lot - received[pair]);
+        let expected_credit = [0, 1].map(|pair| lots[pair] * move_per_lot - paid[pair]);
+        // Each funded pair leaves exactly one payer-ceiling/receiver-floor atom.
+        let funding_dust: u128 = (0..2).map(|pair| paid[pair] - received[pair]).sum();
+        assert_eq!(funding_dust, 2);
         for debtor_order in [[1usize, 3], [3, 1]] {
             for claimant_order in [[0usize, 2], [2, 0]] {
                 for delay in [0u64, 31] {
@@ -246,11 +260,7 @@ fn v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders(
                         );
                         world.check(world.quantities, [false; 4]);
                         for asset in &world.env.market_state().1.assets[1..3] {
-                            let f = if slot == 1 {
-                                0
-                            } else {
-                                funding * ADL_ONE as i128
-                            };
+                            let f = if slot == 1 { 0 } else { funding };
                             assert_eq!(
                                 asset.effective_price as i128,
                                 if slot == 1 { first_price } else { final_price }
@@ -283,6 +293,7 @@ fn v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders(
                     }
                     let mut model = AttributionModel {
                         debt: expected_debt,
+                        credit: expected_credit,
                         basis: [0, world.quantities[1], 0, world.quantities[3]],
                         pending: [true, false, true, false],
                     };
@@ -378,7 +389,7 @@ fn v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders(
                         }
                     }
                     let expected: [u128; 5] = std::array::from_fn(|i| match i {
-                        0 | 2 => ATTRIBUTION_DEPOSITS[i] + expected_debt[i / 2],
+                        0 | 2 => ATTRIBUTION_DEPOSITS[i] + expected_credit[i / 2],
                         1 | 3 => ATTRIBUTION_DEPOSITS[i] - expected_debt[i / 2],
                         _ => ATTRIBUTION_DEPOSITS[i],
                     });
@@ -420,9 +431,14 @@ fn v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders(
                     for (actor, amount) in world.actors.iter().zip(expected) {
                         assert_eq!(world.env.token_amount(actor.token) as u128, amount);
                     }
+                    // Owners are paid exactly; only the funding dust stays in custody.
                     assert_eq!(
-                        expected.iter().sum::<u128>(),
+                        expected.iter().sum::<u128>() + funding_dust,
                         ATTRIBUTION_DEPOSITS.iter().sum::<u128>()
+                    );
+                    assert_eq!(
+                        world.env.token_amount(world.env.vault) as u128,
+                        funding_dust
                     );
                     world.env.svm.warp_to_slot(100 + delay);
                     for actor in [last, claimant_order[0], claimant_order[1], 4] {
@@ -448,8 +464,10 @@ fn v16_program_funded_pending_debt_survives_resolution_and_delayed_close_orders(
                             group.c_tot,
                             group.pnl_pos_tot
                         ),
-                        (0, 0, 0, 0)
+                        (0, funding_dust, 0, 0),
+                        "only the bounded exact-funding dust may remain (CloseSlab sweeps it)"
                     );
+                    assert_eq!(world.env.token_amount(world.env.vault) as u128, funding_dust);
                     worlds += 1;
                 }
             }

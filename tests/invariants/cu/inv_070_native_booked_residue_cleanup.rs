@@ -1,5 +1,7 @@
 //! Scope O: retire booked residue after Scope H's fee/loss/recredit completion.
 //! Paid claims, native escheat, donated surplus and rent have separate recipients.
+//! Since percolator-prog#451 the provider's signed resolved surplus exit precedes
+//! expiry, which completes the claimant's receipt before the reserve payouts.
 
 use super::*;
 
@@ -62,7 +64,8 @@ fn run_cleanup(native: bool) {
     for retained in [SPENT + 1, 101] {
         for &(donation, sync) in schedules {
             for &missing in availability {
-                let (world, insurer, admin_token) = terminal_fee_loss_world_with_quote(native);
+                let (world, claimant, insurer, admin_token) =
+                    terminal_fee_loss_world_with_quote(native);
                 let TerminalEarningsWorld {
                     mut env,
                     admin,
@@ -89,7 +92,8 @@ fn run_cleanup(native: bool) {
                     .unwrap();
                     assert_absent(&env, signer.pubkey());
                 }
-                drop((incumbent, successor));
+                // The drained provider still signs its pre-expiry surplus exit below.
+                drop(successor);
                 let ledger = Keypair::new();
                 system_create_account_for_test(
                     &mut env.svm,
@@ -124,6 +128,8 @@ fn run_cleanup(native: bool) {
                     market: env.svm.get_account(&env.market).unwrap(),
                     ledger: env.svm.get_account(&ledger).unwrap(),
                     mint: mint_frame,
+                    claimant_portfolio: portfolios[1],
+                    claimant_portfolio_rent: env.svm.get_account(&portfolios[1]).unwrap().lamports,
                 };
                 let mut close = Instruction {
                     program_id: env.program_id,
@@ -149,23 +155,37 @@ fn run_cleanup(native: bool) {
                     paid: [0; 4],
                     expired: false,
                     recredited: 0,
+                    insurance_payouts: 0,
                 };
                 frames.check(&env, &book, wallets, tokens, ledger, [true; 5]);
                 // One representative completion word; Scope H owns the order product.
                 for (class, amount) in [
-                    (0usize, SOURCE_PRINCIPAL),
-                    (1, BACKING - retained),
-                    (3, AVAILABLE),
+                    (1usize, BACKING - retained - RECEIPT_SHORTFALL),
                     (0, 0),
+                    (0, SOURCE_PRINCIPAL),
+                    (3, AVAILABLE),
                     (3, SPENT),
                     (2, PROVIDER_FEE),
                 ] {
                     let mut signers = Vec::new();
                     let mut allowed = vec![env.market];
-                    let ix = if amount == 0 {
+                    let ixs = if amount == 0 {
                         env.svm.warp_to_slot(100);
-                        signers.push(&admin);
-                        close.clone()
+                        let [lapse, topup] =
+                            claimant_expiry(&env, wallets, tokens, portfolios, 100);
+                        peak = peak.max(checked_land(
+                            &mut env,
+                            &lapse,
+                            &[],
+                            &tracked,
+                            &allowed,
+                            0,
+                            None,
+                            None,
+                        ));
+                        signers.push(&claimant);
+                        allowed.extend([env.vault, tokens[1], portfolios[1]]);
+                        topup
                     } else {
                         let mut ix = reserve_payout(
                             &env,
@@ -187,6 +207,9 @@ fn run_cleanup(native: bool) {
                         if class == 3 {
                             ix.accounts[0].is_signer = true;
                             signers.push(&insurer);
+                        } else if class == 1 {
+                            ix.accounts[0].is_signer = true;
+                            signers.push(&incumbent);
                         } else {
                             assert!(ix.accounts.iter().all(|meta| !meta.is_signer));
                         }
@@ -194,17 +217,10 @@ fn run_cleanup(native: bool) {
                         if class == 2 {
                             allowed.push(ledger);
                         }
-                        ix
+                        vec![ix]
                     };
                     peak = peak.max(checked_land(
-                        &mut env,
-                        &[ix],
-                        &signers,
-                        &tracked,
-                        &allowed,
-                        0,
-                        None,
-                        None,
+                        &mut env, &ixs, &signers, &tracked, &allowed, 0, None, None,
                     ));
                     if amount == 0 {
                         book.expire();
@@ -213,6 +229,12 @@ fn run_cleanup(native: bool) {
                     }
                     frames.check(&env, &book, wallets, tokens, ledger, [true; 5]);
                 }
+                drop(incumbent);
+                // Resolved insurance debits advanced the authority epoch.
+                close.data = ProgInstruction::CloseSlab {
+                    authority_epoch: env.control_sequences(0).authority_epoch,
+                }
+                .encode();
                 let residue = retained - SPENT;
                 assert_eq!(book.rank(), (0, 0));
                 assert_eq!(book.expected().custody, residue);
@@ -306,7 +328,10 @@ fn run_cleanup(native: bool) {
                 let mut expected_vault = token_image(&frames.vault, residue + wrapped_surplus);
                 expected_vault.lamports += donation - wrapped_surplus;
                 assert_eq!(env.svm.get_account(&env.vault), Some(expected_vault));
-                assert_eq!(env.svm.get_account(&env.market), Some(completed_market));
+                assert_eq!(
+                    env.svm.get_account(&env.market),
+                    Some(completed_market.clone())
+                );
                 let mut batch = Vec::new();
                 if missing {
                     batch.push(Instruction {
@@ -358,7 +383,7 @@ fn run_cleanup(native: bool) {
                 let tombstone_rent = env
                     .svm
                     .minimum_balance_for_rent_exemption(percolator_prog::constants::HEADER_LEN);
-                let refund = frames.market.lamports + token_rent + donation
+                let refund = completed_market.lamports + token_rent + donation
                     - wrapped_surplus
                     - tombstone_rent;
                 let mut expected_admin = env.svm.get_account(&admin.pubkey()).unwrap();

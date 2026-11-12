@@ -6,8 +6,9 @@ use super::*;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
 const EXPIRY: u64 = 25;
-// Debt crystallizes at slot 15; the setup's largest freshness horizon is 1,000.
-const SOURCE_EXPIRY: u64 = 1_015;
+// Debt crystallizes at slot 15, after resolution. Engine #219 anchors the
+// resolved backing lifetime at resolved_slot + horizon, not at the debt slot.
+const DEBT_SLOT: u64 = 15;
 
 #[track_caller]
 fn land(
@@ -283,7 +284,7 @@ fn v16_program_mixed_role_fractional_source_preserves_attribution_through_expiry
                         }
                         world.env.resolve();
                         book.check(&world);
-                        world.env.svm.warp_to_slot(15);
+                        world.env.svm.warp_to_slot(DEBT_SLOT);
                         let market = world.env.market;
                         let vault = world.env.vault;
                         let denied = deletion(&world, 3, false);
@@ -343,10 +344,15 @@ fn v16_program_mixed_role_fractional_source_preserves_attribution_through_expiry
                             BOUND_SCALE,
                             "the conversion's remaining atom stays source-reserved"
                         );
+                        let group = world.env.market_state().1;
+                        let source_expiry = resolved_backing_deadline(&group);
+                        let horizon = source_expiry - group.resolved_slot;
+                        assert_eq!(horizon, 1_000, "the setup's largest freshness horizon");
+                        assert!(group.resolved_slot < DEBT_SLOT);
+                        assert!(source_expiry < DEBT_SLOT + horizon);
                         assert_eq!(
-                            world.env.market_state().1.source_backing_buckets[source_domain]
-                                .expiry_slot,
-                            SOURCE_EXPIRY
+                            group.source_backing_buckets[source_domain].expiry_slot,
+                            source_expiry
                         );
                         let retry = payout(&world, 2, true);
                         peak = peak.max(land(&mut world, &[retry], &[], &[], None));
@@ -449,7 +455,7 @@ fn v16_program_mixed_role_fractional_source_preserves_attribution_through_expiry
                             BOUND_SCALE,
                             "unrelated expiry cannot release the fractional source atom"
                         );
-                        world.env.svm.warp_to_slot(SOURCE_EXPIRY + u64::from(late));
+                        world.env.svm.warp_to_slot(source_expiry + u64::from(late));
                         for _ in 0..16 {
                             if world.env.svm.get_account(&market).unwrap().data.len()
                                 == percolator_prog::constants::HEADER_LEN

@@ -330,6 +330,12 @@ const FIELD_EDGES: &[(&str, &str, usize)] = &[
         "simulated_profile.last_good_oracle_slot",
         1,
     ),
+    // Stale-account refresh requires a Hybrid report consumed in the current slot.
+    (
+        "reject_incomplete_asset_health_observation_view",
+        "profile.last_good_oracle_slot",
+        1,
+    ),
 ];
 
 const CALL_EDGES: &[(&str, &str, usize)] = &[

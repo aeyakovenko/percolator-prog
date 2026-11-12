@@ -337,6 +337,8 @@ fn v16_program_live_successor_accrual_survives_terminal_role_exchange() {
             principal_paid = amount;
         } else {
             insurance_paid = amount;
+            // A successful insurance payout consumes the asset authority epoch.
+            epoch += 1;
         }
         check!();
     }

@@ -91,6 +91,7 @@ fn v16_program_peer_restart_preserves_pending_debt_through_fresh_trade_and_resol
                 let mut world = AttributionWorld::new(reverse_sides);
                 let mut model = AttributionModel {
                     debt: [world.debt(0), world.debt(1)],
+                    credit: [world.debt(0), world.debt(1)],
                     basis: world.quantities,
                     pending: [false; 4],
                 };

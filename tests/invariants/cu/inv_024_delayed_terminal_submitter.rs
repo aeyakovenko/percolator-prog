@@ -246,7 +246,10 @@ fn v16_program_delayed_terminal_cleanup_preserves_earned_fees_across_submitter_c
                     state::read_asset_oracle_profile(&image.data, 0).unwrap(),
                     profile
                 );
-                assert_eq!(env.control_sequences(0), sequences);
+                // The Resolved insurance payout consumes the asset authority epoch.
+                let mut expected_sequences = sequences;
+                expected_sequences.authority_epoch += u64::from(paid[1] != 0);
+                assert_eq!(env.control_sequences(0), expected_sequences);
                 assert_domain_budget_remaining_total_consistent(
                     &group,
                     "delayed terminal submitter",
@@ -447,6 +450,12 @@ fn v16_program_delayed_terminal_cleanup_preserves_earned_fees_across_submitter_c
             let paid_ledger = env.svm.get_account(&ledger);
             env.payer = keeper.insecure_clone();
             let allowed = [env.market, env.vault, env.mint];
+            // CloseSlab binds the epoch the insurance payout just consumed.
+            let mut close = close;
+            close.data = ProgInstruction::CloseSlab {
+                authority_epoch: sequences.authority_epoch + 1,
+            }
+            .encode();
             peak = peak.max(land(
                 &mut env,
                 &[close],

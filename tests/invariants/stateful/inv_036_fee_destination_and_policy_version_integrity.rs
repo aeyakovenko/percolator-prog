@@ -441,7 +441,9 @@ proptest! {
         prop_assert_eq!(protection.lp_capital_loss, protection.provider_earnings);
         prop_assert!(protection.provider_earnings > 0);
         prop_assert_eq!(protection.provider_earnings, u128::from(protection.extracted_tokens));
-        prop_assert_eq!(protection.attacker_capital_delta, -120);
+        // No attacker backing fee; flat maintenance is anchored at first open
+        // (slot 1) and charged through submission slot 6.
+        prop_assert_eq!(protection.attacker_capital_delta, -30 * (6 - 1));
         prop_assert!(protection.zero_cap_risk_reduction_landed);
         prop_assert!(protection.max_route_cu < crate::support::v16_svm::TX_CU_LIMIT);
         prop_assert!(protection.token_supply_conserved);

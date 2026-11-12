@@ -286,13 +286,13 @@ fn v16_program_environmental_completion_prefixes_preserve_permissionless_exit() 
                     let payout_maturity =
                         env.primary_market_state().1.resolved_slot + force_close_delay;
                     env.warp_to_slot(payout_maturity - 1 + payout_boundary);
+                    // A resolved crank takes at most one discovery-only asset hint
+                    // (no oracle accounts); the hinted word must be as live as none.
                     let hints = if complete_hints {
-                        (0..crate::support::v16_svm::ASSET_COUNT)
-                            .map(|asset| CrankObservationHint {
-                                asset_index: asset as u16,
-                                oracle_accounts: env.primary_profile(asset).oracle_leg_count,
-                            })
-                            .collect::<Vec<_>>()
+                        vec![CrankObservationHint {
+                            asset_index: (crate::support::v16_svm::ASSET_COUNT - 1) as u16,
+                            oracle_accounts: 0,
+                        }]
                     } else {
                         vec![]
                     };
@@ -1015,9 +1015,21 @@ enum Inv082TerminalRail {
 }
 
 fn inv082_terminal_hints(word: usize) -> Vec<CrankObservationHint> {
+    // A resolved crank accepts at most one discovery-only asset hint; every
+    // admissible word (none, or any in-range asset) must still make progress.
     match word % 4 {
         0 => vec![],
-        1 => vec![
+        word => vec![CrankObservationHint {
+            asset_index: (word - 1) as u16,
+            oracle_accounts: 0,
+        }],
+    }
+}
+
+/// Malformed resolved hint words reject before any engine work.
+fn inv082_junk_terminal_hints() -> [Vec<CrankObservationHint>; 3] {
+    [
+        vec![
             CrankObservationHint {
                 asset_index: 0,
                 oracle_accounts: 0,
@@ -1027,15 +1039,15 @@ fn inv082_terminal_hints(word: usize) -> Vec<CrankObservationHint> {
                 oracle_accounts: 0,
             },
         ],
-        2 => vec![CrankObservationHint {
+        vec![CrankObservationHint {
             asset_index: u16::MAX,
             oracle_accounts: u8::MAX,
         }],
-        _ => vec![CrankObservationHint {
+        vec![CrankObservationHint {
             asset_index: 1,
             oracle_accounts: u8::MAX,
         }],
-    }
+    ]
 }
 
 #[test]
@@ -1464,6 +1476,15 @@ fn v16_program_stale_exposure_refresh_retains_keeper_only_terminal_progress() {
                     );
                     inv082_assert_frame(&env, &frame, &[]);
                     terminal_rejections += 1;
+                }
+                for junk in inv082_junk_terminal_hints() {
+                    let frame = inv082_account_frame(&env);
+                    inv082_assert_rejected(
+                        env.crank(actor, env.current_slot(), junk)
+                            .expect_err("malformed resolved hint word must reject"),
+                        PercolatorError::InvalidInstruction,
+                    );
+                    inv082_assert_frame(&env, &frame, &[]);
                 }
             }
 

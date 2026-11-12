@@ -29,6 +29,7 @@ struct Claims {
     observed: [[Option<u64>; 2]; 5],
     insurance_observed_loss: [u64; 5],
     holders: [usize; 3],
+    /// Authority epochs consumed by role handoffs and successful insurance debits.
     rotations: u64,
     expired: bool,
     normalized: bool,
@@ -109,6 +110,8 @@ impl Claims {
             }
         }
         self.paid[actor][class] += amount;
+        // Every successful insurance payout consumes the asset authority epoch.
+        self.rotations += u64::from(class == INSURER);
         if class != PRINCIPAL {
             self.observed[actor][class] = Some(self.remaining(class));
         }
@@ -520,7 +523,12 @@ fn v16_program_generated_expiring_role_returns_preserve_beneficiaries_through_cl
                             book = next;
                             frames.check(&world, &book, epoch);
                             let insurance = payment(&world, &frames, &book, INSURER, 1, epoch);
-                            let expired = payment(&world, &frames, &book, PRINCIPAL, 1, epoch);
+                            // Bind the post-insurance epoch so the suffix reaches the
+                            // expired-principal gate rather than the epoch guard.
+                            let mut after_insurance = book.clone();
+                            after_insurance.pay(INSURER, 1);
+                            let expired =
+                                payment(&world, &frames, &after_insurance, PRINCIPAL, 1, epoch);
                             execute(
                                 &mut world,
                                 &[insurance.clone(), expired],

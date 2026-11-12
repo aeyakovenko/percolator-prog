@@ -163,6 +163,28 @@ fn run_catchup(
             continue;
         }
 
+        if !renew_report && elapsed > 1 {
+            // A reused report does not renew provenance, so the stale target stalls with an
+            // exact rollback until a report is consumed in this slot.
+            let checkpoint = frame(&env, &keys);
+            let error = reward_crank(
+                &mut env,
+                target,
+                (&owners[2], keeper),
+                crank_observations_with_accounts(0, 1),
+                &[fresh],
+            )
+            .expect_err("a reused report cannot refresh a stale target");
+            assert!(error.contains("Custom(22)"), "{label}/{slot}: {error}");
+            assert_eq!(
+                frame(&env, &keys),
+                checkpoint,
+                "{label}/{slot}: stall rollback"
+            );
+            fresh = env.set_pyth_price_with_conf(&feed, report_price as i64, -6, 0, now);
+            keys.push(fresh);
+        }
+
         let mut phase_fee = 0;
         let mut phase_reward = 0;
         let mut reached_health = false;
@@ -200,14 +222,8 @@ fn run_catchup(
             assert_eq!(profile.mark_ewma_e6, expected_price);
             assert_eq!(after.assets[0].raw_oracle_target_price, report_price);
             assert_eq!(profile.oracle_target_price_e6, report_price);
-            assert_eq!(
-                profile.oracle_target_publish_time,
-                if renew_report { now } else { 101 }
-            );
-            assert_eq!(
-                profile.last_good_oracle_slot,
-                if renew_report { slot } else { 2 }
-            );
+            assert_eq!(profile.oracle_target_publish_time, now);
+            assert_eq!(profile.last_good_oracle_slot, slot);
             assert_eq!(env.svm.get_account(&peer), peer_before);
             assert_eq!(env.token_amount(env.vault), vault);
             assert_eq!(after.vault, u128::from(vault));

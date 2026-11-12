@@ -20,16 +20,27 @@ use solana_sdk::fee::FeeStructure;
 fn v16_program_unfunded_cross_asset_credit_cannot_precede_admission_liabilities() {
     const RATE: u64 = 10_000;
     const ASSETS: [u16; 3] = [0, 1, 2];
-    let funding_per_lot = -(-i128::from(RATE) * i128::from(PRICE)).div_euclid(1_000_000_000);
-    let funding_num = OLD_SIZE.unsigned_abs() * funding_per_lot as u128 * (ADMISSION - 2) as u128;
-    let debt = funding_num.div_ceil(POS_SCALE);
-    let claim = funding_num / POS_SCALE;
+    // Funding accrues exactly (prog#458): at PRICE 100 the capped rate moves 0.001 atom per
+    // unit per slot, so both funded legs are 1_000x the module's OLD_SIZE (keeping its 0.1-unit
+    // fraction and therefore the rounded lag) to book a real 20.2-atom transfer per leg.
+    const OLD_SIZE: i128 = (10_100 * POS_SCALE + POS_SCALE / 10) as i128;
+    let index_per_slot = (i128::from(RATE) * i128::from(PRICE) * ADL_ONE as i128)
+        .div_euclid(percolator::FUNDING_DEN as i128);
+    assert_eq!(
+        (i128::from(RATE) * i128::from(PRICE) * ADL_ONE as i128) % percolator::FUNDING_DEN as i128,
+        0
+    );
+    let funding_num = OLD_SIZE.unsigned_abs() * index_per_slot as u128 * (ADMISSION - 2) as u128;
+    // Settlement charges the payer the ceiling and credits the receiver the floor.
+    let debt = funding_num.div_ceil(ADL_ONE * POS_SCALE);
+    let claim = funding_num / (ADL_ONE * POS_SCALE);
     let lag = OLD_SIZE.unsigned_abs().div_ceil(POS_SCALE);
     let old_req = 2 * requirement(OLD_SIZE) + lag;
     let initial_req = old_req + requirement(NEW_SIZE);
     let increase = NEW_SIZE / 10;
     let credit_needed = requirement(NEW_SIZE + increase) - requirement(NEW_SIZE);
-    let deposits = [initial_req + FEE + debt, 10_000, 10_000, 10_000];
+    // Both original funding counterparties carry an OLD_SIZE leg (101_001 IM plus lag).
+    let deposits = [initial_req + FEE + debt, 10_000, 200_000, 200_000];
     let principal = [
         initial_req,
         deposits[1] - FEE,
@@ -38,7 +49,7 @@ fn v16_program_unfunded_cross_asset_credit_cannot_precede_admission_liabilities(
     ];
     assert_eq!(
         (debt, claim, lag, initial_req, deposits[0]),
-        (21, 20, 11, 223, 265)
+        (21, 20, 10_101, 212_113, 212_155)
     );
     assert_eq!(old_req + requirement(NEW_SIZE + 1), initial_req + 1);
     // The wrapper also requires full source credit after reserving the new lien.
@@ -125,7 +136,7 @@ fn v16_program_unfunded_cross_asset_credit_cannot_precede_admission_liabilities(
                         },
                     ));
                     let group = env.market_state().1;
-                    let index = (slot - 2) as i128 * funding_per_lot * ADL_ONE as i128;
+                    let index = (slot - 2) as i128 * index_per_slot;
                     for asset in &group.assets[..2] {
                         assert_eq!(
                             (asset.f_long_num, asset.f_short_num),

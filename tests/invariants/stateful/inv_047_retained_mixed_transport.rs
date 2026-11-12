@@ -16,12 +16,56 @@ const PRICE: u64 = 100;
 const FEE_BPS: u16 = 100;
 const DEPOSIT: u128 = 1_000_000;
 
-fn retain(env: &mut V16Svm, route: TradeRoute, size: i128) -> Transaction {
+/// Re-sign a single-CPI trade with the taker's explicit base-fee consent. Single CPI binds
+/// the taker-signed `fee_bps` to the live base fee before the LP grant is consulted.
+fn with_taker_fee_consent(
+    env: &V16Svm,
+    tx: &Transaction,
+    payer: &Keypair,
+    taker: usize,
+) -> Transaction {
+    let message = &tx.message;
+    let mut instructions: Vec<Instruction> = message
+        .instructions
+        .iter()
+        .map(|ix| Instruction {
+            program_id: message.account_keys[ix.program_id_index as usize],
+            accounts: ix
+                .accounts
+                .iter()
+                .map(|&i| AccountMeta {
+                    pubkey: message.account_keys[i as usize],
+                    is_signer: message.is_signer(i as usize),
+                    is_writable: message.is_writable(i as usize),
+                })
+                .collect(),
+            data: ix.data.clone(),
+        })
+        .collect();
+    let trade = instructions.last_mut().expect("trade instruction");
+    let mut decoded = percolator_prog::ix::Instruction::decode(&trade.data).unwrap();
+    match &mut decoded {
+        percolator_prog::ix::Instruction::TradeCpi { fee_bps, .. } => *fee_bps = u64::from(FEE_BPS),
+        other => panic!("expected single CPI trade, got {other:?}"),
+    }
+    trade.data = decoded.encode();
+    Transaction::new_signed_with_payer(
+        &instructions,
+        Some(&payer.pubkey()),
+        &[payer, &env.actors[taker].signer],
+        env.svm.latest_blockhash(),
+    )
+}
+
+fn retain(env: &mut V16Svm, payer: &Keypair, route: TradeRoute, size: i128) -> Transaction {
     let tx = match route {
         TradeRoute::NoCpi => {
             env.build_retained_no_cpi_trade_with_fee(0, 1, 0, size, PRICE, u64::from(FEE_BPS))
         }
-        TradeRoute::Cpi => env.build_retained_cpi_trade(0, 1, 0, size, PRICE),
+        TradeRoute::Cpi => {
+            let tx = env.build_retained_cpi_trade(0, 1, 0, size, PRICE);
+            with_taker_fee_consent(env, &tx, payer, 0)
+        }
         TradeRoute::BatchNoCpi => {
             env.build_retained_batch_no_cpi_trade_with_fee(0, 1, 0, size, PRICE, u64::from(FEE_BPS))
         }
@@ -202,6 +246,7 @@ fn v16_program_retained_grants_bind_context_across_mixed_transport_reductions() 
                 (2, 3, 1, -direction * 3 * POS_SCALE as i128),
             ] {
                 let opening = env.build_retained_cpi_trade(taker, maker, asset, size, PRICE);
+                let opening = with_taker_fee_consent(&env, &opening, &payer, taker);
                 opening.verify().unwrap();
                 let before = frame(&env, false);
                 let simulated = env
@@ -240,7 +285,7 @@ fn v16_program_retained_grants_bind_context_across_mixed_transport_reductions() 
                 expected_prefix = Some(before.clone());
             }
             let size = -direction * 2 * POS_SCALE as i128;
-            let retained = retain(&mut env, route, size);
+            let retained = retain(&mut env, &payer, route, size);
             let live = env
                 .svm
                 .simulate_transaction(retained.clone().into())
@@ -249,7 +294,7 @@ fn v16_program_retained_grants_bind_context_across_mixed_transport_reductions() 
                 matcher_calls(&live.logs, env.matcher_program),
                 usize::from(cpi)
             );
-            let scoped_cpi = retain(&mut env, cpi_route, size);
+            let scoped_cpi = retain(&mut env, &payer, cpi_route, size);
             let valid = env
                 .svm
                 .simulate_transaction(scoped_cpi.clone().into())
@@ -352,7 +397,7 @@ fn v16_program_retained_grants_bind_context_across_mixed_transport_reductions() 
 
             // Refresh only the request's episode binding. The original owner grant remains
             // live after CPI, but bilateral consent revoked it despite the intact prior return.
-            let probe = retain(&mut env, cpi_route, -direction * POS_SCALE as i128);
+            let probe = retain(&mut env, &payer, cpi_route, -direction * POS_SCALE as i128);
             if cpi {
                 let before = frame(&env, false);
                 let live = env.svm.simulate_transaction(probe.into()).unwrap();

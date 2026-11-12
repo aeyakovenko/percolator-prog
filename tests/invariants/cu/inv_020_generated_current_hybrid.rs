@@ -7,6 +7,8 @@
 use super::*;
 use crate::support::fuzz_model::assert_current_certificate_matches_snapshot_full_refresh;
 
+const FEEDS: [[u8; 32]; 2] = [[0xd1; 32], [0xd2; 32]];
+
 struct CurrentWorld {
     env: V16CuEnv,
     owners: [Keypair; 4],
@@ -41,7 +43,7 @@ impl CurrentWorld {
         );
         set_test_clock(&mut env, 0, 100);
         env.update_liquidation_fee_policy_with_cu(SHARE as u16);
-        let feeds = [[0xd1; 32], [0xd2; 32]];
+        let feeds = FEEDS;
         let initial =
             feeds.map(|feed| env.set_pyth_price_with_conf(&feed, PRICE as i64, -6, 0, 100));
         for i in 0..2 {
@@ -113,27 +115,34 @@ impl CurrentWorld {
         }
         set_test_clock(&mut env, 0, 101);
         env.push_auth_mark_for_asset_as_admin(1, u64::MAX, CURRENT[1]);
-        let reports = [0, 1].map(|i| {
-            env.set_pyth_price_with_conf(
-                &feeds[i],
-                [CURRENT[0], KEEPER_PRICE][i] as i64,
-                -6,
-                0,
-                101,
-            )
-        });
-        tracked.extend(reports);
-        Self {
+        let mut world = Self {
             env,
             owners,
             portfolios,
             tokens,
             initial,
-            reports,
+            reports: initial,
             matcher,
             tracked,
             order: if reverse { [3, 2, 1, 0] } else { [0, 1, 2, 3] },
-        }
+        };
+        world.post_reports(101);
+        world
+    }
+
+    /// Stale-account refresh consumes authenticated Hybrid reports in the current slot.
+    fn post_reports(&mut self, publish_time: i64) {
+        let feeds = FEEDS;
+        self.reports = [0, 1].map(|i| {
+            self.env.set_pyth_price_with_conf(
+                &feeds[i],
+                [CURRENT[0], KEEPER_PRICE][i] as i64,
+                -6,
+                0,
+                publish_time,
+            )
+        });
+        self.tracked.extend(self.reports);
     }
 
     fn observe(&self, target: usize, reward: bool, reports: [Option<Pubkey>; 2]) -> Instruction {
@@ -324,6 +333,19 @@ fn v16_program_generated_current_hybrid_recipient_routes_match_full_health_and_r
                             [0, 1, 2].map(|i| w.env.market_state().1.assets[i].slot_last),
                             [32; 3]
                         );
+                        for asset in [0, 2] {
+                            let profile = state::read_asset_oracle_profile(
+                                &w.env.svm.get_account(&w.env.market).unwrap().data,
+                                asset,
+                            )
+                            .unwrap();
+                            assert_eq!(profile.oracle_leg_publish_times, [101, 0, 0]);
+                            // Reusing the report during catchup does not renew its provenance.
+                            assert_eq!(profile.last_good_oracle_slot, 0);
+                        }
+                        // Stale-account refresh consumes authenticated reports in this slot.
+                        w.post_reports(102);
+                        let stage = w.current(1, false);
                         peak = peak.max(w.send(&[stage], None));
                         assert_current_short(&w.env, w.portfolios[1], 130_000, 209_000);
                         assert_eq!(w.certificate(1).certified_liq_deficit, 79_000);
@@ -352,10 +374,9 @@ fn v16_program_generated_current_hybrid_recipient_routes_match_full_health_and_r
                                 asset,
                             )
                             .unwrap();
-                            assert_eq!(profile.oracle_leg_publish_times, [101, 0, 0]);
+                            assert_eq!(profile.oracle_leg_publish_times, [102, 0, 0]);
                             assert_eq!(profile.oracle_leg_prices_e6, [price, 0, 0]);
-                            // Reusing the report during catchup does not renew its provenance.
-                            assert_eq!(profile.last_good_oracle_slot, 0);
+                            assert_eq!(profile.last_good_oracle_slot, 64);
                         }
                         let liquidate = w.current(1, true);
                         let admit = w.trade(&[3], POS_SCALE as i128, batch);

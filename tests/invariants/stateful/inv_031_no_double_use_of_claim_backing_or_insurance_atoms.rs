@@ -982,10 +982,22 @@ fn verify_shared_lien_expiry_refill_suffix(
 
     let direction = if winner_long { 1 } else { -1 };
     let mut impaired_remaining = valid_before;
+    let mut reconciled_sources = [None; 2];
     for (order_index, actor) in actor_order.into_iter().enumerate() {
         let sibling = actor_order[1 - order_index];
         let sibling_before = env.primary_portfolio_data(sibling);
         let actor_lien = counterparty_lien_backing(env, actor, domain);
+        let source_slot = |env: &V16Svm, actor: usize| {
+            env.primary_portfolio(actor)
+                .source_domains
+                .iter()
+                .find(|source| source.is_occupied() && source.domain.get() as usize == domain)
+                .copied()
+        };
+        let actor_source_before = source_slot(env, actor)
+            .ok_or_else(|| format!("{label} owner {actor} lost its impaired source slot"))?;
+        let fee_earnings_before =
+            env.primary_market_state().1.source_backing_buckets[domain].utilization_fee_earnings;
         let adverse_q =
             10 * POS_SCALE as i128 + accepted_increments[actor] as i128 * (POS_SCALE / 10) as i128;
         for (asset, size, price) in [
@@ -1019,26 +1031,44 @@ fn verify_shared_lien_expiry_refill_suffix(
                 "{label} owner {actor} did not flatten after impairment"
             ));
         }
-        let mut release_steps = 0usize;
-        while counterparty_lien_backing(env, actor, domain) != 0 {
-            if release_steps == 8 {
-                return Err(format!(
-                    "{label} owner {actor} impaired lien did not release boundedly"
-                ));
-            }
-            shared_lien_suffix_step(
-                &format!("{label} owner {actor} impaired release {release_steps}"),
-                env,
-                None,
-                |env| env.crank(actor, landing_slot, observations.clone()),
-            )?;
-            release_steps += 1;
-        }
-        if release_steps == 0 {
+        // Since engine #242 (fix for #230) the owner's own K/F settlement inside the flattening
+        // trade reconciles its counterparty lien off the Impaired bucket, so no separate release
+        // crank remains. Pin that the reconcile happened exactly once at the trade: the exact face
+        // moved into the owner's impaired-claim lane, the lien backing and fee clock were retired,
+        // and the bucket's accrued fee was collected at most once (a later crank is not needed and
+        // the slot is checked unchanged after the sibling's reconcile and the refill below).
+        let actor_source_after = source_slot(env, actor)
+            .ok_or_else(|| format!("{label} owner {actor} lost its reconciled source slot"))?;
+        let fee_earnings_after =
+            env.primary_market_state().1.source_backing_buckets[domain].utilization_fee_earnings;
+        let face = actor_source_before
+            .source_claim_counterparty_liened_num
+            .get();
+        if face == 0
+            || actor_source_before
+                .source_lien_counterparty_backing_num
+                .get()
+                != actor_lien
+            || actor_source_after
+                .source_lien_counterparty_backing_num
+                .get()
+                != 0
+            || actor_source_after
+                .source_claim_counterparty_liened_num
+                .get()
+                != 0
+            || actor_source_after.source_lien_fee_last_slot.get() != 0
+            || actor_source_after.source_claim_impaired_num.get()
+                != actor_source_before.source_claim_impaired_num.get() + face
+            || actor_source_after.source_claim_liened_num.get()
+                != actor_source_before.source_claim_liened_num.get() - face
+            || fee_earnings_after < fee_earnings_before
+        {
             return Err(format!(
-                "{label} owner {actor} impaired release was vacuous"
+                "{label} owner {actor} flattening trade did not reconcile its impaired lien exactly once: before={actor_source_before:?}, after={actor_source_after:?}, fee {fee_earnings_before}->{fee_earnings_after}"
             ));
         }
+        reconciled_sources[order_index] = Some((actor, actor_source_after));
         impaired_remaining = impaired_remaining
             .checked_sub(actor_lien)
             .ok_or_else(|| format!("{label} owner {actor} impaired lien exceeded aggregate"))?;
@@ -1104,6 +1134,19 @@ fn verify_shared_lien_expiry_refill_suffix(
     }
     if refilled != REFILL_ATOMS {
         return Err(format!("{label} refill partition totaled {refilled}"));
+    }
+    for (actor, reconciled) in reconciled_sources.into_iter().flatten() {
+        let current = env
+            .primary_portfolio(actor)
+            .source_domains
+            .iter()
+            .find(|source| source.is_occupied() && source.domain.get() as usize == domain)
+            .copied();
+        if current != Some(reconciled) {
+            return Err(format!(
+                "{label} owner {actor} impaired claim changed after its one reconcile: reconciled={reconciled:?}, now={current:?}"
+            ));
+        }
     }
     Ok(())
 }

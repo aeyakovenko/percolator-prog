@@ -841,8 +841,39 @@ mod collateral_rails {
                     let vault = first.accounts[4].pubkey;
                     let destination_before = env.token_amount(destination);
                     let vault_before = env.token_amount(vault);
-                    let accepted = send(&mut env, vec![first.clone(), retry.clone()], &[])
-                        .expect("positive payout followed by the opposite-rail payout handler");
+                    // A CloseResolved with nothing claimable is NonProgress, not a
+                    // successful no-op: a close suffix atomically rolls back the payout
+                    // and the canonical claim lands alone; a claim suffix is a no-op.
+                    let retry_is_close = !first_close;
+                    let accepted = if retry_is_close {
+                        let error = send(&mut env, vec![first.clone(), retry.clone()], &[])
+                            .expect_err("close suffix after the payout is NonProgress");
+                        assert_eq!(
+                            error.err,
+                            TransactionError::InstructionError(
+                                2,
+                                InstructionError::Custom(
+                                    PercolatorError::EngineNonProgress as u32
+                                )
+                            )
+                        );
+                        assert_eq!(
+                            error
+                                .meta
+                                .logs
+                                .iter()
+                                .filter(|log| *log == &format!("Program {} success", spl_token::ID))
+                                .count(),
+                            1,
+                            "the positive payout must execute before the close suffix"
+                        );
+                        assert_eq!(frame(&env, &reserve), before, "atomic payout rollback");
+                        send(&mut env, vec![first.clone()], &[])
+                            .expect("positive payout without the close suffix")
+                    } else {
+                        send(&mut env, vec![first.clone(), retry.clone()], &[])
+                            .expect("positive payout followed by the opposite-rail payout handler")
+                    };
                     assert_frame_except(
                         &before,
                         &env,
@@ -860,7 +891,8 @@ mod collateral_rails {
                         due
                     );
                     assert_eq!(u128::from(vault_before - env.token_amount(vault)), due);
-                    for (program, successes) in [(env.program_id, 2), (spl_token::ID, 1)] {
+                    let handlers = if retry_is_close { 1 } else { 2 };
+                    for (program, successes) in [(env.program_id, handlers), (spl_token::ID, 1)] {
                         assert_eq!(
                             accepted
                                 .logs
@@ -874,13 +906,27 @@ mod collateral_rails {
                     oracle.check(&env, &reserve);
 
                     let before_retry = frame(&env, &reserve);
+                    // After payment the close rail is NonProgress wherever it sits, so the
+                    // both-rail replay rejects atomically without an SPL payout.
                     let replay = send(&mut env, vec![first.clone(), retry.clone()], &[])
-                        .expect("both-rail payout bundle is an exact no-op after payment");
-                    assert_ne!(replay.signature, accepted.signature);
+                        .expect_err("both-rail payout bundle cannot pay again after payment");
+                    assert_eq!(
+                        replay.err,
+                        TransactionError::InstructionError(
+                            if first_close { 1 } else { 2 },
+                            InstructionError::Custom(PercolatorError::EngineNonProgress as u32)
+                        )
+                    );
+                    assert_ne!(replay.meta.signature, accepted.signature);
                     assert_eq!(frame(&env, &reserve), before_retry);
                     assert!(!replay
+                        .meta
                         .logs
                         .contains(&format!("Program {} success", spl_token::ID)));
+                    let claim_rail = if first_close { &retry } else { &first };
+                    send(&mut env, vec![claim_rail.clone()], &[])
+                        .expect("claim-rail retry is an exact no-op after payment");
+                    assert_eq!(frame(&env, &reserve), before_retry);
                     oracle.check(&env, &reserve);
                 }
 

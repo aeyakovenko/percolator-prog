@@ -324,6 +324,8 @@ fn run(
     peak: &mut u64,
     partial_deletions: &mut usize,
     receipt_retries: &mut usize,
+    backed_early_forfeits: &mut usize,
+    pre_snapshot_claim_rejections: &mut usize,
 ) -> [u128; 5] {
     let mut world = AttributionWorld::new_with_deposits(
         reverse,
@@ -414,6 +416,17 @@ fn run(
     }
     book.check(&world);
     if early {
+        let fresh_backing = |world: &AttributionWorld| -> u128 {
+            world
+                .env
+                .market_state()
+                .1
+                .source_credit
+                .iter()
+                .map(|domain| domain.fresh_reserved_backing_num)
+                .sum()
+        };
+        let backing_before = fresh_backing(&world);
         let a = &world.actors[1];
         *peak = (*peak).max(world.env.forfeit_recovery_leg_with_cu(
             &a.owner,
@@ -421,6 +434,16 @@ fn run(
             1,
             u128::MAX,
         ));
+        // Engine #228 (prog#450): debtor 1's capital-covered loss (4 lots * movement) backs
+        // its source domain, capped at the holders' unbacked claims there (8 lots * movement).
+        let debt = 4 * movement as u128;
+        let unbacked_claims = 8 * movement as u128;
+        assert_eq!(
+            fresh_backing(&world) - backing_before,
+            debt.min(unbacked_claims) * BOUND_SCALE,
+            "early forfeit debt must back the holders' source domain"
+        );
+        *backed_early_forfeits += 1;
         book.basis[1] = 0;
         book.check(&world);
     }
@@ -462,6 +485,16 @@ fn run(
                     *peak = (*peak).max(world.payout(holder, true).expect("paid receipt retry"));
                     assert_eq!(world.frame(), before);
                     *receipt_retries += 1;
+                } else if !world.env.market_state().1.payout_snapshot_captured {
+                    // Backing-paid holder: no junior receipt exists, so the top-up claim is
+                    // the specified pre-snapshot rejection with exact rollback.
+                    let before = world.frame();
+                    let error = world
+                        .payout(holder, true)
+                        .expect_err("pre-snapshot claim must reject");
+                    assert!(error.contains("InstructionError(2, Custom(21))"), "{error}");
+                    assert_eq!(world.frame(), before);
+                    *pre_snapshot_claim_rejections += 1;
                 }
                 if Book::owner(holder) == 0
                     && holders.iter().any(|other| {
@@ -508,6 +541,8 @@ fn v16_program_pending_owner_partition_preserves_shared_ata_entitlements_through
     let mut peak = 0;
     let mut partial_deletions = 0;
     let mut receipt_retries = 0;
+    let mut backed_early_forfeits = 0;
+    let mut pre_snapshot_claim_rejections = 0;
     let mut worlds = 0;
     for movement in [8, 16_000] {
         let mut baseline = None;
@@ -524,6 +559,8 @@ fn v16_program_pending_owner_partition_preserves_shared_ata_entitlements_through
                             &mut peak,
                             &mut partial_deletions,
                             &mut receipt_retries,
+                            &mut backed_early_forfeits,
+                            &mut pre_snapshot_claim_rejections,
                         );
                         assert_eq!(*baseline.get_or_insert(payout), payout,
                             "lots={lots:?} movement={movement} reverse={reverse} early={early} backwards={backwards}");
@@ -538,9 +575,17 @@ fn v16_program_pending_owner_partition_preserves_shared_ata_entitlements_through
         partial_deletions > 0,
         "a deleted portfolio must leave its co-owner's separate entitlement unpaid"
     );
-    assert!(
-        receipt_retries > 0,
-        "early settlement must exercise actual receipts"
+    // Engine #228 (prog#450): early forfeit debt now backs the source domain directly, so
+    // every early world must be backing-paid and terminal claims must hit the specified
+    // pre-snapshot rejection instead of a junior receipt.
+    assert_eq!(
+        backed_early_forfeits,
+        worlds / 2,
+        "every early-settlement world must fund source backing"
     );
-    println!("INV-039 owner partition: {worlds} worlds, {partial_deletions} deletions with co-owner value unpaid, {receipt_retries} receipt retries, peak {peak} CU");
+    assert!(
+        pre_snapshot_claim_rejections > 0,
+        "backing-paid holders must exercise the pre-snapshot claim rejection"
+    );
+    println!("INV-039 owner partition: {worlds} worlds, {partial_deletions} deletions with co-owner value unpaid, {backed_early_forfeits} backing-funded early forfeits, {receipt_retries} receipt retries, {pre_snapshot_claim_rejections} pre-snapshot claim rejections, peak {peak} CU");
 }

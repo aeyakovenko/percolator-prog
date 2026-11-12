@@ -114,6 +114,69 @@ fn cpi_reduce(
     }
 }
 
+fn fresh_backing_expiry(world: &World) -> Option<u64> {
+    world
+        .env
+        .market_state()
+        .1
+        .source_backing_buckets
+        .iter()
+        .filter(|bucket| bucket.status == BackingBucketStatusV16::Fresh)
+        .map(|bucket| bucket.expiry_slot)
+        .max()
+}
+
+// Warp past the fresh backing horizon, then expire each lapsed bucket with a public
+// hinted crank on an open receipt so the terminal payout rate can be reached.
+fn expire_resolved_backing(world: &mut World) {
+    let Some(expiry) = fresh_backing_expiry(world) else {
+        return;
+    };
+    let slot = world.env.svm.get_sysvar::<Clock>().slot.max(expiry);
+    world
+        .trace
+        .push(format!("warp to backing expiry slot {slot}"));
+    world.env.svm.warp_to_slot(slot);
+    let Some(actor) = (0..4).find(|&actor| {
+        let receipt = resolved_receipt(&world.env.portfolio_state(world.portfolios[actor]));
+        receipt.present && !receipt.finalized
+    }) else {
+        return;
+    };
+    for asset_index in 0..2u16 {
+        while world.env.market_state().1.source_backing_buckets
+            [2 * asset_index as usize..2 * asset_index as usize + 2]
+            .iter()
+            .any(|bucket| bucket.status == BackingBucketStatusV16::Fresh)
+        {
+            world.trace.push(format!(
+                "hinted crank expires asset {asset_index} backing via actor {actor}"
+            ));
+            world.env.svm.expire_blockhash();
+            let owner = world.owners[actor].insecure_clone();
+            let cu = world
+                .env
+                .send(
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: u64::MAX,
+                        observations: vec![CrankObservationHint {
+                            asset_index,
+                            oracle_accounts: 0,
+                        }],
+                    },
+                    vec![
+                        AccountMeta::new_readonly(owner.pubkey(), true),
+                        AccountMeta::new(world.env.market, false),
+                        AccountMeta::new(world.portfolios[actor], false),
+                    ],
+                    &[&owner],
+                )
+                .unwrap_or_else(|error| panic!("{error}: {:?}", world.trace));
+            world.max_cu = world.max_cu.max(cu);
+        }
+    }
+}
+
 fn pay_resolved(world: &mut World, endpoint: &Economics, reverse: bool) -> [u64; 4] {
     pay_resolved_with_residue(world, endpoint, reverse, 100, 0, |_, _, _| {})
 }
@@ -207,6 +270,7 @@ pub(super) fn pay_resolved_with_residue(
         {
             break;
         }
+        let mut progressed = false;
         for actor in if reverse { [3, 2, 1, 0] } else { [0, 1, 2, 3] } {
             if resolved_portfolio_is_terminal(&world.env, world.portfolios[actor]) {
                 continue;
@@ -243,16 +307,26 @@ pub(super) fn pay_resolved_with_residue(
                 Ok(cu) => {
                     world.max_cu = world.max_cu.max(cu);
                     assert_ne!(frame(world), before, "accepted close must progress");
+                    progressed = true;
                 }
                 Err(error) => {
+                    // A haircut receipt stays open while unexpired fresh source backing
+                    // can still raise its payout rate.
+                    let backing_pending = fresh_backing_expiry(world)
+                        .is_some_and(|expiry| expiry > world.env.svm.get_sysvar::<Clock>().slot);
                     assert!(
-                        is_engine_non_progress_error(&error),
+                        is_engine_non_progress_error(&error)
+                            || (backing_pending && error.contains("Custom(21)")),
                         "{error}: {:?}",
                         world.trace
                     );
                     assert_eq!(frame(world), before, "non-progress close rollback");
                 }
             }
+            check(world);
+        }
+        if !progressed {
+            expire_resolved_backing(world);
             check(world);
         }
     }

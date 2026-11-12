@@ -31,6 +31,8 @@ impl Book {
         self.insurance[0] -= long;
         self.insurance[1] -= amount - long;
         self.paid[actor] += amount;
+        // Live and Resolved insurance debits both consume the asset authority epoch.
+        self.epoch += 1;
     }
 
     fn check(&self, world: &TerminalEarningsWorld) {
@@ -230,7 +232,6 @@ fn v16_program_terminal_fee_share_succession_preserves_operator_paid_history() {
     let ix = insurance_payout(&world, 3, OPERATOR_PREFIX[0], ledgers[1]);
     peak = peak.max(land(&mut world, &ledgers, &[ix], None));
     book.pay_insurance(3, OPERATOR_PREFIX[0]);
-    book.epoch += 1;
     book.check(&world);
     insurance_record(
         &world,
@@ -291,7 +292,6 @@ fn v16_program_terminal_fee_share_succession_preserves_operator_paid_history() {
     let ix = insurance_payout(&world, 3, OPERATOR_PREFIX[1], ledgers[2]);
     peak = peak.max(land(&mut world, &ledgers, &[ix], None));
     book.pay_insurance(3, OPERATOR_PREFIX[1]);
-    book.epoch += 1;
     book.check(&world);
     let insurance_tail =
         INSURANCE + INITIAL_INSURANCE_FEE + INSURANCE_FEE - OPERATOR_PREFIX.iter().sum::<u64>();
@@ -369,7 +369,16 @@ fn v16_program_terminal_fee_share_succession_preserves_operator_paid_history() {
     let mut fees = payout(&world, FEES, 2, book.provider_fees, book.epoch, ledgers[0]);
     fees.accounts[0].is_signer = false;
     let insurance = insurance_payout(&world, 2, TERMINAL_PREFIX, ledgers[2]);
-    let wrong_ledger = insurance_payout(&world, 2, 1, ledgers[1]);
+    // The insurance payout consumes one epoch; bind the next one so the suffix
+    // reaches the ledger-authority check.
+    let mut wrong_ledger = insurance_payout(&world, 2, 1, ledgers[1]);
+    wrong_ledger.data = ProgInstruction::WithdrawInsuranceAsset {
+        asset_index: 0,
+        market_id: world.env.asset_market_id(0),
+        authority_epoch: book.epoch + 1,
+        amount: 1,
+    }
+    .encode();
     peak = peak.max(land(
         &mut world,
         &ledgers,

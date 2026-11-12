@@ -145,7 +145,8 @@ fn v16_retained_insurance_epoch_survives_native_redemption_and_recipient_recreat
         .encode(),
     };
     let original = withdrawal(epoch, ORIGINAL.into());
-    let fresh = withdrawal(epoch + 1, ORIGINAL.into());
+    // The original debit consumes `epoch` and the handoff consumes `epoch + 1`.
+    let fresh = withdrawal(epoch + 2, ORIGINAL.into());
     assert_eq!(original.accounts, fresh.accounts);
     assert_ne!(original.data, fresh.data);
     let redeem =
@@ -161,7 +162,7 @@ fn v16_retained_insurance_epoch_survives_native_redemption_and_recipient_recreat
         data: ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
             market_id,
-            authority_epoch: epoch,
+            authority_epoch: epoch + 1,
             kind: processor::ASSET_AUTH_ORACLE,
             new_pubkey: successor.pubkey().to_bytes(),
         }
@@ -197,7 +198,7 @@ fn v16_retained_insurance_epoch_survives_native_redemption_and_recipient_recreat
     prefix.extend(recreate.clone());
     prefix.extend([
         handoff,
-        top_up(1, epoch + 1, initial_intent + 1, REFILL.into()),
+        top_up(1, epoch + 2, initial_intent + 1, REFILL.into()),
     ]);
     let valid_prefix = transaction(&env, &prefix, 3, true);
     let prefix_bytes = bincode::serialize(&valid_prefix).unwrap();
@@ -208,7 +209,7 @@ fn v16_retained_insurance_epoch_survives_native_redemption_and_recipient_recreat
         .simulate_transaction(valid_prefix.clone().into())
         .unwrap();
 
-    let check = |env: &V16CuEnv, replenished: bool, redeemed: u64, closed: bool| {
+    let check = |env: &V16CuEnv, replenished: bool, redeemed: u64, closed: bool, debits: u64| {
         let deposited = ORIGINAL + if replenished { REFILL } else { 0 };
         let stock = deposited - redeemed;
         let mut expected = initial_market.clone();
@@ -227,6 +228,8 @@ fn v16_retained_insurance_epoch_survives_native_redemption_and_recipient_recreat
             expected_controls.insurance_top_up += 1;
             expected_profile.oracle_authority = successor.pubkey().to_bytes();
         }
+        // Every successful insurance debit consumes the shared authority epoch.
+        expected_controls.authority_epoch += debits;
         assert_eq!(env.control_sequences(0), expected_controls);
         assert_eq!(
             state::read_asset_oracle_profile(&market_account.data, 0).unwrap(),
@@ -369,20 +372,20 @@ fn v16_retained_insurance_epoch_survives_native_redemption_and_recipient_recreat
             peak = peak.max(meta.compute_units_consumed);
         };
 
-    check(&env, false, 0, false);
+    check(&env, false, 0, false, 0);
     prefix.push(original.clone());
     let aborted = transaction(&env, &prefix, 4, true);
     deliver(&mut env, aborted, Some(8), [3, 4, 1]);
-    check(&env, false, 0, false);
+    check(&env, false, 0, false, 0);
     env.svm
         .simulate_transaction(retained[0].clone().into())
         .unwrap();
     assert_eq!(bincode::serialize(&valid_prefix).unwrap(), prefix_bytes);
     deliver(&mut env, valid_prefix, None, [3, 4, 1]);
-    check(&env, true, ORIGINAL, false);
+    check(&env, true, ORIGINAL, false, 1);
     assert_eq!(bincode::serialize(&retained[0]).unwrap(), retained_bytes[0]);
     deliver(&mut env, retained[0].clone(), Some(2), [0, 0, 0]);
-    check(&env, true, ORIGINAL, false);
+    check(&env, true, ORIGINAL, false, 1);
 
     let mut fresh_prefix = vec![fresh, redeem.clone()];
     fresh_prefix.extend(recreate);
@@ -394,25 +397,25 @@ fn v16_retained_insurance_epoch_survives_native_redemption_and_recipient_recreat
     fresh_prefix.push(original);
     let aborted_fresh = transaction(&env, &fresh_prefix, 6, false);
     deliver(&mut env, aborted_fresh, Some(6), [1, 3, 1]);
-    check(&env, true, ORIGINAL, false);
+    check(&env, true, ORIGINAL, false, 1);
     assert_eq!(bincode::serialize(&valid_fresh).unwrap(), fresh_bytes);
     deliver(&mut env, valid_fresh, None, [1, 3, 1]);
-    check(&env, true, 2 * ORIGINAL, false);
+    check(&env, true, 2 * ORIGINAL, false, 2);
     assert!(
         REFILL - ORIGINAL >= ORIGINAL,
         "the retained debit is fully funded"
     );
     assert_eq!(bincode::serialize(&retained[1]).unwrap(), retained_bytes[1]);
     deliver(&mut env, retained[1].clone(), Some(2), [0, 0, 0]);
-    check(&env, true, 2 * ORIGINAL, false);
+    check(&env, true, 2 * ORIGINAL, false, 2);
     let drain = transaction(
         &env,
-        &[withdrawal(epoch + 1, (REFILL - ORIGINAL).into()), redeem],
+        &[withdrawal(epoch + 3, (REFILL - ORIGINAL).into()), redeem],
         7,
         false,
     );
     deliver(&mut env, drain, None, [1, 2, 0]);
-    check(&env, true, ORIGINAL + REFILL, true);
+    check(&env, true, ORIGINAL + REFILL, true, 3);
     assert_eq!((rollbacks, successes), (4, 3));
     println!("INV-008 native insurance recreation: worlds=1, exact_rollbacks={rollbacks}, signed_continuations={successes}, peak_CU={peak}, redeemed_atoms={}", ORIGINAL + REFILL);
 }

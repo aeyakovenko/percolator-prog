@@ -23,34 +23,28 @@ fn observed_crank(w: &World, actor: usize, slot: u64) -> Instruction {
 #[test]
 fn v16_retained_funded_bilateral_reduction_and_renewal_preserve_residual_aggregate_cap() {
     let matcher = std::fs::read(hostile_matcher_program_path()).unwrap();
-    let reduction = 57 * POS_SCALE as i128;
+    let reduction = 513 * POS_SCALE as i128;
     let residual = QUANTITY - reduction;
     let signed_fees = [QUANTITY, reduction, residual].map(|q| fee(q, OPEN_CAP));
-    assert_eq!(signed_fees, [36, 22, 15]);
-    let funding = [QUANTITY, residual].map(funding_quote);
-    assert_eq!(funding, [95, 38]);
+    assert_eq!(signed_fees, [9, 6, 4]);
+    // Exact window funding (prog#458): payer ceiling, receiver floor.
+    let debits = [QUANTITY, residual].map(funding_debit);
+    let funding = [QUANTITY, residual].map(funding_credit);
+    assert_eq!((debits, funding), ([21, 9], [20, 8]));
+    // The fresh residual credit exceeds the fresh close fee it must not fund.
     assert!(u128::from(funding[1]) > fee(residual, CLOSE_FRESH));
+    let total_funding = funding.iter().sum::<u64>();
     let mut counts = Counts::default();
     for direction in [-1, 1] {
         let mut endpoint = None;
         for direct in [Route::SingleNoCpi, Route::BatchNoCpi] {
             eprintln!("funded route renewal: direction={direction}, direct={direct:?}");
-            let mut w = World::with_params(
-                &matcher,
-                V16CuMarketParams {
-                    trade_fee_base_bps: OPEN_CAP,
-                    maintenance_fee_per_slot: MAINTENANCE.into(),
-                    max_abs_funding_e9_per_slot: FUNDING_RATE,
-                    max_price_move_bps_per_slot: 1,
-                    h_max: 1,
-                    ..V16CuMarketParams::default()
-                },
-            );
+            let mut w = World::with_params(&matcher, funded_params(1, MAINTENANCE));
             counts.record(w.env.configure_ewma_mark_with_cu(0, PRICE, 1, 0));
             counts.record(w.partial(95));
             let opening = w.bundle_instructions(
                 Route::PartialCpi,
-                direction * 255 * POS_SCALE as i128,
+                direction * OPEN_REQUEST,
                 direction * QUANTITY,
                 OPEN_CAP,
             );
@@ -216,14 +210,16 @@ fn v16_retained_funded_bilateral_reduction_and_renewal_preserve_residual_aggrega
             counts.record(policy(&mut w, CLOSE_FRESH, 20));
             book.check(&w);
 
-            w.env.svm.warp_to_slot(1);
-            counts.record(w.env.push_ewma_mark_with_cu(1, 98));
-            let crank = w.sign_with_nonce(&[observed_crank(&w, 0, 1)], 21);
+            w.env.svm.warp_to_slot(OBSERVE_SLOT);
+            counts.record(w.env.push_ewma_mark_with_cu(OBSERVE_SLOT, 98));
+            let crank = w.sign_with_nonce(&[observed_crank(&w, 0, OBSERVE_SLOT)], 21);
             counts.record(w.deliver(crank, false, &[w.env.market, w.portfolios[0]], [1, 0, 0]));
-            book.collect(0, 1);
+            book.collect(0, OBSERVE_SLOT);
             book.check(&w);
-            w.env.svm.warp_to_slot(2);
-            counts.record(w.env.push_ewma_mark_with_cu(2, 101));
+            w.env.svm.warp_to_slot(FIRST_CLOSE_SLOT);
+            counts.record(w.env.push_ewma_mark_with_cu(FIRST_CLOSE_SLOT, 101));
+            accrue_funding_window(&mut w, FIRST_CLOSE_SLOT, &[0], 50, &mut counts);
+            book.check(&w);
             counts.record(w.deliver_with_error(
                 retained[0].clone(),
                 Some((
@@ -243,10 +239,10 @@ fn v16_retained_funded_bilateral_reduction_and_renewal_preserve_residual_aggrega
                 [1, 0, 0],
             ));
             counts.fills += 1;
-            book.settled_funding = funding[0];
+            book.settle(QUANTITY);
             book.reduce(reduction);
-            book.collect(0, 2);
-            book.collect(1, 2);
+            book.collect(0, FIRST_CLOSE_SLOT);
+            book.collect(1, FIRST_CLOSE_SLOT);
             book.check(&w);
             assert_eq!(w.env.portfolio_matcher_config(w.portfolios[1]).enabled(), 0);
             assert_eq!(w.env.portfolio_matcher_expiry(w.portfolios[1]), 0);
@@ -256,16 +252,19 @@ fn v16_retained_funded_bilateral_reduction_and_renewal_preserve_residual_aggrega
             );
             assert_eq!(w.env.market_state().0.matcher_req_seq, requests);
 
-            w.env.svm.warp_to_slot(3);
-            counts.record(w.env.push_ewma_mark_with_cu(3, 98));
-            let crank = w.sign_with_nonce(&[observed_crank(&w, 0, 3)], 23);
+            w.env.svm.warp_to_slot(SECOND_OBSERVE_SLOT);
+            counts.record(w.env.push_ewma_mark_with_cu(SECOND_OBSERVE_SLOT, 98));
+            let crank = w.sign_with_nonce(&[observed_crank(&w, 0, SECOND_OBSERVE_SLOT)], 23);
             counts.record(w.deliver(crank, false, &[w.env.market, w.portfolios[0]], [1, 0, 0]));
-            book.collect(0, 3);
+            book.collect(0, SECOND_OBSERVE_SLOT);
             book.check(&w);
-            assert_eq!(w.env.market_state().1.assets[0].f_long_num, ADL_ONE as i128);
-            assert_eq!(w.env.market_state().1.funding_epoch, 1);
-            w.env.svm.warp_to_slot(4);
-            counts.record(w.env.push_ewma_mark_with_cu(4, 101));
+            assert_eq!(w.env.market_state().1.assets[0].f_long_num, funding_index());
+            // One funding epoch per funded canonical accrual slot.
+            assert_eq!(w.env.market_state().1.funding_epoch, FUNDING_WINDOW);
+            w.env.svm.warp_to_slot(SECOND_CLOSE_SLOT);
+            counts.record(w.env.push_ewma_mark_with_cu(SECOND_CLOSE_SLOT, 101));
+            book.check(&w);
+            accrue_funding_window(&mut w, SECOND_CLOSE_SLOT, &[0], 51, &mut counts);
             book.check(&w);
             counts.record(w.deliver_with_error(
                 retained[2].clone(),
@@ -320,7 +319,9 @@ fn v16_retained_funded_bilateral_reduction_and_renewal_preserve_residual_aggrega
                 w.env.portfolio_matcher_sequence(w.portfolios[1]),
                 sequences[1]
             );
-            assert_eq!(w.env.market_state().1.funding_epoch, 1);
+            // The observer already walked the second window; the rolled-back renewal and
+            // close neither add nor remove any funding epoch.
+            assert_eq!(w.env.market_state().1.funding_epoch, 2 * FUNDING_WINDOW);
             probe(&mut w, &retained[6], true, 2, &mut counts);
             counts.record(w.deliver(
                 retained[6].clone(),
@@ -329,13 +330,16 @@ fn v16_retained_funded_bilateral_reduction_and_renewal_preserve_residual_aggrega
                 [2, 0, 1],
             ));
             counts.fills += 1;
-            book.settled_funding += funding[1];
+            book.settle(residual);
             book.reduce(residual);
-            book.collect(0, 4);
-            book.collect(1, 4);
+            book.collect(0, SECOND_CLOSE_SLOT);
+            book.collect(1, SECOND_CLOSE_SLOT);
             book.check(&w);
             assert_eq!(book.trade_fees, signed_fees.iter().sum::<u128>());
-            assert_eq!(book.settled_funding, 133);
+            assert_eq!(
+                (book.funding_debit, book.funding_credit),
+                (debits.iter().sum::<u64>(), total_funding)
+            );
             let renewed = w.env.portfolio_matcher_config(w.portfolios[1]);
             assert_eq!(
                 (
@@ -367,9 +371,9 @@ fn v16_retained_funded_bilateral_reduction_and_renewal_preserve_residual_aggrega
                 epochs.map(|e| e + 2)
             );
             let (_, group) = w.env.market_state();
-            assert_eq!(group.assets[0].f_long_num, 2 * ADL_ONE as i128);
-            assert_eq!(group.assets[0].f_short_num, -2 * ADL_ONE as i128);
-            assert_eq!(group.funding_epoch, 2);
+            assert_eq!(group.assets[0].f_long_num, 2 * funding_index());
+            assert_eq!(group.assets[0].f_short_num, -2 * funding_index());
+            assert_eq!(group.funding_epoch, 2 * FUNDING_WINDOW);
             let mut final_controls = controls;
             final_controls.oracle_observation += 4;
             final_controls.trade_fee += 4;
@@ -392,20 +396,21 @@ fn v16_retained_funded_bilateral_reduction_and_renewal_preserve_residual_aggrega
                 assert_eq!(bincode::serialize(tx).unwrap(), wire);
             }
 
-            w.env.svm.warp_to_slot(5);
+            let payout_slot = SECOND_CLOSE_SLOT + 1;
+            w.env.svm.warp_to_slot(payout_slot);
             for actor in 0..2 {
-                let tx = w.sign_with_nonce(&[collect(&w, actor, 5)], 30 + actor as u32);
+                let tx = w.sign_with_nonce(&[collect(&w, actor, payout_slot)], 30 + actor as u32);
                 counts.record(w.deliver(
                     tx,
                     false,
                     &[w.env.market, w.portfolios[actor]],
                     [1, 0, 0],
                 ));
-                book.collect(actor, 5);
+                book.collect(actor, payout_slot);
                 book.check(&w);
             }
             let winner = book.winner();
-            let tx = w.sign_with_nonce(&[observed_crank(&w, winner, 5)], 32);
+            let tx = w.sign_with_nonce(&[observed_crank(&w, winner, payout_slot)], 32);
             counts.record(w.deliver(tx, false, &[w.env.market, w.portfolios[winner]], [1, 0, 0]));
             book.check(&w);
             let tx = w.sign_with_nonce(
@@ -418,7 +423,7 @@ fn v16_retained_funded_bilateral_reduction_and_renewal_preserve_residual_aggrega
                     ],
                     data: w
                         .env
-                        .convert_released_pnl_ix(w.portfolios[winner], 133)
+                        .convert_released_pnl_ix(w.portfolios[winner], total_funding.into())
                         .encode(),
                 }],
                 33,
@@ -463,15 +468,33 @@ fn v16_retained_funded_bilateral_reduction_and_renewal_preserve_residual_aggrega
                 book.check(&w);
             }
             let outcome = (book.paid, w.env.token_amount(w.env.vault));
-            assert_eq!(outcome.1, 3_216);
+            // Insurance (trade fees plus maintenance) and bounded funding dust remain.
+            let maintenance = book.maintenance_domains.iter().sum::<u128>();
             assert_eq!(
-                outcome.0,
-                if direction < 0 {
-                    [98_375, 198_532]
-                } else {
-                    [98_641, 198_266]
-                }
+                u128::from(outcome.1),
+                2 * book.trade_fees + maintenance + u128::from(book.funding_dust())
             );
+            assert_eq!(
+                book.funding_dust(),
+                debits.iter().sum::<u64>() - total_funding
+            );
+            // The loser pays every settled debit; the winner withdraws exactly its credit.
+            let winner = book.winner();
+            let maintenance_paid = |actor: usize| book.fee_slots[actor] * MAINTENANCE;
+            let fees = u64::try_from(book.trade_fees).unwrap();
+            for actor in 0..2 {
+                let base = PRINCIPAL[actor] + u64::from(actor == 0) * DEPOSIT
+                    - fees
+                    - maintenance_paid(actor);
+                assert_eq!(
+                    outcome.0[actor],
+                    if actor == winner {
+                        base + total_funding
+                    } else {
+                        base - debits.iter().sum::<u64>()
+                    }
+                );
+            }
             if let Some(expected) = endpoint {
                 assert_eq!(
                     outcome, expected,

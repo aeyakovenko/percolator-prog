@@ -656,6 +656,8 @@ fn v16_program_retained_withdrawal_rolls_back_fee_resolution_and_paid_prefix() {
             );
             let tx = world.transaction(&[insurance], &[], true);
             world.expected.insurance_paid = amount;
+            // The successful terminal insurance payout consumes the asset's authority epoch.
+            world.controls.authority_epoch += 1;
             world.land(
                 tx,
                 &[world.env.market, world.admin_token, world.env.vault],

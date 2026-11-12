@@ -32,7 +32,12 @@ struct History {
 }
 
 struct AttributionModel {
+    /// Each pair's debtor-side loss (paid by actors 1 and 3).
     debt: [u128; 2],
+    /// Each pair's holder-side gain (credited to actors 0 and 2). Equals `debt` unless exact
+    /// funding (#458) rounds the paying holder up and the receiving debtor down, in which
+    /// case the difference is vault-retained rounding dust.
+    credit: [u128; 2],
     basis: [i128; 4],
     pending: [bool; 4],
 }
@@ -47,7 +52,7 @@ impl AttributionModel {
         let group = world.env.market_state().1;
         for (actor, initial) in ATTRIBUTION_DEPOSITS.into_iter().enumerate() {
             let expected = match actor {
-                0 | 2 => initial + self.debt[actor / 2],
+                0 | 2 => initial + self.credit[actor / 2],
                 1 | 3 if self.basis[actor] == 0 => initial - self.debt[actor / 2],
                 _ => initial,
             };
@@ -78,7 +83,7 @@ impl AttributionModel {
             );
             if actor < 4 && actor % 2 == 0 && self.basis[actor + 1] != 0 {
                 assert_eq!(account.capital.get(), initial);
-                assert_eq!(account.pnl.get(), self.debt[actor / 2] as i128);
+                assert_eq!(account.pnl.get(), self.credit[actor / 2] as i128);
                 assert!(
                     !receipt.present,
                     "unbooked opposing debt cannot become a receipt"
@@ -206,10 +211,12 @@ fn resolve_history(history: &History) -> (AttributionWorld, AttributionModel) {
             observations: crank_observations_for_assets(&[1, 2]),
         },
     );
+    let debt = std::array::from_fn(|pair| {
+        u128::from(history.lots[pair]) * u128::from(history.price_moves[pair])
+    });
     let mut model = AttributionModel {
-        debt: std::array::from_fn(|pair| {
-            u128::from(history.lots[pair]) * u128::from(history.price_moves[pair])
-        }),
+        debt,
+        credit: debt,
         basis: world.quantities,
         pending: [false; 4],
     };

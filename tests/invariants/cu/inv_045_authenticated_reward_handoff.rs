@@ -192,11 +192,29 @@ fn run_authenticated_handoff(
     oracle_succession: bool,
 ) -> u64 {
     const ACCEPTED: u64 = ENTRY - 2_400;
-    // MARK is below the accepted frontier: the premium hits the negative cap.
-    // Funding rounds down before the per-lot index is scaled by ADL_ONE.
-    let funding_per_lot =
-        -(-i128::from(max_funding) * i128::from(ACCEPTED)).div_euclid(1_000_000_000);
-    assert_eq!(funding_per_lot, i128::from(max_funding != 0));
+    // MARK is below the accepted frontier: the premium hits the negative cap, so
+    // longs receive. Funding accrues exactly (#458): each side's A-scaled index
+    // moves by its own floor of rate * price * ADL_ONE / FUNDING_DEN (sub-unit at
+    // this price), and a leg settles floor(lots * index / ADL_ONE) atoms.
+    let funding_num = -i128::from(max_funding) * i128::from(ACCEPTED);
+    let funding_index = [
+        (-funding_num * ADL_ONE as i128).div_euclid(1_000_000_000),
+        (funding_num * ADL_ONE as i128).div_euclid(1_000_000_000),
+    ];
+    let settled = |lots: i128, side: usize| (lots * funding_index[side]).div_euclid(ADL_ONE as i128);
+    // [target long 100, peer short 100, trader_a long 1, trader_b short 1]
+    let funding_atoms = [settled(100, 0), settled(100, 1), settled(1, 0), settled(1, 1)];
+    let funding_dust = -funding_atoms.iter().sum::<i128>();
+    if max_funding == 0 {
+        assert_eq!((funding_index, funding_dust), ([0, 0], 0));
+    } else {
+        // The sub-unit transfer is no longer rounded up to a whole price unit for
+        // the receivers; payers are charged the ceiling and the receivers' floor
+        // residue stays in the vault, outside every owner and insurance balance.
+        assert_eq!(funding_index, [997_600_000_000_000, -997_600_000_000_000]);
+        assert_eq!(funding_atoms, [99, -100, 0, -1]);
+        assert_eq!(funding_dust, 2);
+    }
     let mut peak_cu = 0;
     let mut late_rejections = 0;
     let mut liquidation_rollbacks = 0;
@@ -368,10 +386,9 @@ fn run_authenticated_handoff(
                         assert_eq!(after.assets[0].raw_oracle_target_price, fresh_price);
                         assert_eq!(profile.oracle_target_publish_time, 1_001);
                         assert_eq!(profile.last_good_oracle_slot, 6);
-                        let funding_index = funding_per_lot * ADL_ONE as i128;
                         assert_eq!(
-                            (after.assets[0].f_long_num, after.assets[0].f_short_num),
-                            (funding_index, -funding_index)
+                            [after.assets[0].f_long_num, after.assets[0].f_short_num],
+                            funding_index
                         );
                         assert_eq!(after.assets[0].slot_last, 6);
                         assert_eq!(
@@ -468,14 +485,14 @@ fn run_authenticated_handoff(
                             InstructionError::Custom(PercolatorError::EngineNonProgress as u32),
                         )),
                     ));
-                    let loss = i128::from(ENTRY - ACCEPTED) - funding_per_lot;
-                    expected[0] -= 100 * loss + penalty as i128;
-                    expected[1] += 100 * loss;
-                    expected[2] -= loss;
-                    expected[3] += loss;
+                    let price_loss = i128::from(ENTRY - ACCEPTED);
+                    expected[0] -= 100 * price_loss - funding_atoms[0] + penalty as i128;
+                    expected[1] += 100 * price_loss + funding_atoms[1];
+                    expected[2] -= price_loss - funding_atoms[2];
+                    expected[3] += price_loss + funding_atoms[3];
                     expected[4] += reward as i128;
                     if let Some(order) = terminal_order {
-                        assert_eq!(funding_per_lot, 1);
+                        assert_ne!(funding_index, [0, 0]);
                         assert_eq!(reward, 0);
                         // Collect the losing trader's debit before freezing the
                         // sources; both winning portfolios keep their pending K/F.
@@ -505,6 +522,8 @@ fn run_authenticated_handoff(
                             order,
                             expected,
                             2 * paid + penalty,
+                            funding_index,
+                            funding_dust as u128,
                         ));
                         worlds += 1;
                         continue;
@@ -528,7 +547,13 @@ fn run_authenticated_handoff(
                     }
                     assert!(census(&env, portfolios)[..4].iter().all(|current| *current));
                     assert_eq!(values(&env, portfolios), expected);
-                    let expected_pnl = [0, 100 * loss, 0, loss, 0];
+                    let expected_pnl = [
+                        0,
+                        100 * price_loss + funding_atoms[1],
+                        0,
+                        price_loss + funding_atoms[3],
+                        0,
+                    ];
                     for i in 0..5 {
                         let account = env.portfolio_state(portfolios[i]);
                         assert_eq!(account.pnl.get(), expected_pnl[i]);
@@ -567,7 +592,7 @@ fn run_authenticated_handoff(
                     census(&env, portfolios);
                     let group = env.market_state().1;
                     assert_eq!(
-                        expected.iter().sum::<i128>() + group.insurance as i128,
+                        expected.iter().sum::<i128>() + group.insurance as i128 + funding_dust,
                         group.vault as i128
                     );
                     assert_eq!(
@@ -600,7 +625,7 @@ fn run_authenticated_handoff(
         fresh_prices.len() * shares.len() * raw_prints.len() * 2
     );
     assert_eq!(liquidation_rollbacks, worlds);
-    println!("authenticated handoff: oracle_succession={oracle_succession}, max_funding={max_funding}, funding_per_lot={funding_per_lot}, worlds={worlds}, late_rollbacks={late_rejections}, liquidation_rollbacks={liquidation_rollbacks}, peak_transaction_cu={peak_cu}");
+    println!("authenticated handoff: oracle_succession={oracle_succession}, max_funding={max_funding}, funding_index={funding_index:?}, funding_dust={funding_dust}, worlds={worlds}, late_rollbacks={late_rejections}, liquidation_rollbacks={liquidation_rollbacks}, peak_transaction_cu={peak_cu}");
     peak_cu
 }
 
@@ -757,6 +782,8 @@ fn redeem_unsettled_funded_handoff(
     order: [usize; 5],
     expected: [i128; 5],
     retained: u128,
+    funding_index: [i128; 2],
+    funding_dust: u128,
 ) -> u64 {
     const LIMIT: u64 = 500_000;
     let mut peak = 0;
@@ -764,8 +791,8 @@ fn redeem_unsettled_funded_handoff(
     let live = env.market_state().1;
     assert_eq!(live.assets[0].effective_price, ENTRY - 2_400);
     assert_eq!(
-        (live.assets[0].f_long_num, live.assets[0].f_short_num),
-        (ADL_ONE as i128, -(ADL_ONE as i128))
+        [live.assets[0].f_long_num, live.assets[0].f_short_num],
+        funding_index
     );
     assert!(!census(env, portfolios)[1]);
     assert_eq!(values(env, portfolios)[1], i128::from(FUNDS[1]));
@@ -773,7 +800,7 @@ fn redeem_unsettled_funded_handoff(
     assert!(expected[1] > i128::from(FUNDS[1]));
     let supply = FUNDS.iter().map(|amount| u128::from(*amount)).sum::<u128>();
     let due = expected.map(|value| u128::try_from(value).unwrap());
-    assert_eq!(due.iter().sum::<u128>() + retained, supply);
+    assert_eq!(due.iter().sum::<u128>() + retained + funding_dust, supply);
     let mint = env.svm.get_account(&env.mint);
     let accounts = portfolios.map(|key| env.svm.get_account(&key));
     let resolve = Instruction {
@@ -965,7 +992,8 @@ fn redeem_unsettled_funded_handoff(
         ),
         (0, 0)
     );
-    assert_eq!(terminal.vault, retained);
+    // Only the input-derived per-side funding floor residue stays beside insurance.
+    assert_eq!(terminal.vault, retained + funding_dust);
     assert_cu_within("unsettled funded handoff redemption", peak, LIMIT);
     println!("row422 funded terminal: order={order:?}, paid={due:?}, retained={retained}, closes={closes}, suffix_rollbacks=5, waiting_rollbacks={waiting}, peak={peak} CU");
     peak

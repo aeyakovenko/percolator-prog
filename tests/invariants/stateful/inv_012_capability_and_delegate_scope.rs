@@ -552,6 +552,49 @@ fn retained_capability_trade(env: &mut V16Svm, route: CpiRoute, size: i128) -> T
     }
 }
 
+/// Re-sign a retained single-CPI trade with an explicit taker base-fee consent. The taker
+/// signs `fee_bps` independently of the LP cap, so a live base-fee policy above the
+/// builder's zero would otherwise reject before the LP grant is ever consulted.
+fn with_taker_fee_consent(
+    env: &V16Svm,
+    tx: &Transaction,
+    fee: u64,
+    payer: &Keypair,
+    taker: &Keypair,
+) -> Transaction {
+    let message = &tx.message;
+    let mut instructions: Vec<Instruction> = message
+        .instructions
+        .iter()
+        .map(|ix| Instruction {
+            program_id: message.account_keys[ix.program_id_index as usize],
+            accounts: ix
+                .accounts
+                .iter()
+                .map(|&i| AccountMeta {
+                    pubkey: message.account_keys[i as usize],
+                    is_signer: message.is_signer(i as usize),
+                    is_writable: message.is_writable(i as usize),
+                })
+                .collect(),
+            data: ix.data.clone(),
+        })
+        .collect();
+    let trade = instructions.last_mut().expect("trade instruction");
+    let mut decoded = ProgInstruction::decode(&trade.data).expect("decode retained trade");
+    match &mut decoded {
+        ProgInstruction::TradeCpi { fee_bps, .. } => *fee_bps = fee,
+        other => panic!("expected single CPI trade, got {other:?}"),
+    }
+    trade.data = decoded.encode();
+    Transaction::new_signed_with_payer(
+        &instructions,
+        Some(&payer.pubkey()),
+        &[payer, taker],
+        env.svm.latest_blockhash(),
+    )
+}
+
 fn land_capability_trade(
     env: &mut V16Svm,
     history: &mut AuthorizationHistory,
@@ -1449,6 +1492,20 @@ fn v16_program_ordered_grant_histories_bind_retained_cpi_disposition() {
         }
     }
 
+    fn consenting_trade(env: &mut V16Svm, route: CpiRoute, size: i128) -> Transaction {
+        let tx = retained_capability_trade(env, route, size);
+        match route {
+            CpiRoute::Single => with_taker_fee_consent(
+                env,
+                &tx,
+                u64::from(FEE_BPS),
+                &env.actors[4].signer,
+                &env.actors[0].signer,
+            ),
+            CpiRoute::Batch => tx,
+        }
+    }
+
     fn consume(
         env: &mut V16Svm,
         history: &mut AuthorizationHistory,
@@ -1522,7 +1579,7 @@ fn v16_program_ordered_grant_histories_bind_retained_cpi_disposition() {
                             );
                             let size = sign * POS_SCALE as i128;
                             let request = history.replay();
-                            let retained = retained_capability_trade(&mut env, route, size);
+                            let retained = consenting_trade(&mut env, route, size);
                             for writer in [first, second] {
                                 let (actor, cap, expiry) = match writer {
                                     Writer::UnrelatedRenewal => (2, Some(10_000), u64::MAX),
@@ -1558,7 +1615,7 @@ fn v16_program_ordered_grant_histories_bind_retained_cpi_disposition() {
 
                             // Repair request freshness only, leaving the modeled grant intact.
                             let current_request = history.replay();
-                            let current = retained_capability_trade(&mut env, route, size);
+                            let current = consenting_trade(&mut env, route, size);
                             let outcome = consume(
                                 &mut env,
                                 &mut history,
@@ -1585,7 +1642,7 @@ fn v16_program_ordered_grant_histories_bind_retained_cpi_disposition() {
                                 slot + 2,
                             );
                             let fresh_request = history.replay();
-                            let fresh = retained_capability_trade(&mut env, route, size);
+                            let fresh = consenting_trade(&mut env, route, size);
                             assert_eq!(
                                 consume(
                                     &mut env,

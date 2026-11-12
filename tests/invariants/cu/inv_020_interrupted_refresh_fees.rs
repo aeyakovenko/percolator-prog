@@ -245,6 +245,8 @@ fn v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements() 
                         assert_eq!((asset.slot_last, asset.effective_price), (32, 1_032_000));
                     }
                     set_test_clock(&mut env, end_slot, 103);
+                    // Stale-account refresh consumes an authenticated report in the current slot.
+                    let report = env.set_pyth_price_with_conf(&feed, CURRENT[0] as i64, -6, 0, 103);
                     let maintenance = RATE * u128::from(end_slot);
                     let fee_ix = Instruction {
                         program_id: env.program_id,

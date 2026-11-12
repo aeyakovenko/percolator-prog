@@ -536,9 +536,14 @@ fn v16_program_fee_bearing_recovery_reconciles_raw_stocks_through_terminal_close
             )
         );
     }
+    // Terminal insurance payouts consumed asset 0's authority epoch; bind its current value.
+    let close_epoch = env.control_sequences(0).authority_epoch;
+    assert_eq!(close_epoch, 1, "exactly one asset-0 insurance payout");
     let close_cu = env
         .send(
-            ProgInstruction::CloseSlab { authority_epoch: 0 },
+            ProgInstruction::CloseSlab {
+                authority_epoch: close_epoch,
+            },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.market, false),

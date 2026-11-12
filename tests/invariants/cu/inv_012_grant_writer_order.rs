@@ -47,7 +47,9 @@ impl Oracle {
     }
 }
 
-fn grant(h: &History, matcher: Matcher) -> Instruction {
+/// `prior_fills` counts owner fills earlier in the same transaction; each bumps the
+/// position epoch the grant must bind.
+fn grant(h: &History, matcher: Matcher, prior_fills: u64) -> Instruction {
     Instruction {
         program_id: h.env.program_id,
         accounts: vec![
@@ -61,7 +63,7 @@ fn grant(h: &History, matcher: Matcher) -> Instruction {
         data: ProgInstruction::SetMatcherConfig {
             portfolio_id: h.env.portfolio_id(h.portfolios[1]),
             expected_sequence: h.grant_sequence,
-            position_epoch: h.env.portfolio_position_epoch(h.portfolios[1]),
+            position_epoch: h.env.portfolio_position_epoch(h.portfolios[1]) + prior_fills,
             asset_generation_frontier: h.env.market_state().1.next_market_id,
             enabled: 1,
             trade_fee_cap_bps: FEE_CAP,
@@ -167,7 +169,9 @@ fn v16_program_grant_writer_order_binds_atomic_cpi_authority() {
                         let oracle = Oracle::after(&h, events);
                         let mut instructions = vec![heap_ix(), cu_ix()];
                         instructions.extend(events.map(|event| match event {
-                            Event::Grant(index) => grant(&h, matchers[index]),
+                            Event::Grant(index) => {
+                                grant(&h, matchers[index], u64::from(!grant_first))
+                            }
                             Event::OwnerFill => writer(&h, batch_writer, size),
                         }));
                         instructions.push(consumer(&h, route, matchers[consumed], &oracle));

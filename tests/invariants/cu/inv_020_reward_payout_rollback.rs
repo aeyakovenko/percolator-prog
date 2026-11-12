@@ -191,7 +191,6 @@ fn v16_program_observation_abort_restores_liquidation_reward_payout_and_intent()
             tracked.extend(tokens);
             tracked.extend(owners.each_ref().map(|owner| owner.pubkey()));
             let full = crank_ix(&env, portfolios, &owners[2], report, &order, u64::MAX);
-            let action = crank_ix(&env, portfolios, &owners[2], report, &[], u64::MAX);
             let stale = crank_ix(&env, portfolios, &owners[2], initial, &order, u64::MAX);
             peak_cu = peak_cu.max(submit(
                 &mut env,
@@ -216,6 +215,12 @@ fn v16_program_observation_abort_restores_liquidation_reward_payout_and_intent()
             assert!(!audit(&env, portfolios)[1]);
             assert_eq!(env.portfolio_position_epoch(short), position_epoch);
             assert_eq!(env.portfolio_state(keeper).capital.get(), DEPOSITS[2]);
+            // Stale-account refresh consumes an authenticated report in the current slot.
+            set_test_clock(&mut env, 64, 102);
+            let report = env.set_pyth_price_with_conf(&feed, CURRENT[0] as i64, -6, 0, 102);
+            tracked.push(report);
+            let full = crank_ix(&env, portfolios, &owners[2], report, &order, u64::MAX);
+            let action = crank_ix(&env, portfolios, &owners[2], report, &[], u64::MAX);
             let mut history = vec![checkpoint(&env, portfolios, tokens)];
 
             // The clean world measures the payout. Interrupted worlds retain its exact

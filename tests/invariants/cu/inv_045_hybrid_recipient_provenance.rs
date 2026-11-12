@@ -470,19 +470,41 @@ fn v16_program_dual_hybrid_reward_lineage_survives_recipient_routes_and_payout()
                                 assert_eq!(asset.raw_oracle_target_price, raw[i]);
                                 assert_eq!(profile.oracle_target_price_e6, raw[i]);
                                 assert_eq!(profile.oracle_leg_prices_e6, [raw[i], 0, 0]);
+                                // Without publish_first, reports are renewed only at step two.
+                                let renewed = match (publish_first, elapsed) {
+                                    (true, _) => elapsed,
+                                    (false, 1..=2) => 1,
+                                    (false, _) => 2,
+                                };
                                 assert_eq!(
                                     profile.oracle_target_publish_time,
-                                    if publish_first {
-                                        100 + elapsed as i64
-                                    } else {
-                                        101
-                                    }
+                                    100 + renewed as i64
                                 );
-                                assert_eq!(
-                                    profile.last_good_oracle_slot,
-                                    if publish_first { slot } else { 2 }
-                                );
+                                assert_eq!(profile.last_good_oracle_slot, 1 + renewed);
                                 assert_eq!(asset.slot_last, slot);
+                            }
+                            if elapsed == 2 && !publish_first {
+                                // A reused report does not renew provenance, so the stale
+                                // recipient stalls until reports are consumed in this slot.
+                                w.send(
+                                    &[w.observe(4, false, w.reports)],
+                                    Some((
+                                        2,
+                                        InstructionError::Custom(
+                                            PercolatorError::EngineNonProgress as u32,
+                                        ),
+                                    )),
+                                );
+                                w.reports = [0, 1].map(|i| {
+                                    w.env.set_pyth_price_with_conf(
+                                        &feeds[i],
+                                        raw[i] as i64,
+                                        -6,
+                                        0,
+                                        100 + elapsed as i64,
+                                    )
+                                });
+                                w.tracked.extend(w.reports);
                             }
                             if elapsed <= 2 {
                                 w.current(4);

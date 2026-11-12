@@ -3,7 +3,9 @@
 
 use super::*;
 
-const SIZES: [i128; 2] = [QUANTITY, 57 * POS_SCALE as i128];
+// Fractional per-leg fees (8.3 and 4.3 atoms at 1 bp) keep the per-leg ceiling sum one atom
+// above the aggregate ceiling under the parent's exact-funding fixture scale.
+const SIZES: [i128; 2] = [830 * POS_SCALE as i128, 430 * POS_SCALE as i128];
 
 fn admin_instruction(w: &World, request: ProgInstruction) -> Instruction {
     Instruction {
@@ -88,17 +90,26 @@ fn trades(w: &World, cpi: bool, close: bool) -> Vec<Instruction> {
         .collect()
 }
 
-fn check_value(w: &World, closed: bool, converted: bool, paid: [u64; 2], custody: &[Account; 3]) {
+fn check_value(
+    w: &World,
+    accrued: bool,
+    closed: bool,
+    converted: bool,
+    paid: [u64; 2],
+    custody: &[Account; 3],
+) {
+    assert!(accrued || !closed);
     let fees = SIZES.map(|q| fee(q, OPEN_CAP) * (1 + u128::from(closed)));
     let gross = fees.iter().sum::<u128>() as u64;
-    let funding = u64::from(closed) * SIZES.into_iter().map(funding_quote).sum::<u64>();
+    let funding = u64::from(closed) * SIZES.into_iter().map(funding_credit).sum::<u64>();
+    let debit = u64::from(closed) * SIZES.into_iter().map(funding_debit).sum::<u64>();
     let accounts = w.portfolios.map(|key| w.env.portfolio_state(key));
     let (cfg, group) = w.env.market_state();
     assert_eq!(cfg.fee_redirect_to_market_0_bps, 0);
     for actor in 0..2 {
         let expected = PRINCIPAL[actor] + u64::from(actor == 0) * DEPOSIT
             - gross
-            - u64::from(actor == 0) * funding
+            - u64::from(actor == 0) * debit
             + u64::from(actor == 1 && converted) * funding
             - paid[actor];
         assert_eq!(accounts[actor].owner, w.owners[actor].pubkey().to_bytes());
@@ -130,11 +141,15 @@ fn check_value(w: &World, closed: bool, converted: bool, paid: [u64; 2], custody
         );
         assert_eq!(
             group.assets[asset].f_long_num,
-            if closed { ADL_ONE as i128 } else { 0 }
+            if accrued { funding_index() } else { 0 }
         );
     }
     assert!(group.insurance_domain_budget[4..].iter().all(|v| *v == 0));
-    assert_eq!(group.funding_epoch, if closed { 2 } else { 0 });
+    // One funding epoch per funded canonical accrual slot on each asset.
+    assert_eq!(
+        group.funding_epoch,
+        if accrued { 2 * FUNDING_WINDOW } else { 0 }
+    );
     assert_eq!(group.insurance, 2 * u128::from(gross));
     assert_eq!(group.c_tot, accounts.iter().map(|p| p.capital.get()).sum());
     let supply = PRINCIPAL.iter().sum::<u64>() + DEPOSIT;
@@ -142,7 +157,10 @@ fn check_value(w: &World, closed: bool, converted: bool, paid: [u64; 2], custody
     assert_eq!(group.vault, u128::from(vault));
     assert_eq!(
         group.vault,
-        group.c_tot + group.insurance + u128::from(!converted) * u128::from(funding)
+        group.c_tot
+            + group.insurance
+            + u128::from(!converted) * u128::from(funding)
+            + u128::from(debit - funding)
     );
     for ((key, before), amount) in [w.tokens[0], w.tokens[1], w.env.vault]
         .into_iter()
@@ -174,28 +192,21 @@ fn v16_retained_two_asset_funding_preserves_cpi_and_bilateral_fee_consent() {
     let matcher = std::fs::read(hostile_matcher_program_path()).unwrap();
     let mut counts = Counts::default();
     let fees = SIZES.map(|q| fee(q, OPEN_CAP));
-    let funding = SIZES.map(funding_quote);
-    assert_eq!(fees, [36, 22]);
-    assert_eq!(fees.iter().sum::<u128>(), 58);
-    assert_eq!(fee(SIZES.iter().sum(), OPEN_CAP), 57);
-    assert_eq!(funding, [95, 57]);
+    // Exact window funding (prog#458): payer ceiling, receiver floor, per asset.
+    let debits = SIZES.map(funding_debit);
+    let funding = SIZES.map(funding_credit);
+    assert_eq!(fees, [9, 5]);
+    assert_eq!(fees.iter().sum::<u128>(), 14);
+    assert_eq!(fee(SIZES.iter().sum(), OPEN_CAP), 13);
+    assert_eq!((debits, funding), ([20, 11], [19, 10]));
+    // Even the receiver's floored credits exceed the fresh close fees.
     assert!(
         u128::from(funding.iter().sum::<u64>())
             > SIZES.into_iter().map(|q| fee(q, CLOSE_FRESH)).sum()
     );
     for cpi in [true, false] {
         eprintln!("retained two-asset funding: cpi={cpi}");
-        let mut w = World::with_params(
-            &matcher,
-            V16CuMarketParams {
-                max_portfolio_assets: 2,
-                trade_fee_base_bps: OPEN_CAP,
-                max_abs_funding_e9_per_slot: FUNDING_RATE,
-                max_price_move_bps_per_slot: 1,
-                h_max: 1,
-                ..V16CuMarketParams::default()
-            },
-        );
+        let mut w = World::with_params(&matcher, funded_params(2, 0));
         for asset in 0..2 {
             let controls = w.env.control_sequences(asset);
             let ix = admin_instruction(
@@ -233,7 +244,7 @@ fn v16_retained_two_asset_funding_preserves_cpi_and_bilateral_fee_consent() {
         counts.fills += 2;
         let custody =
             [w.tokens[0], w.tokens[1], w.env.vault].map(|key| w.env.svm.get_account(&key).unwrap());
-        check_value(&w, false, false, [0; 2], &custody);
+        check_value(&w, false, false, false, [0; 2], &custody);
         let epochs = w.portfolios.map(|key| w.env.portfolio_position_epoch(key));
         let sequences = w
             .portfolios
@@ -276,7 +287,7 @@ fn v16_retained_two_asset_funding_preserves_cpi_and_bilateral_fee_consent() {
             .map(|tx| bincode::serialize(tx).unwrap());
         let short_wire = bincode::serialize(&short).unwrap();
         counts.record(policy(&mut w, CLOSE_FRESH, 20));
-        for (slot, mark) in [(1, 98), (2, 101)] {
+        for (slot, mark) in [(OBSERVE_SLOT, 98), (FIRST_CLOSE_SLOT, 101)] {
             w.env.svm.warp_to_slot(slot);
             for asset in 0..2 {
                 let controls = w.env.control_sequences(asset);
@@ -294,11 +305,14 @@ fn v16_retained_two_asset_funding_preserves_cpi_and_bilateral_fee_consent() {
                 let tx = w.sign_with_nonce(&[ix], 21 + 2 * slot as u32 + asset as u32);
                 counts.record(w.deliver(tx, false, &[w.env.market], [1, 0, 0]));
             }
-            if slot == 1 {
+            if slot == FIRST_CLOSE_SLOT {
+                accrue_funding_window(&mut w, slot, &[0, 1], 50, &mut counts);
+            }
+            if slot == OBSERVE_SLOT {
                 let tx = w.sign_with_nonce(&[observe(&w, slot)], 30);
                 counts.record(w.deliver(tx, false, &[w.env.market, w.portfolios[1]], [1, 0, 0]));
             }
-            check_value(&w, false, false, [0; 2], &custody);
+            check_value(&w, slot == FIRST_CLOSE_SLOT, false, false, [0; 2], &custody);
         }
         counts.record(w.deliver_with_error(
             retained[0].clone(),
@@ -310,7 +324,7 @@ fn v16_retained_two_asset_funding_preserves_cpi_and_bilateral_fee_consent() {
             [0, 0, usize::from(cpi)],
         ));
         counts.rollbacks += 1;
-        check_value(&w, false, false, [0; 2], &custody);
+        check_value(&w, true, false, false, [0; 2], &custody);
         counts.record(policy(&mut w, OPEN_CAP, 31));
         if cpi {
             counts.record(w.deliver_with_error(
@@ -334,7 +348,7 @@ fn v16_retained_two_asset_funding_preserves_cpi_and_bilateral_fee_consent() {
             [1, 0, usize::from(cpi)],
         ));
         counts.rollbacks += 1;
-        check_value(&w, false, false, [0; 2], &custody);
+        check_value(&w, true, false, false, [0; 2], &custody);
         let mut changed = vec![w.env.market, w.portfolios[0], w.portfolios[1]];
         if cpi {
             changed.push(w.context);
@@ -346,7 +360,7 @@ fn v16_retained_two_asset_funding_preserves_cpi_and_bilateral_fee_consent() {
             [1, 0, usize::from(cpi)],
         ));
         counts.fills += 2;
-        check_value(&w, true, false, [0; 2], &custody);
+        check_value(&w, true, true, false, [0; 2], &custody);
         assert_eq!(
             w.portfolios.map(|key| w.env.portfolio_position_epoch(key)),
             epochs.map(|e| e + 1)
@@ -381,15 +395,15 @@ fn v16_retained_two_asset_funding_preserves_cpi_and_bilateral_fee_consent() {
             [0, 0, 0],
         ));
         counts.rollbacks += 1;
-        check_value(&w, true, false, [0; 2], &custody);
+        check_value(&w, true, true, false, [0; 2], &custody);
         for (tx, wire) in retained.iter().zip(wires) {
             tx.verify().unwrap();
             assert_eq!(bincode::serialize(tx).unwrap(), wire);
         }
         short.verify().unwrap();
         assert_eq!(bincode::serialize(&short).unwrap(), short_wire);
-        w.env.svm.warp_to_slot(3);
-        let tx = w.sign_with_nonce(&[observe(&w, 3)], 40);
+        w.env.svm.warp_to_slot(FIRST_CLOSE_SLOT + 1);
+        let tx = w.sign_with_nonce(&[observe(&w, FIRST_CLOSE_SLOT + 1)], 40);
         counts.record(w.deliver(tx, false, &[w.env.market, w.portfolios[1]], [1, 0, 0]));
         let tx = w.sign_with_nonce(
             &[Instruction {
@@ -408,14 +422,15 @@ fn v16_retained_two_asset_funding_preserves_cpi_and_bilateral_fee_consent() {
         );
         counts.record(w.deliver(tx, false, &[w.env.market, w.portfolios[1]], [1, 0, 0]));
         let mut paid = [0; 2];
-        check_value(&w, true, true, paid, &custody);
+        check_value(&w, true, true, true, paid, &custody);
         let gross = 2 * fees.iter().sum::<u128>() as u64;
         let total_funding = funding.iter().sum::<u64>();
+        let total_debit = debits.iter().sum::<u64>();
         let payouts = [
-            PRINCIPAL[0] + DEPOSIT - gross - total_funding,
+            PRINCIPAL[0] + DEPOSIT - gross - total_debit,
             PRINCIPAL[1] - gross + total_funding,
         ];
-        assert_eq!(payouts, [99_848, 200_043]);
+        assert_eq!(payouts, [100_116 - 28 - 31, 200_007 - 28 + 29]);
         for actor in 0..2 {
             let tx = w.sign_with_nonce(
                 &[Instruction {
@@ -449,9 +464,13 @@ fn v16_retained_two_asset_funding_preserves_cpi_and_bilateral_fee_consent() {
             ));
             paid[actor] = payouts[actor];
             counts.payouts += 1;
-            check_value(&w, true, true, paid, &custody);
+            check_value(&w, true, true, true, paid, &custody);
         }
-        assert_eq!(w.env.token_amount(w.env.vault), 232);
+        // Both sides' fees as insurance plus the two assets' conservative funding dust.
+        assert_eq!(
+            w.env.token_amount(w.env.vault),
+            2 * gross + (total_debit - total_funding)
+        );
         counts.worlds += 1;
     }
     assert_eq!(

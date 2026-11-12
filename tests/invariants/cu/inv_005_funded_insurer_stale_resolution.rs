@@ -692,13 +692,10 @@ fn v16_program_funded_insurer_handoff_preserves_stale_deadline_and_permissionles
                     BACKING as u128,
                 );
             }
-            for (signer, destination) in [
-                (&incumbent, wallets[0]),
-                (&operator, wallets[2]),
-                (&admin, wallets[6]),
-                (&provider, wallets[3]),
-            ] {
-                let ix = payout(&env, signer, destination, remaining_insurance, true);
+            // Every wrong signer targets the resolved payee's wallet so the destination
+            // owner check passes and the authority check is what rejects.
+            for signer in [&incumbent, &operator, &admin, &provider] {
+                let ix = payout(&env, signer, wallets[1], remaining_insurance, true);
                 submit(
                     &mut env,
                     &protected,
@@ -708,17 +705,29 @@ fn v16_program_funded_insurer_handoff_preserves_stale_deadline_and_permissionles
                     Some((0, PercolatorError::Unauthorized)),
                 );
             }
-            let mut unsigned = payout(&env, &successor, wallets[1], remaining_insurance, true);
+            // Resolved payout to the configured authority's own wallet is permissionless:
+            // an unsigned delivery of one atom lands, and the signed remainder follows.
+            let mut unsigned = payout(&env, &successor, wallets[1], 1, true);
             unsigned.accounts[0].is_signer = false;
             submit(
                 &mut env,
                 &protected,
                 &[unsigned],
                 &[],
-                &[],
-                Some((0, PercolatorError::ExpectedSigner)),
+                &[market, vault, wallets[1]],
+                None,
             );
-            let ix = payout(&env, &successor, wallets[1], remaining_insurance, true);
+            expected_wallets[1] = 1;
+            assert_value(
+                &env,
+                &wallets,
+                expected_wallets,
+                &portfolios,
+                expected_capital,
+                remaining_insurance - 1,
+                BACKING as u128,
+            );
+            let ix = payout(&env, &successor, wallets[1], remaining_insurance - 1, true);
             submit(
                 &mut env,
                 &protected,

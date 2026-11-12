@@ -14,17 +14,27 @@ fn v16_program_funding_and_maintenance_precede_new_asset_after_route_rollback() 
     const RATE: u64 = 10_000;
     const CAP_BPS: u64 = 1;
     const FUNDING_SLOTS: u64 = ADMISSION - 2;
-    // Negative premium rounds toward minus infinity before position scaling.
-    let funding_per_lot =
-        (-(-i128::from(RATE) * i128::from(PRICE)).div_euclid(1_000_000_000)) as u128;
-    let funding_num = OLD_SIZE.unsigned_abs() * funding_per_lot * u128::from(FUNDING_SLOTS);
-    let debt = funding_num.div_ceil(POS_SCALE);
-    let claim = funding_num / POS_SCALE;
+    // Funding accrues exactly (prog#458): at PRICE 100 the capped rate moves 0.001 atom per
+    // unit per slot, so the funded leg is 1_000x the module's OLD_SIZE (keeping its 0.1-unit
+    // fraction) to book a real 20.2-atom funding transfer at the unchanged price and cap.
+    const OLD_SIZE: i128 = (10_100 * POS_SCALE + POS_SCALE / 10) as i128;
+    // The capped negative premium moves each side's A-scaled index exactly once per slot:
+    // the payer's floor and the receiver's floor coincide because the numerator is exact here.
+    let index_per_slot = (i128::from(RATE) * i128::from(PRICE) * ADL_ONE as i128)
+        .div_euclid(percolator::FUNDING_DEN as i128);
+    assert_eq!(
+        (i128::from(RATE) * i128::from(PRICE) * ADL_ONE as i128) % percolator::FUNDING_DEN as i128,
+        0
+    );
+    let funding_num = OLD_SIZE.unsigned_abs() * index_per_slot as u128 * u128::from(FUNDING_SLOTS);
+    // Settlement charges the payer the ceiling and credits the receiver the floor.
+    let debt = funding_num.div_ceil(ADL_ONE * POS_SCALE);
+    let claim = funding_num / (ADL_ONE * POS_SCALE);
     let exact_req = requirement(OLD_SIZE) + requirement(NEW_SIZE);
     let thin_deposit = exact_req + FEE + debt;
     assert_eq!(
-        (funding_per_lot, debt, claim, FEE, exact_req),
-        (1, 21, 20, 21, 111)
+        (index_per_slot, debt, claim, FEE, exact_req),
+        (1_000_000_000_000, 21, 20, 21, 101_011)
     );
     assert_eq!(
         requirement(OLD_SIZE) + requirement(NEW_SIZE + 1),
@@ -45,7 +55,7 @@ fn v16_program_funding_and_maintenance_precede_new_asset_after_route_rollback() 
         let target = PRICE - 1;
         let old_signed_size = if debtor == 0 { -OLD_SIZE } else { OLD_SIZE };
         let deposits =
-            std::array::from_fn::<_, 2, _>(|i| if i == debtor { thin_deposit } else { 10_000 });
+            std::array::from_fn::<_, 2, _>(|i| if i == debtor { thin_deposit } else { 200_000 });
         let principal = std::array::from_fn::<_, 2, _>(|i| {
             deposits[i] - FEE - if i == debtor { debt } else { 0 }
         });
@@ -106,8 +116,7 @@ fn v16_program_funding_and_maintenance_precede_new_asset_after_route_rollback() 
                         },
                     ));
                     let group = env.market_state().1;
-                    let funding_index =
-                        (slot - 2) as i128 * funding_per_lot as i128 * ADL_ONE as i128;
+                    let funding_index = (slot - 2) as i128 * index_per_slot;
                     assert_eq!(
                         (group.assets[1].f_long_num, group.assets[1].f_short_num),
                         (funding_index, -funding_index),

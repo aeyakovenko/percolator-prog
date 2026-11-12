@@ -593,11 +593,14 @@ fn v16_program_cold_admin_aba_and_burn_preserve_funded_handoff_scope_and_value()
 
                 // Insurance policy succession does not confer the independent hot
                 // operator's payout right. Other transferred roles revoke that right.
+                // The wrong signer targets the current payee's wallet, so the destination
+                // owner check passes and the signer/authority check is what rejects.
                 let wrong = if role_index == 0 { 6 } else { role_index + 3 };
+                let payee = if role_index == 0 { 4 } else { 6 };
                 let ix = payout(
                     &env,
                     actors[wrong].pubkey(),
-                    wallets[wrong],
+                    wallets[payee],
                     subject * 2,
                     role_index == 2,
                     1,
@@ -650,6 +653,8 @@ fn v16_program_cold_admin_aba_and_burn_preserve_funded_handoff_scope_and_value()
                             } else {
                                 stock.insurance[domain] = 0;
                                 stock.insurance[domain + 1] = 0;
+                                // A successful insurance debit consumes the asset's epoch.
+                                sequences[asset].authority_epoch += 1;
                             }
                             stock.wallets[recipient] += amount;
                             stock.assert(&env, &wallets);

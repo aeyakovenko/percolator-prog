@@ -390,7 +390,7 @@ fn v16_program_leg_writer_surface_is_engine_owned_and_source_complete() {
         ENGINE_TRANSITION_ROSTER
             .matches("Inv088EngineCallsite { owner:")
             .count(),
-        50,
+        51,
         "a new wrapper-to-engine transition reopens the structural-leg classification"
     );
     let mut witnesses = std::collections::BTreeSet::new();

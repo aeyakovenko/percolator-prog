@@ -428,16 +428,37 @@ pub mod state {
             let k_delta = price_delta
                 .checked_mul(percolator::ADL_ONE as i128)
                 .ok_or(V16Error::ArithmeticOverflow)?;
-            let funding_delta = if funding_active {
+            // Mirrors the engine's exact funding accrual (prog#458): the exact numerator
+            // rate * dt * price is A-scaled and floored ONCE per side, so the payer's index
+            // falls by at least, and the receiver's rises by at most, the exact transfer.
+            let funding_num = if funding_active {
                 funding_rate_e9
                     .checked_mul(segment_dt as i128)
                     .and_then(|v| v.checked_mul(effective_price as i128))
-                    .map(|v| v / percolator::FUNDING_DEN as i128)
-                    .and_then(|v| v.checked_mul(percolator::ADL_ONE as i128))
                     .ok_or(V16Error::ArithmeticOverflow)?
             } else {
                 0
             };
+            // Floor toward minus infinity: a negative numerator rounds its magnitude up.
+            let floor_den = |n: i128| -> Result<i128, V16Error> {
+                let den = percolator::FUNDING_DEN as i128;
+                let magnitude = n.checked_abs().ok_or(V16Error::ArithmeticOverflow)?;
+                let carry = if n < 0 { den - 1 } else { 0 };
+                let quotient = magnitude
+                    .checked_add(carry)
+                    .ok_or(V16Error::ArithmeticOverflow)?
+                    / den;
+                Ok(if n < 0 { -quotient } else { quotient })
+            };
+            let scaled_num = funding_num
+                .checked_mul(percolator::ADL_ONE as i128)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            let funding_delta_long = floor_den(
+                scaled_num
+                    .checked_neg()
+                    .ok_or(V16Error::ArithmeticOverflow)?,
+            )?;
+            let funding_delta_short = floor_den(scaled_num)?;
             let mut asset = old;
             asset.k_long = asset
                 .k_long
@@ -449,11 +470,11 @@ pub mod state {
                 .ok_or(V16Error::ArithmeticOverflow)?;
             asset.f_long_num = asset
                 .f_long_num
-                .checked_sub(funding_delta)
+                .checked_add(funding_delta_long)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             asset.f_short_num = asset
                 .f_short_num
-                .checked_add(funding_delta)
+                .checked_add(funding_delta_short)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             asset.effective_price = effective_price;
             asset.fund_px_last = effective_price;
@@ -10735,16 +10756,20 @@ pub mod processor {
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             require_asset_generation_view(&group, domain_usize / 2, expected_market_id)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
+            // Resolved: with no portfolio or capital left, nothing can claim the backing.
+            // Otherwise the provider may take only the engine's resolved surplus: backing
+            // that no domain source claim or junior receipt can still need. Unsigned resolved
+            // reserve payments keep requiring the full wind-down; the early surplus exit needs
+            // the provider's own consent.
+            let resolved_surplus_only = group.header.mode == 1
+                && (group.header.materialized_portfolio_count.get() != 0
+                    || group.header.c_tot.get() != 0);
+            if resolved_surplus_only && !authority.is_signer {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
             let shutdown_drain = match group.header.mode {
                 0 => live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize)?,
-                1 => {
-                    if group.header.materialized_portfolio_count.get() != 0
-                        || group.header.c_tot.get() != 0
-                    {
-                        return Err(PercolatorError::EngineLockActive.into());
-                    }
-                    false
-                }
+                1 => false,
                 _ => return Err(PercolatorError::EngineLockActive.into()),
             };
             let local_authorized =
@@ -10790,9 +10815,13 @@ pub mod processor {
             } else {
                 None
             };
-            group
-                .withdraw_fresh_counterparty_backing_not_atomic(domain_usize, amount)
-                .map_err(map_v16_error)?;
+            if resolved_surplus_only {
+                group
+                    .withdraw_resolved_counterparty_backing_surplus_not_atomic(domain_usize, amount)
+            } else {
+                group.withdraw_fresh_counterparty_backing_not_atomic(domain_usize, amount)
+            }
+            .map_err(map_v16_error)?;
             if let Some((ledger, _)) = ledger_state.as_mut() {
                 ledger.total_principal_atoms = ledger
                     .total_principal_atoms

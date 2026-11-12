@@ -359,7 +359,10 @@ fn mixed_maturity_terminal_residue(separate_roles: bool) {
                         .unwrap(),
                         profiles[asset]
                     );
-                    assert_eq!(env.control_sequences(asset), sequences[asset]);
+                    // A successful insurance payout consumes that asset's authority epoch.
+                    let mut expected = sequences[asset];
+                    expected.authority_epoch += u64::from(asset == 1 && paid[1]);
+                    assert_eq!(env.control_sequences(asset), expected);
                 }
                 let group = env.market_state().1;
                 assert_eq!(group.c_tot, capital.into());

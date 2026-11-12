@@ -343,7 +343,13 @@ fn v16_generated_retained_policy_routes_preserve_paid_earnings_across_funded_ret
                     payout(&h.world, INSURER, 3, 1, controls.authority_epoch, h.ledger);
                 former.accounts[0].is_signer = false;
                 let tx = h.sign(&[tail.clone(), former]);
-                h.deliver(tx, Some((3, PercolatorError::ExpectedSigner)), [1, 1, 0]);
+                // Resolved insurance payout is permissionless (no signer gate); the former
+                // role's own token account is not owned by the configured payee.
+                h.deliver(
+                    tx,
+                    Some((3, PercolatorError::InvalidTokenAccount)),
+                    [1, 1, 0],
+                );
                 book.check(&h);
                 h.call(&[tail], [1, 1, 0]);
                 book.paid[2] += PROVIDER - book.earnings;
@@ -372,6 +378,8 @@ fn v16_generated_retained_policy_routes_preserve_paid_earnings_across_funded_ret
                         book.principal = amount;
                     } else {
                         book.insurance = amount;
+                        // The Resolved insurance payout consumes the authority epoch.
+                        controls.authority_epoch += 1;
                     }
                     book.check(&h);
                 }

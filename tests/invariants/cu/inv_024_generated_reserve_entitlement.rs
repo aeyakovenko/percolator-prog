@@ -14,6 +14,7 @@ struct ClaimHistory {
     transferred_out: [[u64; 3]; 5],
     paid: [[u64; 3]; 5],
     holders: [usize; 2],
+    /// Authority epochs consumed by role handoffs and successful insurance debits.
     rotations: u64,
 }
 
@@ -72,6 +73,8 @@ impl ClaimHistory {
         assert_eq!(actor, self.owner(class));
         assert!(amount > 0 && amount <= self.claim(actor, class));
         self.paid[actor][class] += amount;
+        // Every successful insurance payout consumes the asset authority epoch.
+        self.rotations += u64::from(class == INSURER);
     }
 
     fn check(&self, world: &TerminalEarningsWorld, ledgers: [[Pubkey; 2]; 3], epoch: u64) {
@@ -259,7 +262,8 @@ fn v16_program_generated_role_histories_preserve_owner_and_reserve_entitlement()
 
                 if step == 0 {
                     let prefix = payment(&world, &book, ledgers, INSURER, 1, epoch);
-                    let cold_admin = rotate(&world, INSURER, 4, 3, epoch + book.rotations);
+                    // The insurance prefix consumes one epoch before the cold-admin suffix.
+                    let cold_admin = rotate(&world, INSURER, 4, 3, epoch + book.rotations + 1);
                     peak = peak.max(land(
                         &mut world,
                         &tracked,
@@ -346,7 +350,12 @@ fn v16_program_generated_role_histories_preserve_owner_and_reserve_entitlement()
             }
             assert_eq!(book.remaining(), [0; 3]);
             assert_eq!(book.balances().iter().sum::<u64>(), SUPPLY);
-            outcomes.push(book);
+            // Split payouts consume one authority epoch per insurance debit, so only
+            // the entitlement history (not the epoch count) is partition-invariant.
+            outcomes.push(ClaimHistory {
+                rotations: 0,
+                ..book
+            });
         }
         assert_eq!(
             outcomes[0], outcomes[1],

@@ -8,9 +8,15 @@
 //! fixture uses public instructions; only Clock, blockhash and signer SOL use VM
 //! controls. Decoded Account copies below are assertions, never VM state writes.
 //!
-//! Eight finite histories cross succession before any recovery versus after a
-//! seven-atom recovery prefix, partial/full recovery with excess burn, and both
-//! final fee/insurance payout orders. An input-derived oracle distinguishes each
+//! Since percolator-prog#451 the claimant's floored residue keeps its receipt (and
+//! so every insurance/fee payout) open until the provider's pledged backing lapses;
+//! before expiry the provider takes only its signed resolved surplus. Spent-insurance
+//! recredit therefore lands at the first post-expiry insurance payout, and a history
+//! that hands off depleted insurance *before any recovery* is no longer reachable.
+//!
+//! Eight finite histories cross succession after the former beneficiary drew all
+//! available insurance with a zero versus seven-atom recovered prefix, partial/full
+//! recovery with excess burn, and both final fee/insurance payout orders. An input-derived oracle distinguishes each
 //! beneficiary's payments and ledger, protected provider earnings, remaining spent
 //! history and exact burn. A former beneficiary's ledger cannot accompany the
 //! successor's payout, including rollback of a fee payment and lazy recredit.
@@ -29,6 +35,8 @@ struct Book {
     fees_paid: u64,
     old_paid: u64,
     new_paid: u64,
+    claimant_paid: u64,
+    insurance_payouts: u64,
     recovered: u64,
     expired: bool,
     transferred: bool,
@@ -45,7 +53,7 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
         for old_recovery_prefix in [0, 7] {
             for fees_first in [false, true] {
                 let recovery = residual.min(SPENT);
-                let (world, old_beneficiary, admin_token) = terminal_fee_loss_world();
+                let (world, claimant, old_beneficiary, admin_token) = terminal_fee_loss_world();
                 let TerminalEarningsWorld {
                     mut env,
                     admin,
@@ -114,11 +122,14 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                 .chain(ledgers)
                 .chain(portfolios)
                 .collect::<Vec<_>>();
-                let mut book = Book::default();
+                let mut book = Book {
+                    claimant_paid: USER_PAID[1],
+                    ..Book::default()
+                };
                 let check = |env: &V16CuEnv, book: &Book| {
                     let amounts = [
                         USER_PAID[0],
-                        USER_PAID[1],
+                        book.claimant_paid,
                         book.principal_paid + book.source_paid + book.fees_paid,
                         0,
                         book.old_paid,
@@ -126,6 +137,7 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                         0,
                     ];
                     let remaining = BACKING + SOURCE_PRINCIPAL + PROVIDER_FEE + AVAILABLE
+                        - (book.claimant_paid - USER_PAID[1])
                         - book.principal_paid
                         - book.source_paid
                         - book.fees_paid
@@ -156,7 +168,7 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                             group.pnl_pos_tot,
                             group.materialized_portfolio_count
                         ),
-                        (0, 0, 0)
+                        (0, 0, u64::from(!book.expired))
                     );
                     assert_eq!(group.source_claim_bound_total_num, 0);
                     assert_eq!(group.vault, remaining.into());
@@ -219,13 +231,21 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                         expected_profile.insurance_authority = new_beneficiary.pubkey().to_bytes();
                     }
                     let mut expected_sequences = sequences;
-                    expected_sequences.authority_epoch += u64::from(book.transferred);
+                    // Each resolved insurance debit consumes its signed epoch, as does
+                    // the consensual handoff.
+                    expected_sequences.authority_epoch +=
+                        book.insurance_payouts + u64::from(book.transferred);
                     assert_eq!(env.control_sequences(0), expected_sequences);
                     let mut image = env.svm.get_account(&env.market).unwrap();
                     assert_eq!(
                         state::read_asset_oracle_profile(&image.data, 0).unwrap(),
                         expected_profile
                     );
+                    let open = if book.expired {
+                        Vec::new()
+                    } else {
+                        vec![env.portfolio_state(portfolios[1])]
+                    };
                     state::market_view_mut(&mut image.data)
                         .unwrap()
                         .1
@@ -235,7 +255,7 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                         "depleted beneficiary succession",
                         &group,
                         &image.data,
-                        &[],
+                        &open,
                         remaining.into(),
                     )
                     .unwrap();
@@ -250,42 +270,29 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                             assert_eq!(account, empty_ledgers[index]);
                             continue;
                         }
-                        let old_recovered = if book.old_paid > AVAILABLE {
-                            recovery
-                        } else {
-                            0
-                        };
+                        // The recovered stock is recredited by the old beneficiary's first
+                        // post-expiry payout, before its ledger first observes insurance.
                         let expected = if index == 1 {
                             state::InsuranceLedgerAccountV16 {
                                 market_group: env.market.to_bytes(),
                                 authority: old_beneficiary.pubkey().to_bytes(),
                                 total_withdrawn_atoms: book.old_paid.into(),
-                                cumulative_profit_atoms: old_recovered.into(),
+                                cumulative_profit_atoms: 0,
                                 last_observed_insurance_atoms: u128::from(
-                                    AVAILABLE + old_recovered - book.old_paid,
+                                    AVAILABLE + recovery - book.old_paid,
                                 ),
                                 ..Default::default()
                             }
                         } else {
-                            let at_transfer = if old_recovery_prefix == 0 {
-                                0
-                            } else {
-                                recovery - old_recovery_prefix
-                            };
+                            let at_transfer = recovery - old_recovery_prefix;
                             state::InsuranceLedgerAccountV16 {
                                 market_group: env.market.to_bytes(),
                                 authority: new_beneficiary.pubkey().to_bytes(),
                                 total_withdrawn_atoms: book.new_paid.into(),
-                                cumulative_profit_atoms: if old_recovery_prefix == 0 {
-                                    book.recovered.into()
-                                } else {
-                                    0
-                                },
-                                last_observed_insurance_atoms: if book.new_paid == 0 {
-                                    at_transfer.into()
-                                } else {
-                                    0
-                                },
+                                cumulative_profit_atoms: 0,
+                                last_observed_insurance_atoms: u128::from(
+                                    at_transfer - book.new_paid,
+                                ),
                                 ..Default::default()
                             }
                         };
@@ -354,6 +361,64 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                     .encode(),
                 };
                 check(&env, &book);
+                // Before expiry the open receipt keeps insurance and earnings locked;
+                // the provider's signed surplus exit rolls back with the batch.
+                let surplus = resolved_surplus_exit(&env, wallets, tokens, residual);
+                let early = reserve(&env, 2, AVAILABLE, false, ledgers[1]);
+                peak = peak.max(land(
+                    &mut env,
+                    &[surplus.clone(), early],
+                    &[&provider],
+                    &tracked,
+                    &[],
+                    0,
+                    None,
+                    Some((3, PercolatorError::EngineLockActive)),
+                ));
+                rollbacks += 1;
+                check(&env, &book);
+                let allowed = [env.market, env.vault, tokens[2]];
+                peak = peak.max(land(
+                    &mut env,
+                    &[surplus],
+                    &[&provider],
+                    &tracked,
+                    &allowed,
+                    0,
+                    None,
+                    None,
+                ));
+                book.principal_paid = BACKING - residual - RECEIPT_SHORTFALL;
+                check(&env, &book);
+
+                env.svm.warp_to_slot(100);
+                let [lapse, topup] = claimant_expiry(&env, wallets, tokens, portfolios, 100);
+                let allowed = [env.market];
+                peak = peak.max(land(
+                    &mut env,
+                    &lapse,
+                    &[],
+                    &tracked,
+                    &allowed,
+                    0,
+                    None,
+                    None,
+                ));
+                let allowed = [env.market, env.vault, tokens[1], portfolios[1]];
+                peak = peak.max(land(
+                    &mut env,
+                    &topup,
+                    &[&claimant],
+                    &tracked,
+                    &allowed,
+                    0,
+                    None,
+                    None,
+                ));
+                book.expired = true;
+                book.claimant_paid = CLAIMANT_FINAL;
+                check(&env, &book);
+
                 let mut source = reserve(&env, 0, SOURCE_PRINCIPAL, false, ledgers[0]);
                 source.data = ProgInstruction::WithdrawBackingBucket {
                     domain: 0,
@@ -362,12 +427,11 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                     amount: SOURCE_PRINCIPAL.into(),
                 }
                 .encode();
-                let principal = reserve(&env, 0, BACKING - residual, false, ledgers[0]);
                 let available = reserve(&env, 2, AVAILABLE, false, ledgers[1]);
                 let allowed = [env.market, env.vault, tokens[2], tokens[4], ledgers[1]];
                 peak = peak.max(land(
                     &mut env,
-                    &[source, principal, available],
+                    &[source, available],
                     &[],
                     &tracked,
                     &allowed,
@@ -376,31 +440,17 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                     None,
                 ));
                 book.source_paid = SOURCE_PRINCIPAL;
-                book.principal_paid = BACKING - residual;
                 book.old_paid = AVAILABLE;
+                book.insurance_payouts += 1;
+                book.recovered = recovery;
                 check(&env, &book);
-                assert_eq!(env.market_state().1.insurance, 0);
+                assert_eq!(env.market_state().1.insurance, u128::from(recovery));
                 assert_eq!(
                     env.market_state().1.insurance_domain_spent,
-                    [0, SPENT.into()]
+                    [0, (SPENT - recovery).into()]
                 );
 
                 if old_recovery_prefix != 0 {
-                    env.svm.warp_to_slot(100);
-                    let ix = close(&env);
-                    let allowed = [env.market];
-                    peak = peak.max(land(
-                        &mut env,
-                        &[ix],
-                        &[&admin],
-                        &tracked,
-                        &allowed,
-                        0,
-                        None,
-                        None,
-                    ));
-                    book.expired = true;
-                    check(&env, &book);
                     let ix = reserve(&env, 2, old_recovery_prefix, false, ledgers[1]);
                     let allowed = [env.market, env.vault, tokens[4], ledgers[1]];
                     peak = peak.max(land(
@@ -413,8 +463,8 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                         None,
                         None,
                     ));
-                    book.recovered = recovery;
                     book.old_paid += old_recovery_prefix;
+                    book.insurance_payouts += 1;
                     check(&env, &book);
                 }
                 let handoff = Instruction {
@@ -457,30 +507,13 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                 book.new_ledger_initialized = true;
                 check(&env, &book);
                 let old_ledger_frame = env.svm.get_account(&ledgers[1]);
-                if !book.expired {
-                    env.svm.warp_to_slot(100);
-                    let ix = close(&env);
-                    let allowed = [env.market];
-                    peak = peak.max(land(
-                        &mut env,
-                        &[ix],
-                        &[&admin],
-                        &tracked,
-                        &allowed,
-                        0,
-                        None,
-                        None,
-                    ));
-                    book.expired = true;
-                    check(&env, &book);
-                }
 
                 let fees = reserve(&env, 1, PROVIDER_FEE, false, ledgers[0]);
                 let tail = recovery - old_recovery_prefix;
                 let wrong_ledger = reserve(&env, 2, tail, true, ledgers[1]);
                 peak = peak.max(land(
                     &mut env,
-                    &[fees.clone(), wrong_ledger],
+                    &[fees, wrong_ledger],
                     &[],
                     &tracked,
                     &[],
@@ -490,12 +523,13 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                 ));
                 rollbacks += 1;
                 check(&env, &book);
-                let payment = reserve(&env, 2, tail, true, ledgers[2]);
-                for (is_fee, ix) in if fees_first {
-                    [(true, fees), (false, payment)]
-                } else {
-                    [(false, payment), (true, fees)]
-                } {
+                for is_fee in [fees_first, !fees_first] {
+                    // Built at submission: an insurance debit advances the signed epoch.
+                    let ix = if is_fee {
+                        reserve(&env, 1, PROVIDER_FEE, false, ledgers[0])
+                    } else {
+                        reserve(&env, 2, tail, true, ledgers[2])
+                    };
                     let allowed = [
                         env.market,
                         env.vault,
@@ -516,6 +550,7 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                         book.fees_paid = PROVIDER_FEE;
                     } else {
                         book.new_paid = tail;
+                        book.insurance_payouts += 1;
                         book.recovered = recovery;
                     }
                     check(&env, &book);
@@ -589,8 +624,9 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                 assert_eq!(env.token_amount(new_token), recovery - old_recovery_prefix);
                 assert_eq!(
                     env.token_amount(tokens[2]),
-                    BACKING - residual + SOURCE_PRINCIPAL + PROVIDER_FEE
+                    BACKING - residual - RECEIPT_SHORTFALL + SOURCE_PRINCIPAL + PROVIDER_FEE
                 );
+                assert_eq!(env.token_amount(tokens[1]), CLAIMANT_FINAL);
                 assert_eq!(env.token_amount(tokens[3]), 0);
                 assert_eq!(env.token_amount(admin_token), 0);
                 assert_eq!(operator.pubkey(), wallets[3]);
@@ -598,7 +634,7 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
             }
         }
     }
-    assert_eq!((histories, rollbacks), (8, 12));
+    assert_eq!((histories, rollbacks), (8, 20));
     assert_cu_within("depleted beneficiary succession", peak, 700_000);
     eprintln!("row429 depleted beneficiary succession: {histories} histories, {rollbacks} exact rollbacks, peak_CU={peak}");
 }

@@ -111,14 +111,12 @@ fn advance(ledger: &mut Ledger, direction: i128, slot: u64) {
             RATE,
             "both public premiums saturate the configured cap"
         );
-        let funding = -(rate * price).div_euclid(1_000_000_000);
         for actor in 0..4 {
-            ledger.value[actor] +=
-                ledger.lots[actor][asset] * (price - ledger.price[asset] as i128 + funding);
+            ledger.value[actor] += ledger.lots[actor][asset] * (price - ledger.price[asset] as i128);
         }
+        ledger.accrue_funding(asset, rate, price);
         ledger.price[asset] = price as u64;
         ledger.carry[asset] = numerator % 10_000;
-        ledger.funding[asset] += funding;
     }
     ledger.slot = slot;
 }
@@ -178,6 +176,10 @@ fn crank(world: &mut World, ledger: &mut Ledger, direction: i128, reverse: bool,
         .expect("bounded public funding catch-up");
     world.max_cu = world.max_cu.max(result.compute_units_consumed);
     advance(ledger, direction, slot);
+    // A bounded partial catch-up does not settle the supplied portfolio.
+    if slot == clock {
+        ledger.settle_f(2);
+    }
     checkpoint(world, ledger, direction);
     assert_eq!(
         [0, 1, 3].map(|actor| world.env.svm.get_account(&world.portfolios[actor])),
@@ -350,9 +352,11 @@ fn v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpo
                     .send_transaction(retained[2].clone())
                     .expect("retained reduction after public catch-up");
                 world.max_cu = world.max_cu.max(result.compute_units_consumed);
+                ledger.settle_f(0);
+                ledger.settle_f(1);
                 for asset in 0..2 {
-                    ledger.lots[0][asset] -= 2;
-                    ledger.lots[1][asset] += 2;
+                    ledger.resize(0, asset, -2);
+                    ledger.resize(1, asset, 2);
                 }
                 checkpoint(&world, &mut ledger, direction);
                 assert_eq!(carry_transport_exit::profiles(&world), profile_before);

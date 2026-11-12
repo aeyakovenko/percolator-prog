@@ -234,19 +234,47 @@ fn v16_program_cold_admin_cannot_seize_impaired_backing_only_role() {
         env.svm.warp_to_slot(EXPIRY);
         env.push_auth_mark_for_asset_as_admin(0, EXPIRY, expiry_winning_mark);
         env.push_auth_mark_for_asset_as_admin(1, EXPIRY, adverse_mark);
-        for portfolio in [portfolios[0], portfolios[1]] {
-            for asset in [0, 1] {
-                if let Some(cu) = env.crank_if_actionable(
-                    portfolio,
-                    ProgInstruction::PermissionlessCrank {
-                        now_slot: EXPIRY,
-                        observations: crank_observations(asset),
-                    },
-                ) {
-                    peak[0] = peak[0].max(cu);
-                }
+        // The holder's first permissionless crank at expiry commits exactly the canonical
+        // expiry transition (Fresh -> Impaired) and returns before K/F settlement. Since engine
+        // #242 (fix for #230) any LATER K/F settlement of the lien holder reconciles its
+        // counterparty lien off the Impaired bucket (bucket -> Expired, then refillable as
+        // Fresh), so the holder cranks exactly once here to keep the impaired-only bucket this
+        // seizure probe needs. The counterparty's loss then lands on the still-Impaired bucket
+        // and (#216) is booked to the junior pool rather than refilling it.
+        let expiry_cu = env
+            .crank_if_actionable(
+                portfolios[0],
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: EXPIRY,
+                    observations: crank_observations(0),
+                },
+            )
+            .expect("holder crank commits the canonical expiry transition");
+        peak[0] = peak[0].max(expiry_cu);
+        for asset in [0, 1] {
+            if let Some(cu) = env.crank_if_actionable(
+                portfolios[1],
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: EXPIRY,
+                    observations: crank_observations(asset),
+                },
+            ) {
+                peak[0] = peak[0].max(cu);
             }
         }
+        assert!(
+            env.portfolio_state(portfolios[0])
+                .source_domains
+                .iter()
+                .any(|source| {
+                    source.is_occupied()
+                        && source.domain.get() == u32::from(domain)
+                        && source.source_claim_liened_num.get() > 0
+                        && source.source_lien_counterparty_backing_num.get() > 0
+                        && source.source_claim_impaired_num.get() == 0
+                }),
+            "unsettled holder still carries its unreconciled lien on the impaired bucket"
+        );
 
         let before = env.market_state();
         let bucket = before.1.source_backing_buckets[domain as usize];
@@ -371,6 +399,25 @@ fn v16_program_cold_admin_cannot_seize_impaired_backing_only_role() {
         expected_sequences.authority_epoch += 2;
         assert_eq!(env.control_sequences(0), expected_sequences);
 
+        let holder_lien = |state: &PortfolioAccountV16| {
+            *state
+                .source_domains
+                .iter()
+                .find(|source| source.is_occupied() && source.domain.get() == u32::from(domain))
+                .expect("holder keeps its source-domain slot")
+        };
+        let lien_before = holder_lien(&env.portfolio_state(portfolios[0]));
+        let lien_face = lien_before.source_claim_counterparty_liened_num.get();
+        let lien_backing = lien_before.source_lien_counterparty_backing_num.get();
+        assert!(lien_face > 0 && lien_backing > 0);
+        assert_eq!(
+            lien_backing,
+            before.1.source_credit[domain as usize].impaired_liened_backing_num
+        );
+        let (c_tot_before, insurance_before) = {
+            let state = env.market_state().1;
+            (state.c_tot, state.insurance)
+        };
         peak[2] = peak[2].max(env.trade_asset_with_cu(
             1,
             &owners[0],
@@ -381,11 +428,39 @@ fn v16_program_cold_admin_cannot_seize_impaired_backing_only_role() {
             adverse_mark,
             0,
         ));
+        // Since engine #242 the holder's K/F settlement in the strict reduction reconciles the
+        // impaired lien: the bucket/domain impaired encumbrance drops by exactly this holder's
+        // lien backing, and the identical claim face moves into the holder's own impaired-claim
+        // lane (still attributed, still burned before capital). No other value moves (zero fee).
         let reduced = env.market_state().1;
-        assert!(
-            reduced.source_credit[domain as usize].impaired_liened_backing_num > 0,
-            "strict risk reduction preserves still-attributed impaired backing"
+        let lien_after = holder_lien(&env.portfolio_state(portfolios[0]));
+        assert_eq!(
+            reduced.source_credit[domain as usize].impaired_liened_backing_num,
+            before.1.source_credit[domain as usize].impaired_liened_backing_num - lien_backing,
+            "strict risk reduction retires exactly the holder's impaired lien share"
         );
+        assert_eq!(
+            reduced.source_backing_buckets[domain as usize].impaired_liened_backing_num,
+            reduced.source_credit[domain as usize].impaired_liened_backing_num
+        );
+        assert_ne!(
+            reduced.source_backing_buckets[domain as usize].status,
+            BackingBucketStatusV16::Impaired,
+            "the last holder's reconcile ends the bucket's impairment"
+        );
+        assert_eq!(lien_after.source_claim_counterparty_liened_num.get(), 0);
+        assert_eq!(lien_after.source_lien_counterparty_backing_num.get(), 0);
+        assert_eq!(
+            lien_after.source_claim_impaired_num.get(),
+            lien_before.source_claim_impaired_num.get() + lien_face,
+            "the reconciled face stays attributed to the holder as an impaired claim"
+        );
+        assert_eq!(
+            lien_after.source_claim_liened_num.get(),
+            lien_before.source_claim_liened_num.get() - lien_face
+        );
+        assert_eq!(reduced.c_tot, c_tot_before);
+        assert_eq!(reduced.insurance, insurance_before);
     }
     eprintln!("INV-005 impaired backing containment: worlds=2, exact SPL-prefix rollbacks=2, incumbent consents=2, strict reductions=2, peak={peak:?}");
 }

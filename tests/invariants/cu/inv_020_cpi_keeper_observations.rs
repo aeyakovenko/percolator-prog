@@ -197,6 +197,9 @@ fn v16_program_cpi_active_keeper_observations_preserve_admission_and_payout() {
                 peak = peak.max(transact(&mut env, &[&owners[2]], &[stage], &tracked, None));
                 let before = frame(&env, &portfolios);
                 set_test_clock(&mut env, 64, 102);
+                // Stale-account refresh consumes an authenticated report in the current slot.
+                let report = env.set_pyth_price_with_conf(&feed, CURRENT[0] as i64, -6, 0, 102);
+                tracked.push(report);
                 let stage = observation(&env, target, &owners[2], Some(keeper), report, &full);
                 peak = peak.max(transact(&mut env, &[&owners[2]], &[stage], &tracked, None));
                 assert_eq!(frame(&env, &portfolios), before);

@@ -362,6 +362,8 @@ fn v16_program_paid_cpi_then_stale_crank_rolls_back_before_fresh_batch_reversal(
         );
 
         set_test_clock(&mut env, 6, 201);
+        // Stale-account refresh consumes an authenticated report in the current slot.
+        let fresh = env.set_pyth_price_with_conf(&feed, ENTRY[1] as i64, -6, 0, 201);
         max_crank_cu = max_crank_cu.max(refresh_all(&mut env, &owners[0], portfolios, fresh));
         assert_eq!(env.market_state().1.assets[0].effective_price, 980_000);
         // Reverse the pending EWMA target through a two-asset no-CPI batch. The
@@ -407,6 +409,7 @@ fn v16_program_paid_cpi_then_stale_crank_rolls_back_before_fresh_batch_reversal(
         assert_eq!(env.market_state().1.insurance, total_fee);
 
         set_test_clock(&mut env, 7, 202);
+        let fresh = env.set_pyth_price_with_conf(&feed, ENTRY[1] as i64, -6, 0, 202);
         max_crank_cu = max_crank_cu.max(refresh_all(&mut env, &owners[0], portfolios, fresh));
         let final_group = env.market_state().1;
         let actor_values = values(&env, portfolios);

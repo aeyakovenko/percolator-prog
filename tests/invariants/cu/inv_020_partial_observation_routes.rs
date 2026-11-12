@@ -20,6 +20,8 @@ struct ThreeLegSeed {
     report: Pubkey,
 }
 
+const FEED: [u8; 32] = [0xab; 32];
+
 fn three_leg_seed(order: &[u16], prices: [u64; 3]) -> ThreeLegSeed {
     let mut env = inv018_public_spl_market_with_params(
         0,
@@ -37,7 +39,7 @@ fn three_leg_seed(order: &[u16], prices: [u64; 3]) -> ThreeLegSeed {
         },
     );
     set_test_clock(&mut env, 0, 100);
-    let feed = [0xab; 32];
+    let feed = FEED;
     let initial = env.set_pyth_price_with_conf(&feed, PRICE as i64, -6, 0, 100);
     env.try_configure_hybrid_asset_with_conf_filter_cu(
         0,
@@ -106,6 +108,11 @@ fn three_leg_seed(order: &[u16], prices: [u64; 3]) -> ThreeLegSeed {
         initial,
         report,
     }
+}
+
+/// Stale-account refresh consumes an authenticated Hybrid report in the current slot.
+fn renewed_report(env: &mut V16CuEnv, price: u64, publish_time: i64) -> Pubkey {
+    env.set_pyth_price_with_conf(&FEED, price as i64, -6, 0, publish_time)
 }
 
 fn crank(env: &mut V16CuEnv, target: Pubkey, report: Pubkey, order: &[u16]) -> u64 {
@@ -358,6 +365,7 @@ fn v16_program_partial_observation_three_leg_reductions_match_single_and_batch()
                         assert_eq!(frame(&env, &portfolios[..2]), accounts[..2]);
                         census(&env, portfolios);
                     }
+                    let report = renewed_report(&mut env, PRICES[0], 103);
                     let custody_keys = [
                         env.vault,
                         env.mint,
@@ -499,6 +507,7 @@ fn v16_program_partial_sibling_observations_cannot_expand_single_or_batch_risk_c
             assert_eq!(loss.mark_ewma_e6, prices[2]);
             assert_eq!(loss.mark_ewma_last_slot, 0);
 
+            let report = renewed_report(&mut env, prices[0], 103);
             let keys = [
                 env.market,
                 portfolios[0],

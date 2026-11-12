@@ -9,7 +9,13 @@ const EARLY_ASSET: usize = 1;
 const LATER_ASSET: usize = SLOTS - 1;
 const CAPITAL: u64 = 101;
 const AMOUNTS: [u64; 3] = [17, 31, 43];
-const EXPIRIES: [u64; 3] = [400, 450, 425];
+const RESOLVED_SLOT: u64 = 300;
+// Engine #219 caps every resolved backing expiry at resolved_slot + horizon.
+// The horizon here is the bankrupt-close lifetime, so the sibling's far
+// provider-chosen expiry lapses at RESOLVED_SLOT + HORIZON = 450 while the
+// natural 400/425 expiries stay inside it.
+const HORIZON: u64 = 150;
+const EXPIRIES: [u64; 3] = [400, 10_000, 425];
 const BACKING: u64 = 91;
 const STEP_LIMIT: u64 = 300_000;
 
@@ -201,7 +207,12 @@ fn assert_stocks(
     for i in 0..3 {
         let bucket = group.source_backing_buckets[domains[i]];
         let source = group.source_credit[domains[i]];
-        assert_eq!(bucket.expiry_slot, EXPIRIES[i]);
+        let deadline = resolved_backing_deadline(&group);
+        assert_eq!(deadline, RESOLVED_SLOT + HORIZON);
+        // The stored expiry persists the cap only once a write-back touches the
+        // bucket; the effective (engine-read) expiry is always the capped one.
+        assert!([EXPIRIES[i], EXPIRIES[i].min(deadline)].contains(&bucket.expiry_slot));
+        assert_eq!(bucket.expiry_slot.min(deadline), EXPIRIES[i].min(deadline));
         let expected = if expired[i] {
             0
         } else {
@@ -266,8 +277,12 @@ fn v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings()
     assert_eq!(AMOUNTS.iter().sum::<u64>(), BACKING);
     for early_side in 0..2 {
         for late in [false, true] {
-            let mut env =
-                inv018_public_spl_market_with_capacity(6, V16CuMarketParams::default(), SLOTS);
+            let params = V16CuMarketParams {
+                max_bankrupt_close_lifetime_slots: HORIZON,
+                ..V16CuMarketParams::default()
+            };
+            assert!(params.h_max < HORIZON && params.max_accrual_dt_slots < HORIZON);
+            let mut env = inv018_public_spl_market_with_capacity(6, params, SLOTS);
             let admin = env.admin.insecure_clone();
             let owner = Keypair::new();
             env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
@@ -340,8 +355,9 @@ fn v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings()
                     EXPIRIES[i],
                 );
             }
-            env.svm.warp_to_slot(300);
+            env.svm.warp_to_slot(RESOLVED_SLOT);
             env.resolve();
+            assert_eq!(env.market_state().1.resolved_slot, RESOLVED_SLOT);
             let crank = instruction(
                 &env,
                 ProgInstruction::PermissionlessCrank {
@@ -395,7 +411,7 @@ fn v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings()
 
             // The first three calls pay real SPL capital, delete the account, and park at asset 1.
             // The fourth call is a same-Clock wait, so all three effects must roll back together.
-            for now_slot in [0, 300, u64::MAX] {
+            for now_slot in [0, RESOLVED_SLOT, u64::MAX] {
                 for assets in [&[][..], &[EARLY_ASSET as u16][..]] {
                     let mut retained = crank.clone();
                     retained.data = ProgInstruction::PermissionlessCrank {
@@ -422,7 +438,7 @@ fn v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings()
             assert_eq!(env.token_amount(user), CAPITAL);
             assert_eq!(
                 env.market_state().1.current_slot,
-                300,
+                RESOLVED_SLOT,
                 "caller time cannot expire backing early"
             );
             assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
@@ -455,7 +471,8 @@ fn v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings()
             assert_stocks(&env, domains, [true, false, false], user, provider);
             max_success =
                 max_success.max(scan_step(&mut env, &close, &admin, &tracked, EARLY_ASSET));
-            for slot in [425, 449] {
+            // The horizon-capped sibling is genuinely live through deadline - 1.
+            for slot in [EXPIRIES[2], RESOLVED_SLOT + HORIZON - 1] {
                 let market = env.svm.get_account(&env.market);
                 env.svm.warp_to_slot(slot);
                 assert_eq!(env.svm.get_account(&env.market), market);
@@ -470,13 +487,14 @@ fn v16_program_persisted_scan_reclassifies_time_without_skipping_live_siblings()
                 assert_eq!(rank(&env), (2, SLOTS - EARLY_ASSET));
                 assert_stocks(&env, domains, [true, false, false], user, provider);
             }
-            env.svm.warp_to_slot(450 + u64::from(late));
+            // Past resolved_slot + horizon the far-expiry sibling lapses normally.
+            env.svm.warp_to_slot(RESOLVED_SLOT + HORIZON + u64::from(late));
             max_success = max_success.max(scan_step(&mut env, &close, &admin, &tracked, 0));
             assert_stocks(&env, domains, [true, true, false], user, provider);
             max_success = max_success.max(scan_step(&mut env, &close, &admin, &tracked, 256));
             assert_stocks(&env, domains, [true, true, false], user, provider);
             let market = env.svm.get_account(&env.market);
-            env.svm.warp_to_slot(452 + u64::from(late));
+            env.svm.warp_to_slot(RESOLVED_SLOT + HORIZON + 2 + u64::from(late));
             assert_eq!(env.svm.get_account(&env.market), market);
             max_success = max_success.max(scan_step(&mut env, &close, &admin, &tracked, 0));
             assert_stocks(&env, domains, [true; 3], user, provider);

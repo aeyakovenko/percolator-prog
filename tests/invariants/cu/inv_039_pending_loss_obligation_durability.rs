@@ -464,6 +464,36 @@ impl AttributionWorld {
             &[],
         )
     }
+
+    /// Retry the junior top-up claim for an already-paid terminal actor.
+    ///
+    /// Engine #228 (prog#450): a forfeited leg's capital-covered K/F loss backs the payer's
+    /// source domain, so the receiver may be paid entirely from backing and no payout
+    /// snapshot is ever captured. Before a snapshot the claim is specified to reject with
+    /// `EngineLockActive`; after one it is an exactly-once no-op. Either way the frame is
+    /// restored exactly.
+    fn assert_terminal_claim_retry_is_inert(&mut self, actor: usize, context: &str) {
+        let before = self.frame();
+        let snapshot = self.env.market_state().1.payout_snapshot_captured;
+        match self.payout(actor, true) {
+            Ok(_) => assert!(snapshot, "{context}: pre-snapshot claim must not succeed"),
+            Err(error) => {
+                assert!(
+                    !snapshot,
+                    "{context}: post-snapshot retry must be a no-op: {error}"
+                );
+                assert!(
+                    error.contains("InstructionError(2, Custom(21))"),
+                    "{context}: pre-snapshot claim must hit EngineLockActive: {error}"
+                );
+            }
+        }
+        assert_eq!(
+            self.frame(),
+            before,
+            "{context}: no repeated terminal value extraction"
+        );
+    }
 }
 
 #[test]
@@ -670,9 +700,7 @@ fn v16_program_pending_obligations_release_only_the_settled_domain_across_payout
                         &world.env,
                         world.actors[i].portfolio
                     ));
-                    let before = world.frame();
-                    world.payout(i, true).expect("finalized receipt retry");
-                    assert_eq!(world.frame(), before, "settled claim retry is exactly once");
+                    world.assert_terminal_claim_retry_is_inert(i, "finalized receipt retry");
                 }
                 assert_eq!(world.env.market_state().1.vault, 0);
                 for actor in order {

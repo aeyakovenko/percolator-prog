@@ -989,14 +989,23 @@ market reclaim (`CloseSlab`) requires a live market authority.
 # before treating this artifact as deployable.
 cargo build-sbf --tools-version v1.52
 
-# Legacy local compatibility build without the Anchor v2 entrypoint.
-cargo build-sbf --no-default-features
+# Legacy local compatibility build without the Anchor v2 entrypoint. Written to its
+# own directory so it does not replace the .so the tests load.
+cargo build-sbf --no-default-features --sbf-out-dir target/deploy-legacy
 
-# All tests (integration, unit, alignment; LiteSVM loads target/deploy/percolator_prog.so)
+# Matcher programs the tests load. Build once (and after changing them); without
+# these, hundreds of tests fail with missing-.so panics. The external matcher is
+# the sibling repo https://github.com/aeyakovenko/percolator-match cloned next to
+# this one (../percolator-match).
+(cd tests/fixtures/auth_matcher && cargo build-sbf --tools-version v1.52)
+(cd tests/fixtures/hostile_matcher && cargo build-sbf --tools-version v1.52)
+(cd ../percolator-match && cargo build-sbf --tools-version v1.52)
+
+# All tests (integration, unit, alignment; LiteSVM loads target/deploy/percolator_prog.so,
+# so rebuild it with the first command above after any src/ change)
 cargo test --all-targets
 
 # Blocker corpus and stateful public-interface fuzz gate.
-(cd tests/fixtures/auth_matcher && cargo build-sbf --tools-version v1.52)
 cargo test --test v16_program_fuzz_regressions -- --nocapture
 cargo test --test v16_program_stateful_fuzz -- --nocapture
 

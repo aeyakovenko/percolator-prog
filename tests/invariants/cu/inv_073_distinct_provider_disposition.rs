@@ -498,7 +498,11 @@ fn verify_provider_histories(expired_asset: Option<usize>, shared_provider: bool
                     assert_eq!(bucket.impaired_liened_backing_num, 0);
                 }
                 let expired = normalized && expired_asset == Some(asset);
-                assert_eq!(bucket.expiry_slot, expiries[asset]);
+                // Resolution caps a provider-chosen far expiry at the bounded
+                // post-resolution horizon (#219); the earlier expiry is kept.
+                let deadline = resolved_backing_deadline(&group);
+                assert!(expiries[0].min(expiries[1]) < deadline);
+                assert_eq!(bucket.expiry_slot, expiries[asset].min(deadline));
                 assert_eq!(
                     bucket.status,
                     if expired || principal_paid[asset] == BACKING {
