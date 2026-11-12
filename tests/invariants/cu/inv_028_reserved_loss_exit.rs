@@ -1,16 +1,17 @@
 //! Row 423: admission preserves historical backing for later loss settlement and exit.
 //! Provider surplus leaves before the loss; no refill or senior owner capital funds exit.
-//! Live loss consumption leaves residual custody, realized by signed Resolved exits.
-//! Junior-first payout retains a partial receipt until historical source realization
-//! raises its rate; a keeper-only top-up must survive a rejected withdrawal suffix.
-//! Recovery also carries obsolete historical liens into the partial-receipt interval.
+//! Live loss consumption moves the consumed claim backing to the peer's loss domain
+//! (engine #226, prog#457), so both owners hold source claims backed at par and are paid
+//! in full by their own signed Resolved exits in either order: no junior receipt or
+//! payout snapshot is created, and a keeper-only claim has nothing to pay. A rejected
+//! withdrawal suffix must still restore the peer's successful payout exactly.
+//! Recovery also carries obsolete historical liens across the peer's full payout.
 
 use super::*;
 
 const EXIT_UNITS: i128 = 25;
 const LOSS: u128 = EXIT_UNITS as u128 * 10;
 const REMAINING_CLAIM: u128 = 3_000 - LOSS;
-const EARLY_JUNIOR_PAYOUT: u128 = LOSS * LOSS / (REMAINING_CLAIM + LOSS);
 
 fn assert_loss_resources(s: &ReservedExit, loss: u128) {
     let group = s.h.env.market_state().1;
@@ -61,19 +62,24 @@ fn assert_loss_resources(s: &ReservedExit, loss: u128) {
         group.source_credit[new_domain].exact_positive_claim_num,
         loss * BOUND_SCALE
     );
+    // Engine #226 (prog#457): the backing behind the claim face a cross-domain loss consumes
+    // moves to the loss domain, so the peer's new claim is backed at par by the historical
+    // backing the loss burned. Nothing is left as unattributed residual custody.
     assert_eq!(
-        group.source_backing_buckets[new_domain].fresh_unliened_backing_num, 0,
-        "claim-funded loss is residual custody, not a new principal-backed source deposit"
+        group.source_credit[new_domain].fresh_reserved_backing_num,
+        loss * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_backing_buckets[new_domain].fresh_unliened_backing_num,
+        loss * BOUND_SCALE,
+        "claim-funded loss moves its consumed backing to the receiver's domain"
     );
     let backing = group
         .source_backing_buckets
         .iter()
         .map(|bucket| bucket.fresh_unliened_backing_num + bucket.valid_liened_backing_num)
         .sum::<u128>();
-    assert_eq!(
-        (group.vault - group.c_tot) * BOUND_SCALE - backing,
-        loss * BOUND_SCALE
-    );
+    assert_eq!((group.vault - group.c_tot) * BOUND_SCALE, backing);
     assert_eq!(accounts[0].capital.get(), 0);
     assert_eq!(accounts[0].pnl.get(), (3_000 - loss) as i128);
     assert_eq!(accounts[1].capital.get(), CAPITAL - 3_000);
@@ -107,8 +113,8 @@ fn run_reserved_loss_exit(recovery: bool) {
     let mut max_cu = 0;
     let mut max_packet = 0;
     let mut max_cleanup = 0;
-    let mut partial_receipts = 0;
-    let mut keeper_topups = 0;
+    let mut peer_first_payouts = 0;
+    let mut inert_keeper_claims = 0;
     let mut force_calls = 0;
     let mut max_force_cu = 0;
     let cases: &[(bool, bool)] = if recovery {
@@ -399,21 +405,17 @@ fn run_reserved_loss_exit(recovery: bool) {
             )
         };
         let payout_order = if junior_first { [1, 0] } else { [0, 1] };
-        let economic_frame = |s: &ReservedExit| {
-            [
-                s.h.env.market,
-                s.h.env.vault,
-                s.h.env.mint,
-                s.h.portfolios[0],
-                s.h.portfolios[1],
-                s.h.tokens[0],
-                s.h.tokens[1],
-                s.provider,
-            ]
-            .map(|key| s.h.env.svm.get_account(&key))
-        };
         for actor in payout_order {
             let close_resolved = payout(&s, actor, false);
+            if junior_first && actor == 1 {
+                // Resolved ordinary withdrawal is forbidden even for the correct owner. Its
+                // rejection must restore the preceding successful SPL payout to the peer.
+                s.submit(
+                    &[close_resolved.clone(), s.withdraw(0, 1)],
+                    &[1, 0],
+                    Some((3, PercolatorError::EngineLockActive)),
+                );
+            }
             let rank = |s: &ReservedExit| {
                 let account = s.h.env.portfolio_state(s.h.portfolios[actor]);
                 (
@@ -472,47 +474,32 @@ fn run_reserved_loss_exit(recovery: bool) {
                 assert!(u128::from(s.h.env.token_amount(s.h.tokens[actor])) <= ceiling);
             }
             assert_eq!(rank(&s), (0, 0, 0));
-            let receipt = resolved_receipt(&s.h.env.portfolio_state(s.h.portfolios[actor]));
-            if actor == 0 {
-                assert_eq!(receipt, ResolvedPayoutReceiptV16::EMPTY);
-                assert_eq!(
-                    s.h.env.token_amount(s.h.tokens[0]) as u128,
+            // Engine #226 (prog#457): the loss moved its consumed backing to the peer's domain,
+            // so both owners hold source claims backed at par. Each is paid in full by its own
+            // signed closes, in either order, with no junior receipt and no payout snapshot.
+            assert_eq!(
+                resolved_receipt(&s.h.env.portfolio_state(s.h.portfolios[actor])),
+                ResolvedPayoutReceiptV16::EMPTY
+            );
+            assert_eq!(
+                s.h.env.token_amount(s.h.tokens[actor]) as u128,
+                if actor == 0 {
                     CAPITAL + REMAINING_CLAIM
-                );
-            } else {
-                let paid = if junior_first {
-                    EARLY_JUNIOR_PAYOUT
                 } else {
-                    LOSS
-                };
-                assert_eq!(
-                    receipt,
-                    ResolvedPayoutReceiptV16 {
-                        present: true,
-                        prior_bound_contribution_num: LOSS * BOUND_SCALE,
-                        live_released_face_at_receipt: 0,
-                        terminal_positive_claim_face: LOSS,
-                        paid_effective: paid,
-                        finalized: !junior_first,
-                    }
-                );
-                assert_eq!(
-                    s.h.env.token_amount(s.h.tokens[1]) as u128,
-                    CAPITAL - 3_000 + paid
-                );
-                let ledger = s.h.env.market_state().1.resolved_payout_ledger;
-                let outstanding = if junior_first { REMAINING_CLAIM } else { 0 };
-                assert_eq!(ledger.snapshot_residual, LOSS);
-                assert_eq!(ledger.terminal_claim_exact_receipts_num, LOSS * BOUND_SCALE);
-                assert_eq!(
-                    ledger.terminal_claim_bound_unreceipted_num,
-                    outstanding * BOUND_SCALE
-                );
-                assert_eq!(ledger.current_payout_rate_num, LOSS * BOUND_SCALE);
-                assert_eq!(
-                    ledger.current_payout_rate_den,
-                    (LOSS + outstanding) * BOUND_SCALE
-                );
+                    CAPITAL - REMAINING_CLAIM
+                }
+            );
+            let group = s.h.env.market_state().1;
+            assert!(!group.payout_snapshot_captured);
+            assert_eq!(
+                group.resolved_payout_ledger,
+                ResolvedPayoutLedgerV16::default()
+            );
+            assert!(resolved_portfolio_is_terminal(
+                &s.h.env,
+                s.h.portfolios[actor]
+            ));
+            if actor == 1 {
                 if junior_first {
                     if recovery {
                         let account = s.h.env.portfolio_state(s.h.portfolios[0]);
@@ -521,86 +508,26 @@ fn run_reserved_loss_exit(recovery: bool) {
                             .iter()
                             .filter(|source| source.source_lien_counterparty_backing_num.get() > 0)
                             .count();
-                        assert!(liens > 1, "partial receipt coexists with historical liens");
+                        assert!(liens > 1, "the peer's full payout coexists with historical liens");
                         assert!(s.provider_remaining.iter().sum::<u128>() > 0);
-                        println!("Recovery receipt overlap: split={split}, liens={liens}, lien_num={}, paid={paid}", s.lien());
+                        println!("Recovery payout overlap: split={split}, liens={liens}, lien_num={}, paid={LOSS}", s.lien());
                     }
-                    assert!(!resolved_portfolio_is_terminal(&s.h.env, s.h.portfolios[1]));
-                    let frame = economic_frame(&s);
-                    s.submit(&[payout(&s, 1, true)], &[], None);
-                    assert_eq!(
-                        economic_frame(&s),
-                        frame,
-                        "early top-up preserves the pending receipt"
-                    );
-                    partial_receipts += 1;
+                    peer_first_payouts += 1;
                 }
+                // With no snapshot there is nothing for a keeper-only claim to pay: it rejects
+                // without mutation, so the peer's payout cannot be repeated.
+                let claim = payout(&s, 1, true);
+                assert!(claim.accounts.iter().all(|meta| !meta.is_signer));
+                s.submit(&[claim], &[], Some((2, PercolatorError::EngineLockActive)));
+                inert_keeper_claims += 1;
             }
         }
         assert_eq!(s.lien(), 0);
-        let ledger = s.h.env.market_state().1.resolved_payout_ledger;
-        assert_eq!(ledger.snapshot_residual, LOSS);
-        assert_eq!(ledger.terminal_claim_bound_unreceipted_num, 0);
-        assert_eq!(ledger.current_payout_rate_num, LOSS * BOUND_SCALE);
-        assert_eq!(ledger.current_payout_rate_den, LOSS * BOUND_SCALE);
+        assert_eq!(
+            s.h.env.market_state().1.resolved_payout_ledger,
+            ResolvedPayoutLedgerV16::default()
+        );
         for actor in payout_order {
-            if !resolved_portfolio_is_terminal(&s.h.env, s.h.portfolios[actor]) {
-                assert!(junior_first && actor == 1);
-                let before = resolved_receipt(&s.h.env.portfolio_state(s.h.portfolios[actor]));
-                assert_eq!(before.paid_effective, EARLY_JUNIOR_PAYOUT);
-                let topup = payout(&s, actor, true);
-                assert!(topup.accounts.iter().all(|meta| !meta.is_signer));
-                // Resolved ordinary withdrawal is forbidden even for the correct owner.
-                // Its rejection must restore the preceding successful SPL receipt payout.
-                s.submit(
-                    &[topup.clone(), s.withdraw(0, 1)],
-                    &[0],
-                    Some((3, PercolatorError::EngineLockActive)),
-                );
-                assert_eq!(
-                    resolved_receipt(&s.h.env.portfolio_state(s.h.portfolios[actor])),
-                    before
-                );
-                let frame = [s.h.portfolios[0], s.h.tokens[0], s.provider]
-                    .map(|key| s.h.env.svm.get_account(&key));
-                let vault = s.h.env.token_amount(s.h.env.vault);
-                let wallet = s.h.env.token_amount(s.h.tokens[actor]);
-                s.submit(&[topup.clone()], &[], None);
-                terminal_calls += 1;
-                keeper_topups += 1;
-                let receipt = resolved_receipt(&s.h.env.portfolio_state(s.h.portfolios[actor]));
-                assert_eq!(
-                    receipt,
-                    ResolvedPayoutReceiptV16 {
-                        paid_effective: LOSS,
-                        finalized: true,
-                        ..before
-                    }
-                );
-                assert_eq!(
-                    vault - s.h.env.token_amount(s.h.env.vault),
-                    (LOSS - EARLY_JUNIOR_PAYOUT) as u64
-                );
-                assert_eq!(
-                    s.h.env.token_amount(s.h.tokens[actor]) - wallet,
-                    (LOSS - EARLY_JUNIOR_PAYOUT) as u64
-                );
-                assert_eq!(
-                    [s.h.portfolios[0], s.h.tokens[0], s.provider].map(|key| s
-                        .h
-                        .env
-                        .svm
-                        .get_account(&key)),
-                    frame
-                );
-                let frame = economic_frame(&s);
-                s.submit(&[topup], &[], None);
-                assert_eq!(
-                    economic_frame(&s),
-                    frame,
-                    "repeated top-up cannot pay twice"
-                );
-            }
             assert!(resolved_portfolio_is_terminal(
                 &s.h.env,
                 s.h.portfolios[actor]
@@ -659,9 +586,14 @@ fn run_reserved_loss_exit(recovery: bool) {
             );
             assert_eq!(source.spent_backing_num, source.provider_receivable_num);
             assert_eq!(source.spent_backing_num, bucket.consumed_liened_backing_num);
+            // The loss domain realizes exactly the backing the loss moved into it.
             assert_eq!(
                 source.spent_backing_num,
-                s.h.claims[domain] * BOUND_SCALE,
+                if domain == 2 * LIVE {
+                    LOSS
+                } else {
+                    s.h.claims[domain]
+                } * BOUND_SCALE,
                 "historical face is spent exactly once across loss and final realization"
             );
         }
@@ -670,8 +602,10 @@ fn run_reserved_loss_exit(recovery: bool) {
         max_cu = max_cu.max(s.max_cu);
         max_packet = max_packet.max(s.max_packet);
     }
-    assert_eq!(rollbacks, if recovery { 6 } else { 10 });
-    assert_eq!((partial_receipts, keeper_topups), (2, 2));
+    // Per world: the oversized admission and its retry reject, and the keeper claim is inert;
+    // each peer-first world also rolls back the payout-then-withdraw suffix.
+    assert_eq!(rollbacks, if recovery { 8 } else { 14 });
+    assert_eq!((peer_first_payouts, inert_keeper_claims), (2, cases.len()));
     assert_eq!(force_calls, if recovery { 3 } else { 0 });
-    println!("INV-028 reserved loss exit: recovery={recovery}, worlds={}, partial_receipts={partial_receipts}, keeper_topups={keeper_topups}, force_calls={force_calls}, max_force_cu={max_force_cu}, suffix_calls={calls}, exact_rollbacks={rollbacks}, settlement_calls={settlement_calls}, terminal_calls={terminal_calls}, max_cu={max_cu}, headroom={}, max_packet={max_packet}, max_cleanup={max_cleanup}", cases.len(), CU_LIMIT - max_cu);
+    println!("INV-028 reserved loss exit: recovery={recovery}, worlds={}, peer_first_payouts={peer_first_payouts}, inert_keeper_claims={inert_keeper_claims}, force_calls={force_calls}, max_force_cu={max_force_cu}, suffix_calls={calls}, exact_rollbacks={rollbacks}, settlement_calls={settlement_calls}, terminal_calls={terminal_calls}, max_cu={max_cu}, headroom={}, max_packet={max_packet}, max_cleanup={max_cleanup}", cases.len(), CU_LIMIT - max_cu);
 }

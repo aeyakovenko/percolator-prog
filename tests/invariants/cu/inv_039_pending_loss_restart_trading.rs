@@ -392,9 +392,7 @@ fn v16_program_peer_restart_preserves_pending_debt_through_fresh_trade_and_resol
                         &world.env,
                         world.actors[actor].portfolio
                     ));
-                    let before = world.frame();
-                    world.payout(actor, true).expect("settled topup retry");
-                    assert_eq!(world.frame(), before);
+                    world.assert_terminal_claim_retry_is_inert(actor, "settled topup retry");
                 }
                 for actor in order {
                     let a = &world.actors[actor];

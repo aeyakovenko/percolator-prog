@@ -414,14 +414,9 @@ fn v16_program_pending_debt_survives_sibling_restart_and_delayed_resolution() {
                 }
                 assert_eq!(world.env.market_state().1.vault, 0);
                 for actor in order {
-                    let paid = world.frame();
-                    world
-                        .payout(actor, true)
-                        .expect("settled receipt retry after all initial payouts");
-                    assert_eq!(
-                        world.frame(),
-                        paid,
-                        "payout is exactly once across generation changes"
+                    world.assert_terminal_claim_retry_is_inert(
+                        actor,
+                        "settled receipt retry after all initial payouts",
                     );
                 }
                 for actor in order {
