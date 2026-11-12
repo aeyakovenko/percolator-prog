@@ -812,6 +812,32 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
         percolator::SOCIAL_LOSS_DEN - 121_035
     );
     let before_owner_reduction = env.market_state().1;
+    // l1 still owes its share of s1's bankruptcy as an outstanding B loss. The short-side source
+    // domain holds only loser-paid fresh backing at par, more than enough to cover that loss.
+    let short_source = usize::from(ASSET) * 2 + 1;
+    let l1_outstanding_loss = u128::try_from(-env.portfolio_state(l1).pnl.get())
+        .expect("l1 must carry a B loss into its owner exit");
+    assert!(l1_outstanding_loss > 0);
+    let cured_num = l1_outstanding_loss * BOUND_SCALE;
+    let source_before_cure = before_owner_reduction.source_credit[short_source];
+    let bucket_before_cure = before_owner_reduction.source_backing_buckets[short_source];
+    assert_eq!(
+        (
+            source_before_cure.spent_backing_num,
+            source_before_cure.provider_receivable_num
+        ),
+        (0, 0)
+    );
+    assert_eq!(
+        source_before_cure.credit_rate_num,
+        percolator::CREDIT_RATE_SCALE
+    );
+    assert_eq!(
+        bucket_before_cure.status,
+        percolator::BackingBucketStatusV16::Fresh
+    );
+    assert!(bucket_before_cure.expiry_slot > before_owner_reduction.current_slot);
+    assert!(bucket_before_cure.fresh_unliened_backing_num >= cured_num);
     let l1_leg_before = active_leg_for_asset(&env.portfolio_state(l1), ASSET as usize);
     let l1_effective_before =
         reference_current_epoch_effective_abs(&before_owner_reduction, l1_leg_before);
@@ -837,6 +863,27 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
         carry_state.assets[ASSET as usize].social_loss_dust_long_num,
         percolator::SOCIAL_LOSS_DEN - 121_035
     );
+    // Engine #172: the backed gain l1 realizes on exit cures that outstanding loss instead of
+    // being burned. The cure consumes fresh counterparty backing atom for atom and records the
+    // matching provider receivable; only the remainder of the gain becomes a claim.
+    let cured_source = carry_state.source_credit[short_source];
+    assert_eq!(
+        (
+            cured_source.spent_backing_num,
+            cured_source.provider_receivable_num
+        ),
+        (cured_num, cured_num)
+    );
+    assert_eq!(
+        carry_state.source_backing_buckets[short_source].fresh_unliened_backing_num,
+        bucket_before_cure.fresh_unliened_backing_num - cured_num
+    );
+    assert_eq!(
+        carry_state.source_backing_buckets[short_source].consumed_liened_backing_num,
+        cured_num
+    );
+    assert!(env.portfolio_state(l1).pnl.get() > 0);
+    assert_eq!(carry_state.negative_pnl_account_count, 0);
 
     env.svm.warp_to_slot(6);
     env.push_auth_mark_for_asset_as_admin(ASSET, 6, 7);
@@ -852,6 +899,11 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
         ASSET as usize
     ));
     assert!(health_cert(&env.portfolio_state(s2)).certified_liq_deficit != 0);
+    // s2's realized loss lands as fresh loser-paid backing, which first refills the receivable
+    // the cure left behind. Spent backing is a cumulative audit counter, so it keeps the cure.
+    let repaid_source = env.market_state().1.source_credit[short_source];
+    assert_eq!(repaid_source.provider_receivable_num, 0);
+    assert_eq!(repaid_source.spent_backing_num, cured_num);
 
     let mut successful_steps = 0usize;
     for slot in 6..=8u64 {
@@ -1107,7 +1159,13 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
     assert_eq!(source.positive_claim_bound_num, 0);
     assert_eq!(source.exact_positive_claim_num, 0);
     assert!(source.provider_receivable_num > 0);
-    assert_eq!(source.provider_receivable_num, source.spent_backing_num);
+    // The terminal conversions drew the outstanding receivable from the refilled bucket, so
+    // only the cure that s2's loss already repaid (#172) separates the cumulative spent audit
+    // from it.
+    assert_eq!(
+        source.spent_backing_num,
+        source.provider_receivable_num + cured_num
+    );
     assert_eq!(source.provider_receivable_num % BOUND_SCALE, 0);
     let refill_atoms = source.provider_receivable_num / BOUND_SCALE;
     let refill_expiry =
