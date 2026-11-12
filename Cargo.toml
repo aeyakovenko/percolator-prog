@@ -18,7 +18,8 @@ required-features = ["kani"]
 # v16 deploys through the Anchor v2 / Pinocchio entrypoint by default. The
 # Solana 1.18 bundled SBF toolchain cannot parse the current Anchor v2
 # dependency graph; use platform-tools v1.52 or newer for deployable builds.
-# `--no-default-features` remains available for legacy local compatibility.
+# `--no-default-features` builds but is unsupported: more compute and heap access
+# violations on some paths (#459).
 default = ["anchor-v2"]
 no-entrypoint = []
 test-sbf = []
