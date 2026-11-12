@@ -12281,8 +12281,42 @@ fn run_forfeit_accrual_ordering_world(
     if env.primary_market_state().1.assets[0].mode_short != SideModeV16::DrainOnly {
         return Err("public reduction did not enter short-side DrainOnly".into());
     }
-    env.forfeit_recovery_leg(0, 0, u128::from(u64::MAX))
-        .map_err(|error| format!("forfeit accrual-boundary recovery leg: {error}"))?;
+    // Engine #205: the DrainOnly leg still carries effective OI, so its forfeit is refused on a
+    // Live asset (it would leave the book one-sided). It must reject without mutation in both
+    // orders; the leg then leaves through an ordinary unilateral reduction.
+    let before_forfeit = accrual_ordering_snapshot(&env);
+    match env.forfeit_recovery_leg(0, 0, u128::from(u64::MAX)) {
+        Err(error)
+            if error.contains("Custom(21)") || error.contains("custom program error: 0x15") => {}
+        other => {
+            return Err(format!(
+                "forfeit of a DrainOnly leg with live OI was not refused: {other:?}"
+            ))
+        }
+    }
+    if accrual_ordering_snapshot(&env) != before_forfeit {
+        return Err("refused accrual-boundary forfeit mutated public state".into());
+    }
+    let drained_a_short = env.primary_market_state().1.assets[0].a_short;
+    let recovery_leg = env
+        .primary_portfolio(0)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == 0)
+        .ok_or("accrual-boundary recovery leg vanished before its exit")?;
+    let effective_q = super::reference_math::mul_div_ceil(
+        recovery_leg.basis_pos_q.unsigned_abs(),
+        drained_a_short,
+        recovery_leg.a_basis,
+    )?;
+    if effective_q == 0 || effective_q >= Q_ATTACKER.unsigned_abs() {
+        return Err(format!(
+            "recovery leg must keep a partially drained effective size: {effective_q}"
+        ));
+    }
+    env.rebalance_reduce(0, 0, effective_q)
+        .map_err(|error| format!("exit accrual-boundary recovery leg: {error}"))?;
     settle_zero_move_actors(&mut env, settlement_slot, &[3])?;
     let (paid, received) = funding_totals(&env, 0, 3);
     finish_accrual_ordering_world(

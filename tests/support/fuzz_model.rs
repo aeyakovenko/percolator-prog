@@ -34523,8 +34523,43 @@ fn run_forfeit_funding_order_world(
             after_reduce.assets[0].mode_short
         ));
     }
-    env.forfeit_recovery_leg(0, 0, u128::from(u64::MAX))
-        .map_err(|error| format!("PR 273 forfeit attacker recovery leg: {error}"))?;
+    // Engine #205: a DrainOnly leg that still carries effective OI is no longer forfeitable on
+    // a Live asset, since detaching it would leave the book one-sided. The forfeit therefore
+    // cannot be used to drop a leg ahead of its elapsed funding in either order: it must reject
+    // without mutation, and the leg leaves through an ordinary unilateral reduction.
+    let before_forfeit = (env.market_data(false), env.primary_portfolio_data(0));
+    match env.forfeit_recovery_leg(0, 0, u128::from(u64::MAX)) {
+        Err(error)
+            if error.contains("Custom(21)") || error.contains("custom program error: 0x15") => {}
+        other => {
+            return Err(format!(
+                "PR 273 forfeit of a DrainOnly leg with live OI was not refused: {other:?}"
+            ))
+        }
+    }
+    if (env.market_data(false), env.primary_portfolio_data(0)) != before_forfeit {
+        return Err("PR 273 refused forfeit mutated the market or the attacker".into());
+    }
+    let (_, drained) = env.primary_market_state();
+    let attacker_leg = env
+        .primary_portfolio(0)
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == 0)
+        .ok_or("PR 273 attacker lost its DrainOnly leg before the exit")?;
+    let effective_q = super::reference_math::mul_div_ceil(
+        attacker_leg.basis_pos_q.unsigned_abs(),
+        drained.assets[0].a_short,
+        attacker_leg.a_basis,
+    )?;
+    if effective_q == 0 || effective_q >= Q_ATTACKER as u128 {
+        return Err(format!(
+            "PR 273 attacker leg must keep a partially drained effective size: {effective_q}"
+        ));
+    }
+    env.rebalance_reduce(0, 0, effective_q)
+        .map_err(|error| format!("PR 273 attacker ordinary exit: {error}"))?;
     env.crank_if_actionable(3, 3, zero_move_observation(&env))
         .map_err(|error| format!("PR 273 settle independent LP: {error}"))?;
 
