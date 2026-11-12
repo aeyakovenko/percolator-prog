@@ -865,7 +865,7 @@ fn v16_program_policy_arithmetic_matches_independent_full_width_corpus() {
             "fee share diverged at corpus word {index}"
         );
 
-        let asset_index = (inv_085_boundary_u64(&mut state, index + 15) % 5_783) as usize;
+        let asset_index = (inv_085_boundary_u64(&mut state, index + 15) % 5_683) as usize;
         assert_eq!(
             percolator_prog::policy_v16::permissionless_market_init_fee_for_asset(
                 amount,
@@ -1115,7 +1115,7 @@ fn v16_program_market_init_fee_matches_repeated_doubling_at_supported_and_overfl
         (u128::MAX, 32),
         (1, 4_095),
         (1, 4_096),
-        (1, 5_782),
+        (1, 5_682),
         (1, usize::MAX),
     ];
     for (base_fee, asset_index) in cases {

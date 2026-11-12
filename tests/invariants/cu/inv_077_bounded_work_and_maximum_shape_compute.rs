@@ -35,7 +35,7 @@
 //! eight source domains before crossing all 42 authenticated feed references. Both a 13+1 split and
 //! the all-at-once schedule remain bounded; repeated complete-tail calls consume prior source work,
 //! reach a strict liquidation at no more than 1.201M CU, and then restore current health.
-//! Finally, a fully public maximum-market construction appends all 5,782 configured assets after
+//! Finally, a fully public maximum-market construction appends all 5,682 configured assets after
 //! both funded portfolios already hold fourteen legs and twenty-eight source records. Thirty
 //! bounded automatic cranks refresh both accounts, unilateral reduction lands below 1.179M CU,
 //! and ResetPending cleanup plus every remaining owner exit completes without state injection.

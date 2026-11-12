@@ -759,12 +759,19 @@ struct FundingCadenceOutcome {
 }
 
 fn run_funding_cadence(crank_slots: &[u64], target_price: u64) -> FundingCadenceOutcome {
-    const INITIAL_PRICE: u64 = 1_000_000;
+    run_funding_cadence_at(1_000_000, crank_slots, target_price)
+}
+
+fn run_funding_cadence_at(
+    initial_price: u64,
+    crank_slots: &[u64],
+    target_price: u64,
+) -> FundingCadenceOutcome {
     const DEPOSIT: u128 = 2_000_000_000;
     const SIZE_Q: i128 = (1_000u128 * POS_SCALE) as i128;
 
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
-        initial_price: INITIAL_PRICE,
+        initial_price,
         max_price_move_bps_per_slot: 100,
         max_accrual_dt_slots: 10,
         max_abs_funding_e9_per_slot: 10_000,
@@ -772,7 +779,7 @@ fn run_funding_cadence(crank_slots: &[u64], target_price: u64) -> FundingCadence
         ..V16CuMarketParams::default()
     });
     env.svm.warp_to_slot(0);
-    env.configure_auth_mark_with_cu(0, INITIAL_PRICE);
+    env.configure_auth_mark_with_cu(0, initial_price);
 
     let long_owner = Keypair::new();
     let long = env.create_portfolio(&long_owner);
@@ -786,7 +793,7 @@ fn run_funding_cadence(crank_slots: &[u64], target_price: u64) -> FundingCadence
         &short_owner,
         short,
         SIZE_Q,
-        INITIAL_PRICE,
+        initial_price,
         0,
     );
 
@@ -812,10 +819,10 @@ fn run_funding_cadence(crank_slots: &[u64], target_price: u64) -> FundingCadence
     );
     assert_eq!(
         env.market_state().1.assets[0].effective_price,
-        if target_price > INITIAL_PRICE {
-            1_010_000
+        if target_price > initial_price {
+            initial_price + initial_price / 100
         } else {
-            990_000
+            initial_price - initial_price / 100
         }
     );
 
@@ -941,6 +948,29 @@ fn v16_program_upward_funding_is_crank_partition_invariant() {
     assert_eq!(fragmented.f_short_num, -fragmented.f_long_num);
 }
 
+// Low-price regression for prog#458 (engine PR #227): at 3% of the standard test price the
+// raw funding numerator rate * dt * price is below FUNDING_DEN, so the old floor-then-scale
+// accrual dropped the funding entirely. The exact A-scaled per-side floor keeps low-price
+// funding nonzero and independent of how the cranks partition the window.
+#[test]
+fn v16_program_low_price_upward_funding_is_crank_partition_invariant() {
+    let fragmented = run_funding_cadence_at(30_000, &[2, 3, 4, 5, 6, 7, 8, 9, 10], 33_000);
+    let irregular = run_funding_cadence_at(30_000, &[3, 6, 7, 10], 33_000);
+    let delayed = run_funding_cadence_at(30_000, &[10], 33_000);
+
+    assert_eq!(fragmented, irregular);
+    assert_eq!(fragmented, delayed);
+    assert_eq!(fragmented.final_mark, 33_000);
+    assert_eq!(fragmented.effective_price, 33_000);
+    assert_eq!(fragmented.terminal_vault, 0);
+    assert_eq!(fragmented.terminal_c_tot, 0);
+    assert_ne!(
+        fragmented.f_long_num, 0,
+        "low price must still accrue funding"
+    );
+    assert_eq!(fragmented.f_short_num, -fragmented.f_long_num);
+}
+
 #[test]
 fn v16_program_downward_funding_is_crank_partition_invariant() {
     let fragmented = run_funding_cadence(&[2, 3, 4, 5, 6, 7, 8, 9, 10], 910_000);
@@ -954,6 +984,31 @@ fn v16_program_downward_funding_is_crank_partition_invariant() {
     assert_eq!(fragmented.effective_price, 910_000);
     assert!(fragmented.f_long_num > 0);
     assert_eq!(fragmented.f_short_num, -fragmented.f_long_num);
+}
+
+// The negative-rate branch of prog#458: every accrued slot used to floor the per-unit funding
+// down a whole price unit, charging the shorts several times the configured cap at this price.
+#[test]
+fn v16_program_low_price_downward_funding_respects_the_cap_at_every_cadence() {
+    let fragmented = run_funding_cadence_at(30_000, &[2, 3, 4, 5, 6, 7, 8, 9, 10], 27_300);
+    let irregular = run_funding_cadence_at(30_000, &[4, 5, 8, 10], 27_300);
+    let delayed = run_funding_cadence_at(30_000, &[10], 27_300);
+
+    assert_eq!(fragmented, irregular);
+    assert_eq!(fragmented, delayed);
+    assert_eq!(fragmented.final_mark, 27_300);
+    assert_eq!(fragmented.effective_price, 27_300);
+    assert!(fragmented.f_long_num > 0);
+    assert_eq!(fragmented.f_short_num, -fragmented.f_long_num);
+    // The 10_000 e9 per-slot cap bounds the per-unit transfer by rate * price each slot. Ten
+    // slots at the initial price is a loose ceiling on the whole window; the old floor moved a
+    // full price unit (ADL_ONE) per funded slot, 7 * ADL_ONE here: over twice this ceiling.
+    let cap_ceiling = 10 * 10_000 * 30_000 * ADL_ONE as i128 / percolator::FUNDING_DEN as i128;
+    assert!(
+        fragmented.f_long_num <= cap_ceiling,
+        "low-price funding {} exceeds the configured cap ceiling {cap_ceiling}",
+        fragmented.f_long_num
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1477,7 +1532,7 @@ fn inv052_source_defines_test(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_split_merge_operation_family_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "4db11a8cb0053815e23a35d3a7d3edc265d8d866";
+    const ENGINE_PIN: &str = "b22bef7d6122fd7d82680ce9859e8b77fd8ef656";
     const CLASSES: &[Inv052PartitionClass] = &[
         Inv052PartitionClass {
             class: "trade withdrawal and owner-reduction partitions",
