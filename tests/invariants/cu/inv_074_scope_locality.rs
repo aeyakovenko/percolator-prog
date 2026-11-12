@@ -1985,11 +1985,11 @@ fn v16_program_scope_locality_composition_is_source_complete() {
         transition_roster
             .matches("Inv088EngineCallsite { owner:")
             .count(),
-        50,
+        53,
         "wrapper-to-engine transition surface drift",
     );
     assert!(
-        transition_roster.contains("certificate_disposition_classes,\n        [18, 16, 11, 5]"),
+        transition_roster.contains("certificate_disposition_classes,\n        [19, 16, 13, 5]"),
         "all transition classes must retain an explicit certificate/scope disposition",
     );
     assert!(

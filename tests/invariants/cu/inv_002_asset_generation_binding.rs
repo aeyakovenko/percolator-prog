@@ -111,7 +111,7 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
         source_between(source, "pub enum Instruction {", "\n    impl Instruction {");
 
     // Per-asset IDs and market-wide frontiers are separate retained generation bindings.
-    assert_eq!(instruction_enum.matches("market_id: u64").count(), 17);
+    assert_eq!(instruction_enum.matches("market_id: u64").count(), 18);
     for variant in [
         "TradeNoCpi",
         "TradeCpi",
@@ -130,6 +130,7 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
         "WithdrawInsuranceAsset",
         "UpdateAssetAuthority",
         "UpdateAssetLifecycle",
+        "CanonicalizeSpentBackingHistory",
     ] {
         assert!(
             variant_body(instruction_enum, variant).contains("market_id: u64"),
@@ -330,7 +331,7 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
         ),
         (
             "fn handle_withdraw_backing_bucket_earnings",
-            "fn handle_sync_backing_domain_ledger",
+            "fn handle_canonicalize_spent_backing_history",
         ),
     ] {
         let body = source_between(source, handler, next);
@@ -338,6 +339,21 @@ fn v16_program_asset_generation_field_and_guard_roster_is_source_complete() {
         assert!(body.contains("verify_domain_withdrawal_preflight("));
         assert!(body.contains("require_asset_generation_view("));
     }
+
+    // The spent-history canonicalization (#170) moves no tokens, so it has no withdrawal
+    // preflight; it binds the asset generation before its only engine mutation.
+    let canonicalize = source_between(
+        source,
+        "fn handle_canonicalize_spent_backing_history",
+        "fn handle_sync_backing_domain_ledger",
+    );
+    assert!(canonicalize.contains("expected_market_id: u64"));
+    let canonicalize_preflight = source_between(
+        canonicalize,
+        "fn handle_canonicalize_spent_backing_history",
+        "canonicalize_spent_backing_history_not_atomic(",
+    );
+    assert!(canonicalize_preflight.contains("require_asset_generation_view("));
 
     let authority = source_between(
         source,

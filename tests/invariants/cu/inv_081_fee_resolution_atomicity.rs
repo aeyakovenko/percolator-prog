@@ -392,7 +392,16 @@ impl World {
     fn check(&mut self) {
         let raw_market = self.env.svm.get_account(&self.env.market).unwrap().data;
         let (cfg, group) = state::read_market(&raw_market).unwrap();
-        assert_eq!(cfg, self.config, "wrapper authority/policy frame");
+        // The wrapper config also holds the maintenance-fee split carry (#386): the parity of
+        // all maintenance revenue credited to insurance so far.
+        let mut expected_config = self.config;
+        expected_config._padding0 = u8::from(
+            (self.expected.fees.iter().sum::<u128>()
+                - self.expected.rewards.iter().sum::<u128>())
+                % 2
+                == 1,
+        );
+        assert_eq!(cfg, expected_config, "wrapper authority/policy frame");
         assert_eq!(self.env.control_sequences(0), self.controls);
         let portfolios: Vec<_> = self
             .actors

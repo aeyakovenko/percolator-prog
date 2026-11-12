@@ -140,6 +140,8 @@ fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
                 "handle_configure_managed_mark",
                 "handle_update_backing_fee_policy",
                 "preserve_backing_fee_policy",
+                // The quiet-asset gate shared by the two oracle configuration handlers above.
+                "require_asset_active_for_oracle_reconfiguration_view",
                 "subtract_backing_fee_policy_count",
             ],
         },
@@ -235,6 +237,12 @@ fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
             ],
         },
         Inv063BackingSurfaceClass {
+            disposition:
+                "spent-history canonicalization (#170); value-free, every live backing amount is zero",
+            witness: "v16_program_backing_authority_canonicalizes_spent_history_before_reuse",
+            functions: &["handle_canonicalize_spent_backing_history"],
+        },
+        Inv063BackingSurfaceClass {
             disposition: "instruction dispatch only; handler owns expiry semantics",
             witness: "v16_program_backing_expiry_trade_route_boundary_matrix",
             functions: &["process_instruction"],
@@ -249,6 +257,7 @@ fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
         include_str!("inv_005_authority_incarnation_binding.rs"),
         include_str!("inv_025_exact_stock_reconciliation.rs"),
         include_str!("inv_063_backing_expiry_normalization.rs"),
+        include_str!("inv_065_reset_recovery_and_retired_state_isolation.rs"),
         include_str!("inv_089_activation_reactivation_and_initialization_equivalence.rs"),
     ];
 
@@ -289,7 +298,7 @@ fn v16_program_backing_expiry_consumer_composition_is_source_complete() {
             );
         }
     }
-    assert_eq!(witnesses.len(), 12, "INV-063 backing witness roster drift");
+    assert_eq!(witnesses.len(), 13, "INV-063 backing witness roster drift");
     assert_eq!(
         actual, expected,
         "every production processor function that names backing needs an INV-063 expiry disposition and executable witness"

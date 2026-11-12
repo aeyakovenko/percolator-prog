@@ -526,7 +526,7 @@ fn v16_program_adversarial_role_containment_matrix_is_source_complete() {
     assert_eq!(public_handlers.len(), 50, "public handler census drift");
     assert_eq!(
         configured_handlers.len(),
-        29,
+        30,
         "configured-role route census drift"
     );
 

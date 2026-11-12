@@ -2423,7 +2423,8 @@ fn v16_program_loss_stale_economic_routes_have_a_complete_seniority_disposition(
         std::collections::BTreeMap::from([
             ("handle_withdraw_backing_bucket".to_string(), 1),
             ("handle_withdraw_backing_bucket_earnings".to_string(), 1),
-            ("handle_withdraw_insurance_asset".to_string(), 1),
+            // An asset insurance withdrawal debits both domains, so it gates on both (#438).
+            ("handle_withdraw_insurance_asset".to_string(), 2),
         ]),
         "all live reserve withdrawals must share the exact stale-loss gate",
     );
