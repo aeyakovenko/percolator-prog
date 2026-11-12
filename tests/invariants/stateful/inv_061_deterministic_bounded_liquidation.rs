@@ -18,14 +18,18 @@
 //! three-user topology with two equal-risk target legs. Public first-wave liquidations make each
 //! target leg ADL-scaled, then an authenticated account fee makes the combined portfolio
 //! liquidatable. Four opening transports, both persisted leg orders, and both market-accrual
-//! orders must select exactly the first live leg, match an independent close-size/fee oracle,
+//! orders must select exactly the leg an independent risk model names (engine #176: the highest
+//! ADL-effective notional; this first episode is an exact tie, which keeps the first persisted
+//! leg), match an independent close-size/fee oracle,
 //! mutate only that asset's OI and insurance domains, frame both counterparties and every SPL
 //! account, and restore health below the CU ceiling. Two later authenticated fee episodes must each
 //! create a real deficit and satisfy the same independent quantity, OI, fee, attribution, and frame
 //! oracle. The matrix crosses both leaving the first selected leg live and canonically reducing its
-//! residual first; in the latter case the second episode must select the other asset, while the
+//! residual first. With the residual live the second episode must select the other leg, which the
+//! first liquidation left riskier; with it cleared only the other leg remains, while the
 //! intervening owner reduction exactly removes both OI lanes and frames value, the other asset,
-//! counterparties, and SPL custody. The third episode repeats on whichever leg the second selected,
+//! counterparties, and SPL custody. The third episode again follows risk (the first persisted leg
+//! on an exact tie, the lone leg once the residual is cleared),
 //! under a fresh authenticated slot, and independently rechecks exact selected-only OI reduction,
 //! fee attribution, frames, and CU. All three owners then clear their remaining effective or
 //! reset-obligation legs, withdraw the exact non-fee value, and close while the market remains Live.
@@ -40,8 +44,8 @@
 //! caller-controlled on the sole public crank, and INV-059 source-locks that surface.
 //! Larger account partitions, four-plus liquidation episodes, transfer, retirement, and remaining
 //! maximum-shape cross-products remain in the audit ledger. This matrix owns two authenticated
-//! follow-up fee-bearing episodes after the first liquidation, on either the same or successive
-//! selected legs of a two-asset ADL account;
+//! follow-up fee-bearing episodes after the first liquidation, on the risk-selected legs of a
+//! two-asset ADL account, with the first leg's residual either left live or cleared;
 //! INV-059 separately owns the single-asset episode boundary and post-episode owner reduction.
 
 use super::*;
@@ -85,7 +89,7 @@ fn v16_program_multi_asset_adl_liquidation_is_order_local_and_exit_complete() {
             * FollowupLiquidationSelection::ALL.len()
             * EqualRiskAssetOrder::ALL.len()
             * EqualRiskAssetOrder::ALL.len(),
-        "must cross every opening transport, follow-up selection, persisted leg order, and accrual order"
+        "must cross every opening transport, follow-up residual state, persisted leg order, and accrual order"
     );
     for discovery in &discoveries {
         assert!(

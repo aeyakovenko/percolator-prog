@@ -517,14 +517,18 @@ impl EqualRiskAssetOrder {
     }
 }
 
+/// How the target's previously liquidated leg is left before the next liquidation episode.
+/// Engine #176 selects by risk, so these name the preparation, not the leg that gets selected.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FollowupLiquidationSelection {
-    SameAsset,
-    NextAsset,
+    /// No owner action: the previously liquidated leg's residual stays live.
+    ResidualLive,
+    /// The owner first reduces the previously liquidated leg to zero.
+    ResidualCleared,
 }
 
 impl FollowupLiquidationSelection {
-    pub const ALL: [Self; 2] = [Self::SameAsset, Self::NextAsset];
+    pub const ALL: [Self; 2] = [Self::ResidualLive, Self::ResidualCleared];
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1363,6 +1367,7 @@ pub struct MultiAssetAdlLiquidationDiscovery {
     pub leg_order: EqualRiskAssetOrder,
     pub accrual_order: EqualRiskAssetOrder,
     pub first_active_asset: u16,
+    pub expected_selected_asset: u16,
     pub selected_asset: u16,
     pub first_liquidation_slot: u64,
     pub pre_certificate_valid: bool,
@@ -1372,6 +1377,7 @@ pub struct MultiAssetAdlLiquidationDiscovery {
     pub pre_short_a: [u128; 2],
     pub pre_raw_basis_q: [u128; 2],
     pub pre_effective_q: [u128; 2],
+    pub pre_effective_price: [u64; 2],
     pub pre_oi_q: [[u128; 2]; 2],
     pub expected_close_q: u128,
     pub observed_oi_reduce_q: [[u128; 2]; 2],
@@ -1411,9 +1417,11 @@ pub struct FollowupLiquidationDiscovery {
     pub preparation_counterparties_framed: bool,
     pub preparation_moved_no_tokens: bool,
     pub authenticated_slot: u64,
+    pub first_live_asset: u16,
     pub selected_asset: u16,
     pub pre_certified_liq_deficit: u128,
     pub pre_effective_q: [u128; 2],
+    pub pre_effective_price: [u64; 2],
     pub pre_oi_q: [[u128; 2]; 2],
     pub expected_close_q: u128,
     pub observed_oi_reduce_q: [[u128; 2]; 2],
@@ -1470,6 +1478,7 @@ pub struct ThreeAssetLockedLossDiscovery {
     pub route: DiscoveryTradeRoute,
     pub leg_order: ThreeAssetLegOrder,
     pub accrual_order: ThreeAssetAccrualOrder,
+    pub position_q: [u128; ASSET_COUNT],
     pub effective_prices: [u64; ASSET_COUNT],
     pub independent_loss_by_asset: [u128; ASSET_COUNT],
     pub target_principal_consumed: u128,
@@ -1498,6 +1507,19 @@ impl ThreeAssetLockedLossDiscovery {
             .pre_liquidation_pnl
             .checked_neg()
             .map(|pnl| pnl as u128);
+        // Engine #176: every step liquidates the live leg with the highest ADL-effective
+        // notional (quantity x effective price). No leg is ADL-scaled here and each step closes
+        // its whole leg, so the sequence is the fixture's strictly descending risk order,
+        // independent of the persisted leg order.
+        let risk = |asset: u16| {
+            self.position_q[usize::from(asset)]
+                * u128::from(self.effective_prices[usize::from(asset)])
+        };
+        let mut risk_order = [0u16, 1, 2];
+        risk_order.sort_by_key(|asset| core::cmp::Reverse(risk(*asset)));
+        let risk_strictly_ordered = risk_order
+            .windows(2)
+            .all(|pair| risk(pair[0]) > risk(pair[1]));
         self.effective_prices == [150, 140, 120]
             && self.independent_loss_by_asset == [500, 240, 60]
             && self.target_principal_consumed == 600
@@ -1506,11 +1528,12 @@ impl ThreeAssetLockedLossDiscovery {
             && self.pre_liquidation_deficit != 0
             && self.pre_liquidation_lock
             && self.steps.len() == ASSET_COUNT
+            && risk_strictly_ordered
             && self
                 .steps
                 .iter()
                 .map(|step| step.expected_asset)
-                .eq(self.leg_order.assets())
+                .eq(risk_order)
             && self.steps.iter().all(|step| step.satisfies_invariant())
             && self.target_flat
             && self.market_live_before_resolution
@@ -1717,11 +1740,23 @@ impl MultiAssetAdlLiquidationDiscovery {
             .authenticated_slot
             .checked_sub(self.first_liquidation_slot);
         let followup_slot_is_bounded = match self.followup.selection {
-            FollowupLiquidationSelection::SameAsset => {
+            FollowupLiquidationSelection::ResidualLive => {
                 matches!(followup_slot_gap, Some(1..=16))
             }
-            FollowupLiquidationSelection::NextAsset => {
+            FollowupLiquidationSelection::ResidualCleared => {
                 matches!(followup_slot_gap, Some(200..=215))
+            }
+        };
+        // Engine #176: liquidation follows risk, not persisted slot order. With the first
+        // episode's residual still live, the leg it did not shrink is the riskier one for the
+        // second episode. A cleared residual leaves a single live leg for both later episodes.
+        let later_selection_follows_risk = match self.followup.selection {
+            FollowupLiquidationSelection::ResidualLive => {
+                usize::from(self.followup.selected_asset) == nonselected
+            }
+            FollowupLiquidationSelection::ResidualCleared => {
+                usize::from(self.followup.selected_asset) == nonselected
+                    && self.third.selected_asset == self.followup.selected_asset
             }
         };
         let third_slot_is_bounded = matches!(
@@ -1743,16 +1778,21 @@ impl MultiAssetAdlLiquidationDiscovery {
             .map(|(_, delta)| *delta)
             .sum::<u128>();
 
+        // The first episode is an exact risk tie (equal ADL-effective sizes at one mark), so
+        // the modeled and observed selection is the first persisted leg (#176 keeps slot order
+        // only on a tie).
         self.first_active_asset == self.leg_order.assets()[0]
-            && self.selected_asset == self.first_active_asset
+            && self.pre_effective_price[0] == self.pre_effective_price[1]
+            && self.expected_selected_asset == self.first_active_asset
+            && self.selected_asset == self.expected_selected_asset
             && self.followup.authenticated_slot > self.first_liquidation_slot
             && followup_slot_is_bounded
             && self.followup.prior_selected_asset == self.selected_asset
-            && self.third.selection == FollowupLiquidationSelection::SameAsset
+            && self.third.selection == FollowupLiquidationSelection::ResidualLive
             && self.third.authenticated_slot > self.followup.authenticated_slot
             && third_slot_is_bounded
             && self.third.prior_selected_asset == self.followup.selected_asset
-            && self.third.selected_asset == self.followup.selected_asset
+            && later_selection_follows_risk
             && selected < 2
             && self.pre_certificate_valid
             && self.pre_certified_liq_deficit != 0
@@ -1804,9 +1844,25 @@ impl FollowupLiquidationDiscovery {
     pub fn satisfies_invariant(&self) -> bool {
         let prior_selected = usize::from(self.prior_selected_asset);
         let selected = usize::from(self.selected_asset);
-        if prior_selected >= 2 || selected >= 2 {
+        let first_live = usize::from(self.first_live_asset);
+        if prior_selected >= 2 || selected >= 2 || first_live >= 2 {
             return false;
         }
+        // Engine #176: the crank liquidates the live leg with the highest ADL-effective notional
+        // (effective quantity x effective price). An exact tie, or a lone live leg, keeps the
+        // first persisted live leg, so persisted order alone never moves the selection.
+        let risk = |asset: usize| {
+            self.pre_effective_q[asset].checked_mul(u128::from(self.pre_effective_price[asset]))
+        };
+        let (Some(first_live_risk), Some(other_risk)) = (risk(first_live), risk(first_live ^ 1))
+        else {
+            return false;
+        };
+        let riskiest = if other_risk > first_live_risk {
+            first_live ^ 1
+        } else {
+            first_live
+        };
         let nonselected = selected ^ 1;
         let selected_domains = [selected * 2, selected * 2 + 1];
         let selected_budget_delta = selected_domains
@@ -1822,13 +1878,12 @@ impl FollowupLiquidationDiscovery {
             .sum::<u128>();
 
         let preparation_valid = match self.selection {
-            FollowupLiquidationSelection::SameAsset => {
-                selected == prior_selected
-                    && self.preparation_close_q == 0
+            FollowupLiquidationSelection::ResidualLive => {
+                self.preparation_close_q == 0
                     && self.preparation_observed_oi_reduce_q == [[0; 2]; 2]
                     && !self.preparation_old_leg_absent
             }
-            FollowupLiquidationSelection::NextAsset => {
+            FollowupLiquidationSelection::ResidualCleared => {
                 selected == (prior_selected ^ 1)
                     && self.preparation_close_q != 0
                     && self.preparation_observed_oi_reduce_q[prior_selected]
@@ -1839,6 +1894,8 @@ impl FollowupLiquidationDiscovery {
         };
 
         preparation_valid
+            && selected == riskiest
+            && self.pre_effective_q[first_live] != 0
             && self.preparation_nonselected_asset_framed
             && self.preparation_target_value_framed
             && self.preparation_counterparties_framed
@@ -18398,6 +18455,77 @@ fn discovery_effective_leg_q(
     )
 }
 
+/// Independent model of the auto-crank's liquidation target (engine #176). The crank no longer
+/// takes the first persisted slot: among the legs it can dispatch it liquidates the one with the
+/// highest ADL-effective notional (effective quantity x effective price), so slot layout cannot
+/// steer liquidation order. A leg competes only if this liquidation can reduce it (close capacity
+/// and no pending loss barrier on its domain). An exact tie keeps persisted order, and a lone
+/// dispatchable leg, or none that can compete, falls back to the first dispatchable slot.
+fn discovery_riskiest_liquidatable_leg(
+    group: &percolator_prog::state::MarketGroupV16,
+    account: &percolator_prog::state::PortfolioAccountV16,
+) -> Result<Option<PortfolioLegV16>, String> {
+    let bitmap = account.active_bitmap.map(percolator::V16PodU64::get);
+    let mut dispatchable = Vec::new();
+    for (slot, encoded) in account.legs.iter().enumerate() {
+        let leg = encoded
+            .try_to_runtime()
+            .map_err(|error| format!("decode liquidation candidate slot {slot}: {error:?}"))?;
+        if !leg.active || !percolator::active_bitmap_get(bitmap, slot) {
+            continue;
+        }
+        let asset = *group.assets.get(leg.asset_index as usize).ok_or_else(|| {
+            format!(
+                "liquidation candidate names unknown asset {}",
+                leg.asset_index
+            )
+        })?;
+        let (side_mode, side_epoch) = match leg.side {
+            SideV16::Long => (asset.mode_long, asset.epoch_long),
+            SideV16::Short => (asset.mode_short, asset.epoch_short),
+        };
+        let prior_reset_obligation = side_mode == SideModeV16::ResetPending
+            && leg.epoch_snap.checked_add(1) == Some(side_epoch);
+        if matches!(
+            asset.lifecycle,
+            percolator::AssetLifecycleV16::Active | percolator::AssetLifecycleV16::DrainOnly
+        ) && leg.basis_pos_q != 0
+            && asset.oi_eff_long_q.min(asset.oi_eff_short_q) != 0
+            && !prior_reset_obligation
+        {
+            dispatchable.push((leg, asset));
+        }
+    }
+    let Some((first_leg, _)) = dispatchable.first().copied() else {
+        return Ok(None);
+    };
+    if dispatchable.len() < 2 {
+        return Ok(Some(first_leg));
+    }
+    let mut riskiest: Option<(u128, PortfolioLegV16)> = None;
+    for (leg, asset) in dispatchable {
+        let effective_q = discovery_effective_leg_q(asset, leg)?;
+        let close_capacity = effective_q
+            .min(asset.oi_eff_long_q)
+            .min(asset.oi_eff_short_q);
+        let domain = leg.asset_index as usize * 2 + usize::from(leg.side == SideV16::Short);
+        let loss_barrier = *group
+            .pending_domain_loss_barriers
+            .get(domain)
+            .ok_or_else(|| format!("liquidation candidate names unknown domain {domain}"))?;
+        if close_capacity == 0 || loss_barrier != 0 {
+            continue;
+        }
+        let risk = effective_q
+            .checked_mul(u128::from(asset.effective_price))
+            .unwrap_or(u128::MAX);
+        if riskiest.map_or(true, |(best, _)| risk > best) {
+            riskiest = Some((risk, leg));
+        }
+    }
+    Ok(Some(riskiest.map_or(first_leg, |(_, leg)| leg)))
+}
+
 fn discovery_certificate_is_current(
     group: &percolator_prog::state::MarketGroupV16,
     account: &percolator_prog::state::PortfolioAccountV16,
@@ -18449,7 +18577,7 @@ fn execute_followup_multi_asset_liquidation(
     let mut preparation_counterparties_framed = true;
     let mut preparation_moved_no_tokens = true;
 
-    if selection == FollowupLiquidationSelection::NextAsset {
+    if selection == FollowupLiquidationSelection::ResidualCleared {
         let prior_selected = usize::from(prior_selected_asset);
         if prior_selected >= 2 {
             return Err(format!(
@@ -18506,8 +18634,8 @@ fn execute_followup_multi_asset_liquidation(
     let mut authenticated_slot = None;
     let followup_start_slot = first_liquidation_slot
         .checked_add(match selection {
-            FollowupLiquidationSelection::SameAsset => 1,
-            FollowupLiquidationSelection::NextAsset => 200,
+            FollowupLiquidationSelection::ResidualLive => 1,
+            FollowupLiquidationSelection::ResidualCleared => 200,
         })
         .ok_or_else(|| "follow-up liquidation start slot overflow".to_string())?;
     let followup_end_slot = followup_start_slot
@@ -18587,7 +18715,7 @@ fn execute_followup_multi_asset_liquidation(
             "follow-up liquidation did not start from a current deficit: {cert:?}"
         ));
     }
-    let selected_asset = before_account
+    let first_live_asset = before_account
         .legs
         .iter()
         .map(|encoded| encoded.try_to_runtime())
@@ -18597,17 +18725,23 @@ fn execute_followup_multi_asset_liquidation(
         .find(|leg| leg.active)
         .map(|leg| leg.asset_index as u16)
         .ok_or_else(|| "follow-up liquidation target has no active leg".to_string())?;
-    if selected_asset > 1 {
+    // Engine #176: the crank liquidates the riskiest live leg, not the first persisted one.
+    let selected_asset = discovery_riskiest_liquidatable_leg(&before_group, &before_account)?
+        .map(|leg| leg.asset_index as u16)
+        .ok_or_else(|| "follow-up liquidation target has no liquidatable leg".to_string())?;
+    if selected_asset > 1 || first_live_asset > 1 {
         return Err(format!(
-            "follow-up liquidation selected unsupported asset {selected_asset}"
+            "follow-up liquidation selected unsupported asset {selected_asset}/{first_live_asset}"
         ));
     }
 
     let mut pre_effective_q = [0u128; 2];
+    let mut pre_effective_price = [0u64; 2];
     let mut pre_oi_q = [[0u128; 2]; 2];
     for asset_index in [0u16, 1] {
         let index = asset_index as usize;
         let asset = before_group.assets[index];
+        pre_effective_price[index] = asset.effective_price;
         pre_oi_q[index] = [asset.oi_eff_long_q, asset.oi_eff_short_q];
         pre_effective_q[index] = discovery_leg_for_asset(&before_account, asset_index)?
             .map(|leg| discovery_effective_leg_q(asset, leg))
@@ -18711,9 +18845,11 @@ fn execute_followup_multi_asset_liquidation(
         preparation_counterparties_framed,
         preparation_moved_no_tokens,
         authenticated_slot,
+        first_live_asset,
         selected_asset,
         pre_certified_liq_deficit: cert.certified_liq_deficit,
         pre_effective_q,
+        pre_effective_price,
         pre_oi_q,
         expected_close_q,
         observed_oi_reduce_q,
@@ -18913,11 +19049,22 @@ fn verify_one_multi_asset_adl_liquidation(
         .find(|leg| leg.active)
         .map(|leg| leg.asset_index as u16)
         .ok_or_else(|| "equal-risk target lost both active legs".to_string())?;
-    let expected_selected_asset = first_active_asset;
+    // Engine #176: the crank liquidates the riskiest live leg. This first episode is an exact
+    // tie (equal ADL-effective sizes at one mark), which keeps the first persisted leg.
+    let expected_selected_asset =
+        discovery_riskiest_liquidatable_leg(&before_group, &before_account)?
+            .map(|leg| leg.asset_index as u16)
+            .ok_or_else(|| "equal-risk target has no liquidatable leg".to_string())?;
+    if expected_selected_asset > 1 {
+        return Err(format!(
+            "equal-risk model selected unsupported asset {expected_selected_asset}"
+        ));
+    }
     let mut pre_long_a = [0u128; 2];
     let mut pre_short_a = [0u128; 2];
     let mut pre_raw_basis_q = [0u128; 2];
     let mut pre_effective_q = [0u128; 2];
+    let mut pre_effective_price = [0u64; 2];
     let mut pre_oi_q = [[0u128; 2]; 2];
     let mut selected_leg = None;
     for asset_index in [0u16, 1] {
@@ -18929,6 +19076,7 @@ fn verify_one_multi_asset_adl_liquidation(
         pre_short_a[index] = asset.a_short;
         pre_raw_basis_q[index] = leg.basis_pos_q.unsigned_abs();
         pre_effective_q[index] = discovery_effective_leg_q(asset, leg)?;
+        pre_effective_price[index] = asset.effective_price;
         pre_oi_q[index] = [asset.oi_eff_long_q, asset.oi_eff_short_q];
         if asset_index == expected_selected_asset {
             selected_leg = Some(leg);
@@ -19054,7 +19202,7 @@ fn verify_one_multi_asset_adl_liquidation(
         HELPER,
         accrual_order,
         followup.selected_asset,
-        FollowupLiquidationSelection::SameAsset,
+        FollowupLiquidationSelection::ResidualLive,
         followup.authenticated_slot,
         MARK,
         &mut max_compute_units,
@@ -19178,6 +19326,7 @@ fn verify_one_multi_asset_adl_liquidation(
         leg_order,
         accrual_order,
         first_active_asset,
+        expected_selected_asset,
         selected_asset,
         first_liquidation_slot: liquidation_slot,
         pre_certificate_valid: cert.valid,
@@ -19187,6 +19336,7 @@ fn verify_one_multi_asset_adl_liquidation(
         pre_short_a,
         pre_raw_basis_q,
         pre_effective_q,
+        pre_effective_price,
         pre_oi_q,
         expected_close_q,
         observed_oi_reduce_q,
@@ -19584,12 +19734,17 @@ fn verify_one_three_asset_locked_loss_liquidation(
             .into_iter()
             .filter(|leg| leg.active)
             .collect::<Vec<_>>();
-        let Some(selected_leg) = active_legs.first().copied() else {
+        if active_legs.is_empty() {
             break;
-        };
+        }
+        let (_, before_group) = env.primary_market_state();
+        // Engine #176: the crank liquidates the riskiest live leg, not the first persisted one.
+        let selected_leg = discovery_riskiest_liquidatable_leg(&before_group, &before_account)?
+            .ok_or_else(|| {
+                format!("locked-loss step {liquidation_step} has no liquidatable leg")
+            })?;
         let expected_asset = selected_leg.asset_index as u16;
         let selected_index = usize::from(expected_asset);
-        let (_, before_group) = env.primary_market_state();
         let before_cert = before_account
             .health_cert
             .try_to_runtime()
@@ -19722,6 +19877,7 @@ fn verify_one_three_asset_locked_loss_liquidation(
         route,
         leg_order,
         accrual_order,
+        position_q: POSITION_Q.map(i128::unsigned_abs),
         effective_prices,
         independent_loss_by_asset,
         target_principal_consumed: before_liquidations_account

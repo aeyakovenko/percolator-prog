@@ -2842,7 +2842,7 @@ fn v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg(
     env.deposit(&counterparty_owner, counterparty, 2_000_000);
 
     // Asset 0 deliberately occupies the first active slot with the minimum representable public
-    // position quantum. It must still be removable rather than shadowing the material asset-1 loss.
+    // position quantum. It must not shadow the material asset-1 loss.
     env.trade_asset_with_cu(
         0,
         &victim_owner,
@@ -2891,9 +2891,22 @@ fn v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg(
     assert!(has_active_leg_for_asset(&before, 0));
     let material_before = active_leg_for_asset(&before, 1).basis_pos_q.unsigned_abs();
 
-    // Every successful call is engine-selected. The tiny first leg may be removed first, but it
-    // must not permanently shadow the later leg that carries the material deficit.
+    // Every successful call is engine-selected. Engine #176 liquidates the flagged leg with the
+    // highest ADL-effective notional (quantity x effective price), not the first persisted slot,
+    // so the tiny first leg cannot shadow the later leg that carries the material deficit: the
+    // material leg is the riskier candidate and must progress on the first call.
+    let tiny_before = active_leg_for_asset(&before, 0);
+    let group_before = env.market_state().1;
+    let risk = |asset: usize| {
+        reference_current_epoch_effective_abs(&group_before, active_leg_for_asset(&before, asset))
+            * u128::from(group_before.assets[asset].effective_price)
+    };
+    assert!(
+        risk(1) > risk(0),
+        "the later leg must be the riskier liquidation candidate"
+    );
     let mut material_after = material_before;
+    let mut calls = 0usize;
     for _ in 0..6 {
         env.svm.expire_blockhash();
         env.send(
@@ -2909,6 +2922,7 @@ fn v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg(
             &[],
         )
         .expect("one honest auto-crank step");
+        calls += 1;
         let state = env.portfolio_state(victim);
         material_after = if has_active_leg_for_asset(&state, 1) {
             active_leg_for_asset(&state, 1).basis_pos_q.unsigned_abs()
@@ -2923,9 +2937,19 @@ fn v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg(
         material_after < material_before,
         "tiny first leg must not shadow liquidation of the later losing leg"
     );
-    assert!(
-        !has_active_leg_for_asset(&env.portfolio_state(victim), 0),
-        "the minimum-quantum first leg must clear before the later material liquidation progresses"
+    // Engine #176: selection follows risk, so clearing the minimum-quantum first slot is no
+    // longer a prerequisite. The material leg progresses on the first engine-selected call
+    // while the tiny first-slot leg is still live and untouched.
+    assert_eq!(
+        calls, 1,
+        "the riskiest leg must be liquidated directly, not after the first persisted slot"
+    );
+    let after = env.portfolio_state(victim);
+    assert_eq!(leg(&after, 0).asset_index, 0);
+    assert_eq!(
+        active_leg_for_asset(&after, 0),
+        tiny_before,
+        "the minimum-quantum first leg must be untouched when the material liquidation progresses"
     );
 }
 

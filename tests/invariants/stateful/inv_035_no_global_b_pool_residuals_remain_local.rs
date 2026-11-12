@@ -18,9 +18,11 @@
 //! strengthens that boundary with three unequal losses. It opens the positions through all four
 //! public trade transports, permutes all six persisted leg orders and both accrual orders, then
 //! drives the sole public crank. Each selected liquidation must close the independently modeled
-//! first live leg while framing account value, protocol stocks, all six source/insurance/B loss
-//! domains, every nonselected asset, all counterparties, and SPL balances. All 48 worlds must
-//! converge to the same exact owner payouts after permissionless stale resolution.
+//! riskiest live leg (highest ADL-effective notional, engine #176) while framing account value,
+//! protocol stocks, all six source/insurance/B loss domains, every nonselected asset, all
+//! counterparties, and SPL balances. All 48 worlds must liquidate in that one risk order whatever
+//! the persisted leg order, and converge to the same exact owner payouts after permissionless
+//! stale resolution.
 //!
 //! Guarantee boundary: this bounded matrix and the randomized public-route oracle below certify
 //! the exercised two-domain topologies. The deterministic TDD route lives in the public-SBF
@@ -313,12 +315,13 @@ fn v16_program_three_asset_locked_loss_liquidation_is_domain_neutral_and_order_i
     assert_eq!(discoveries.len(), 4 * 6 * 2);
 
     let baseline_payouts = discoveries[0].terminal_payouts;
-    let mut baseline_close_by_asset = discoveries[0]
+    // Engine #176: selection follows risk, so every persisted leg order must produce the same
+    // liquidation sequence, not merely the same per-asset sizing.
+    let baseline_close_by_asset = discoveries[0]
         .steps
         .iter()
         .map(|step| (step.expected_asset, step.expected_close_q))
         .collect::<Vec<_>>();
-    baseline_close_by_asset.sort_unstable();
     for discovery in discoveries {
         assert!(
             discovery.satisfies_invariant(),
@@ -328,15 +331,14 @@ fn v16_program_three_asset_locked_loss_liquidation_is_domain_neutral_and_order_i
             discovery.terminal_payouts, baseline_payouts,
             "trade transport or landing order changed terminal ownership: {discovery:#?}"
         );
-        let mut close_by_asset = discovery
+        let close_by_asset = discovery
             .steps
             .iter()
             .map(|step| (step.expected_asset, step.expected_close_q))
             .collect::<Vec<_>>();
-        close_by_asset.sort_unstable();
         assert_eq!(
             close_by_asset, baseline_close_by_asset,
-            "persisted leg order changed per-asset liquidation sizing: {discovery:#?}"
+            "persisted leg order changed the liquidation sequence or its sizing: {discovery:#?}"
         );
     }
 }

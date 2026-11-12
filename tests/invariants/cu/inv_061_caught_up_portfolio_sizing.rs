@@ -2,8 +2,11 @@
 //! Linear quantity enumeration includes the untouched active leg's maintenance.
 //! Public single/batch opens and joined/partitioned observations must agree on
 //! owner value, selected-only OI changes and the keeper's actual SPL entitlement.
-//! Equal-notional legs with unequal prices/quantities additionally distinguish
-//! persisted-order selection from raw-size or price ranking, including fee rounding.
+//! Engine #176: the crank liquidates the leg with the highest ADL-effective notional
+//! (quantity x effective price), so unequal-risk legs must size and pay identically in
+//! either persisted slot order. Equal-notional legs with unequal prices/quantities
+//! additionally distinguish the tie's persisted-order selection from raw-size or price
+//! ranking, including fee rounding.
 
 use super::*;
 
@@ -104,13 +107,27 @@ struct CaughtUpOutcome {
     payout: u64,
 }
 
+/// The leg the public crank must liquidate once both are caught up (engine #176): the
+/// highest ADL-effective notional wins, and only an exact tie falls back to the leg in the
+/// first persisted slot. Both A indices are still one here, so effective quantity is `q`.
+fn riskiest_leg(q: [u128; 2], first: usize) -> usize {
+    let risk = std::array::from_fn::<_, 2, _>(|i| q[i] * u128::from(FINAL_PRICES[i]));
+    if risk[first ^ 1] > risk[first] {
+        first ^ 1
+    } else {
+        first
+    }
+}
+
 fn run_caught_up(
     q: [u128; 2],
-    selected: usize,
+    first: usize,
     batch: bool,
     partitioned: bool,
     reverse: bool,
 ) -> (CaughtUpOutcome, u64, bool) {
+    // `first` only fixes which leg is opened into the first persisted slot.
+    let selected = riskiest_leg(q, first);
     let initial_capital = q
         .map(|quantity| (quantity * INITIAL_BPS).div_ceil(10_000))
         .iter()
@@ -206,7 +223,7 @@ fn run_caught_up(
         &[&env.admin],
     )
     .expect("fix the public mint supply");
-    let order = [selected, selected ^ 1];
+    let order = [first, first ^ 1];
     if batch {
         let ix = env.batch_trade_no_cpi_ix(
             portfolios[0],
@@ -249,7 +266,7 @@ fn run_caught_up(
         }
     }
     let opened = env.portfolio_state(portfolios[0]);
-    assert_eq!(leg(&opened, 0).asset_index, (selected + 1) as u32);
+    assert_eq!(leg(&opened, 0).asset_index, (first + 1) as u32);
     let idle_before = env.svm.get_account(&portfolios[3]).unwrap();
     let position_frames = [portfolios[0], portfolios[1]].map(|key| env.svm.get_account(&key));
     let initial_group = env.market_state().1;
@@ -537,18 +554,28 @@ fn v16_program_caught_up_multi_asset_sizing_preserves_health_and_beneficiary_val
     let mut peak = 0;
     let mut worlds = 0;
     let mut fee_price_witnesses = 0;
+    let mut liquidated_legs = [0usize; 2];
     for q in [[64, 80], [96, 64], [128, 96]] {
-        for selected in [0, 1] {
-            let mut reference = None;
+        // Engine #176: these legs carry unequal risk, so the riskier one is liquidated
+        // whichever slot it occupies and both persisted orders must reach one outcome.
+        let riskiest = riskiest_leg(q, 0);
+        assert_eq!(
+            riskiest,
+            riskiest_leg(q, 1),
+            "q={q:?} must not be a risk tie"
+        );
+        liquidated_legs[riskiest] += 1;
+        let mut reference = None;
+        for first in [0, 1] {
             for batch in [false, true] {
                 for partitioned in [false, true] {
                     for reverse in [false, true] {
                         let (outcome, cu, price_witness) =
-                            run_caught_up(q, selected, batch, partitioned, reverse);
+                            run_caught_up(q, first, batch, partitioned, reverse);
                         peak = peak.max(cu);
                         fee_price_witnesses += usize::from(price_witness);
                         if let Some(expected) = &reference {
-                            assert_eq!(expected, &outcome, "q={q:?}, selected={selected}, batch={batch}, partitioned={partitioned}, reverse={reverse}");
+                            assert_eq!(expected, &outcome, "q={q:?}, first={first}, batch={batch}, partitioned={partitioned}, reverse={reverse}");
                         } else {
                             reference = Some(outcome);
                         }
@@ -558,6 +585,10 @@ fn v16_program_caught_up_multi_asset_sizing_preserves_health_and_beneficiary_val
             }
         }
     }
+    assert!(
+        liquidated_legs.iter().all(|&count| count > 0),
+        "the matrix must liquidate each leg as the riskier one: {liquidated_legs:?}"
+    );
     assert!(fee_price_witnesses > 0);
     println!("INV-061 current-source catchup: {worlds} worlds, {fee_price_witnesses} fee-price witnesses, peak {peak} CU");
 }
@@ -578,6 +609,13 @@ fn v16_program_equal_risk_unequal_price_legs_preserve_sizing_order_and_reward() 
             requirement(q[0], FINAL_PRICES[0]),
             requirement(q[1], FINAL_PRICES[1]),
             "both fully caught-up legs must present equal maintenance risk"
+        );
+        // Engine #176 compares exact quantity x price; this is an exact tie, so the leg in
+        // the first persisted slot is still the one liquidated.
+        assert_eq!(
+            [riskiest_leg(q, 0), riskiest_leg(q, 1)],
+            [0, 1],
+            "an exact risk tie must keep persisted order"
         );
         let mut selected_outcomes = Vec::new();
         for selected in [0, 1] {
