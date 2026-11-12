@@ -1,7 +1,10 @@
 //! INV-020/024/036/053/056/080, holdouts 422/426: the first persisted leg can be
 //! either asset, with a key-bound Switchboard/Chainlink feed and a Pyth sibling.
-//! Provider binding, liquidation fee domains and final SPL entitlement follow
-//! that selected asset independently of observation order. Public construction only.
+//! Provider binding follows that first-slot asset. Since engine #176 the crank
+//! liquidates the riskiest leg instead of the first persisted slot, so either asset
+//! is also given the higher mark: liquidation fee domains and final SPL entitlement
+//! follow the higher-notional asset independently of its persisted slot, its
+//! provider and observation order. Public construction only.
 
 use super::*;
 
@@ -21,12 +24,31 @@ fn v16_program_selected_provider_assignment_preserves_fee_domains_and_owner_exit
         EpochMatrixProvider::Switchboard,
         EpochMatrixProvider::Chainlink,
     ] {
-        for selected in 0..2 {
+        // `selected` is the first persisted slot and carries the key-bound provider; `dearer`
+        // is the asset given the higher of the two current marks.
+        for (selected, dearer) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
             for reverse in [false, true] {
-                let label =
-                    format!("provider={provider:?}, selected={selected}, reverse={reverse}");
+                let label = format!(
+                    "provider={provider:?}, selected={selected}, dearer={dearer}, reverse={reverse}"
+                );
                 eprintln!("selected-provider prefix: {label}");
                 let other = 1 - selected;
+                let current: [u64; 2] = std::array::from_fn(|asset| {
+                    if asset == dearer {
+                        CURRENT[0].max(CURRENT[1])
+                    } else {
+                        CURRENT[0].min(CURRENT[1])
+                    }
+                });
+                // Engine #176: both unit legs are flagged, so the crank liquidates the higher
+                // notional wherever it is persisted; only an exact tie would keep the first
+                // persisted slot.
+                let liquidated = if current[other] > current[selected] {
+                    other
+                } else {
+                    selected
+                };
+                let sibling = 1 - liquidated;
                 let mut env = inv018_public_spl_market_with_params(
                     6,
                     V16CuMarketParams {
@@ -108,7 +130,7 @@ fn v16_program_selected_provider_assignment_preserves_fee_domains_and_owner_exit
                 let full = if reverse { [1, 0] } else { [0, 1] };
                 set_test_clock(&mut env, 1, 101);
                 for (asset, leg) in legs.iter().enumerate() {
-                    write_epoch_matrix_leg(&mut env, *leg, CURRENT[asset], 101, 1);
+                    write_epoch_matrix_leg(&mut env, *leg, current[asset], 101, 1);
                 }
                 let mut tracked = vec![env.market, env.mint, env.vault, env.admin.pubkey()];
                 tracked.extend(portfolios);
@@ -128,7 +150,7 @@ fn v16_program_selected_provider_assignment_preserves_fee_domains_and_owner_exit
                     let state = env.market_state().1.assets[asset];
                     assert_eq!(
                         (state.effective_price, state.raw_oracle_target_price),
-                        (PRICE, CURRENT[asset])
+                        (PRICE, current[asset])
                     );
                 }
                 assert_eq!(env.portfolio_state(target).capital.get(), DEPOSITS[1]);
@@ -136,14 +158,15 @@ fn v16_program_selected_provider_assignment_preserves_fee_domains_and_owner_exit
                 assert_eq!(frame(&env, &immutable_keys), immutable);
                 // Stale-account refresh consumes authenticated reports in the current slot.
                 for (asset, leg) in legs.iter().enumerate() {
-                    write_epoch_matrix_leg(&mut env, *leg, CURRENT[asset], 102, 2);
+                    write_epoch_matrix_leg(&mut env, *leg, current[asset], 102, 2);
                 }
                 let immutable = frame(&env, &immutable_keys);
 
                 // A valid sibling report cannot stand in for the selected asset's configured key.
                 let mut substituted = legs;
                 substituted[selected] = legs[other];
-                let other_only = [other];
+                // After the refresh, the liquidation omits the liquidated asset's own hint.
+                let sibling_only = [sibling];
                 for refreshed in [false, true] {
                     let good = observation(
                         &env,
@@ -151,7 +174,7 @@ fn v16_program_selected_provider_assignment_preserves_fee_domains_and_owner_exit
                         &owners[2],
                         Some(keeper),
                         &legs,
-                        if refreshed { &other_only } else { &full },
+                        if refreshed { &sibling_only } else { &full },
                     );
                     let bad =
                         observation(&env, target, &owners[2], Some(keeper), &substituted, &full);
@@ -204,13 +227,14 @@ fn v16_program_selected_provider_assignment_preserves_fee_domains_and_owner_exit
                     }
                 }
                 let group = env.market_state().1;
-                let remaining = group.assets[selected].oi_eff_short_q;
+                // Engine #176: the riskiest leg is reduced in either slot order.
+                let remaining = group.assets[liquidated].oi_eff_short_q;
                 assert!(remaining > 0 && remaining < POS_SCALE);
-                assert_eq!(group.assets[selected].oi_eff_long_q, remaining);
+                assert_eq!(group.assets[liquidated].oi_eff_long_q, remaining);
                 assert_eq!(
                     (
-                        group.assets[other].oi_eff_long_q,
-                        group.assets[other].oi_eff_short_q
+                        group.assets[sibling].oi_eff_long_q,
+                        group.assets[sibling].oi_eff_short_q
                     ),
                     (POS_SCALE, POS_SCALE)
                 );
@@ -219,18 +243,18 @@ fn v16_program_selected_provider_assignment_preserves_fee_domains_and_owner_exit
                     let notional = (closed * u128::from(price)).div_ceil(POS_SCALE);
                     (notional * 100).div_ceil(10_000).min(10_000)
                 };
-                let penalty = fee_at(CURRENT[selected]);
+                let penalty = fee_at(current[liquidated]);
                 let reward = penalty * SHARE / 10_000;
                 let insurance = penalty - reward;
                 assert!(reward > 0 && insurance > 0);
                 assert_ne!(
                     penalty,
-                    fee_at(CURRENT[other]),
+                    fee_at(current[sibling]),
                     "the fee oracle distinguishes the sibling price"
                 );
                 let mut budgets = [0; 4];
-                budgets[2 * selected] = insurance / 2;
-                budgets[2 * selected + 1] = insurance - insurance / 2;
+                budgets[2 * liquidated] = insurance / 2;
+                budgets[2 * liquidated + 1] = insurance - insurance / 2;
                 assert_eq!(&group.insurance_domain_budget[..4], &budgets);
                 assert!(group.insurance_domain_budget[4..]
                     .iter()
@@ -396,17 +420,22 @@ fn v16_program_selected_provider_assignment_preserves_fee_domains_and_owner_exit
                     peak[3],
                     TWO_ASSET_ACTION_CU_LIMIT,
                 );
+                // Keyed by the liquidated asset: its persisted slot and provider no longer
+                // enter the economics, so both first-slot choices share one reference.
                 let outcome = (remaining, penalty, reward, budgets, paid);
-                if let Some(reference) = &references[selected] {
-                    assert_eq!(&outcome, reference, "{label}: provider/order equivalence");
+                if let Some(reference) = &references[liquidated] {
+                    assert_eq!(
+                        &outcome, reference,
+                        "{label}: provider/slot/order equivalence"
+                    );
                 } else {
-                    references[selected] = Some(outcome);
+                    references[liquidated] = Some(outcome);
                 }
                 println!("selected-provider {label}: closed={closed}, penalty={penalty}, reward={reward}, insurance={insurance}, paid={paid:?}");
                 worlds += 1;
             }
         }
     }
-    assert_eq!((worlds, rollbacks), (8, 40));
+    assert_eq!((worlds, rollbacks), (16, 80));
     println!("selected-provider assignment: worlds={worlds}, exact_rollbacks={rollbacks}, terminal_calls={terminal_calls}, CU [action,rollback,withdrawal,terminal]={peak:?}");
 }

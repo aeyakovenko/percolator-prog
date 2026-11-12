@@ -373,10 +373,13 @@ fn v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements() 
                     let ix = instruction(&env, short, &owners[2], keeper, report, &order);
                     peak = peak.max(step(&mut env, &owners[2], ix, &keys, None));
                     let account = env.portfolio_state(short);
-                    let remaining = active_leg_for_asset(&account, 0).basis_pos_q.unsigned_abs();
+                    // Engine #176: the riskiest leg is reduced, not the first persisted slot.
+                    let remaining = active_leg_for_asset(&account, LIQUIDATED)
+                        .basis_pos_q
+                        .unsigned_abs();
                     let closed = POS_SCALE - remaining;
                     assert!(closed > 0 && remaining > 0);
-                    let notional = (closed * u128::from(CURRENT[0])).div_ceil(POS_SCALE);
+                    let notional = (closed * u128::from(CURRENT[LIQUIDATED])).div_ceil(POS_SCALE);
                     let penalty = notional.div_ceil(100).min(10_000);
                     let reward = penalty * SHARE / 10_000;
                     assert!(reward > 0);
@@ -399,7 +402,7 @@ fn v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements() 
                     );
                     let retained = penalty - reward;
                     let group = env.market_state().1;
-                    for (asset, quantity) in [(0, remaining), (1, POS_SCALE)] {
+                    for (asset, quantity) in [(LIQUIDATED, remaining), (UNTOUCHED, POS_SCALE)] {
                         assert_eq!(group.assets[asset].oi_eff_long_q, quantity);
                         assert_eq!(group.assets[asset].oi_eff_short_q, quantity);
                         assert_eq!(group.assets[asset].slot_last, end_slot);
@@ -407,15 +410,21 @@ fn v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements() 
                         assert_eq!(group.assets[asset].f_long_num, 0);
                         assert_eq!(group.assets[asset].f_short_num, 0);
                     }
-                    assert_eq!(
-                        group.insurance_domain_budget,
-                        [
-                            maintenance / 2 + retained / 2,
-                            maintenance - maintenance / 2 + retained - retained / 2,
-                            0,
-                            0,
-                        ]
-                    );
+                    // Side-neutral maintenance revenue is credited to asset 0 and splits by
+                    // cumulative total (issue #386 carry); the retained liquidation fee funds
+                    // the liquidated asset's own two domains.
+                    fn credit_maintenance(budgets: &mut [u128; 4], fee: u128) {
+                        let before = budgets[0] + budgets[1];
+                        let long = (before + fee) / 2 - before / 2;
+                        budgets[0] += long;
+                        budgets[1] += fee - long;
+                    }
+                    let mut maintenance_budgets = [0u128; 4];
+                    credit_maintenance(&mut maintenance_budgets, maintenance);
+                    let mut expected_budgets = maintenance_budgets;
+                    expected_budgets[2 * LIQUIDATED] += retained / 2;
+                    expected_budgets[2 * LIQUIDATED + 1] += retained - retained / 2;
+                    assert_eq!(group.insurance_domain_budget, expected_budgets);
                     check_state(&env, portfolios);
 
                     let payout = DEPOSITS[2] + reward - maintenance;
@@ -445,14 +454,14 @@ fn v16_program_interrupted_refresh_preserves_fee_and_liquidation_entitlements() 
                         u128::from(env.token_amount(env.vault)) + payout,
                         DEPOSITS.iter().sum()
                     );
+                    // The keeper's own maintenance is the second credit of the same amount.
+                    credit_maintenance(&mut maintenance_budgets, maintenance);
+                    let mut expected_budgets = maintenance_budgets;
+                    expected_budgets[2 * LIQUIDATED] += retained / 2;
+                    expected_budgets[2 * LIQUIDATED + 1] += retained - retained / 2;
                     assert_eq!(
                         env.market_state().1.insurance_domain_budget,
-                        [
-                            2 * (maintenance / 2) + retained / 2,
-                            2 * (maintenance - maintenance / 2) + retained - retained / 2,
-                            0,
-                            0,
-                        ]
+                        expected_budgets
                     );
                     assert_eq!(env.svm.get_account(&long).unwrap(), account_prefix[0].1);
                     assert_eq!(env.token_amount(tokens[0]), 0);

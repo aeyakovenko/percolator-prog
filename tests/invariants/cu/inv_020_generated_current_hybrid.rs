@@ -429,9 +429,14 @@ fn v16_program_generated_current_hybrid_recipient_routes_match_full_health_and_r
                         let keeper_leg =
                             active_leg_for_asset(&w.env.portfolio_state(w.portfolios[2]), 2);
                         peak = peak.max(w.send(&[liquidate], None));
-                        let remaining = w.env.market_state().1.assets[0].oi_eff_short_q;
+                        // Engine #176: the target's riskiest leg is reduced, not its first slot.
+                        let remaining = w.env.market_state().1.assets[LIQUIDATED].oi_eff_short_q;
                         assert!(remaining > 0 && remaining < POS_SCALE);
-                        let penalty = ((POS_SCALE - remaining) * u128::from(CURRENT[0]))
+                        assert_eq!(
+                            w.env.market_state().1.assets[UNTOUCHED].oi_eff_short_q,
+                            POS_SCALE
+                        );
+                        let penalty = ((POS_SCALE - remaining) * u128::from(CURRENT[LIQUIDATED]))
                             .div_ceil(POS_SCALE)
                             .div_ceil(100)
                             .min(10_000);
@@ -556,10 +561,11 @@ fn v16_program_generated_current_hybrid_recipient_routes_match_full_health_and_r
                         let insurance = penalty - reward;
                         let group = w.env.market_state().1;
                         assert_eq!(group.insurance, insurance);
-                        assert_eq!(
-                            group.insurance_domain_budget,
-                            [insurance / 2, insurance - insurance / 2, 0, 0, 0, 0, 0, 0]
-                        );
+                        // The retained fee funds the liquidated asset's two insurance domains.
+                        let mut budgets = [0; 8];
+                        budgets[2 * LIQUIDATED] = insurance / 2;
+                        budgets[2 * LIQUIDATED + 1] = insurance - insurance / 2;
+                        assert_eq!(group.insurance_domain_budget, budgets);
                         let outcome = (
                             remaining,
                             penalty,

@@ -359,10 +359,15 @@ fn v16_program_active_keeper_reward_recertifies_unrelated_loss_across_partial_re
                     &tracked,
                     None,
                 ));
-                let remaining = env.market_state().1.assets[0].oi_eff_short_q;
+                // Engine #176: the target's riskiest leg is reduced, not its first slot.
+                let remaining = env.market_state().1.assets[LIQUIDATED].oi_eff_short_q;
                 assert!(remaining > 0 && remaining < POS_SCALE);
+                assert_eq!(
+                    env.market_state().1.assets[UNTOUCHED].oi_eff_short_q,
+                    POS_SCALE
+                );
                 let closed = POS_SCALE - remaining;
-                let penalty = ((closed * u128::from(CURRENT[0])).div_ceil(POS_SCALE))
+                let penalty = ((closed * u128::from(CURRENT[LIQUIDATED])).div_ceil(POS_SCALE))
                     .div_ceil(100)
                     .min(10_000);
                 let reward = penalty * SHARE / 10_000;
@@ -510,10 +515,11 @@ fn v16_program_active_keeper_reward_recertifies_unrelated_loss_across_partial_re
                 assert_eq!(env.svm.get_account(&target).unwrap(), paid_target);
                 assert_eq!(env.market_state().1.insurance, penalty - reward);
                 let insurance = penalty - reward;
-                assert_eq!(
-                    env.market_state().1.insurance_domain_budget,
-                    [insurance / 2, insurance - insurance / 2, 0, 0, 0, 0, 0, 0]
-                );
+                // The retained fee funds the liquidated asset's two insurance domains.
+                let mut budgets = [0; 8];
+                budgets[2 * LIQUIDATED] = insurance / 2;
+                budgets[2 * LIQUIDATED + 1] = insurance - insurance / 2;
+                assert_eq!(env.market_state().1.insurance_domain_budget, budgets);
                 census(&env, portfolios, tokens);
                 let outcome = (
                     remaining,

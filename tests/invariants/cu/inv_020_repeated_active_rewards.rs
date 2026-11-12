@@ -150,7 +150,15 @@ fn v16_program_repeated_active_rewards_preserve_renewed_observations_and_exact_e
             for episode in 1..=2u64 {
                 let start = 64 * (episode - 1);
                 let end = start + 64;
-                let prices = [PRICE + episode * 40_000, PRICE + episode * 50_000];
+                // Engine #176 liquidates the riskiest leg first, which clears a moderate
+                // deficit in one bounded step. Episode 1 only just outruns the 32-step
+                // catch-up prefix; episode 2 then moves both marks by nearly the whole
+                // 64-slot cap, so closing the entire larger leg at the fee cap still leaves a
+                // deficit and the recipient is credited twice within that episode.
+                let prices = [
+                    [PRICE + 33_000, PRICE + 34_000],
+                    [PRICE + 99_000, PRICE + 100_000],
+                ][episode as usize - 1];
                 let keeper_price = PRICE + episode * 50_000;
                 // Each slot boundary consumes a fresh authenticated report.
                 let timestamp = 99 + 2 * episode as i64;
@@ -260,6 +268,18 @@ fn v16_program_repeated_active_rewards_preserve_renewed_observations_and_exact_e
                     });
                     assert_eq!(closed.iter().filter(|&&q| q > 0).count(), 1);
                     let asset = usize::from(closed[1] > 0);
+                    // Engine #176: the reduced leg is the one with the highest ADL-effective
+                    // notional (the target holds the whole short side of both assets); an
+                    // exact tie would keep the first persisted slot.
+                    let risk = [0, 1].map(|i| {
+                        before_group.assets[i].oi_eff_short_q
+                            * u128::from(before_group.assets[i].effective_price)
+                    });
+                    assert_eq!(
+                        asset,
+                        usize::from(risk[1] > risk[0]),
+                        "episode {episode}: closed {closed:?} against risk {risk:?}"
+                    );
                     let penalty = (closed[asset] * u128::from(prices[asset]))
                         .div_ceil(POS_SCALE)
                         .div_ceil(100)

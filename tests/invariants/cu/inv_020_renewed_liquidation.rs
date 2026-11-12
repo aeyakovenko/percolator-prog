@@ -253,7 +253,15 @@ fn v16_program_renewed_observations_preserve_repeated_liquidation_certificates()
                 let mut total_reward = 0;
                 for episode in 1..=2u64 {
                     let start = 64 * (episode - 1);
-                    let prices = [PRICE + episode * 40_000, PRICE + episode * 50_000];
+                    // Engine #176 liquidates the riskiest leg first, which clears a moderate
+                    // deficit in one bounded step. Episode 1 only just outruns the 32-step
+                    // catch-up prefix; episode 2 then moves both marks by nearly the whole
+                    // 64-slot cap, so closing the entire larger leg at the fee cap still leaves
+                    // a deficit and the later episode needs a second bounded step.
+                    let prices = [
+                        [PRICE + 33_000, PRICE + 34_000],
+                        [PRICE + 99_000, PRICE + 100_000],
+                    ][episode as usize - 1];
                     let timestamp = 100 + episode as i64 * 10;
                     set_test_clock(&mut env, start, timestamp);
                     env.push_auth_mark_for_asset_as_admin(1, caller_slot, prices[1]);
@@ -411,6 +419,21 @@ fn v16_program_renewed_observations_preserve_repeated_liquidation_certificates()
                             position_epoch + 1
                         );
                         let after = env.market_state().1;
+                        // Engine #176: each bounded action reduces only the leg with the highest
+                        // ADL-effective notional (the target holds the whole short side of both
+                        // assets); an exact tie would keep the first persisted slot.
+                        let risk = [0, 1].map(|i| {
+                            before.assets[i].oi_eff_short_q
+                                * u128::from(before.assets[i].effective_price)
+                        });
+                        let riskiest = usize::from(risk[1] > risk[0]);
+                        let closed = [0, 1].map(|i| {
+                            before.assets[i].oi_eff_short_q - after.assets[i].oi_eff_short_q
+                        });
+                        assert!(
+                            closed[riskiest] > 0 && closed[1 - riskiest] == 0,
+                            "episode {episode}: closed {closed:?} against risk {risk:?}"
+                        );
                         let penalty = equity - env.portfolio_state(portfolios[1]).capital.get();
                         assert!(penalty > 0 && penalty <= 10_000);
                         total_penalty += penalty;

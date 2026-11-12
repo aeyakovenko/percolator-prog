@@ -28,6 +28,12 @@ mod renewed_liquidation;
 const PRICE: u64 = 1_000_000;
 const CURRENT: [u64; 2] = [1_040_000, 1_050_000];
 const DEPOSITS: [u128; 3] = [10_000_000, 220_000, 1_000];
+// Engine #176: when both legs of the target are flagged, the auto-crank liquidates the leg
+// with the highest ADL-effective notional rather than the first persisted slot; an exact tie
+// keeps the persisted order. These worlds hold one unit short per asset with asset 0 in the
+// first slot, so the liquidated leg is the asset with the strictly higher current price.
+const LIQUIDATED: usize = if CURRENT[1] > CURRENT[0] { 1 } else { 0 };
+const UNTOUCHED: usize = 1 - LIQUIDATED;
 
 fn funded_owner(env: &mut V16CuEnv, owner: &Keypair, amount: u128) -> (Pubkey, Pubkey) {
     env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
@@ -404,12 +410,15 @@ fn v16_program_staged_observations_match_current_liquidation_and_reduction() {
             let after = env.market_state().1;
             assert_eq!(env.portfolio_position_epoch(short), position_epoch + 1);
             if liquidation {
-                let remaining = active_leg_for_asset(&env.portfolio_state(short), 0)
+                // Engine #176: the riskiest leg is reduced, not the first persisted slot.
+                let remaining = active_leg_for_asset(&env.portfolio_state(short), LIQUIDATED)
                     .basis_pos_q
                     .unsigned_abs();
                 assert!(remaining > 0 && remaining < POS_SCALE);
-                assert_eq!(after.assets[0].oi_eff_short_q, remaining);
-                assert_eq!(after.assets[0].oi_eff_long_q, remaining);
+                assert_eq!(after.assets[LIQUIDATED].oi_eff_short_q, remaining);
+                assert_eq!(after.assets[LIQUIDATED].oi_eff_long_q, remaining);
+                assert_eq!(after.assets[UNTOUCHED].oi_eff_short_q, POS_SCALE);
+                assert_eq!(after.assets[UNTOUCHED].oi_eff_long_q, POS_SCALE);
                 let capital = env.portfolio_state(short).capital.get();
                 let penalty = 130_000 - capital;
                 let reward = env.portfolio_state(keeper).capital.get() - DEPOSITS[2];
@@ -420,8 +429,9 @@ fn v16_program_staged_observations_match_current_liquidation_and_reduction() {
                     after.c_tot + after.insurance,
                     before.c_tot + before.insurance
                 );
-                let margin = (remaining * u128::from(CURRENT[0])).div_ceil(POS_SCALE * 10)
-                    + u128::from(CURRENT[1]) / 10;
+                let margin = (remaining * u128::from(CURRENT[LIQUIDATED]))
+                    .div_ceil(POS_SCALE * 10)
+                    + u128::from(CURRENT[UNTOUCHED]) / 10;
                 assert_current_short(&env, short, capital, margin);
                 assert_eq!(
                     health_cert(&env.portfolio_state(short)).certified_liq_deficit,
@@ -444,9 +454,10 @@ fn v16_program_staged_observations_match_current_liquidation_and_reduction() {
                 );
                 assert_eq!(env.portfolio_state(keeper).capital.get(), DEPOSITS[2]);
                 assert_eq!(after.insurance, 0);
+                // The owner reduction closes asset 0; its sibling leg is untouched.
+                assert_eq!(after.assets[1].oi_eff_long_q, POS_SCALE);
+                assert_eq!(after.assets[1].oi_eff_short_q, POS_SCALE);
             }
-            assert_eq!(after.assets[1].oi_eff_long_q, POS_SCALE);
-            assert_eq!(after.assets[1].oi_eff_short_q, POS_SCALE);
             assert_eq!(after.vault, DEPOSITS.iter().sum::<u128>());
             assert_eq!(after.vault, u128::from(env.token_amount(env.vault)));
             assert_eq!(

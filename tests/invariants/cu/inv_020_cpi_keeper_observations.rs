@@ -252,9 +252,14 @@ fn v16_program_cpi_active_keeper_observations_preserve_admission_and_payout() {
                     &tracked,
                     None,
                 ));
-                let remaining = env.market_state().1.assets[0].oi_eff_short_q;
+                // Engine #176: the target's riskiest leg is reduced, not its first slot.
+                let remaining = env.market_state().1.assets[LIQUIDATED].oi_eff_short_q;
                 assert!(remaining > 0 && remaining < POS_SCALE);
-                let penalty = ((POS_SCALE - remaining) * u128::from(CURRENT[0]))
+                assert_eq!(
+                    env.market_state().1.assets[UNTOUCHED].oi_eff_short_q,
+                    POS_SCALE
+                );
+                let penalty = ((POS_SCALE - remaining) * u128::from(CURRENT[LIQUIDATED]))
                     .div_ceil(POS_SCALE)
                     .div_ceil(100)
                     .min(10_000);
@@ -430,10 +435,11 @@ fn v16_program_cpi_active_keeper_observations_preserve_admission_and_payout() {
                 assert_eq!(env.svm.get_account(&target), paid_target);
                 let insurance = penalty - reward;
                 assert_eq!(env.market_state().1.insurance, insurance);
-                assert_eq!(
-                    env.market_state().1.insurance_domain_budget,
-                    [insurance / 2, insurance - insurance / 2, 0, 0, 0, 0, 0, 0]
-                );
+                // The retained fee funds the liquidated asset's two insurance domains.
+                let mut budgets = [0; 8];
+                budgets[2 * LIQUIDATED] = insurance / 2;
+                budgets[2 * LIQUIDATED + 1] = insurance - insurance / 2;
+                assert_eq!(env.market_state().1.insurance_domain_budget, budgets);
                 census(&env, portfolios, tokens);
                 let outcome = (
                     remaining,

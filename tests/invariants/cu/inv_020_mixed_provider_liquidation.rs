@@ -2,6 +2,8 @@
 //! of the selected asset's discovery hint preserves its authenticated fee and
 //! reward attribution. Stale evidence rolls back refresh and paid liquidation.
 //! Fresh public histories only; Clock, signer SOL and vendor reports are fixtures.
+//! The selected asset is the engine's choice: since engine #176 the riskiest leg
+//! (`LIQUIDATED`), not the first persisted slot.
 
 use super::*;
 use crate::support::fuzz_model::{
@@ -276,7 +278,8 @@ fn v16_program_mixed_provider_liquidation_omissions_preserve_exact_entitlements(
                         Some(keeper),
                         &legs,
                         if refreshed && omit_selected_after_refresh {
-                            &[1]
+                            // Only the sibling's hint: the selected asset's is omitted.
+                            &[UNTOUCHED]
                         } else {
                             &full
                         },
@@ -335,18 +338,20 @@ fn v16_program_mixed_provider_liquidation_omissions_preserve_exact_entitlements(
                     }
                 }
                 let group = env.market_state().1;
-                let remaining = group.assets[0].oi_eff_short_q;
+                // Engine #176: the riskiest leg is reduced, whichever provider prices it and
+                // whether or not its own hint accompanied the liquidation.
+                let remaining = group.assets[LIQUIDATED].oi_eff_short_q;
                 assert!(remaining > 0 && remaining < POS_SCALE);
-                assert_eq!(group.assets[0].oi_eff_long_q, remaining);
+                assert_eq!(group.assets[LIQUIDATED].oi_eff_long_q, remaining);
                 assert_eq!(
                     (
-                        group.assets[1].oi_eff_long_q,
-                        group.assets[1].oi_eff_short_q
+                        group.assets[UNTOUCHED].oi_eff_long_q,
+                        group.assets[UNTOUCHED].oi_eff_short_q
                     ),
                     (POS_SCALE, POS_SCALE)
                 );
                 let closed = POS_SCALE - remaining;
-                let notional = (closed * u128::from(CURRENT[0])).div_ceil(POS_SCALE);
+                let notional = (closed * u128::from(CURRENT[LIQUIDATED])).div_ceil(POS_SCALE);
                 let penalty = (notional * 100).div_ceil(10_000).min(10_000);
                 let reward = penalty * SHARE / 10_000;
                 let insurance = penalty - reward;
@@ -358,10 +363,11 @@ fn v16_program_mixed_provider_liquidation_omissions_preserve_exact_entitlements(
                     DEPOSITS[2] + reward
                 );
                 assert_eq!(group.insurance, insurance);
-                assert_eq!(
-                    &group.insurance_domain_budget[..4],
-                    &[insurance / 2, insurance - insurance / 2, 0, 0]
-                );
+                // The retained fee funds the liquidated asset's two insurance domains.
+                let mut budgets = [0; 4];
+                budgets[2 * LIQUIDATED] = insurance / 2;
+                budgets[2 * LIQUIDATED + 1] = insurance - insurance / 2;
+                assert_eq!(&group.insurance_domain_budget[..4], &budgets);
                 assert_eq!(group.vault, DEPOSITS.iter().sum::<u128>());
                 assert_eq!(env.svm.get_account(&peer), owners_before[0]);
                 assert_eq!(frame(&env, &custody_keys), custody);
@@ -369,8 +375,8 @@ fn v16_program_mixed_provider_liquidation_omissions_preserve_exact_entitlements(
                 assert_eq!(cert.certified_liq_deficit, 0);
                 assert_eq!(
                     cert.certified_maintenance_req,
-                    (remaining * u128::from(CURRENT[0])).div_ceil(POS_SCALE * 10)
-                        + u128::from(CURRENT[1]) / 10
+                    (remaining * u128::from(CURRENT[LIQUIDATED])).div_ceil(POS_SCALE * 10)
+                        + u128::from(CURRENT[UNTOUCHED]) / 10
                 );
                 let repeated = observation(&env, target, &owners[2], Some(keeper), &legs, &full);
                 peak[1] = peak[1].max(transact(

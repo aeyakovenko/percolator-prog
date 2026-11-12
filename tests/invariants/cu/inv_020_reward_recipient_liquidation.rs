@@ -373,8 +373,13 @@ fn recipient_routes(cpi: bool, interrupted: bool) -> (Outcome, u64, usize) {
             ));
             assert_current_short(&env, target, 130_000, 209_000);
             peak = peak.max(transact(&mut env, &[&owners[2]], &[ix], &tracked, None));
-            let first_remaining = env.market_state().1.assets[0].oi_eff_short_q;
-            let first_fee = penalty(first_remaining, CURRENT[0]);
+            // Engine #176: the first target's riskiest leg is reduced, not its first slot.
+            let first_remaining = env.market_state().1.assets[LIQUIDATED].oi_eff_short_q;
+            assert_eq!(
+                env.market_state().1.assets[UNTOUCHED].oi_eff_short_q,
+                POS_SCALE
+            );
+            let first_fee = penalty(first_remaining, CURRENT[LIQUIDATED]);
             let first_reward = first_fee * SHARE / 10_000;
             assert!(first_reward > 0);
             assert_eq!(
@@ -541,19 +546,14 @@ fn recipient_routes(cpi: bool, interrupted: bool) -> (Outcome, u64, usize) {
             );
             let insurance = [first_fee - first_reward, second_fee - second_reward];
             assert_eq!(env.market_state().1.insurance, insurance.iter().sum());
-            assert_eq!(
-                env.market_state().1.insurance_domain_budget,
-                [
-                    insurance[0] / 2,
-                    insurance[0] - insurance[0] / 2,
-                    0,
-                    0,
-                    insurance[1] / 2,
-                    insurance[1] - insurance[1] / 2,
-                    0,
-                    0
-                ]
-            );
+            // Each retained fee funds its liquidated asset's two domains: the first target's
+            // riskiest leg, then the recipient's only leg on asset 2.
+            let mut budgets = [0; 8];
+            for (asset, retained) in [(LIQUIDATED, insurance[0]), (2, insurance[1])] {
+                budgets[2 * asset] = retained / 2;
+                budgets[2 * asset + 1] = retained - retained / 2;
+            }
+            assert_eq!(env.market_state().1.insurance_domain_budget, budgets);
             assert_eq!(env.svm.get_account(&target), first_target);
             census(&env, portfolios, tokens);
 
