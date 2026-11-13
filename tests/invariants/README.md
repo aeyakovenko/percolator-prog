@@ -32500,6 +32500,38 @@ force close and rewarded maintenance retain their separate documented gaps.
 No production finding, engine proof, exhaustive guarantee, or invariant-status
 promotion is claimed; INV-077 remains open evidence.
 
+### INV-077 source-lien loss refresh (2026-11-13)
+
+[`inv_077_source_lien_loss_refresh.rs`](cu/inv_077_source_lien_loss_refresh.rs), mounted from
+the existing INV-077 CU module, adds three selectors under `source_lien_loss_refresh::`,
+measured on engine `427dc5fc584ccd0bb7f4510c76c8992f68546a6c`. Setup uses public wrapper
+instructions only; no program-owned state is injected.
+
+**Guarantee.** An LP holds a 1,000-atom claim in each of the twenty-eight source domains, each
+beside 1,000 atoms of provider principal, and the claims are liened as its margin. A mark move
+takes that margin, and one hint-free `PermissionlessCrank` must settle every losing leg in a
+single transaction: an account that cannot be refreshed cannot be liquidated. Each test requires
+that call to stay below 1.375M CU, the backing behind every burned lien to end in the domain its
+loss is owed to (after the taker refreshes, every domain's fresh reserved backing covers its
+claims), and the total backing across the source domains to be unchanged.
+
+| Selector | Shape | Refresh CU |
+|---|---|---|
+| `v16_program_one_leg_loss_through_every_source_lien_is_bounded_and_backs_the_gain` | one short, 28 liened claims, no capital | 760,279 |
+| `v16_program_five_leg_loss_through_every_source_lien_is_bounded_and_backs_every_gain` | five shorts, 28 liened claims, no capital | 1,097,075 |
+| `v16_program_six_leg_loss_through_leftover_source_liens_is_bounded_and_backs_every_gain` | six shorts opened against capital, 27 leftover liens | 1,167,865 |
+
+The one-leg test also pins the exact result: the loss domain ends with its own 2,000 atoms and
+the 1,000 the taker paid into each of the other twenty-seven domains, which keep their provider's
+1,000. On engine `a712af767eeb217876a3d3c50e3849b60ea54462` the backing assertions fail (the
+burned liens are un-pledged where they stand), and the six-leg refresh exceeds the transaction
+limit.
+
+**Remaining gaps.** More losing legs over the same lien table cost more: ten legs with the 27
+leftover liens, and fourteen legs after a ten-percent move, still exceed the transaction limit on
+this engine as on the previous one. Those shapes are not asserted here. Hybrid feeds, funding,
+fees and partially backed domains are not part of this fixture.
+
 ### INV-077 source-capacity reclamation
 
 Additional bounded evidence, 2026-09-08:

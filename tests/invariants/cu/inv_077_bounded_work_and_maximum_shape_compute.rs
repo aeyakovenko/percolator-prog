@@ -78,6 +78,9 @@ mod terminal_destination_variants;
 #[path = "inv_077_short_side_b_budget.rs"]
 mod short_side_b_budget;
 
+#[path = "inv_077_source_lien_loss_refresh.rs"]
+mod source_lien_loss_refresh;
+
 #[path = "inv_077_public_native_insurance_capacity.rs"]
 mod public_native_insurance_capacity;
 
