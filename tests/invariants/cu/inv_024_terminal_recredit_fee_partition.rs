@@ -25,14 +25,21 @@ const AVAILABLE: u64 = INSURANCE + INSURANCE_FEE - SPENT;
 const USER_PAID: [u64; 2] = [0, CAPITAL[1] + LOSS - SOURCE_PRINCIPAL];
 const FEE_PREFIX: u64 = 17;
 const RELEASED_LIEN: u64 = 1_050 * 105 / 2 - CAPITAL[0];
-// percolator-prog#457 (engine #226): when the released lien left domain-1 provider
-// backing behind the former winner's unrealized face, the reversal nets that face 1:1
-// against the twin domain. The consumed twin backing (still recorded as a domain-1
-// provider receivable) is credited to the loss domain, so the claimant collects it from
-// its source domain instead of leaving it as junior residue on its terminal receipt.
-const TWIN_CREDIT: u64 = PROFIT - RELEASED_LIEN;
+// percolator-prog#457 (engine #226): the reversal nets the former winner's unrealized
+// face 1:1 against the twin domain. The consumed twin backing (still recorded as a
+// domain-1 provider receivable) is credited to the loss domain, so the claimant collects
+// it from its source domain instead of leaving it as junior residue on its terminal
+// receipt. Since the engine follow-up to #250 that holds for the liened part of the face
+// as well: the backing behind it is consumed from the lien and follows the loss, where
+// it used to be un-pledged in place and left in domain 1 with no claim on it. The whole
+// PROFIT moves, and what each party is finally paid does not change.
+const TWIN_CREDIT: u64 = PROFIT;
 const RESIDUAL_SOURCE_PAID: u64 = SOURCE_PAID + TWIN_CREDIT;
-const _: () = assert!(RESIDUAL_SOURCE_PAID == 54_003 && SOURCE_FACE - RESIDUAL_SOURCE_PAID == 2_697);
+const _: () = assert!(
+    RESIDUAL_SOURCE_PAID == 56_626
+        && SOURCE_FACE - RESIDUAL_SOURCE_PAID == 74
+        && TWIN_CREDIT - RELEASED_LIEN == 2_377
+);
 // Engine #175: with no lien on it, the former winner's own face (PROFIT, fronted by the
 // domain-1 provider) pays that much of its reversal loss, and the counterparty backing this
 // consumes is booked for the loss domain instead of being left in the junior residual. The
@@ -382,8 +389,9 @@ fn terminal_fee_loss_prefix(
                             market_id: world.env.asset_market_id(0),
                             authority_epoch: world.env.control_sequences(0).authority_epoch,
                             // #226: the claimant's floored source atom is now funded by
-                            // the loss domain it was collected from, so domain 1 need
-                            // only retain the released lien plus `residual`.
+                            // the loss domain it was collected from, and the released
+                            // lien's backing left with the reversal loss, so domain 1
+                            // need only retain `residual`.
                             amount: u128::from(BACKING - residual),
                         },
                         vec![
@@ -468,17 +476,17 @@ fn terminal_fee_loss_after_receipt_expiry(
     let group = world.env.market_state().1;
     assert_eq!(
         group.source_credit[1].fresh_reserved_backing_num,
-        u128::from(residual + RELEASED_LIEN) * BOUND_SCALE
+        u128::from(residual) * BOUND_SCALE
     );
     assert_eq!(
         group.source_credit[1].provider_receivable_num,
-        u128::from(PROFIT - RELEASED_LIEN) * BOUND_SCALE
+        u128::from(TWIN_CREDIT) * BOUND_SCALE
     );
     assert_eq!(
         world.tokens.map(|key| world.env.token_amount(key)),
         [
             0,
-            USER_PAID[1] - RELEASED_LIEN,
+            USER_PAID[1],
             BACKING - residual,
             0,
             0,
@@ -520,7 +528,7 @@ fn terminal_fee_loss_after_receipt_expiry(
     // from the terminal receipt to source-domain collection.
     assert_eq!(
         receipt.terminal_positive_claim_face - receipt.paid_effective,
-        u128::from(SOURCE_PRINCIPAL + RELEASED_LIEN)
+        u128::from(SOURCE_PRINCIPAL)
     );
     let retry = payout(
         &world,
@@ -559,33 +567,37 @@ fn terminal_fee_loss_after_receipt_expiry(
         Some((2, PercolatorError::EngineNonProgress)),
     );
     world.env.svm.warp_to_slot(100);
-    // Each hinted crank lapses one bucket: first the receipt's source (loss) domain,
-    // whose floored atom now backs the claimant (#226), then the retained twin domain.
+    // The hinted crank lapses the receipt's source (loss) domain, whose floored atom now
+    // backs the claimant (#226). That atom is all the receipt still waits for: the released
+    // lien's backing left with the reversal loss and was collected from the source domain,
+    // so the claimant no longer waits for the twin domain's bucket to lapse.
     let allowed = [world.env.market];
-    for expired in [[true, false], [true, true]] {
-        land(
-            &mut world.env,
-            &[expiry.clone()],
-            &[],
-            &tracked,
-            &allowed,
-            0,
-            None,
-            None,
-        );
-        let group = world.env.market_state().1;
-        for domain in 0..2 {
-            assert_eq!(
-                group.source_backing_buckets[domain].status,
-                if expired[domain] {
-                    BackingBucketStatusV16::Expired
-                } else {
-                    BackingBucketStatusV16::Fresh
-                }
-            );
-        }
-        assert_eq!(group.source_backing_buckets[0].fresh_unliened_backing_num, 0);
-    }
+    land(
+        &mut world.env,
+        &[expiry.clone()],
+        &[],
+        &tracked,
+        &allowed,
+        0,
+        None,
+        None,
+    );
+    let group = world.env.market_state().1;
+    assert_eq!(
+        [
+            group.source_backing_buckets[0].status,
+            group.source_backing_buckets[1].status
+        ],
+        [
+            BackingBucketStatusV16::Expired,
+            BackingBucketStatusV16::Fresh
+        ]
+    );
+    assert_eq!(group.source_backing_buckets[0].fresh_unliened_backing_num, 0);
+    assert_eq!(
+        group.source_credit[1].fresh_reserved_backing_num,
+        u128::from(residual) * BOUND_SCALE
+    );
     assert_eq!(
         resolved_receipt(&world.env.portfolio_state(world.portfolios[1])),
         receipt
@@ -632,6 +644,43 @@ fn terminal_fee_loss_after_receipt_expiry(
             .env
             .close_portfolio_with_cu(&users[actor], world.portfolios[actor]);
     }
+    // Nothing of the claimant's waited on the twin domain, so no portfolio crank lapsed
+    // its bucket. The provider's retained `residual` there lapses through the terminal
+    // slab scan, which moves no token and leaves the recredit to the insurance payout.
+    let lapse_twin = Instruction {
+        program_id: world.env.program_id,
+        accounts: vec![
+            AccountMeta::new(world.admin.pubkey(), true),
+            AccountMeta::new(world.env.market, false),
+            AccountMeta::new(world.env.vault, false),
+            AccountMeta::new_readonly(world.env.vault_authority, false),
+            AccountMeta::new(admin_token, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(world.env.mint, false),
+        ],
+        data: ProgInstruction::CloseSlab {
+            authority_epoch: world.env.control_sequences(0).authority_epoch,
+        }
+        .encode(),
+    };
+    let allowed = [world.env.market];
+    let admin = world.admin.insecure_clone();
+    land(
+        &mut world.env,
+        &[lapse_twin],
+        &[&admin],
+        &tracked,
+        &allowed,
+        0,
+        None,
+        None,
+    );
+    let group = world.env.market_state().1;
+    assert_eq!(
+        group.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Expired
+    );
+    assert_eq!(group.source_credit[1].fresh_reserved_backing_num, 0);
     (world, insurer, admin_token)
 }
 
