@@ -6105,10 +6105,16 @@ fn run_source_credit_watermark_trade_case(
         (program, ctx, delegate)
     });
 
+    // Engine #250. At the exact watermark the domain is still fully backed, and the lien an
+    // increase needs pledges backing that already stands behind the trader's own face. A
+    // lien there dilutes nobody, so the watermark by itself no longer rejects the increase.
+    // (Under the old rate the pledged face stayed in the denominator, so the trader's
+    // remaining face lost value the moment it pledged, and every direction failed initial
+    // margin unless a provider had left surplus behind.)
     let before_market = env.svm.get_account(&env.market).unwrap();
     let before_cross = env.svm.get_account(&cross_account).unwrap();
     let before_counterparty = env.svm.get_account(&counterparty_account).unwrap();
-    let over_watermark = try_source_credit_watermark_trade(
+    let at_watermark = try_source_credit_watermark_trade(
         &mut env,
         path,
         matcher_accounts,
@@ -6121,21 +6127,97 @@ fn run_source_credit_watermark_trade_case(
         asset1_mark,
         0,
     );
+    match direction {
+        SourceCreditWatermarkDirection::PositiveSize => {
+            assert!(
+                at_watermark.is_ok(),
+                "{path:?} {direction:?} risk increase at the exact source-credit watermark failed: {at_watermark:?}"
+            );
+            let (_, at_watermark_group) = env.market_state();
+            let at_watermark_source = at_watermark_group.source_credit[winning_domain];
+            assert_eq!(
+                at_watermark_source.credit_rate_num,
+                percolator::CREDIT_RATE_SCALE,
+                "{path:?} {direction:?} lien at the exact watermark must not dilute live positive claims"
+            );
+            assert_eq!(
+                at_watermark_source.fresh_reserved_backing_num,
+                at_watermark_source.positive_claim_bound_num,
+                "{path:?} {direction:?} the lien pledges existing backing; it neither adds nor removes any"
+            );
+            let at_watermark_lien = state::portfolio_source_domain(
+                &env.portfolio_state(cross_account),
+                winning_domain,
+            );
+            assert!(
+                at_watermark_lien.source_lien_effective_reserved.get() > 0,
+                "{path:?} {direction:?} the admitted increase must reserve a source-credit lien"
+            );
+            assert!(at_watermark_lien.source_lien_counterparty_backing_num.get() > 0);
+            assert_eq!(at_watermark_lien.source_lien_insurance_backing_num.get(), 0);
+            assert_eq!(
+                at_watermark_source.valid_liened_backing_num,
+                at_watermark_lien.source_lien_counterparty_backing_num.get(),
+                "{path:?} {direction:?} the domain pledges exactly what the trader's lien reserves"
+            );
+        }
+        SourceCreditWatermarkDirection::NegativeSize => {
+            // This direction needs more margin than the trader's capital and fully credited
+            // gain provide (it is funded with a larger second-pass deposit below), so it is
+            // still rejected, and atomically.
+            assert!(
+                at_watermark.is_err(),
+                "{path:?} {direction:?} under-margined risk increase must reject at the exact source-credit watermark"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap().data,
+                before_market.data
+            );
+            assert_eq!(
+                env.svm.get_account(&cross_account).unwrap().data,
+                before_cross.data
+            );
+            assert_eq!(
+                env.svm.get_account(&counterparty_account).unwrap().data,
+                before_counterparty.data
+            );
+        }
+    }
+    // The watermark still binds the provider: with every atom of backing behind a claim,
+    // nothing more can leave.
+    let market_id = env.asset_market_id(winning_domain as u16 / 2);
+    let authority_epoch =
+        env.withdrawal_authority_epoch(env.admin.pubkey(), winning_domain / 2, false);
+    let market_at_watermark = env.svm.get_account(&env.market).unwrap();
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    let over_watermark_withdraw = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: winning_domain as u16,
+            market_id,
+            authority_epoch,
+            amount: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(watermark_withdraw_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
     assert!(
-        over_watermark.is_err(),
-        "{path:?} {direction:?} risk increase must reject at the exact source-credit watermark"
+        over_watermark_withdraw.is_err(),
+        "{path:?} {direction:?} provider withdrawal past the exact watermark must reject"
     );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap().data,
-        before_market.data
-    );
-    assert_eq!(
-        env.svm.get_account(&cross_account).unwrap().data,
-        before_cross.data
-    );
-    assert_eq!(
-        env.svm.get_account(&counterparty_account).unwrap().data,
-        before_counterparty.data
+        market_at_watermark.data
     );
 
     env.top_up_backing_bucket(winning_domain as u16, 5_000, 10);

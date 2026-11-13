@@ -1642,17 +1642,26 @@ pub(crate) fn assert_source_credit_rates(
             ));
         }
         let available = source_available_backing_num(label, domain, source)?;
-        let expected = if source.positive_claim_bound_num == 0
-            || available >= source.positive_claim_bound_num
-        {
+        // Engine #250: the rate credits UN-LIENED claim face. A valid lien locks at least
+        // as much face as the backing it pledges and locked face draws no soft credit, so
+        // the pledged backing and the same amount of claim bound leave the rate together.
+        let lien_covered = source
+            .valid_liened_backing_num
+            .checked_add(source.valid_liened_insurance_num)
+            .ok_or_else(|| format!("{label} source domain {domain} lien backing overflow"))?;
+        let unliened_claim_bound = source.positive_claim_bound_num.saturating_sub(lien_covered);
+        let expected = if source.positive_claim_bound_num == 0 {
+            CREDIT_RATE_SCALE
+        } else if available == 0 {
+            0
+        } else if available >= unliened_claim_bound {
             CREDIT_RATE_SCALE
         } else {
             super::reference_math::mul_div_floor(
                 available,
                 CREDIT_RATE_SCALE,
-                source.positive_claim_bound_num,
+                unliened_claim_bound,
             )?
-            .min(CREDIT_RATE_SCALE)
         };
         if source.credit_rate_num != expected {
             return Err(format!(
@@ -1661,8 +1670,9 @@ pub(crate) fn assert_source_credit_rates(
                 source.credit_rate_num, source.positive_claim_bound_num
             ));
         }
+        // Soft credit is drawn only by the face that liens do not already cover.
         let usable_positive_credit_num = super::reference_math::mul_div_floor(
-            source.positive_claim_bound_num,
+            unliened_claim_bound,
             source.credit_rate_num,
             CREDIT_RATE_SCALE,
         )?;

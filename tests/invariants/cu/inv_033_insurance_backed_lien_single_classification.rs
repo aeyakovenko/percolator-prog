@@ -704,30 +704,34 @@ fn run_public_source_lien_classification(
             "fresh counterparty backing should admit the source-credit risk increase: {trade_result:?}",
         );
     } else {
+        // Engine #250: the counterparty's settled loss is real backing for this claim, and a
+        // lien on it no longer devalues the rest of the same claim, so the increase is
+        // admitted on that backing alone. What this route pins is that the funded but
+        // unreserved domain insurance is not what admitted it: no insurance is reserved,
+        // liened or spent, and no token moves.
         assert!(
-            trade_result.is_err(),
+            trade_result.is_ok(),
+            "loser-paid backing alone should admit the source-credit risk increase: {trade_result:?}",
+        );
+        let before_group = state::read_market(&before_market.data).unwrap().1;
+        let (_, after_group) = env.market_state();
+        assert_eq!(
+            after_group.insurance_domain_budget[SOURCE_DOMAIN],
+            before_group.insurance_domain_budget[SOURCE_DOMAIN],
             "unreserved domain insurance must not be silently consumed as source-credit backing",
         );
+        assert_eq!(after_group.insurance, before_group.insurance);
         assert_eq!(
-            env.svm.get_account(&env.market).unwrap(),
-            before_market,
-            "rejected insurance-only source-credit attempt rewrote market state",
-        );
-        assert_eq!(
-            env.svm.get_account(&cross_account).unwrap(),
-            before_cross,
-            "rejected insurance-only source-credit attempt rewrote the trader portfolio",
-        );
-        assert_eq!(
-            env.svm.get_account(&counterparty_account).unwrap(),
-            before_counterparty,
-            "rejected insurance-only source-credit attempt rewrote the counterparty portfolio",
+            after_group.source_credit[SOURCE_DOMAIN].fresh_reserved_backing_num,
+            before_group.source_credit[SOURCE_DOMAIN].fresh_reserved_backing_num,
+            "the lien pledges the loser-paid backing that was already there",
         );
         assert_eq!(
             env.svm.get_account(&env.vault).unwrap(),
             before_vault,
-            "rejected insurance-only source-credit attempt moved vault tokens",
+            "admitting the increase moved vault tokens",
         );
+        let _ = (&before_cross, &before_counterparty);
     }
 
     let cross_after = env.portfolio_state(cross_account);
@@ -773,36 +777,45 @@ fn v16_program_public_source_lien_classification_never_double_counts_insurance()
     assert_eq!(counterparty.market_insurance_credit_reserved_num, 0);
     assert_eq!(counterparty.market_valid_liened_insurance_num, 0);
 
-    let insurance_only = run_public_source_lien_classification(false);
-    assert!(!insurance_only.trade_succeeded);
+    // Funded domain insurance beside loser-paid backing, no provider surplus. Before engine
+    // #250 this increase was rejected: pledging part of a fully backed claim left the
+    // pledged face in the rate denominator, so the trader's own remaining face lost value
+    // and initial margin failed. It is admitted now, by exactly the lien the provider-funded
+    // control creates, and still without touching the insurance.
+    let insurance_beside = run_public_source_lien_classification(false);
+    assert!(insurance_beside.trade_succeeded);
     assert!(
-        insurance_only.domain_insurance_budget > 0,
-        "negative route must be nonvacuous: domain insurance was actually funded",
+        insurance_beside.domain_insurance_budget > 0,
+        "route must be nonvacuous: domain insurance was actually funded",
     );
     assert_eq!(
-        insurance_only.source_claim_counterparty_liened_num, 0,
-        "rejected insurance-only route must not create counterparty claim liens",
+        insurance_beside.source_claim_counterparty_liened_num,
+        counterparty.source_claim_counterparty_liened_num,
+        "the lien does not depend on provider surplus or on funded insurance",
     );
     assert_eq!(
-        insurance_only.source_claim_insurance_liened_num, 0,
+        insurance_beside.source_lien_counterparty_backing_num,
+        counterparty.source_lien_counterparty_backing_num,
+    );
+    assert_eq!(
+        insurance_beside.source_claim_insurance_liened_num, 0,
         "unreserved domain insurance must not become an account-local insurance claim lien",
     );
     assert_eq!(
-        insurance_only.source_lien_counterparty_backing_num, 0,
-        "rejected insurance-only route must not reserve counterparty backing",
-    );
-    assert_eq!(
-        insurance_only.source_lien_insurance_backing_num, 0,
+        insurance_beside.source_lien_insurance_backing_num, 0,
         "unreserved domain insurance must not become account-local insurance backing",
     );
-    assert_eq!(insurance_only.market_valid_liened_backing_num, 0);
     assert_eq!(
-        insurance_only.market_insurance_credit_reserved_num, 0,
+        insurance_beside.market_valid_liened_backing_num,
+        counterparty.market_valid_liened_backing_num,
+    );
+    assert_eq!(
+        insurance_beside.market_insurance_credit_reserved_num, 0,
         "public domain-insurance top-up must not expose the engine-only insurance-credit reservation",
     );
     assert_eq!(
-        insurance_only.market_valid_liened_insurance_num, 0,
-        "rejected route must not consume reserved insurance",
+        insurance_beside.market_valid_liened_insurance_num, 0,
+        "admitted route must not consume reserved insurance",
     );
 
     // This is an intentional API absence, not an untested public transition. The wrapper may

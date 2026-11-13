@@ -16919,14 +16919,22 @@ pub mod processor {
                     .valid_liened_backing_num
                     .checked_add(locked_num)
                     .unwrap();
+                // Engine #250: un-liened backing over the claim bound the lien does not
+                // cover (10_000 / (20_000 - 10_000)), capped at the full rate.
                 group.source_credit[1].credit_rate_num = group.source_credit[1]
                     .fresh_reserved_backing_num
                     .checked_sub(group.source_credit[1].valid_liened_backing_num)
                     .unwrap()
                     .checked_mul(percolator::CREDIT_RATE_SCALE)
                     .unwrap()
-                    .checked_div(group.source_credit[1].positive_claim_bound_num)
-                    .unwrap();
+                    .checked_div(
+                        group.source_credit[1]
+                            .positive_claim_bound_num
+                            .checked_sub(group.source_credit[1].valid_liened_backing_num)
+                            .unwrap(),
+                    )
+                    .unwrap()
+                    .min(percolator::CREDIT_RATE_SCALE);
                 group.source_credit[1].credit_epoch =
                     group.source_credit[1].credit_epoch.checked_add(1).unwrap();
                 group.risk_epoch = group.risk_epoch.checked_add(1).unwrap();
