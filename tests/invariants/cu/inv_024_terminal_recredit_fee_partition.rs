@@ -33,6 +33,20 @@ const RELEASED_LIEN: u64 = 1_050 * 105 / 2 - CAPITAL[0];
 const TWIN_CREDIT: u64 = PROFIT - RELEASED_LIEN;
 const RESIDUAL_SOURCE_PAID: u64 = SOURCE_PAID + TWIN_CREDIT;
 const _: () = assert!(RESIDUAL_SOURCE_PAID == 54_003 && SOURCE_FACE - RESIDUAL_SOURCE_PAID == 2_697);
+// Engine #175: with no lien on it, the former winner's own face (PROFIT, fronted by the
+// domain-1 provider) pays that much of its reversal loss, and the counterparty backing this
+// consumes is booked for the loss domain instead of being left in the junior residual. The
+// claimant therefore collects PROFIT more from its source domain and that much less through
+// its junior receipt; what each party is finally paid does not change.
+const SUPPORT_CREDIT: u64 = PROFIT;
+const SUPPORTED_SOURCE_RATE: u128 =
+    (CAPITAL[0] - EARNINGS + SUPPORT_CREDIT) as u128 * BOUND_SCALE / SOURCE_FACE as u128;
+const SUPPORTED_SOURCE_PAID: u64 = (SOURCE_FACE as u128 * SUPPORTED_SOURCE_RATE / BOUND_SCALE) as u64;
+const _: () = assert!(
+    SUPPORTED_SOURCE_PAID == SOURCE_PAID + SUPPORT_CREDIT
+        && CAPITAL[0] - EARNINGS + SUPPORT_CREDIT - SUPPORTED_SOURCE_PAID == SOURCE_PRINCIPAL
+        && SOURCE_FACE - SUPPORTED_SOURCE_PAID == 74
+);
 
 #[derive(Default)]
 struct Entitlements {
@@ -283,7 +297,7 @@ fn terminal_fee_loss_world_with_quote(
     assert!(receipt.present && !receipt.finalized);
     assert_eq!(
         receipt.terminal_positive_claim_face,
-        u128::from(SOURCE_FACE - SOURCE_PAID)
+        u128::from(SOURCE_FACE - SUPPORTED_SOURCE_PAID)
     );
     assert_eq!(
         receipt.terminal_positive_claim_face - receipt.paid_effective,
@@ -1030,9 +1044,15 @@ fn v16_program_resolved_provider_withdraws_unneeded_backing_before_expiry() {
             ledger.terminal_claim_bound_unreceipted_num,
             ledger.snapshot_residual
         ),
-        (0, 5_073)
+        (
+            0,
+            u128::from(SOURCE_FACE - SUPPORTED_SOURCE_PAID - RECEIPT_SHORTFALL)
+        )
     );
-    assert_eq!(ledger.current_payout_rate_den, 5_074 * BOUND_SCALE);
+    assert_eq!(
+        ledger.current_payout_rate_den,
+        u128::from(SOURCE_FACE - SUPPORTED_SOURCE_PAID) * BOUND_SCALE
+    );
     assert_eq!(
         group.source_backing_buckets[1].fresh_unliened_backing_num,
         u128::from(BACKING) * BOUND_SCALE

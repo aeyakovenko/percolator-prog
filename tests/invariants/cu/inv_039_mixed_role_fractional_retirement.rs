@@ -249,6 +249,15 @@ fn terminal_check(world: &AttributionWorld, payouts: [u128; 5], reserve: u128, e
     assert_reservation_encumbrance_census("mixed fractional retirement", &group, &[]).unwrap();
 }
 
+// NOTE (engine #175): this test was written for worlds in which the peer's source domain
+// converts at a fractional rate and leaves a `support + 1` junior receipt plus one
+// source-reserved atom to carry through two expiry deadlines. With #175 the support the
+// mixed-role account pays with is booked for the peer's domain, so in these worlds the peer
+// converts its whole gain and neither the receipt nor the atom exists. The assertions below
+// pin that outcome, and the test still covers owner attribution, the rollback matrix, both
+// expiry deadlines and the terminal burn. Reaching a fractional peer rate again needs a
+// different setup (a debt the mixed-role account cannot cover); that re-parameterisation is
+// still to do.
 #[test]
 fn v16_program_mixed_role_fractional_source_preserves_attribution_through_expiry_and_retirement() {
     let mut worlds = 0;
@@ -265,11 +274,12 @@ fn v16_program_mixed_role_fractional_source_preserves_attribution_through_expiry
                     for late in [false, true] {
                         let (mut world, mut book) = setup(reverse, assets, debt);
                         assert_eq!(book.support(), DEPOSITS[1]);
-                        assert_eq!(
-                            book.peer_receipt_face(),
-                            book.support() + 1,
-                            "fractional conversion retains an additional receipt atom"
-                        );
+                        // Engine #175: the support the mixed-role account pays with is booked
+                        // for the peer's domain, which is then fully backed in these worlds.
+                        // The peer converts its whole gain; the fractional rate and the
+                        // receipt it used to leave (`support + 1`) are no longer reached by
+                        // this setup.
+                        assert_eq!(book.peer_receipt_face(), 0);
                         peak = peak.max(fund_provider(&mut world, &mut book, backing));
                         if schedule == 1 {
                             world.env.crank(
@@ -332,17 +342,16 @@ fn v16_program_mixed_role_fractional_source_preserves_attribution_through_expiry
                         assert!(book.booked && book.charged && book.debt_settled);
                         let peer = world.env.portfolio_state(world.actors[2].portfolio);
                         let receipt = resolved_receipt(&peer);
-                        assert!(receipt.present);
-                        assert_eq!(
-                            (receipt.terminal_positive_claim_face, receipt.paid_effective),
-                            (book.peer_receipt_face(), book.peer_receipt_face())
+                        assert!(
+                            !receipt.present,
+                            "a fully converted gain leaves no junior receipt"
                         );
                         let source_domain = assets[1] * 2 + usize::from(!reverse);
                         assert_eq!(
                             world.env.market_state().1.source_credit[source_domain]
                                 .fresh_reserved_backing_num,
-                            BOUND_SCALE,
-                            "the conversion's remaining atom stays source-reserved"
+                            0,
+                            "the full conversion leaves no source-reserved remainder"
                         );
                         let group = world.env.market_state().1;
                         let source_expiry = resolved_backing_deadline(&group);
@@ -354,10 +363,7 @@ fn v16_program_mixed_role_fractional_source_preserves_attribution_through_expiry
                             group.source_backing_buckets[source_domain].expiry_slot,
                             source_expiry
                         );
-                        let retry = payout(&world, 2, true);
-                        peak = peak.max(land(&mut world, &[retry], &[], &[], None));
-                        book.check(&world);
-                        receipts += 1;
+                        receipts += usize::from(receipt.present);
 
                         let payouts = book.payouts();
                         for actor in order {
@@ -452,8 +458,8 @@ fn v16_program_mixed_role_fractional_source_preserves_attribution_through_expiry
                         assert_eq!(
                             world.env.market_state().1.source_credit[source_domain]
                                 .fresh_reserved_backing_num,
-                            BOUND_SCALE,
-                            "unrelated expiry cannot release the fractional source atom"
+                            0,
+                            "the peer's domain was converted in full; no source atom is left to release"
                         );
                         world.env.svm.warp_to_slot(source_expiry + u64::from(late));
                         for _ in 0..16 {
@@ -528,7 +534,7 @@ fn v16_program_mixed_role_fractional_source_preserves_attribution_through_expiry
             }
         }
     }
-    assert_eq!((worlds, receipts), (32, 32));
+    assert_eq!((worlds, receipts), (32, 0));
     assert_eq!(rollbacks, 2 * worlds + terminal_calls);
     println!("INV-039 mixed fractional retirement: {worlds} worlds, {rollbacks} exact rollbacks, {receipts} paid receipt retries, {waits} waiting rollbacks, {terminal_calls} terminal calls; peak CU={peak}");
 }

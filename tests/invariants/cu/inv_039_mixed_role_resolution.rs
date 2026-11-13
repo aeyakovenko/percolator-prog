@@ -55,8 +55,12 @@ impl Book {
     }
 
     fn peer_conversion(&self) -> u128 {
-        // Preserve both rate quantization and the subsequent atom floor.
-        let backing = self.debt - self.support();
+        // Engine #175: the part of the debt that the mixed-role account pays with its own
+        // source support is counterparty backing consumed from its claim domain, and it is
+        // now booked for the loss domain instead of being left in the junior residual. The
+        // peer's domain therefore holds the capital-paid part plus the support, i.e. the
+        // whole debt. Preserve both rate quantization and the subsequent atom floor.
+        let backing = self.debt - self.support() + self.support();
         let rate = backing * percolator::CREDIT_RATE_SCALE / self.debt;
         self.debt * rate / percolator::CREDIT_RATE_SCALE
     }
@@ -607,6 +611,8 @@ fn v16_program_mixed_creditor_debtor_roles_preserve_owner_entitlement_through_re
     }
     assert_eq!(worlds, 32);
     assert!(waits > 0);
-    assert_eq!(receipt_retries, 32);
+    // Engine #175: the peer converts its whole gain from its source domain (see
+    // `Book::peer_conversion`), so no world leaves it a junior receipt to retry.
+    assert_eq!(receipt_retries, 0);
     println!("INV-039 mixed creditor/debtor: {worlds} worlds, {waits} exact waiting rejections, {receipt_retries} paid receipt retries; peak resolved CU={peak}");
 }

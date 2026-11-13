@@ -79,7 +79,7 @@ fn check_reserves(
     }
     assert_eq!(
         group.source_credit[0].provider_receivable_num,
-        u128::from(SOURCE_PAID) * BOUND_SCALE
+        u128::from(SUPPORTED_SOURCE_PAID) * BOUND_SCALE
     );
     if fees_paid != 0 {
         let account = env.svm.get_account(&ledger).unwrap();
@@ -306,7 +306,7 @@ fn v16_program_native_fee_loss_expiry_recredit_partitions_booked_residue() {
         );
         let receipt = resolved_receipt(&env.portfolio_state(portfolios[1]));
         // Source-credit flooring leaves one junior atom unpaid until provider expiry.
-        let face = SOURCE_FACE - SOURCE_PAID;
+        let face = SOURCE_FACE - SUPPORTED_SOURCE_PAID;
         assert_eq!(receipt.terminal_positive_claim_face, u128::from(face));
         assert_eq!(
             receipt.paid_effective,

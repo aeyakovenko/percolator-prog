@@ -199,7 +199,7 @@ fn v16_program_depleted_insurance_succession_preserves_recovered_reserve_attribu
                     );
                     assert_eq!(
                         group.source_credit[0].provider_receivable_num,
-                        u128::from(SOURCE_PAID) * BOUND_SCALE
+                        u128::from(SUPPORTED_SOURCE_PAID) * BOUND_SCALE
                     );
                     assert_eq!(
                         group.source_backing_buckets[0].fresh_unliened_backing_num,
