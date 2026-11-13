@@ -52,7 +52,7 @@ fn inv035_source_defines_test(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_domain_local_b_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "a712af767eeb217876a3d3c50e3849b60ea54462";
+    const ENGINE_PIN: &str = "1683b11d0e6640233eadb2f078a2c603483636a0";
     const ROUTES: &[Inv035ResidualRoute] = &[
         Inv035ResidualRoute {
             class: "single and batch trade terminal residual attribution",
