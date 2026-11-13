@@ -902,7 +902,7 @@ fn inv075_source_defines_test(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_exclusive_close_ownership_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "1683b11d0e6640233eadb2f078a2c603483636a0";
+    const ENGINE_PIN: &str = "427dc5fc584ccd0bb7f4510c76c8992f68546a6c";
     const CLASSES: &[Inv075CloseClass] = &[
         Inv075CloseClass {
             class: "exclusive domain and account acquisition",
