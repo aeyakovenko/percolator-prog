@@ -7060,18 +7060,41 @@ impl ScenarioRunner {
             0
         };
         let lapsed_live_backing = if group.mode == MarketModeV16::Live {
-            account
+            // Engine #243: a Live refresh reads the account's roster domains and the
+            // favorable domain `(asset, opposite side)` of every active leg, and expires
+            // one lapsed bucket per call from that set.
+            let mut read_domains = account
                 .source_domains
                 .iter()
                 .filter(|source| source.is_occupied())
-                .filter_map(|source| {
-                    group
-                        .source_backing_buckets
-                        .get(source.domain.get() as usize)
-                })
+                .map(|source| source.domain.get() as usize)
+                .collect::<Vec<_>>();
+            read_domains.extend(
+                decoded_legs(&account)
+                    .into_iter()
+                    .filter(|leg| leg.active)
+                    .map(|leg| {
+                        2 * leg.asset_index as usize + usize::from(leg.side == SideV16::Long)
+                    }),
+            );
+            read_domains.sort_unstable();
+            read_domains.dedup();
+            read_domains
+                .into_iter()
+                .filter_map(|domain| group.source_backing_buckets.get(domain))
                 .filter(|bucket| {
+                    // The engine judges expiry at the slot the crank reaches. Once the
+                    // market is as current as it can get that is the authenticated slot,
+                    // which can be ahead of the committed clock (a Recovery asset does not
+                    // accrue). While catch-up work remains it comes first, and the bucket
+                    // is judged at the committed clock.
                     bucket.status == BackingBucketStatusV16::Fresh
-                        && bucket.expiry_slot <= group.current_slot
+                        && bucket.expiry_slot
+                            <= if market_currentness_lag == 0 {
+                                authenticated_slot.max(group.current_slot)
+                            } else {
+                                group.current_slot
+                            }
                         && (bucket.fresh_unliened_backing_num != 0
                             || bucket.valid_liened_backing_num != 0
                             || bucket.consumed_liened_backing_num != 0
@@ -7081,8 +7104,8 @@ impl ScenarioRunner {
         } else {
             0
         };
-        // Expiry is selected from this portfolio's bounded source-domain roster, so it is
-        // account-scoped Refresh work. Keeping it in the market-lock lane makes the scheduler
+        // Expiry is selected from this portfolio's bounded source-domain roster and its
+        // active legs' favorable domains, so it is account-scoped Refresh work. Keeping it in the market-lock lane makes the scheduler
         // skip the only progressing account whenever another account has stale work.
         stale_legs = stale_legs
             .checked_add(lapsed_live_backing)

@@ -206,6 +206,27 @@ fn run_resource_failure_lattice(keeper_pair_reversed: Option<bool>) {
                 &format!("INV-078 resource cell {resource_mask} actor 0 slot {slot}"),
             );
         }
+        // Engine #243: the loser's refresh reads the favorable domain of its own leg too.
+        // In the expired-backing cells that bucket (SOURCE_DOMAIN) has lapsed, so the first
+        // crank expires it and returns before valuation; the next one settles the loss.
+        if has_expired_backing {
+            assert_eq!(
+                env.primary_market_state().1.source_backing_buckets[SOURCE_DOMAIN].status,
+                percolator::BackingBucketStatusV16::Fresh,
+                "resource cell {resource_mask} lapsed bucket must still be unexpired here"
+            );
+            env.crank(1, 41, observations.clone())
+                .expect("expire the lapsed bucket in the loser's favorable domain");
+            assert_eq!(
+                env.primary_market_state().1.source_backing_buckets[SOURCE_DOMAIN].status,
+                percolator::BackingBucketStatusV16::Expired,
+                "resource cell {resource_mask} loser crank must expire the lapsed bucket first"
+            );
+            assert_resource_census(
+                &format!("INV-078 resource cell {resource_mask} lapsed backing expired"),
+                &env,
+            );
+        }
         env.crank(1, 41, observations)
             .expect("settle bankrupt counterparty once before Recovery");
         assert_resource_census(
@@ -523,14 +544,17 @@ fn verify_keeper_pair_exit(
     assert_eq!(after_pair.assets[0].oi_eff_short_q, 0);
     assert_eq!(after_pair.insurance_domain_budget[SOURCE_DOMAIN], insurance);
     assert_eq!(after_pair.insurance_domain_spent[SOURCE_DOMAIN], 0);
+    // Engine #243: the lapsed bucket sits in the favorable domain of the loser's leg, so the
+    // loser's settlement crank expired it (forfeiting its atom to the junior pool) before the
+    // pair closed. No lapsed-but-unexpired backing is left for Recovery to trip over.
     assert_eq!(
         after_pair.source_backing_buckets[SOURCE_DOMAIN].fresh_unliened_backing_num,
-        backing * BOUND_SCALE
+        0
     );
     if backing != 0 {
         assert_eq!(
-            after_pair.source_backing_buckets[SOURCE_DOMAIN].expiry_slot,
-            26
+            after_pair.source_backing_buckets[SOURCE_DOMAIN].status,
+            percolator::BackingBucketStatusV16::Expired
         );
         assert!(
             force_slot > 26,
