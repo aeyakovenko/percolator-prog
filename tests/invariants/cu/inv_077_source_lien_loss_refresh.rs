@@ -6,6 +6,12 @@
 //! burned lien pays the domain its loss is owed to, so every domain must end
 //! fully backed, and the refresh must fit in one transaction: an account that
 //! cannot be refreshed cannot be liquidated.
+//!
+//! That refresh costs work for every leg that reaches liened face and for every
+//! claim it burns through, and past a point it does not fit. The wrapper
+//! therefore refuses the trade that would take a portfolio holding liened face
+//! past `liened claims + 6 * legs <= 72`; the second half of this file measures
+//! the costliest loss on that line and shows the trades past it are refused.
 
 use super::*;
 
@@ -19,6 +25,12 @@ const WIPE_OUT_PRICE: u64 = 200;
 /// paid in by the taker, beside the same amount of provider principal.
 const CLAIM_PER_SOURCE: u128 = 1_000;
 const PROVIDER_PER_SOURCE: u128 = 1_000;
+/// Mark for every leg but the first in the costliest loss: ten atoms a unit.
+const SMALL_LOSS_PRICE: u64 = 110;
+const LEG_WEIGHT: usize = percolator_prog::constants::WRAPPER_SOURCE_LIEN_REFRESH_LEG_WEIGHT;
+const MAX_WORK: usize = percolator_prog::constants::WRAPPER_MAX_SOURCE_LIEN_REFRESH_WORK;
+/// `PercolatorError::InvalidInstruction`, which the wrapper's admission bounds return.
+const REFUSED: &str = "Custom(9)";
 
 struct AllSourceLienPair {
     env: V16CuEnv,
@@ -163,7 +175,10 @@ fn all_source_lien_pair() -> AllSourceLienPair {
             if usize::from(source_count) == SOURCES {
                 let state = env.portfolio_state(lp);
                 assert_eq!(state.capital.get(), 0);
-                assert_eq!(state.pnl.get(), (SOURCES as u128 * CLAIM_PER_SOURCE) as i128);
+                assert_eq!(
+                    state.pnl.get(),
+                    (SOURCES as u128 * CLAIM_PER_SOURCE) as i128
+                );
                 assert!(percolator::active_bitmap_is_empty(active_bitmap(&state)));
                 assert_eq!(liened_sources(&state), SOURCES - 1);
                 return AllSourceLienPair {
@@ -283,18 +298,22 @@ impl AllSourceLienPair {
         max_cu
     }
 
-    /// Moves the first `legs` assets to `WIPE_OUT_PRICE` in the next slot. The
-    /// marks are committed on a flat observer, so the LP's own crank carries no
-    /// observation.
+    /// Moves the first `legs` assets to `WIPE_OUT_PRICE` in the next slot.
     fn move_marks_against_the_lp(&mut self, legs: usize) {
+        self.move_marks(&vec![WIPE_OUT_PRICE; legs])
+    }
+
+    /// Moves asset `i` to `prices[i]` in the next slot. The marks are committed
+    /// on a flat observer, so the LP's own crank carries no observation.
+    fn move_marks(&mut self, prices: &[u64]) {
         let observer = self.env.create_portfolio(&Keypair::new());
         self.slot += 1;
         self.env.svm.warp_to_slot(self.slot);
-        for asset_index in 0..legs as u16 {
+        for (asset_index, price) in prices.iter().enumerate() {
             self.env
-                .push_auth_mark_for_asset_as_admin(asset_index, self.slot, WIPE_OUT_PRICE);
+                .push_auth_mark_for_asset_as_admin(asset_index as u16, self.slot, *price);
         }
-        for asset_index in 0..legs as u16 {
+        for asset_index in 0..prices.len() as u16 {
             self.env.svm.expire_blockhash();
             self.env
                 .send(
@@ -312,9 +331,66 @@ impl AllSourceLienPair {
                 .expect("commit the moved mark");
         }
         let group = self.env.market_state().1;
-        assert!(group.assets[..legs]
-            .iter()
-            .all(|asset| asset.effective_price == WIPE_OUT_PRICE));
+        for (asset_index, price) in prices.iter().enumerate() {
+            assert_eq!(group.assets[asset_index].effective_price, *price);
+        }
+    }
+
+    /// One crank of the LP.
+    fn try_crank_lp(&mut self, observations: Vec<CrankObservationHint>) -> Result<u64, String> {
+        self.env.svm.expire_blockhash();
+        self.env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: self.slot,
+                observations,
+            },
+            vec![
+                AccountMeta::new(self.env.payer.pubkey(), true),
+                AccountMeta::new(self.env.market, false),
+                AccountMeta::new(self.lp, false),
+            ],
+            &[],
+        )
+    }
+
+    /// Cranks the flat, funded LP until only `liened` of its claims still carry
+    /// a lien. Each crank returns the lien of one domain.
+    fn release_liens_down_to(&mut self, liened: usize) {
+        for _ in 0..4 * SOURCES {
+            if liened_sources(&self.env.portfolio_state(self.lp)) <= liened {
+                break;
+            }
+            // A flat account is recertified against an observation; the releases
+            // that follow need none.
+            let observations = if certificate_is_current(&self.env, self.lp) {
+                vec![]
+            } else {
+                crank_observations(0)
+            };
+            self.try_crank_lp(observations)
+                .expect("a flat funded account's liens are released one domain a crank");
+        }
+        assert_eq!(liened_sources(&self.env.portfolio_state(self.lp)), liened);
+    }
+
+    /// One LP short of `units` on `asset_index` at `PRICE_LOW`.
+    fn try_open_short(&mut self, asset_index: u16, units: i128) -> Result<u64, String> {
+        self.env.svm.expire_blockhash();
+        self.env.try_trade_asset_with_cu(
+            asset_index,
+            &self.taker_owner,
+            self.taker,
+            &self.lp_owner,
+            self.lp,
+            units * POS_SCALE as i128,
+            PRICE_LOW,
+            0,
+        )
+    }
+
+    /// The LP buys back `units` of its short on `asset_index`.
+    fn try_reduce_short(&mut self, asset_index: u16, units: i128) -> Result<u64, String> {
+        self.try_open_short(asset_index, -units)
     }
 
     /// One hint-free crank of the LP: the refresh that settles every leg's loss.
@@ -390,7 +466,11 @@ fn v16_program_one_leg_loss_through_every_source_lien_is_bounded_and_backs_the_g
 
     pair.move_marks_against_the_lp(1);
     let refresh_cu = pair.refresh_lp();
-    assert_cu_within("one-leg all-source lien loss refresh", refresh_cu, 1_375_000);
+    assert_cu_within(
+        "one-leg all-source lien loss refresh",
+        refresh_cu,
+        1_375_000,
+    );
 
     let lp = pair.env.portfolio_state(pair.lp);
     assert_eq!(lp.pnl.get(), 0);
@@ -428,7 +508,11 @@ fn v16_program_five_leg_loss_through_every_source_lien_is_bounded_and_backs_ever
 
     pair.move_marks_against_the_lp(UNITS.len());
     let refresh_cu = pair.refresh_lp();
-    assert_cu_within("five-leg all-source lien loss refresh", refresh_cu, 1_375_000);
+    assert_cu_within(
+        "five-leg all-source lien loss refresh",
+        refresh_cu,
+        1_375_000,
+    );
 
     let loss = UNITS.iter().sum::<i128>() * (WIPE_OUT_PRICE - PRICE_LOW) as i128;
     let lp = pair.env.portfolio_state(pair.lp);
@@ -476,4 +560,186 @@ fn v16_program_six_leg_loss_through_leftover_source_liens_is_bounded_and_backs_e
     );
     pair.assert_every_domain_backs_its_claims();
     println!("INV-077 six-leg leftover-lien loss CU: open={open_cu}, refresh={refresh_cu}");
+}
+
+// ---------------------------------------------------------------------------
+// The refresh bound on locked claim face.
+// ---------------------------------------------------------------------------
+
+/// Position sizes for the costliest loss `legs` shorts can take over `liened`
+/// liened claims, the other claims being unliened.
+///
+/// Asset 0 goes to `WIPE_OUT_PRICE` (100 atoms a unit): its loss takes every
+/// unliened claim, which is netted at par, and half of the first liened one.
+/// Every other asset goes to `SMALL_LOSS_PRICE` (ten atoms a unit) and loses
+/// the same amount, sized so that each loss ends inside a liened claim and the
+/// last one inside the last claim. Every leg then burns liened face, and the
+/// liened burns number `liened + legs - 1`, the most there can be.
+fn costliest_loss_units(legs: usize, liened: usize) -> Vec<i128> {
+    assert!(legs >= 2 && (1..SOURCES).contains(&liened));
+    let claim = CLAIM_PER_SOURCE as i128;
+    let first_loss = (SOURCES - liened) as i128 * claim + claim / 2;
+    let liened_left = liened as i128 * claim - claim / 2;
+    let later_legs = legs as i128 - 1;
+    let mut share = (liened_left - 10) / later_legs / 10 * 10;
+    while (1..=later_legs).any(|leg| (claim / 2 + leg * share) % claim == 0) {
+        share -= 10;
+    }
+    assert!(share >= 10);
+    let mut units = vec![first_loss / (WIPE_OUT_PRICE - PRICE_LOW) as i128];
+    units.extend(std::iter::repeat(share / (SMALL_LOSS_PRICE - PRICE_LOW) as i128).take(legs - 1));
+    units
+}
+
+/// `legs` shorts opened against capital over `liened` leftover liens take the
+/// costliest loss. The refresh must fit, pay every gain's domain, and one more
+/// leg must be refused. Returns the refresh CU.
+fn costliest_loss_within_the_bound(legs: usize, liened: usize) -> u64 {
+    assert!(liened + LEG_WEIGHT * legs <= MAX_WORK);
+    let units = costliest_loss_units(legs, liened);
+    let mut pair = all_source_lien_pair();
+    pair.redeposit_capital();
+    pair.release_liens_down_to(liened);
+    let open_cu = pair.open_shorts_one_by_one(&units);
+    assert_cu_within(
+        "open under the source-lien refresh bound",
+        open_cu,
+        1_375_000,
+    );
+    assert_eq!(liened_sources(&pair.env.portfolio_state(pair.lp)), liened);
+
+    let refused = pair
+        .try_open_short(legs as u16, 1)
+        .expect_err("one more leg would pass the bound");
+    assert!(refused.contains(REFUSED), "{refused}");
+
+    let mut prices = vec![SMALL_LOSS_PRICE; legs];
+    prices[0] = WIPE_OUT_PRICE;
+    pair.move_marks(&prices);
+    let refresh_cu = pair.refresh_lp();
+    assert_cu_within(
+        &format!("costliest {legs}-leg loss over {liened} liened claims"),
+        refresh_cu,
+        1_375_000,
+    );
+
+    let loss = units[0] * (WIPE_OUT_PRICE - PRICE_LOW) as i128
+        + units[1..].iter().sum::<i128>() * (SMALL_LOSS_PRICE - PRICE_LOW) as i128;
+    let lp = pair.env.portfolio_state(pair.lp);
+    assert_eq!(
+        lp.pnl.get(),
+        (SOURCES as u128 * CLAIM_PER_SOURCE) as i128 - loss,
+        "the whole loss is paid out of the claims"
+    );
+    assert_eq!(lp.capital.get(), pair.capital);
+    assert_eq!(
+        pair.reserved_backing().iter().sum::<u128>(),
+        SOURCES as u128 * (CLAIM_PER_SOURCE + PROVIDER_PER_SOURCE),
+        "netted and burned claims move backing between domains and never out of them"
+    );
+    pair.assert_every_domain_backs_its_claims();
+    println!(
+        "INV-077 costliest loss, {legs} legs over {liened} liened claims: open={open_cu}, refresh={refresh_cu}"
+    );
+    refresh_cu
+}
+
+/// Seven legs may sit on any number of liens. Capital is back in the account, so
+/// one of the 28 claims carries none.
+#[test]
+fn v16_program_costliest_seven_leg_loss_over_27_liens_is_bounded_and_backs_every_gain() {
+    costliest_loss_within_the_bound(7, 27);
+}
+
+#[test]
+fn v16_program_costliest_eight_leg_loss_over_24_liens_is_bounded_and_backs_every_gain() {
+    assert_eq!(24 + LEG_WEIGHT * 8, MAX_WORK);
+    costliest_loss_within_the_bound(8, 24);
+}
+
+#[test]
+fn v16_program_costliest_nine_leg_loss_over_18_liens_is_bounded_and_backs_every_gain() {
+    assert_eq!(18 + LEG_WEIGHT * 9, MAX_WORK);
+    costliest_loss_within_the_bound(9, 18);
+}
+
+#[test]
+fn v16_program_costliest_ten_leg_loss_over_12_liens_is_bounded_and_backs_every_gain() {
+    assert_eq!(12 + LEG_WEIGHT * 10, MAX_WORK);
+    costliest_loss_within_the_bound(10, 12);
+}
+
+#[test]
+fn v16_program_costliest_eleven_leg_loss_over_6_liens_is_bounded_and_backs_every_gain() {
+    assert_eq!(6 + LEG_WEIGHT * 11, MAX_WORK);
+    costliest_loss_within_the_bound(11, 6);
+}
+
+/// The shapes that could not be refreshed before the bound can no longer be
+/// built: over 27 leftover liens the eighth leg is refused, whatever its size.
+/// What does not raise the work past the bound is not refused: reducing a leg,
+/// closing one, and opening it again.
+#[test]
+fn v16_program_source_lien_refresh_bound_refuses_the_leg_past_it() {
+    let mut pair = all_source_lien_pair();
+    pair.redeposit_capital();
+    assert_eq!(
+        liened_sources(&pair.env.portfolio_state(pair.lp)),
+        SOURCES - 1
+    );
+    for asset_index in 0..7 {
+        pair.try_open_short(asset_index, 20)
+            .unwrap_or_else(|error| panic!("leg {asset_index} is within the bound: {error}"));
+    }
+    assert!(SOURCES - 1 + LEG_WEIGHT * 7 <= MAX_WORK && SOURCES - 1 + LEG_WEIGHT * 8 > MAX_WORK);
+    let before = pair.env.portfolio_state(pair.lp);
+    for units in [1, 20, 29] {
+        let refused = pair
+            .try_open_short(7, units)
+            .expect_err("an eighth leg over 27 liens passes the bound");
+        assert!(refused.contains(REFUSED), "{refused}");
+    }
+    assert_eq!(pair.env.portfolio_state(pair.lp), before);
+
+    pair.try_reduce_short(0, 10)
+        .expect("reducing a leg adds no work");
+    pair.try_reduce_short(6, 20)
+        .expect("closing a leg lowers the work");
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&pair.env.portfolio_state(pair.lp))),
+        6
+    );
+    pair.try_open_short(6, 20)
+        .expect("the seventh leg is within the bound again");
+    let refused = pair
+        .try_open_short(7, 20)
+        .expect_err("and the eighth is still past it");
+    assert!(refused.contains(REFUSED), "{refused}");
+}
+
+/// Unliened claims need no such bound. All fourteen legs lose through 28
+/// unliened claims and a little capital: every claim is netted at par and the
+/// refresh fits.
+#[test]
+fn v16_program_fourteen_leg_loss_through_unliened_claims_at_the_source_cap_is_bounded() {
+    const UNITS: [i128; 14] = [15, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21];
+    let mut pair = all_source_lien_pair();
+    pair.redeposit_capital();
+    pair.release_liens_down_to(0);
+    let open_cu = pair.open_shorts_one_by_one(&UNITS);
+    assert_cu_within("fourteen-leg unliened open", open_cu, 1_375_000);
+    assert_eq!(liened_sources(&pair.env.portfolio_state(pair.lp)), 0);
+
+    pair.move_marks_against_the_lp(UNITS.len());
+    let refresh_cu = pair.refresh_lp();
+    assert_cu_within("fourteen-leg unliened loss refresh", refresh_cu, 1_375_000);
+
+    let loss = UNITS.iter().sum::<i128>() as u128 * (WIPE_OUT_PRICE - PRICE_LOW) as u128;
+    let claims = SOURCES as u128 * CLAIM_PER_SOURCE;
+    let lp = pair.env.portfolio_state(pair.lp);
+    assert_eq!(lp.pnl.get(), 0);
+    assert_eq!(lp.capital.get(), pair.capital - (loss - claims));
+    assert!(lp.source_domains.iter().all(|source| !source.is_occupied()));
+    pair.assert_every_domain_backs_its_claims();
+    println!("INV-077 fourteen-leg unliened loss CU: open={open_cu}, refresh={refresh_cu}");
 }

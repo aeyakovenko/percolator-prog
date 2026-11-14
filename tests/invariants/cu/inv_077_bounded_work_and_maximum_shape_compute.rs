@@ -727,8 +727,11 @@ fn release_all_source_liens_with_cu(
 fn v16_program_max_source_flat_lien_release_and_owner_exit_are_bounded() {
     let (mut env, taker_owner, lp_owner, taker, lp, slot) =
         setup_max_source_live_pair_with_seeded_lien();
+    // Eleven legs: the most the source-lien refresh bound admits beside the two seeded liens.
     let mut max_flatten_cu = 0;
-    for asset_index in (0..MAX_SOURCE_LIVE_ASSETS).rev() {
+    for asset_index in
+        ((MAX_SOURCE_LIVE_ASSETS - SEEDED_LIEN_RETAINED_ASSETS)..MAX_SOURCE_LIVE_ASSETS).rev()
+    {
         let lp_state = env.portfolio_state(lp);
         let basis = active_leg_for_asset(&lp_state, usize::from(asset_index)).basis_pos_q;
         assert_ne!(basis, 0, "asset {asset_index} must retain a real leg");

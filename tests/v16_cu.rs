@@ -8472,11 +8472,23 @@ fn setup_max_source_live_pair_with_spare_auth_mark_asset(
     )
 }
 
+/// Legs the seeded-lien fixture retains: the most the source-lien refresh bound admits beside
+/// its two liens (`liened claims + LEG_WEIGHT * legs <= MAX_WORK`).
+const SEEDED_LIEN_RETAINED_ASSETS: u16 = 11;
+const _: () = assert!(
+    2 + percolator_prog::constants::WRAPPER_SOURCE_LIEN_REFRESH_LEG_WEIGHT
+        * SEEDED_LIEN_RETAINED_ASSETS as usize
+        <= percolator_prog::constants::WRAPPER_MAX_SOURCE_LIEN_REFRESH_WORK
+        && 2 + percolator_prog::constants::WRAPPER_SOURCE_LIEN_REFRESH_LEG_WEIGHT
+            * (SEEDED_LIEN_RETAINED_ASSETS as usize + 1)
+            > percolator_prog::constants::WRAPPER_MAX_SOURCE_LIEN_REFRESH_WORK
+);
+
 fn setup_max_source_live_pair_with_seeded_lien() -> (V16CuEnv, Keypair, Keypair, Pubkey, Pubkey, u64)
 {
     setup_max_source_live_pair_with_configured_assets(
         0,
-        MAX_SOURCE_LIVE_ASSETS,
+        SEEDED_LIEN_RETAINED_ASSETS,
         MAX_SOURCE_LIVE_ASSETS,
         true,
         None,
@@ -8744,7 +8756,9 @@ fn setup_max_source_live_pair_with_configured_assets_and_capacity(
             }
             drive_both_current(&mut env, slot);
         }
-        if seed_source_lien && asset_index == 0 {
+        // The liens are seeded on the first asset whose leg is retained, against the claims in
+        // domains 0 and 1.
+        if seed_source_lien && asset_index == MAX_SOURCE_LIVE_ASSETS - retained_active_assets {
             const SEEDED_LIEN_Q: i128 = 20 * POS_SCALE as i128;
             cpi_fill(&mut env, asset_index, -MAX_SOURCE_LIVE_SIZE_Q);
             let capital = env.portfolio_state(lp).capital.get();
