@@ -248,31 +248,41 @@ impl AllSourceLienPair {
     /// Opens one LP short per entry of `units` (asset `i` gets `units[i]`) at
     /// `PRICE_LOW` in a single batch and returns its CU.
     fn open_shorts_in_one_batch(&mut self, units: &[i128]) -> u64 {
-        let legs = units
+        let legs: Vec<(u16, i128)> = units
             .iter()
             .enumerate()
+            .map(|(asset_index, units)| (asset_index as u16, *units))
+            .collect();
+        self.try_open_shorts_batch(&legs)
+            .expect("open the LP's shorts against its claims")
+    }
+
+    /// One `BatchTradeNoCpi` of LP shorts: asset `legs[i].0` gets `legs[i].1`
+    /// units at `PRICE_LOW`, all in a single instruction. Returns the send's
+    /// Result instead of expecting success.
+    fn try_open_shorts_batch(&mut self, legs: &[(u16, i128)]) -> Result<u64, String> {
+        let legs = legs
+            .iter()
             .map(|(asset_index, units)| BatchTradeLeg {
-                asset_index: asset_index as u16,
-                market_id: first_generation_market_id(asset_index as u16),
+                asset_index: *asset_index,
+                market_id: first_generation_market_id(*asset_index),
                 size_q: units * POS_SCALE as i128,
                 exec_price: PRICE_LOW,
                 fee_bps: 0,
             })
             .collect();
         self.env.svm.expire_blockhash();
-        self.env
-            .send(
-                self.env.batch_trade_no_cpi_ix(self.taker, self.lp, legs),
-                vec![
-                    AccountMeta::new(self.taker_owner.pubkey(), true),
-                    AccountMeta::new(self.lp_owner.pubkey(), true),
-                    AccountMeta::new(self.env.market, false),
-                    AccountMeta::new(self.taker, false),
-                    AccountMeta::new(self.lp, false),
-                ],
-                &[&self.taker_owner, &self.lp_owner],
-            )
-            .expect("open the LP's shorts against its claims")
+        self.env.send(
+            self.env.batch_trade_no_cpi_ix(self.taker, self.lp, legs),
+            vec![
+                AccountMeta::new(self.taker_owner.pubkey(), true),
+                AccountMeta::new(self.lp_owner.pubkey(), true),
+                AccountMeta::new(self.env.market, false),
+                AccountMeta::new(self.taker, false),
+                AccountMeta::new(self.lp, false),
+            ],
+            &[&self.taker_owner, &self.lp_owner],
+        )
     }
 
     /// Opens the same shorts one trade at a time and returns the largest CU.
@@ -742,4 +752,87 @@ fn v16_program_fourteen_leg_loss_through_unliened_claims_at_the_source_cap_is_bo
     assert!(lp.source_domains.iter().all(|source| !source.is_occupied()));
     pair.assert_every_domain_backs_its_claims();
     println!("INV-077 fourteen-leg unliened loss CU: open={open_cu}, refresh={refresh_cu}");
+}
+
+/// The bound also guards the batch path, whose check runs only after the
+/// whole batch has executed: a single `BatchTradeNoCpi` that would land past
+/// the bound is refused whole. Over the fixture's 27 leftover liens, a batch
+/// of eight shorts at once ends at work 27 + 6 * 8 = 75 > 72, so the batch is
+/// refused with `InvalidInstruction` and neither portfolio nor the market
+/// account changes by a byte — no leg of the batch survives. The same legs
+/// minus one land at 69 and are admitted as one batch, and one more leg
+/// after them is refused again.
+#[test]
+fn v16_program_source_lien_refresh_bound_refuses_the_batch_past_it() {
+    let mut pair = all_source_lien_pair();
+    pair.redeposit_capital();
+    assert_eq!(
+        liened_sources(&pair.env.portfolio_state(pair.lp)),
+        SOURCES - 1
+    );
+
+    let legs: Vec<(u16, i128)> = (0..8u16).map(|asset| (asset, 20)).collect();
+    let lp_before = pair.env.svm.get_account(&pair.lp).unwrap();
+    let taker_before = pair.env.svm.get_account(&pair.taker).unwrap();
+    let market_before = pair.env.svm.get_account(&pair.env.market).unwrap();
+    let refused = pair
+        .try_open_shorts_batch(&legs)
+        .expect_err("a batch landing past the bound must be refused whole");
+    assert!(refused.contains(REFUSED), "{refused}");
+    assert_eq!(pair.env.svm.get_account(&pair.lp).unwrap(), lp_before);
+    assert_eq!(pair.env.svm.get_account(&pair.taker).unwrap(), taker_before);
+    assert_eq!(
+        pair.env.svm.get_account(&pair.env.market).unwrap(),
+        market_before
+    );
+
+    let open_cu = pair
+        .try_open_shorts_batch(&legs[..7])
+        .expect("seven legs in one batch land at work 69, inside the bound");
+    println!("INV-077 seven-leg batch open over 27 liens: {open_cu} CU");
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(
+            &pair.env.portfolio_state(pair.lp)
+        )),
+        7
+    );
+
+    let lp_state_before = pair.env.portfolio_state(pair.lp);
+    let refused = pair
+        .try_open_shorts_batch(&[(7, 20)])
+        .expect_err("one more leg in a batch of its own is past the bound again");
+    assert!(refused.contains(REFUSED), "{refused}");
+    assert_eq!(pair.env.portfolio_state(pair.lp), lp_state_before);
+}
+
+/// A batch may land exactly on the bound: over 24 liens, eight shorts in one
+/// batch end at work 24 + 6 * 8 = 72 and are admitted; the next leg, in a
+/// batch of its own, is refused and changes nothing on either portfolio.
+#[test]
+fn v16_program_source_lien_refresh_bound_admits_a_batch_landing_exactly_on_it() {
+    let mut pair = all_source_lien_pair();
+    pair.redeposit_capital();
+    pair.release_liens_down_to(24);
+    assert_eq!(24 + LEG_WEIGHT * 8, MAX_WORK);
+
+    let legs: Vec<(u16, i128)> = (0..8u16).map(|asset| (asset, 20)).collect();
+    let open_cu = pair
+        .try_open_shorts_batch(&legs)
+        .expect("a batch landing exactly on the bound is admitted");
+    println!("INV-077 eight-leg batch open over 24 liens (work = 72): {open_cu} CU");
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(
+            &pair.env.portfolio_state(pair.lp)
+        )),
+        8
+    );
+
+    let lp_before = pair.env.svm.get_account(&pair.lp).unwrap();
+    let taker_before = pair.env.svm.get_account(&pair.taker).unwrap();
+    let refused = pair
+        .try_open_shorts_batch(&[(8, 20)])
+        .expect_err("a ninth leg past the bound is refused");
+    assert!(refused.contains(REFUSED), "{refused}");
+    assert_eq!(pair.env.svm.get_account(&pair.lp).unwrap(), lp_before);
+    assert_eq!(pair.env.svm.get_account(&pair.taker).unwrap(), taker_before);
 }

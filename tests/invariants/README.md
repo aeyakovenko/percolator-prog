@@ -32571,6 +32571,8 @@ leg takes the liened path and the liened burns number `liened + legs - 1`.
 | `v16_program_costliest_eleven_leg_loss_over_6_liens_is_bounded_and_backs_every_gain` | 11 legs, 6 liens | 1,305,908 |
 | `v16_program_fourteen_leg_loss_through_unliened_claims_at_the_source_cap_is_bounded` | 14 legs, 28 unliened claims | 1,260,213 |
 | `v16_program_source_lien_refresh_bound_refuses_the_leg_past_it` | 27 leftover liens: the eighth leg is refused at any size; reducing, closing and reopening a leg are not | n/a |
+| `v16_program_source_lien_refresh_bound_refuses_the_batch_past_it` | 27 leftover liens: one batch of eight legs is refused whole (both portfolios and the market account byte-identical after); seven in one batch are admitted | n/a |
+| `v16_program_source_lien_refresh_bound_admits_a_batch_landing_exactly_on_it` | 24 liens: one batch of eight legs lands exactly on work 72 and is admitted; a ninth leg is refused | n/a |
 
 **Existing fixture changed.** `setup_max_source_live_pair_with_seeded_lien` retained fourteen legs
 beside its two liens, which is past the bound. It now retains eleven, the most the bound admits
