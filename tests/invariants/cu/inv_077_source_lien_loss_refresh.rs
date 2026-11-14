@@ -69,6 +69,11 @@ fn certificate_is_current(env: &V16CuEnv, portfolio: Pubkey) -> bool {
 /// of the 28 source domains (27 of them still liened from the earlier seeds) and
 /// no capital: it has just been withdrawn into `capital_source`.
 fn all_source_lien_pair() -> AllSourceLienPair {
+    all_source_lien_pair_with_backing_expiry(1_000)
+}
+
+/// The same pair with every provider bucket expiring at `backing_expiry_slot`.
+fn all_source_lien_pair_with_backing_expiry(backing_expiry_slot: u64) -> AllSourceLienPair {
     const LIEN_PER_SOURCE_Q: i128 = 10 * POS_SCALE as i128;
 
     let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
@@ -141,7 +146,7 @@ fn all_source_lien_pair() -> AllSourceLienPair {
     let mut source_count = 0u16;
     for asset_index in 0..MAX_SOURCE_LIVE_ASSETS {
         for domain in [asset_index * 2, asset_index * 2 + 1] {
-            env.top_up_backing_bucket(domain, PROVIDER_PER_SOURCE, 1_000);
+            env.top_up_backing_bucket(domain, PROVIDER_PER_SOURCE, backing_expiry_slot);
         }
         for (open_q, open_price, target_price, close_q) in [
             (
@@ -334,6 +339,51 @@ impl AllSourceLienPair {
         for (asset_index, price) in prices.iter().enumerate() {
             assert_eq!(group.assets[asset_index].effective_price, *price);
         }
+    }
+
+    /// Walks the market clock to `slot`, one slot at a time, with every asset
+    /// marked at `PRICE_LOW` in each: a mark may not skip slots.
+    fn walk_the_clock_to(&mut self, slot: u64) {
+        let observer = self.env.create_portfolio(&Keypair::new());
+        while self.slot < slot {
+            self.slot += 1;
+            self.env.svm.warp_to_slot(self.slot);
+            for asset_index in 0..MAX_SOURCE_LIVE_ASSETS {
+                self.env
+                    .push_auth_mark_for_asset_as_admin(asset_index, self.slot, PRICE_LOW);
+            }
+            for asset_index in 0..MAX_SOURCE_LIVE_ASSETS {
+                self.env.svm.expire_blockhash();
+                self.env
+                    .send(
+                        ProgInstruction::PermissionlessCrank {
+                            now_slot: self.slot,
+                            observations: crank_observations(asset_index),
+                        },
+                        vec![
+                            AccountMeta::new(self.env.payer.pubkey(), true),
+                            AccountMeta::new(self.env.market, false),
+                            AccountMeta::new(observer, false),
+                        ],
+                        &[],
+                    )
+                    .expect("carry the mark forward");
+            }
+        }
+    }
+
+    /// Cranks the LP until the engine has nothing left for it. Each crank
+    /// expires one lapsed bucket behind a claim it holds.
+    fn crank_lp_until_idle(&mut self) {
+        for _ in 0..8 * SOURCES {
+            if self.try_crank_lp(vec![]).is_ok() {
+                continue;
+            }
+            if self.try_crank_lp(crank_observations(0)).is_err() {
+                return;
+            }
+        }
+        panic!("the LP did not reach a fixed point");
     }
 
     /// One crank of the LP.
@@ -742,4 +792,83 @@ fn v16_program_fourteen_leg_loss_through_unliened_claims_at_the_source_cap_is_bo
     assert!(lp.source_domains.iter().all(|source| !source.is_occupied()));
     pair.assert_every_domain_backs_its_claims();
     println!("INV-077 fourteen-leg unliened loss CU: open={open_cu}, refresh={refresh_cu}");
+}
+
+/// Claims in lapsed domains. The provider buckets behind all 28 claims expire
+/// before the LP opens its fourteen shorts, so every claim is face with nothing
+/// behind it, and the LP holds just the capital the wipe-out move will cost.
+///
+/// Each leg's loss then meets face that cannot pay for it. The leg's own payment
+/// into its loss domain brings the LP's lapsed claim there back to par, and the
+/// next leg nets that claim and pays the rest from capital: every leg both moves
+/// backing and pays capital into its loss domain. With one ledger update for each
+/// of the two payments this refresh cost 1,390,372 compute units, inside the
+/// transaction limit by less than 10,000; the engine now books them together.
+#[test]
+fn v16_program_fourteen_leg_loss_over_claims_in_lapsed_domains_is_bounded() {
+    const BACKING_EXPIRY_SLOT: u64 = 60;
+    const UNITS: [i128; 14] = [21; 14];
+    let loss = UNITS.iter().sum::<i128>() as u128 * (WIPE_OUT_PRICE - PRICE_LOW) as u128;
+
+    let mut pair = all_source_lien_pair_with_backing_expiry(BACKING_EXPIRY_SLOT);
+    pair.redeposit_capital();
+    pair.release_liens_down_to(0);
+    pair.walk_the_clock_to(BACKING_EXPIRY_SLOT + 1);
+    pair.crank_lp_until_idle();
+    let group = pair.env.market_state().1;
+    for domain in 0..SOURCES {
+        assert_eq!(
+            group.source_backing_buckets[domain].status,
+            BackingBucketStatusV16::Expired,
+            "domain {domain}"
+        );
+        assert_eq!(group.source_credit[domain].credit_rate_num, 0, "domain {domain}");
+    }
+    let lapsed = pair.env.portfolio_state(pair.lp);
+    assert!(certificate_is_current(&pair.env, pair.lp));
+    assert_eq!(liened_sources(&lapsed), 0);
+    assert_eq!(
+        lapsed.pnl.get(),
+        (SOURCES as u128 * CLAIM_PER_SOURCE) as i128
+    );
+    assert_eq!(
+        lapsed
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        SOURCES
+    );
+
+    // Leave exactly what the move will cost.
+    let spare = lapsed.capital.get() - loss;
+    let lp_owner = pair.lp_owner.insecure_clone();
+    pair.env.withdraw_with_cu(&lp_owner, pair.lp, spare);
+    let open_cu = pair.open_shorts_one_by_one(&UNITS);
+    assert_cu_within("fourteen-leg lapsed-claim open", open_cu, 1_375_000);
+
+    pair.move_marks_against_the_lp(UNITS.len());
+    let refresh_cu = pair.refresh_lp();
+    assert_cu_within(
+        "fourteen-leg loss refresh over lapsed claims",
+        refresh_cu,
+        1_375_000,
+    );
+
+    // Twenty-seven claims are gone against the loss, one for one, and capital
+    // paid the rest: 100 on the first leg, whose domain had nothing to net yet,
+    // 100 more on each later leg, and the last claim is the one the last leg's
+    // own payment has just brought back.
+    let lp = pair.env.portfolio_state(pair.lp);
+    assert!(certificate_is_current(&pair.env, pair.lp));
+    assert_eq!(lp.pnl.get(), CLAIM_PER_SOURCE as i128);
+    assert_eq!(lp.capital.get(), loss - 2_400);
+    assert_eq!(
+        lp.source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        1
+    );
+    println!("INV-077 fourteen-leg lapsed-claim loss CU: open={open_cu}, refresh={refresh_cu}");
 }

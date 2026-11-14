@@ -32630,13 +32630,45 @@ suite:
 - Unliened claims in expired domains cost more than fully backed ones. Fourteen legs burning 28 of
   them measure 1,390,372 CU: inside the transaction limit by less than 10,000 CU and above the
   1.375M guardrail the tests here use. No admission rule covers that shape, because expiry is
-  driven by time.
+  driven by time. (Fixed in the engine and asserted since `5e3af071`: see the next section.)
 
 **Remaining gaps.** The bound is calibrated on AuthMark assets at 100% margin with a hint-free
 crank. Hybrid feeds, funding, fees and partially backed domains (credit rate between zero and
 one) are not part of this fixture. In the states this fixture reaches, the engine itself refuses
 (`LockActive`) a trade that needs a further lien while legs are open, and one that grows an
 existing leg beside leftover liens, so the bound is exercised here through new legs only.
+
+### INV-077 loss refresh over claims in lapsed domains (2026-11-14)
+
+The same file, selector
+`source_lien_loss_refresh::v16_program_fourteen_leg_loss_over_claims_in_lapsed_domains_is_bounded`,
+measured on engine `5e3af0710ec7e9b7077393012f8a94a31b2f07ef`. Setup uses public wrapper
+instructions only.
+
+**Shape.** The provider buckets behind all 28 of the LP's claims expire at slot 60. The LP's
+liens are released first, the clock is walked past the expiry with every asset marked in every
+slot, and the LP is cranked until each bucket has been expired: 28 unliened claims of 1,000 at
+credit rate zero. The LP then keeps exactly what the move will cost (29,400), opens fourteen
+shorts of 21 units, and every mark doubles.
+
+**Why this was the costliest refresh.** Each leg's loss meets face that cannot pay for it. The
+leg's own payment into its loss domain brings the LP's lapsed claim there back to par, and the
+next leg nets that claim and pays the rest from capital. Every leg therefore both moves backing
+into its loss domain and pays capital into it, and the engine wrote that domain's ledger once for
+each: about 13,000 CU a time. The refresh measured 1,390,372 CU, with no admission rule able to
+prevent the shape. Engine `4eba3dfb` books the two payments of a loss in one ledger update,
+leaving the stored state unchanged bit for bit.
+
+**Guarantee.** One hint-free `PermissionlessCrank` settles all fourteen losses below the 1.375M
+guardrail (1,221,642 CU; the opens stay below it too, 736,974 at most). Afterwards 27 of the 28
+claims have been cancelled against the loss one for one, capital has paid the other 2,400, one
+claim of 1,000 is left, and the certificate is current. On engine `827a125f` the test fails on
+the guardrail at 1,390,372.
+
+**Not asserted.** The test bounds the work. It takes no position on the outcome it pins: 27,000
+of the LP's 29,400 loss is met by face whose backing had lapsed, so the winner's gains are backed
+by what capital paid. How lapsed claims should rank against new loser payments into the same
+domain is an engine design question, noted in the engine PR.
 
 ### INV-077 source-capacity reclamation
 
