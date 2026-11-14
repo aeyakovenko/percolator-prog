@@ -18,6 +18,9 @@
 
 use super::*;
 
+#[path = "inv_031_provider_exit_principal.rs"]
+mod provider_exit_principal;
+
 fn inv031_source_defines_test(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
     let mut test_attribute = false;

@@ -30412,6 +30412,43 @@ shared-lien expiry/refill slice is addressed separately below. INV-033 retains i
 absence guard and pinned engine-owned contracts; no insurance-lien creation, engine proof rerun,
 generic F completion or invariant status promotion is claimed.
 
+### INV-031 provider exit and provider principal (2026-11-14)
+
+[`inv_031_provider_exit_principal.rs`](cu/inv_031_provider_exit_principal.rs), mounted from the
+INV-031 CU module, adds two selectors under `provider_exit_principal::`. Setup uses public
+wrapper instructions only.
+
+**Guarantee.** While the market is Live and a position on the asset has not settled the latest
+price move, `WithdrawBackingBucket` pays out no more than the domain's provider principal. What
+the domain's losers paid in stays for the gain it is owed to until that gain is a registered
+claim, which the claim watermark then protects.
+
+**The defect it closes.** The engine's provider exit kept `available backing >= registered
+claims`, and a gain is registered as a claim only when its account is refreshed. In the fixture a
+long of 100 gains 400 on a 4% move and only the short is refreshed, so the short's 400 sits in
+the domain with no claim on it. The wrapper's Live withdrawal gate does not close this by itself:
+it refuses while the market-wide loss-stale flag is set, and that flag summarizes only the asset
+touched last, so one crank on a second, current asset clears it while the long is still
+unrefreshed. On engine `427dc5fc584ccd0bb7f4510c76c8992f68546a6c` both selectors fail: the
+backing authority withdraws 1,400 for 1,000 of principal, and 400 with no principal at all, and
+the long's claim is then registered against no backing.
+
+| Selector | Provider principal | Result |
+|---|---|---|
+| `v16_program_live_provider_exit_leaves_the_loser_payment_for_the_winner` | 1,000 | 1,400 and 1,001 are refused with `EngineLockActive` and exact rollback; 1,000 is paid; one more atom is refused; the long then holds a 400 claim on 400 of backing at full rate |
+| `v16_program_live_provider_exit_is_empty_without_provider_principal` | none | 400 and 1 are refused; the long ends the same way |
+
+**Unchanged on purpose.** Once every position on the asset is settled, backing above the claim
+watermark leaves as before, whether or not a loser paid it in: that is how a domain is drained
+before its asset is retired or restarted
+(`v16_program_asset0_recovery_matrix_preserves_provider_withdraw_and_restart_progress`,
+`v16_program_reused_slot_matches_fresh_after_public_insurance_spend`). After resolution the
+engine's surplus rule governs alone
+(`v16_program_resolved_provider_withdraws_unneeded_backing_before_expiry`).
+
+**Remaining gaps.** The optional backing-domain ledger account, backing fees and the shutdown
+drain are not part of this fixture.
+
 ### INV-031 CPI-created shared-lien consumption
 
 `v16_program_cpi_created_shared_liens_preserve_single_use_through_no_cpi_exit` adds one focused
