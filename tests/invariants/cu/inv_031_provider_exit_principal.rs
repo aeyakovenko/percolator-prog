@@ -1,18 +1,18 @@
-//! INV-031: what a domain's losers pay in backs the gains it is owed to. While
-//! a position has not settled the latest price move, a backing provider takes
-//! out what it put in and nothing more.
+//! INV-031: what a domain's losers pay in backs the gains it is owed to. A
+//! backing provider cannot take it out before the winner is refreshed.
 //!
 //! The engine's provider exit keeps `available backing >= registered claims`,
 //! and a gain is registered as a claim only when its account is refreshed.
 //! Between the loser's refresh and the winner's, the loser's payment is covered
-//! by no claim. Before the engine capped the exit at provider principal for
-//! that window, `WithdrawBackingBucket` let the backing authority take the
-//! payment, and the winner's claim was then registered against no backing.
+//! by no claim. `WithdrawBackingBucket` used to let the backing authority take
+//! it, and the winner's claim was then registered against no backing.
 //!
-//! The wrapper's own Live withdrawal gate does not close this. It refuses while
-//! the market-wide loss-stale flag is set, and that flag summarizes only the
-//! asset touched last: one crank on another, current asset clears it while the
-//! winner here is still unrefreshed.
+//! Two layers close it. The engine caps the exit at provider principal while a
+//! position on the asset is unsettled. The wrapper's Live withdrawal gate
+//! refuses outright in that window: it used to read only the market-wide
+//! loss-stale flag, which summarizes the asset touched last, so one crank on
+//! another, current asset cleared it while the winner here was still
+//! unrefreshed. The fixture reproduces exactly that: asset 1 is touched last.
 
 use super::*;
 
@@ -194,9 +194,8 @@ impl LoserPaidWinnerStale {
         assert_eq!(self.env.token_amount(self.destination), destination_before);
     }
 
-    /// Refreshes the long and requires its whole gain to be a backed claim.
-    fn assert_winner_is_backed(&mut self) {
-        refresh(&mut self.env, self.long, self.slot);
+    /// The long's whole gain is a claim on exactly the short's payment.
+    fn assert_winner_is_backed(&self) {
         assert_eq!(
             self.env.portfolio_state(self.long).pnl.get(),
             PAYMENT as i128
@@ -208,12 +207,18 @@ impl LoserPaidWinnerStale {
     }
 }
 
-/// The provider recovers its 1,000 and not an atom of the short's 400, which
-/// then backs the long's claim in full.
+/// While the long is unrefreshed nothing leaves the domain, the provider's own
+/// 1,000 included. Once the long's gain is a claim the provider recovers its
+/// 1,000 and not an atom more, and the short's 400 backs the claim in full.
 #[test]
 fn v16_program_live_provider_exit_leaves_the_loser_payment_for_the_winner() {
     let mut world = loser_paid_winner_not_refreshed(PRINCIPAL);
     world.assert_refused(PRINCIPAL + PAYMENT);
+    world.assert_refused(PRINCIPAL);
+    world.assert_refused(1);
+
+    let (long, slot) = (world.long, world.slot);
+    refresh(&mut world.env, long, slot);
     world.assert_refused(PRINCIPAL + 1);
     world
         .try_withdraw(PRINCIPAL)
@@ -223,11 +228,17 @@ fn v16_program_live_provider_exit_leaves_the_loser_payment_for_the_winner() {
     world.assert_winner_is_backed();
 }
 
-/// With no provider principal in the domain there is nothing to withdraw.
+/// With no provider principal in the domain there is never anything to
+/// withdraw: not before the long is refreshed, and not after, when its claim
+/// holds the payment.
 #[test]
 fn v16_program_live_provider_exit_is_empty_without_provider_principal() {
     let mut world = loser_paid_winner_not_refreshed(0);
     world.assert_refused(PAYMENT);
+    world.assert_refused(1);
+
+    let (long, slot) = (world.long, world.slot);
+    refresh(&mut world.env, long, slot);
     world.assert_refused(1);
     world.assert_winner_is_backed();
 }

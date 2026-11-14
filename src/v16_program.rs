@@ -6167,6 +6167,13 @@ pub mod processor {
             return true;
         }
         let asset = &group.markets[asset_index].engine.asset;
+        // A stored position that has not settled this asset's latest K/F change is unsettled
+        // loss state here whichever asset was touched last. The header's `loss_stale_active`
+        // summarizes only that last asset, so it cannot stand in for this check.
+        if asset.stale_account_count_long.get() != 0 || asset.stale_account_count_short.get() != 0
+        {
+            return true;
+        }
         matches!(
             asset.lifecycle,
             ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY
