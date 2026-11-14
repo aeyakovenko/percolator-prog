@@ -407,8 +407,8 @@ fn terminal_with_claims(
 fn v16_program_used_generation_admission_reserves_latent_capacity_through_exact_exit() {
     // This witness is revalidated separately from the older global certification roster.
     assert!(include_str!("../../../Cargo.lock").contains(
-        "git+https://github.com/aeyakovenko/percolator?rev=827a125f719d6d0884734f216ca54e6c9f87319a#\
-         827a125f719d6d0884734f216ca54e6c9f87319a"
+        "git+https://github.com/aeyakovenko/percolator?rev=5e3af0710ec7e9b7077393012f8a94a31b2f07ef#\
+         5e3af0710ec7e9b7077393012f8a94a31b2f07ef"
     ));
     let mut m = Measurements::default();
     let mut worlds = 0;
@@ -998,8 +998,8 @@ fn competition_settle(
 #[test]
 fn v16_program_mixed_materialized_latent_reclamation_admits_only_fitting_replacement() {
     assert!(include_str!("../../../Cargo.lock").contains(
-        "git+https://github.com/aeyakovenko/percolator?rev=827a125f719d6d0884734f216ca54e6c9f87319a#\
-         827a125f719d6d0884734f216ca54e6c9f87319a"
+        "git+https://github.com/aeyakovenko/percolator?rev=5e3af0710ec7e9b7077393012f8a94a31b2f07ef#\
+         5e3af0710ec7e9b7077393012f8a94a31b2f07ef"
     ));
     let mut m = Measurements::default();
     let mut worlds = 0;
