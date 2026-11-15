@@ -253,31 +253,39 @@ impl AllSourceLienPair {
     /// Opens one LP short per entry of `units` (asset `i` gets `units[i]`) at
     /// `PRICE_LOW` in a single batch and returns its CU.
     fn open_shorts_in_one_batch(&mut self, units: &[i128]) -> u64 {
+        self.try_batch(0, units)
+            .expect("open the LP's shorts against its claims")
+    }
+
+    /// One `BatchTradeNoCpi` at `PRICE_LOW`: the LP sells `units[i]` of asset
+    /// `first_asset + i` to the taker (a negative entry buys back).
+    fn try_batch(&mut self, first_asset: u16, units: &[i128]) -> Result<u64, String> {
         let legs = units
             .iter()
             .enumerate()
-            .map(|(asset_index, units)| BatchTradeLeg {
-                asset_index: asset_index as u16,
-                market_id: first_generation_market_id(asset_index as u16),
-                size_q: units * POS_SCALE as i128,
-                exec_price: PRICE_LOW,
-                fee_bps: 0,
+            .map(|(offset, units)| {
+                let asset_index = first_asset + offset as u16;
+                BatchTradeLeg {
+                    asset_index,
+                    market_id: first_generation_market_id(asset_index),
+                    size_q: units * POS_SCALE as i128,
+                    exec_price: PRICE_LOW,
+                    fee_bps: 0,
+                }
             })
             .collect();
         self.env.svm.expire_blockhash();
-        self.env
-            .send(
-                self.env.batch_trade_no_cpi_ix(self.taker, self.lp, legs),
-                vec![
-                    AccountMeta::new(self.taker_owner.pubkey(), true),
-                    AccountMeta::new(self.lp_owner.pubkey(), true),
-                    AccountMeta::new(self.env.market, false),
-                    AccountMeta::new(self.taker, false),
-                    AccountMeta::new(self.lp, false),
-                ],
-                &[&self.taker_owner, &self.lp_owner],
-            )
-            .expect("open the LP's shorts against its claims")
+        self.env.send(
+            self.env.batch_trade_no_cpi_ix(self.taker, self.lp, legs),
+            vec![
+                AccountMeta::new(self.taker_owner.pubkey(), true),
+                AccountMeta::new(self.lp_owner.pubkey(), true),
+                AccountMeta::new(self.env.market, false),
+                AccountMeta::new(self.taker, false),
+                AccountMeta::new(self.lp, false),
+            ],
+            &[&self.taker_owner, &self.lp_owner],
+        )
     }
 
     /// Opens the same shorts one trade at a time and returns the largest CU.
@@ -767,6 +775,68 @@ fn v16_program_source_lien_refresh_bound_refuses_the_leg_past_it() {
     assert!(refused.contains(REFUSED), "{refused}");
 }
 
+/// The same bound on the batch instruction, which checks the work once, after
+/// all of its legs. A batch that ends past the bound is refused as a whole,
+/// although seven of its eight legs would have fit, and changes nothing. A batch
+/// that ends within it is admitted; one more leg is then refused in a batch of
+/// its own; and a batch that closes one leg while it opens another does not raise
+/// the work and is not refused.
+#[test]
+fn v16_program_source_lien_refresh_bound_refuses_a_batch_as_a_whole() {
+    let mut pair = all_source_lien_pair();
+    pair.redeposit_capital();
+    let liened = liened_sources(&pair.env.portfolio_state(pair.lp));
+    assert_eq!(liened, SOURCES - 1);
+    assert!(liened + LEG_WEIGHT * 7 <= MAX_WORK && liened + LEG_WEIGHT * 8 > MAX_WORK);
+    let leg_assets = |pair: &AllSourceLienPair| {
+        let mut assets: Vec<u32> = pair
+            .env
+            .portfolio_state(pair.lp)
+            .legs
+            .iter()
+            .map(|leg| leg.try_to_runtime().unwrap())
+            .filter(|leg| leg.active)
+            .map(|leg| leg.asset_index)
+            .collect();
+        assets.sort_unstable();
+        assets
+    };
+    let accounts = |pair: &AllSourceLienPair| {
+        [pair.env.market, pair.lp, pair.taker].map(|key| pair.env.svm.get_account(&key))
+    };
+
+    let untouched = accounts(&pair);
+    let refused = pair
+        .try_batch(0, &[20; 8])
+        .expect_err("eight legs over 27 liens pass the bound");
+    assert!(refused.contains(REFUSED), "{refused}");
+    assert_eq!(
+        accounts(&pair),
+        untouched,
+        "a refused batch changes nothing"
+    );
+
+    pair.try_batch(0, &[20; 7])
+        .expect("seven legs over 27 liens are within the bound");
+    assert_eq!(leg_assets(&pair), [0, 1, 2, 3, 4, 5, 6]);
+    assert_eq!(liened_sources(&pair.env.portfolio_state(pair.lp)), liened);
+
+    let at_the_bound = accounts(&pair);
+    let refused = pair
+        .try_batch(7, &[20])
+        .expect_err("the eighth leg passes the bound in a batch of its own too");
+    assert!(refused.contains(REFUSED), "{refused}");
+    let refused = pair
+        .try_batch(6, &[-10, 20])
+        .expect_err("reducing one leg does not make room for another");
+    assert!(refused.contains(REFUSED), "{refused}");
+    assert_eq!(accounts(&pair), at_the_bound);
+
+    pair.try_batch(6, &[-20, 20])
+        .expect("closing one leg and opening another leaves the work where it was");
+    assert_eq!(leg_assets(&pair), [0, 1, 2, 3, 4, 5, 7]);
+}
+
 /// Unliened claims need no such bound. All fourteen legs lose through 28
 /// unliened claims and a little capital: every claim is netted at par and the
 /// refresh fits.
@@ -822,7 +892,10 @@ fn v16_program_fourteen_leg_loss_over_claims_in_lapsed_domains_is_bounded() {
             BackingBucketStatusV16::Expired,
             "domain {domain}"
         );
-        assert_eq!(group.source_credit[domain].credit_rate_num, 0, "domain {domain}");
+        assert_eq!(
+            group.source_credit[domain].credit_rate_num, 0,
+            "domain {domain}"
+        );
     }
     let lapsed = pair.env.portfolio_state(pair.lp);
     assert!(certificate_is_current(&pair.env, pair.lp));
