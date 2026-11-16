@@ -484,7 +484,7 @@ fn inv044_source_defines_test(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_derived_value_class_roster_is_source_complete() {
-    const ENGINE_PIN: &str = "5e3af0710ec7e9b7077393012f8a94a31b2f07ef";
+    const ENGINE_PIN: &str = "a55aceb31b172a9b92f6046b0c9e8375ebb6af70";
     const CLASSES: &[Inv044DerivedValueClass] = &[
         Inv044DerivedValueClass {
             class: "ADL A indices and effective quantity",

@@ -1143,7 +1143,7 @@ struct Inv069TerminalBlockerClass {
 
 #[test]
 fn v16_program_terminal_blocker_census_composes_engine_retirement_before_wrapper_cleanup() {
-    const ENGINE_PIN: &str = "5e3af0710ec7e9b7077393012f8a94a31b2f07ef";
+    const ENGINE_PIN: &str = "a55aceb31b172a9b92f6046b0c9e8375ebb6af70";
     const CLASSES: &[Inv069TerminalBlockerClass] = &[
         Inv069TerminalBlockerClass {
             class: "live OI, stored legs, stale cohorts, side modes, and prior epochs",
