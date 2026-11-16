@@ -945,3 +945,6 @@ fn v16_program_fourteen_leg_loss_over_claims_in_lapsed_domains_is_bounded() {
     );
     println!("INV-077 fourteen-leg lapsed-claim loss CU: open={open_cu}, refresh={refresh_cu}");
 }
+
+#[path = "inv_077_resolved_loss_settlement.rs"]
+mod resolved_loss_settlement;

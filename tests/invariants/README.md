@@ -32671,6 +32671,51 @@ of the LP's 29,400 loss is met by face whose backing had lapsed, so the winner's
 by what capital paid. How lapsed claims should rank against new loser payments into the same
 domain is an engine design question, noted in the engine PR.
 
+### INV-077 losses first settled after resolution (2026-11-16)
+
+[`cu/inv_077_resolved_loss_settlement.rs`](cu/inv_077_resolved_loss_settlement.rs), measured on
+engine `a55aceb31b172a9b92f6046b0c9e8375ebb6af70`. Setup uses public wrapper instructions only,
+on the fixture of the two sections above.
+
+**Shape.** The LP holds a claim of 1,000 in each of the 28 source domains and opens up to
+fourteen shorts; every mark then doubles and the market is resolved before anyone refreshes
+the LP or the taker. All of both accounts' legs carry an unsettled K/F delta into Resolved
+mode, and the LP's are losses over source claims.
+
+**What failed.** A resolved close settled every leg of an account in its first call. With
+losses over source claims that costs work for each losing leg and for each claim its loss
+burns through. On engine `5e3af071` the LP's call exceeded the transaction limit for fourteen
+legs over 28 claims at par and over 28 lapsed claims, in both close orders and however long
+the clock ran; seven and eleven legs over liened claims failed until the backing deadline had
+passed; two big legs among fourteen fit at 1,340,780. An account that cannot settle keeps its
+legs in the market's payout blockers, so no account with a profit was paid: a winner on
+another asset, settled before resolution, received nothing 3,200 slots later, capital
+included. Engine `a55aceb3` settles such an account two legs per call.
+
+**Guarantee.** Every resolved call succeeds below 1.25M CU, both accounts close in the slot
+after resolution with no deadline awaited, and the amounts are those of the books. The loser's
+close first: both are paid exactly. The winner's close first: the winner is paid exactly and
+what the loser is short of stays in the vault (see "Not asserted").
+
+| Selector (`source_lien_loss_refresh::resolved_loss_settlement::`) | Shape | Costliest call, loser first / winner first |
+|---|---|---|
+| `v16_program_fourteen_leg_loss_first_settled_after_resolution_closes_within_the_limit` | 14 legs, each losing through about two of 28 claims | 887,275 / 945,143 |
+| `v16_program_two_legs_burning_every_claim_at_the_fourteen_leg_shape_fit` | 14 legs; the two the order settles first burn all 28 claims | 894,863 / 903,381 |
+| same | 14 legs; the two the order settles last burn all 28 claims, in the ordinary final call | 1,120,764 / 1,156,073 |
+| `v16_program_fourteen_leg_loss_over_lapsed_claims_first_settled_after_resolution_closes` | 14 legs over 28 claims in lapsed domains, capital for exactly the loss | 857,234 / 885,604 |
+| `v16_program_losses_on_the_lien_bound_first_settled_after_resolution_close_at_once` | 7 legs over 27 liened claims, 11 over 6 | below the limit, not printed |
+| `v16_program_a_fourteen_leg_loser_does_not_hold_up_unrelated_winners` | the first shape beside a settled winner, a settled loser and a flat account | n/a: the winner waits while the LP's legs are unsettled and is then paid 101,000 in full |
+
+All five tests fail on engine `5e3af071`: four on a resolved call that exceeds the transaction
+limit, the two-big-legs test on the 1.25M guardrail.
+
+**Not asserted.** When the winner closes first, the LP's claims in the domains it owes are
+burned below par, and the LP ends short of its books (4,740 of 28,800 in the first shape).
+That is the engine's existing resolved rule, not this change, and is the subject of engine
+draft #264. The tests require only that the winner is exact, that the LP is not overpaid, and
+that the shortfall stays in the vault. A bankrupt LP and the amounts a winner's receipt is
+later topped up to are outside these tests.
+
 ### INV-077 source-capacity reclamation
 
 Additional bounded evidence, 2026-09-08:
