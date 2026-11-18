@@ -552,9 +552,10 @@ fn retained_capability_trade(env: &mut V16Svm, route: CpiRoute, size: i128) -> T
     }
 }
 
-/// Re-sign a retained single-CPI trade with an explicit taker base-fee consent. The taker
-/// signs `fee_bps` independently of the LP cap, so a live base-fee policy above the
-/// builder's zero would otherwise reject before the LP grant is ever consulted.
+/// Re-sign a retained CPI trade with an explicit taker base-fee consent. The taker signs
+/// `fee_bps` independently of the LP cap, on the single-CPI route and (since #453) on every
+/// leg of the batch-CPI route, so a live base-fee policy above the builder's zero would
+/// otherwise reject before the LP grant is ever consulted.
 fn with_taker_fee_consent(
     env: &V16Svm,
     tx: &Transaction,
@@ -584,7 +585,12 @@ fn with_taker_fee_consent(
     let mut decoded = ProgInstruction::decode(&trade.data).expect("decode retained trade");
     match &mut decoded {
         ProgInstruction::TradeCpi { fee_bps, .. } => *fee_bps = fee,
-        other => panic!("expected single CPI trade, got {other:?}"),
+        ProgInstruction::BatchTradeCpi { legs, .. } => {
+            for leg in legs.iter_mut() {
+                leg.fee_bps = fee;
+            }
+        }
+        other => panic!("expected a CPI trade, got {other:?}"),
     }
     trade.data = decoded.encode();
     Transaction::new_signed_with_payer(
@@ -1494,16 +1500,13 @@ fn v16_program_ordered_grant_histories_bind_retained_cpi_disposition() {
 
     fn consenting_trade(env: &mut V16Svm, route: CpiRoute, size: i128) -> Transaction {
         let tx = retained_capability_trade(env, route, size);
-        match route {
-            CpiRoute::Single => with_taker_fee_consent(
-                env,
-                &tx,
-                u64::from(FEE_BPS),
-                &env.actors[4].signer,
-                &env.actors[0].signer,
-            ),
-            CpiRoute::Batch => tx,
-        }
+        with_taker_fee_consent(
+            env,
+            &tx,
+            u64::from(FEE_BPS),
+            &env.actors[4].signer,
+            &env.actors[0].signer,
+        )
     }
 
     fn consume(

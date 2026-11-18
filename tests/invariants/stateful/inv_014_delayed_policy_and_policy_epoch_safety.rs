@@ -442,7 +442,14 @@ fn v16_program_retained_batch_route_switch_preserves_fee_caps_and_funded_provide
                         "{label}: {error}"
                     );
                     if rejected_cpi {
-                        assert!(error.contains(&format!("Program {} success", env.matcher_program)), "{label}: aggregate rejection must follow successful matcher CPI, not the LP cap: {error}");
+                        // #453: each leg's signed `fee_bps` is a ceiling on this route too,
+                        // so the raised policy is refused before the matcher is invoked. The
+                        // aggregate cap after a successful matcher CPI is the subject of
+                        // `retained_taker_aggregate_cap`.
+                        assert!(
+                            !error.contains(&format!("Program {} invoke", env.matcher_program)),
+                            "{label}: the leg ceiling rejects before the matcher CPI"
+                        );
                     }
                     assert_eq!(
                         frame(&env, &keys),

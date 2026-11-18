@@ -16,8 +16,9 @@ const PRICE: u64 = 100;
 const FEE_BPS: u16 = 100;
 const DEPOSIT: u128 = 1_000_000;
 
-/// Re-sign a single-CPI trade with the taker's explicit base-fee consent. Single CPI binds
-/// the taker-signed `fee_bps` to the live base fee before the LP grant is consulted.
+/// Re-sign a CPI trade with the taker's explicit base-fee consent. Single CPI and (since
+/// #453) every leg of batch CPI bind the taker-signed `fee_bps` to the live base fee before
+/// the LP grant is consulted.
 fn with_taker_fee_consent(
     env: &V16Svm,
     tx: &Transaction,
@@ -46,7 +47,12 @@ fn with_taker_fee_consent(
     let mut decoded = percolator_prog::ix::Instruction::decode(&trade.data).unwrap();
     match &mut decoded {
         percolator_prog::ix::Instruction::TradeCpi { fee_bps, .. } => *fee_bps = u64::from(FEE_BPS),
-        other => panic!("expected single CPI trade, got {other:?}"),
+        percolator_prog::ix::Instruction::BatchTradeCpi { legs, .. } => {
+            for leg in legs.iter_mut() {
+                leg.fee_bps = u64::from(FEE_BPS);
+            }
+        }
+        other => panic!("expected a CPI trade, got {other:?}"),
     }
     trade.data = decoded.encode();
     Transaction::new_signed_with_payer(
@@ -69,7 +75,10 @@ fn retain(env: &mut V16Svm, payer: &Keypair, route: TradeRoute, size: i128) -> T
         TradeRoute::BatchNoCpi => {
             env.build_retained_batch_no_cpi_trade_with_fee(0, 1, 0, size, PRICE, u64::from(FEE_BPS))
         }
-        TradeRoute::BatchCpi => env.build_retained_batch_cpi_trade(0, 1, 0, size, PRICE),
+        TradeRoute::BatchCpi => {
+            let tx = env.build_retained_batch_cpi_trade(0, 1, 0, size, PRICE);
+            with_taker_fee_consent(env, &tx, payer, 0)
+        }
     };
     tx.verify().expect("retained transaction signatures");
     assert!(bincode::serialize(&tx).unwrap().len() <= 1232);

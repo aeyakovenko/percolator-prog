@@ -9972,6 +9972,13 @@ pub mod processor {
         if !fee_bounds_ok {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        // The taker signs every leg's fee_bps. Treat it as the ceiling for the mutable
+        // base-fee policy, as the single-CPI route and both no-CPI routes do, so a retained
+        // transaction cannot be charged a base fee installed after signing. The LP's
+        // matcher fee cap below is a separate consent and cannot stand in for it.
+        if legs.iter().any(|leg| cpi_fee_bps > leg.fee_bps) {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         let (account_a_header, account_a_owner) = {
             let data = account_a_ai.try_borrow_data()?;
             expect_portfolio_id(&data, account_a_portfolio_id)?;

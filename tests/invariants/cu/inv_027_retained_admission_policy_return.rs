@@ -550,17 +550,13 @@ fn v16_generated_retained_first_admission_survives_funded_policy_return_and_fee_
                     assert!(gap > controls.trade_fee);
                     w.deliver(prefix, Some((2, PercolatorError::EngineStale)), [0, 0, 0]);
                     w.check(&book, false);
+                    // Every route refuses a policy above the signed `fee_bps` before the
+                    // matcher is invoked. Until #453 the batch-CPI route ignored its legs'
+                    // `fee_bps`, ran the matcher and was refused by the engine's fee bound.
                     w.deliver(
                         denied,
-                        Some((
-                            3,
-                            if matches!(route, TradeRoute::BatchCpi) {
-                                PercolatorError::EngineInvalidConfig
-                            } else {
-                                PercolatorError::InvalidInstruction
-                            },
-                        )),
-                        [1, 1, usize::from(matches!(route, TradeRoute::BatchCpi))],
+                        Some((3, PercolatorError::InvalidInstruction)),
+                        [1, 1, 0],
                     );
                     w.check(&book, false);
                     controls.trade_fee += 1;

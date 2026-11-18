@@ -13410,6 +13410,45 @@ cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir 
 cargo clean --manifest-path tests/fixtures/auth_matcher/Cargo.toml --target-dir tests/fixtures/auth_matcher/target
 ```
 
+## INV-014 retained batch-CPI taker fee consent (#453, 2026-11-18)
+
+[`cu/inv_014_delayed_policy_and_policy_epoch_safety.rs`](cu/inv_014_delayed_policy_and_policy_epoch_safety.rs),
+selector `v16_retained_batch_cpi_leg_fee_cap_rejects_policy_increase`, beside the single-CPI
+selector it follows. Public instructions only.
+
+**Guarantee.** On every trade route the taker's signed `fee_bps` is a ceiling for the mutable
+base trade fee. A transaction retained across a base-fee increase above that value is rejected
+with `InvalidInstruction` before the matcher is invoked, with exact rollback.
+
+**The gap it closes.** `handle_batch_trade_cpi` checked each leg's `fee_bps` only against
+`max_trading_fee_bps` and then charged the base fee in force at landing, up to the LP's matcher
+fee cap. `TradeCpi`, `TradeNoCpi` and `BatchTradeNoCpi` already compare the base fee with the
+signed value. The taker's aggregate `max_fee_atoms` still bound the charge, so a taker who set
+it was protected; one who left it at `u128::MAX`, as the instruction builders do, relied on
+`fee_bps`, which had no effect.
+
+| Fixture | Before the fix | Required |
+|---|---|---|
+| the single-CPI fixture through `BatchTradeCpi` with one leg: base fee 19 bps, leg signed at 99, LP cap 137, `max_fee_atoms` unbounded; the base fee is then raised to 100 | the retained transaction executes | rejected at instruction 2 with `InvalidInstruction`, the matcher is not invoked, every non-payer account is unchanged; a fresh leg signed at 100 executes and each owner pays 100 atoms |
+
+**Existing tests that encoded the gap.** Five places treated the batch-CPI route differently
+from the other three, because it ignored its legs' `fee_bps`. Each now treats it like the
+single-CPI route:
+
+| Where | Before | Now |
+|---|---|---|
+| `verify_cpi_base_fee_consent` in [`support/fuzz_model.rs`](../support/fuzz_model.rs) (INV-036, the LP fee-cap selector) | under a 500 bps base fee the single-CPI arm signs 500 "so this selector isolates the LP capability cap"; the batch-CPI arm signed 0 and landed all the same | the batch arm signs 500 |
+| `consenting_trade` in [`stateful/inv_012_capability_and_delegate_scope.rs`](stateful/inv_012_capability_and_delegate_scope.rs) | `with_taker_fee_consent` re-signed the single-CPI trade at the base fee; the batch-CPI trade kept the retained builder's zero | both routes are re-signed |
+| `retain` in [`stateful/inv_047_retained_mixed_transport.rs`](stateful/inv_047_retained_mixed_transport.rs) | the same | the same |
+| the denied delivery in [`cu/inv_027_retained_admission_policy_return.rs`](cu/inv_027_retained_admission_policy_return.rs) | on the batch-CPI route a policy above the signed `fee_bps` ran the matcher and was refused by the engine (`EngineInvalidConfig`, one matcher success); the other routes refused with `InvalidInstruction` before the matcher | every route refuses with `InvalidInstruction` and no matcher invocation |
+| `v16_program_retained_batch_route_switch_preserves_fee_caps_and_funded_provider` in [`stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs`](stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs) | required the batch-CPI rejection of a raised policy to follow a successful matcher CPI (the aggregate `max_fee_atoms`) | requires that the matcher is not invoked; the aggregate cap after a successful matcher CPI stays covered by `retained_taker_aggregate_cap`, whose legs sign a ceiling above the policy |
+
+**Controls.** Without the handler change the new selector, the INV-027 selector and the
+route-switch selector fail as edited; the other three pass on either program, since they only
+sign a higher ceiling. With the handler change and the tests as they were, the INV-036
+regression (`v16_program_pr313_cpi_base_fee_requires_lp_consent`), the INV-012, INV-047 and
+INV-027 selectors and the route-switch selector fail.
+
 ## INV-073 depleted reserves through retirement retries (rows 420/421, 2026-09-12)
 
 Owner: [cu/inv_073_absent_insurer_spent_retirement.rs](cu/inv_073_absent_insurer_spent_retirement.rs).

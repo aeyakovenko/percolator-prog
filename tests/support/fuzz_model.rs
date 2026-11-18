@@ -22917,7 +22917,7 @@ pub fn verify_cpi_base_fee_consent(
                     asset_index: ASSET,
                     market_id,
                     size_q,
-                    fee_bps: 0,
+                    fee_bps: INSTALLED_FEE_BPS,
                     limit_price: 0,
                 }],
             ),
