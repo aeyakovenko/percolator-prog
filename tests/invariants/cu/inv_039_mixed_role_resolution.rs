@@ -36,7 +36,13 @@ struct Book {
 
 impl Book {
     fn support(&self) -> u128 {
-        self.debt.min(DEPOSITS[1])
+        // Until engine `a55aceb3` this was `self.debt.min(DEPOSITS[1])`: the debt was met
+        // by retiring the account's claim on the under-backed payer at the payer's rate.
+        // Since engine `52659c02` a loss first settled after resolution keeps face that
+        // sits at a rate strictly between 0 and 1 and is paid from capital, as in Live.
+        // No source support is consumed for the debt, and the quantities derived from it
+        // below (`support_face`, `face_discount`) are zero.
+        0
     }
 
     fn support_face(&self) -> u128 {

@@ -6846,7 +6846,7 @@ fn inv073_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str
 
 #[test]
 fn v16_program_terminal_disposition_and_administrative_retirement_are_source_complete() {
-    const ENGINE_PIN: &str = "a55aceb31b172a9b92f6046b0c9e8375ebb6af70";
+    const ENGINE_PIN: &str = "52659c02165439c84d99711231c1bf1c74cefc46";
     const PHASES: &[Inv073TerminalPhase] = &[
         Inv073TerminalPhase {
             rank_lane: "economic-work",

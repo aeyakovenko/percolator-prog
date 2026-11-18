@@ -32716,6 +32716,45 @@ draft #264. The tests require only that the winner is exact, that the LP is not 
 that the shortfall stays in the vault. A bankrupt LP and the amounts a winner's receipt is
 later topped up to are outside these tests.
 
+### INV-039 mixed-role book after engine `52659c02` (2026-11-18)
+
+[`cu/inv_039_mixed_role_resolution.rs`](cu/inv_039_mixed_role_resolution.rs) and its child
+[`cu/inv_039_mixed_role_fractional_retirement.rs`](cu/inv_039_mixed_role_fractional_retirement.rs).
+
+**What changed in the engine.** One portfolio holds a claim on a payer that cannot pay in full
+and owes a loss in another domain, and both are first settled after resolution. Until engine
+`a55aceb3` the loss was met by retiring the claim's face at the payer's backing-to-claim ratio
+(`support()` atoms of support for `support_face()` of face), and the difference,
+`face_discount()`, stayed in the vault unowned. Engine `52659c02` keeps face that sits at a
+rate strictly between 0 and 1 and pays the loss from capital, as Live does. The account then
+converts that face at the domain's rate like any other claimant.
+
+**What changed in the book.** `Book::support()` is 0. Everything derived from it follows:
+no face is retired for the debt, `face_discount()` is 0, the account converts its claim less
+the residual, and nothing is left in the vault for the discount. The fractional child's
+precondition on `support()` is restated accordingly.
+
+With the previous book two selectors fail on engine `52659c02` at their first owner-entitlement
+check after the debt is settled, by exactly `face_discount()`:
+
+| Selector (`mixed_role_resolution::`) | Mixed-role account's entitlement in the previous book | On the engine |
+|---|---|---|
+| `v16_program_mixed_creditor_debtor_roles_preserve_owner_entitlement_through_resolution` | 560,000 | 564,000 |
+| `fractional_retirement::v16_program_mixed_role_fractional_source_preserves_attribution_through_expiry_and_retirement` | 344,000 | 364,000 |
+
+The other three selectors of the module pass with either book. The September sections above
+that describe 180,000 atoms of support retiring 200,000 of source face (Scope L) describe the
+engine before this pin.
+
+**Why.** Retiring face at the payer's rate spends `x / rate` of face for `x` of loss, at a
+rate the domain's unsettled losers have yet to restore. In the engine's oracles that made the
+order of permissionless closes decide payouts: over 8,000 random insolvent histories wound down
+in up to 24 close orders each, the order changed a payout in 472 on `a55aceb3` and in 1 on
+`52659c02` (4 with this change alone on `a55aceb3`; 101 with the book's rule kept, face retained
+only in the loss domain itself).
+
+**Not covered.** A bankrupt LP, and the amounts a winner's receipt is later topped up to.
+
 ### INV-077 source-capacity reclamation
 
 Additional bounded evidence, 2026-09-08:

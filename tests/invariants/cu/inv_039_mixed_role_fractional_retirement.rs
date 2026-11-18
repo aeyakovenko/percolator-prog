@@ -273,11 +273,12 @@ fn v16_program_mixed_role_fractional_source_preserves_attribution_through_expiry
                 for schedule in 0..2 {
                     for late in [false, true] {
                         let (mut world, mut book) = setup(reverse, assets, debt);
-                        assert_eq!(book.support(), DEPOSITS[1]);
-                        // Engine #175: the support the mixed-role account pays with is booked
-                        // for the peer's domain, which is then fully backed in these worlds.
-                        // The peer converts its whole gain; the fractional rate and the
-                        // receipt it used to leave (`support + 1`) are no longer reached by
+                        // Engine `52659c02`: the mixed-role account pays its debt from capital
+                        // and keeps its claim, so no source support is consumed.
+                        assert_eq!(book.support(), 0);
+                        // The peer's domain is fully backed in these worlds either way (the
+                        // debt reaches it whole), and the peer converts its whole gain; the
+                        // fractional rate and the receipt it used to leave are not reached by
                         // this setup.
                         assert_eq!(book.peer_receipt_face(), 0);
                         peak = peak.max(fund_provider(&mut world, &mut book, backing));

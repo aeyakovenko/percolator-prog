@@ -1465,7 +1465,7 @@ fn inv066_handler_body<'a>(production: &'a str, function: &str) -> &'a str {
 
 #[test]
 fn v16_program_resolved_payout_induction_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "a55aceb31b172a9b92f6046b0c9e8375ebb6af70";
+    const ENGINE_PIN: &str = "52659c02165439c84d99711231c1bf1c74cefc46";
     const CLASSES: &[Inv066PayoutClass] = &[
         Inv066PayoutClass {
             class: "snapshot-bound receipt materialization",
