@@ -30464,6 +30464,43 @@ is still consulted, so an exit can still be refused because of the asset touched
 optional backing-domain ledger account, backing fees and the shutdown drain are not part of these
 fixtures.
 
+### INV-073 crossed Recovery obligations after resolution (2026-11-18)
+
+[`inv_073_crossed_recovery_obligations.rs`](cu/inv_073_crossed_recovery_obligations.rs), mounted
+from the INV-073 CU module. Public wrapper instructions only; nobody is insolvent and the two
+shut-down assets never move.
+
+**Guarantee.** After resolution every account can be closed by permissionless `CloseResolved`
+calls and is paid its exact entitlement, whatever legs the owners forfeited on shut-down assets
+before.
+
+**The defect it closes.** A leg forfeited on a shut-down asset stays attached with a zero basis
+and its loss weight while a real position is attached on the other side of that asset, and
+resolved close detached none of an account's legs while one such obligation waited. Two accounts
+that each forfeit one leg and keep a real position on the other asset, crossed, then held each
+other up for ever: `CloseResolved` succeeded for both without changing anything, and because an
+attached leg blocks every positive payout, no winner in the market was paid, its capital
+included. On engine `2ed67b16a65de77ca088dca3d8c868c60d41042b` the obligation holds the
+account's other legs only while some account in the market still has a loss to settle or to
+book. After that the other legs detach, which releases the obligations they held up.
+
+| Selector | Fixture | On engine `a55aceb31b172a9b92f6046b0c9e8375ebb6af70` | Required |
+|---|---|---|---|
+| `crossed_recovery_obligations::v16_program_crossed_recovery_obligations_do_not_lock_the_resolved_market` | P long one unit against Q on one asset, Q long one unit against P on another; R has won 10,000 from S on asset 0; the market authority shuts both assets down; P forfeits the first, Q the second; the market resolves | the cohort reaches a fixed point: `CloseResolved` succeeds for P and Q without progress and R is never paid | in both keeper orders R is paid 210,000, S 190,000, P and Q 200,000 each, and the vault is empty |
+| `crossed_recovery_obligations::v16_program_asset_creator_cannot_lock_the_resolved_market_with_crossed_forfeits` | the same where an account without any market role activates the two assets for the listing fee, shuts them down itself, and P and Q are its own accounts | the same fixed point | the same payouts; the vault holds the two fee atoms |
+| `crossed_recovery_obligations::v16_program_one_recovery_obligation_waits_and_the_resolved_market_drains` | control: only P forfeits | everyone is paid exactly | unchanged |
+
+**Unchanged on purpose.** What an obligation waits for: it leaves only when no real position is
+attached opposite it. And while any account in the market is unsettled an account's legs still
+leave together: all 36 INV-039 pending-loss selectors pass unchanged, among them
+`v16_attack_recovery_resolved_cannot_clear_unreleased_loss_weight_before_debtor`,
+`v16_program_resolve_with_pending_obligation_defers_claim_until_debtor_settles` and
+`v16_program_shared_holder_pending_domains_survive_partial_detach_and_debtor_close_orders`.
+
+**Remaining gaps.** Losses on the shut-down assets and more than two accounts in the cycle are
+not part of these fixtures; the engine's random-history oracle covers them without a fairness
+model.
+
 ### INV-031 CPI-created shared-lien consumption
 
 `v16_program_cpi_created_shared_liens_preserve_single_use_through_no_cpi_exit` adds one focused

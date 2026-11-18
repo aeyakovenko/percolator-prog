@@ -101,6 +101,9 @@ mod successor_custody_retry;
 #[path = "inv_073_shared_holder_paid_reserves.rs"]
 mod shared_holder_paid_reserves;
 
+#[path = "inv_073_crossed_recovery_obligations.rs"]
+mod crossed_recovery_obligations;
+
 #[test]
 fn v16_program_generated_reserve_wallet_absence_preserves_fee_claims_across_expiry() {
     crate::inv_024_attributed_quote_value_conservation::terminal_earnings_succession::verify_generated_reserve_wallets();
