@@ -13,6 +13,15 @@
 //! loss-stale flag, which summarizes the asset touched last, so one crank on
 //! another, current asset cleared it while the winner here was still
 //! unrefreshed. The fixture reproduces exactly that: asset 1 is touched last.
+//!
+//! A payment can also outlive its claim. If the move reverses before the winner
+//! is refreshed, the winner's gain is gone and nobody ever claims the payment
+//! where it sits; the payer's regain is claimed on the twin domain, which the
+//! other side never funds. With every position settled the engine treated the
+//! payment as surplus and the backing authority could withdraw it, with or
+//! without principal of its own in the domain. The engine now leaves in a
+//! domain what its losers paid beyond its claims for as long as the twin's
+//! claims are short of it.
 
 use super::*;
 
@@ -28,6 +37,7 @@ const PAYMENT: u128 = UNITS * (MOVED_PRICE - OPEN_PRICE) as u128;
 struct LoserPaidWinnerStale {
     env: V16CuEnv,
     long: Pubkey,
+    short: Pubkey,
     slot: u64,
     destination: Pubkey,
 }
@@ -143,6 +153,7 @@ fn loser_paid_winner_not_refreshed(principal: u128) -> LoserPaidWinnerStale {
     LoserPaidWinnerStale {
         env,
         long,
+        short,
         slot,
         destination,
     }
@@ -241,4 +252,89 @@ fn v16_program_live_provider_exit_is_empty_without_provider_principal() {
     refresh(&mut world.env, long, slot);
     world.assert_refused(1);
     world.assert_winner_is_backed();
+}
+
+/// The fixture's move reverses before the long is ever refreshed, and then both
+/// accounts are. Nobody gained or lost. The short holds its regain as a claim on
+/// the long-loss domain, which nothing backs; its 400 sits in the short-loss
+/// domain under no claim, beside `principal`.
+fn payment_stranded_by_a_reversal(principal: u128) -> LoserPaidWinnerStale {
+    let mut world = loser_paid_winner_not_refreshed(principal);
+    world.slot += 1;
+    let (long, short, slot) = (world.long, world.short, world.slot);
+    world.env.svm.warp_to_slot(slot);
+    world.env.push_auth_mark_for_asset_as_admin(0, slot, OPEN_PRICE);
+    world.env.push_auth_mark_for_asset_as_admin(1, slot, OPEN_PRICE);
+    refresh(&mut world.env, short, slot);
+    refresh(&mut world.env, long, slot);
+
+    let group = world.env.market_state().1;
+    assert_eq!(
+        (
+            group.assets[0].stale_account_count_long,
+            group.assets[0].stale_account_count_short
+        ),
+        (0, 0),
+        "every position on the asset is settled"
+    );
+    let long_state = world.env.portfolio_state(long);
+    let short_state = world.env.portfolio_state(short);
+    assert_eq!((long_state.capital.get(), long_state.pnl.get()), (10_000, 0));
+    assert_eq!(
+        (short_state.capital.get(), short_state.pnl.get()),
+        (10_000 - PAYMENT, PAYMENT as i128)
+    );
+    let payment = group.source_credit[DOMAIN as usize];
+    assert_eq!(payment.positive_claim_bound_num, 0);
+    assert_eq!(
+        payment.fresh_reserved_backing_num,
+        (principal + PAYMENT) * BOUND_SCALE
+    );
+    let regain = group.source_credit[DOMAIN as usize - 1];
+    assert_eq!(regain.positive_claim_bound_num, PAYMENT * BOUND_SCALE);
+    assert_eq!(regain.fresh_reserved_backing_num, 0);
+    world
+}
+
+impl LoserPaidWinnerStale {
+    /// The short's payment is still in the domain and its claim is unchanged.
+    fn assert_payment_is_still_there(&self, principal_left: u128) {
+        let group = self.env.market_state().1;
+        assert_eq!(
+            group.source_credit[DOMAIN as usize].fresh_reserved_backing_num,
+            (principal_left + PAYMENT) * BOUND_SCALE
+        );
+        let short = self.env.portfolio_state(self.short);
+        assert_eq!(
+            (short.capital.get(), short.pnl.get()),
+            (10_000 - PAYMENT, PAYMENT as i128)
+        );
+    }
+}
+
+/// A provider with 1,000 in the domain recovers its 1,000 and not an atom of
+/// the 400 a reversal stranded there.
+#[test]
+fn v16_program_live_provider_exit_leaves_a_payment_stranded_by_a_reversal() {
+    let mut world = payment_stranded_by_a_reversal(PRINCIPAL);
+    world.assert_refused(PRINCIPAL + PAYMENT);
+    world.assert_refused(PRINCIPAL + 1);
+    world.assert_payment_is_still_there(PRINCIPAL);
+    world
+        .try_withdraw(PRINCIPAL)
+        .expect("a provider takes out what it put in");
+    assert_eq!(world.env.token_amount(world.destination), PRINCIPAL as u64);
+    world.assert_refused(1);
+    world.assert_payment_is_still_there(0);
+}
+
+/// With no principal in the domain the backing authority has nothing to
+/// withdraw. It used to walk away with the short's 400.
+#[test]
+fn v16_program_live_backing_authority_cannot_take_a_stranded_payment_without_principal() {
+    let mut world = payment_stranded_by_a_reversal(0);
+    world.assert_refused(PAYMENT);
+    world.assert_refused(1);
+    world.assert_payment_is_still_there(0);
+    assert_eq!(world.env.token_amount(world.destination), 0);
 }

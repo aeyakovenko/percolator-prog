@@ -30435,6 +30435,8 @@ own count of unsettled positions.
 | `live_exit_loss_stale_gate::v16_program_live_insurance_exit_waits_for_unsettled_positions_on_its_asset` | a long owes 601 on a 60% move and has 600; 2 of insurance; nobody refreshed | the operator withdraws both atoms of insurance and the short collects 600 | the withdrawal is refused with exact rollback, 1 of insurance pays the shortfall, and the short collects its whole 601 |
 | `provider_exit_principal::v16_program_live_provider_exit_leaves_the_loser_payment_for_the_winner` | a long gains 400 on a 4% move, only the short refreshed, 1,000 of provider principal | on engine `427dc5fc584ccd0bb7f4510c76c8992f68546a6c` the backing authority withdraws 1,400 | nothing leaves while the long is unrefreshed; then 1,001 is refused, 1,000 is paid, one more atom is refused, and the long holds a 400 claim on 400 of backing at full rate |
 | `provider_exit_principal::v16_program_live_provider_exit_is_empty_without_provider_principal` | the same without provider principal | on engine `427dc5fc584ccd0bb7f4510c76c8992f68546a6c` the backing authority withdraws the short's 400 | nothing leaves before or after the long is refreshed |
+| `provider_exit_principal::v16_program_live_provider_exit_leaves_a_payment_stranded_by_a_reversal` (2026-11-18) | the first fixture, then the mark returns before the long is ever refreshed and both are refreshed: the short's 400 sits under no claim, its 400 regain is a claim on the twin domain that nothing backs; 1,000 of provider principal | on engine `a55aceb31b172a9b92f6046b0c9e8375ebb6af70` the backing authority withdraws 1,400 | 1,400 and 1,001 are refused with nothing moved, 1,000 is paid, one more atom is refused, and the short's payment and claim are unchanged |
+| `provider_exit_principal::v16_program_live_backing_authority_cannot_take_a_stranded_payment_without_principal` (2026-11-18) | the same without provider principal | on engine `a55aceb31b172a9b92f6046b0c9e8375ebb6af70` the backing authority withdraws the short's 400 | 400 and 1 are refused with nothing moved |
 
 Two layers protect the provider exit. The engine caps it at provider principal while a position
 on the asset is unsettled (engine `827a125f719d6d0884734f216ca54e6c9f87319a`), and the wrapper
@@ -30442,9 +30444,16 @@ gate refuses it outright in that window. With the gate alone unfixed the first p
 fails on its principal step; with the engine alone unfixed both provider selectors pass through
 the gate.
 
-**Unchanged on purpose.** Once every position on the asset is settled, backing above the claim
-watermark leaves as before, whether or not a loser paid it in: that is how a domain is drained
-before its asset is retired or restarted
+A third case needs no unsettled position (engine `9a219cca1a6aeadd08f6b7db16fcf1e4dd468329`). A
+loser's payment can outlive its claim: if the move reverses before the winner is refreshed, the
+gain is gone, nobody claims the payment where it sits, and the payer's regain is claimed on the
+twin domain, which the other side never funds. With every position settled the engine now
+leaves in a domain what its losers paid beyond its claims for as long as the twin's claims are
+short of it. The wrapper gate is not involved: nothing is unsettled in the last two selectors.
+
+**Unchanged on purpose.** Once every position on the asset is settled and the twin domain is
+owed nothing, backing above the claim watermark leaves as before, whether or not a loser paid
+it in: that is how a domain is drained before its asset is retired or restarted
 (`v16_program_asset0_recovery_matrix_preserves_provider_withdraw_and_restart_progress`,
 `v16_program_reused_slot_matches_fresh_after_public_insurance_spend`). After resolution the
 engine's surplus rule governs alone
