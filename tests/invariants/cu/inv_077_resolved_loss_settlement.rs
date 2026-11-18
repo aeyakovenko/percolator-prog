@@ -8,14 +8,15 @@
 //! market's payout blockers, and no account with a profit was paid, whoever its
 //! counterparty was.
 //!
-//! The engine now settles such an account a bounded number of legs per call.
-//! These tests close the largest shapes in both orders and require that every
-//! call fits, that both accounts finish without waiting for any deadline, and
-//! that everyone is paid what the books say.
+//! The engine now settles such an account a bounded number of legs per call,
+//! and places a bounded number of stranded loser payments per call. These tests
+//! close the largest shapes in both orders and require that every call fits,
+//! that both accounts finish without waiting for any deadline, and that
+//! everyone is paid exactly what the books say.
 
 use super::*;
 
-/// Costliest resolved call measured over these shapes: 1,156,073.
+/// Costliest resolved call measured over these shapes: 1,179,627.
 const RESOLVED_CALL_CU_LIMIT: u64 = 1_250_000;
 const LP: usize = 0;
 const TAKER: usize = 1;
@@ -162,11 +163,11 @@ fn loss(units: &[i128]) -> u128 {
 
 /// Both close orders of a solvent pair over par claims. The loss is `loss`; the
 /// provider principal in the 28 domains is nobody's to take here and stays.
+/// Everyone is paid exactly in either order.
 ///
-/// Loser first, everyone is paid exactly. Winner first, the winner is still paid
-/// exactly; the LP's own claims in the domains it owes are then burned below
-/// par (the engine's existing resolved rule), so it can end short, and what it
-/// is short of stays in the vault: nothing is paid to anyone else.
+/// Winner first used to leave the LP short: its own claims in the domains it
+/// owed were burned below par, at the rate those domains showed before it had
+/// paid. The engine now nets such a loss against the face it is owed to.
 fn close_both_orders(units: &[i128], label: &str) -> u64 {
     let claims = SOURCES as u128 * CLAIM_PER_SOURCE;
     let principal = SOURCES as u128 * PROVIDER_PER_SOURCE;
@@ -188,18 +189,10 @@ fn close_both_orders(units: &[i128], label: &str) -> u64 {
 
         let closed = resolve_and_close(pair, lp_first, label);
         assert_eq!(closed.paid[TAKER], taker_fair, "{label}: the winner");
-        if lp_first {
-            assert_eq!(
-                closed.paid[LP], lp_fair,
-                "{label}: the loser, closing first"
-            );
-        } else {
-            assert!(closed.paid[LP] <= lp_fair, "{label}: the loser");
-        }
+        assert_eq!(closed.paid[LP], lp_fair, "{label}: the loser");
         assert_eq!(
-            closed.paid[LP] + closed.vault_left,
-            lp_fair + principal,
-            "{label}: what the loser is short of stays in the vault"
+            closed.vault_left, principal,
+            "{label}: only the provider principal is left"
         );
         max_cu = max_cu.max(closed.max_cu);
         println!(
@@ -307,11 +300,7 @@ fn v16_program_losses_on_the_lien_bound_first_settled_after_resolution_close_at_
             let label = format!("{legs} legs over {liened} liened claims");
             let closed = resolve_and_close(pair, lp_first, &label);
             assert_eq!(closed.paid[TAKER], taker_fair, "{label}");
-            if lp_first {
-                assert_eq!(closed.paid[LP], lp_fair, "{label}");
-            } else {
-                assert!(closed.paid[LP] <= lp_fair, "{label}");
-            }
+            assert_eq!(closed.paid[LP], lp_fair, "{label}");
         }
     }
 }
