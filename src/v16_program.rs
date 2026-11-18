@@ -9972,6 +9972,13 @@ pub mod processor {
         if !fee_bounds_ok {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        // The taker signs fee_bps independently of the LP's matcher capability cap.
+        if legs
+            .iter()
+            .any(|leg| cpi_fee_bps > leg.fee_bps)
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         let (account_a_header, account_a_owner) = {
             let data = account_a_ai.try_borrow_data()?;
             expect_portfolio_id(&data, account_a_portfolio_id)?;
