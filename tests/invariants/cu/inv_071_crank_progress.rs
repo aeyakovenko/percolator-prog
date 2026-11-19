@@ -3673,7 +3673,7 @@ fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
                 ),
                 (
                     "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
-                    "v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_shape",
+                    "v16_attack_public_recovery_kf_progress_takes_a_current_42_feed_tail_at_max_shape",
                 ),
             ],
         },

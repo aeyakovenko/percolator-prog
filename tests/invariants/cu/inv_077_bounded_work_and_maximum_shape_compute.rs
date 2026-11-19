@@ -5287,8 +5287,15 @@ fn v16_program_recovery_kf_refresh_at_14_leg_28_source_shape_is_bounded() {
     eprintln!("14-leg/28-source Recovery K/F refresh CU: {refresh_cu}");
 }
 
+// A stale account that still holds live Hybrid legs is refreshed only from reports that
+// advanced in this slot (#426): a crank cannot take an account's health from the previous
+// slot's observation of any leg. At the maximum shape that is a 42-account tail, three reports
+// for each of the 14 legs. This test pins both halves at that shape. A tail that omits a leg, or
+// carries the previous slot's reports, is refused without changing any account. The current
+// tail is accepted within the compute limit and gives the Recovery leg its committed K/F
+// progress.
 #[test]
-fn v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_shape() {
+fn v16_attack_public_recovery_kf_progress_takes_a_current_42_feed_tail_at_max_shape() {
     const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
     const MOVED_PRICE: u64 = 110;
 
@@ -5300,32 +5307,116 @@ fn v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_sha
     let custody_before = env.token_amount(env.vault);
     env.configure_permissionless_resolve_with_cu(1_000, 5);
 
+    // Reports for one slot: the last asset's composite price moves to 110, the other thirteen
+    // keep the price they opened at.
+    let reports_at = |env: &mut V16CuEnv, publish_time: i64| {
+        let moved = [
+            env.set_pyth_price(&feeds[0], 3_300_000, -6, publish_time),
+            env.set_pyth_price(&feeds[1], 150_000_000, -6, publish_time),
+            env.set_pyth_price(&feeds[2], 200_000_000, -6, publish_time),
+        ];
+        let unmoved = [
+            env.set_pyth_price(&feeds[0], 3_000_000, -6, publish_time),
+            env.set_pyth_price(&feeds[1], 150_000_000, -6, publish_time),
+            env.set_pyth_price(&feeds[2], 200_000_000, -6, publish_time),
+        ];
+        (moved, unmoved)
+    };
+    // The complete tail: every leg observed, three reports each, in asset order.
+    let complete_tail =
+        |env: &V16CuEnv, portfolio: Pubkey, (moved, unmoved): ([Pubkey; 3], [Pubkey; 3])| {
+            let observations = (0..ACTIVE_CAP)
+                .map(|observed_asset| CrankObservationHint {
+                    asset_index: observed_asset,
+                    oracle_accounts: 3,
+                })
+                .collect::<Vec<_>>();
+            let mut accounts = vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ];
+            for observed_asset in 0..ACTIVE_CAP {
+                let reports = if observed_asset == asset_index {
+                    moved
+                } else {
+                    unmoved
+                };
+                accounts.extend(
+                    reports
+                        .iter()
+                        .copied()
+                        .map(|key| AccountMeta::new_readonly(key, false)),
+                );
+            }
+            (observations, accounts)
+        };
+
     slot = slot.checked_add(1).unwrap();
     let publish_time = 100 + slot as i64;
     set_test_clock(&mut env, slot, publish_time);
-    let moved_oracles = [
-        env.set_pyth_price(&feeds[0], 3_300_000, -6, publish_time),
-        env.set_pyth_price(&feeds[1], 150_000_000, -6, publish_time),
-        env.set_pyth_price(&feeds[2], 200_000_000, -6, publish_time),
-    ];
-    env.crank_with_oracle_tail(
-        taker,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: slot,
-            observations: crank_observations(asset_index),
-        },
-        &moved_oracles,
-    );
+    let first_reports = reports_at(&mut env, publish_time);
+
+    // The moved asset's own three reports are not enough: the taker has thirteen other live
+    // Hybrid legs, none of them observed in this slot.
+    {
+        let tracked = [env.market, taker, lp];
+        let before = tracked.map(|key| env.svm.get_account(&key).unwrap());
+        let mut accounts = vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+        ];
+        accounts.extend(
+            first_reports
+                .0
+                .iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+        env.svm.expire_blockhash();
+        let error = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations_with_accounts(asset_index, 3),
+                },
+                accounts,
+                &[],
+            )
+            .expect_err("a tail that omits live Hybrid legs must not refresh the account");
+        assert!(error.contains("Custom(22)"), "{error}");
+        assert_eq!(
+            tracked.map(|key| env.svm.get_account(&key).unwrap()),
+            before,
+            "an incomplete tail must change nothing"
+        );
+    }
+    let (observations, accounts) = complete_tail(&env, taker, first_reports);
+    env.svm.expire_blockhash();
+    let first_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations,
+            },
+            accounts,
+            &[],
+        )
+        .expect("the complete current tail refreshes the taker");
+    assert_cu_within("max-shape complete current tail crank", first_cu, 1_375_000);
 
     let live_group = env.market_state().1;
     let stale_lp = env.portfolio_state(lp);
     let stale_leg = active_leg_for_asset(&stale_lp, asset_slot);
     assert_eq!(live_group.assets[asset_slot].effective_price, MOVED_PRICE);
+    assert_eq!(live_group.assets[0].effective_price, 100);
     assert_eq!(stale_leg.side, SideV16::Short);
     assert!(stale_leg.kf_epoch_snap < live_group.assets[asset_slot].kf_epoch_short);
 
     slot = slot.checked_add(1).unwrap();
     set_test_clock(&mut env, slot, publish_time + 1);
+    let current_reports = reports_at(&mut env, publish_time + 1);
     let mut checkpoint_calls = 0usize;
     let mut checkpoint_max_cu = 0u64;
     loop {
@@ -5338,14 +5429,18 @@ fn v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_sha
         }
         let market_before = env.svm.get_account(&env.market).unwrap();
         let portfolio_before = env.svm.get_account(&taker).unwrap();
-        let cu = env.crank_with_oracle_tail(
-            taker,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: slot,
-                observations: crank_observations(asset_index),
-            },
-            &moved_oracles,
-        );
+        let (observations, accounts) = complete_tail(&env, taker, current_reports);
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations,
+                },
+                accounts,
+                &[],
+            )
+            .expect("Hybrid funding-checkpoint catch-up with the current tail");
         assert_cu_within("Hybrid funding-checkpoint catch-up", cu, 1_375_000);
         checkpoint_calls += 1;
         checkpoint_max_cu = checkpoint_max_cu.max(cu);
@@ -5397,29 +5492,35 @@ fn v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_sha
         let account = env.svm.get_account(&env.market).unwrap();
         state::read_asset_oracle_profile(&account.data, asset_slot).unwrap()
     };
-    let feeds_before = moved_oracles.map(|key| env.svm.get_account(&key).unwrap());
     let active_bitmap_before = active_bitmap(&stale_lp);
 
-    let observations = (0..ACTIVE_CAP)
-        .map(|observed_asset| CrankObservationHint {
-            asset_index: observed_asset,
-            oracle_accounts: 3,
-        })
-        .collect::<Vec<_>>();
-    let mut accounts = vec![
-        AccountMeta::new(env.payer.pubkey(), true),
-        AccountMeta::new(env.market, false),
-        AccountMeta::new(lp, false),
-    ];
-    for _ in 0..ACTIVE_CAP {
-        accounts.extend(
-            moved_oracles
-                .iter()
-                .copied()
-                .map(|key| AccountMeta::new_readonly(key, false)),
+    // The previous slot's complete tail: every report is fresh by age and well formed, but none
+    // of the LP's thirteen live Hybrid legs has advanced in this slot. Nothing changes.
+    {
+        let tracked = [env.market, taker, lp];
+        let before = tracked.map(|key| env.svm.get_account(&key).unwrap());
+        let (observations, accounts) = complete_tail(&env, lp, first_reports);
+        env.svm.expire_blockhash();
+        let error = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations,
+                },
+                accounts,
+                &[],
+            )
+            .expect_err("the previous slot's tail must not refresh a stale account");
+        assert!(error.contains("Custom(22)"), "{error}");
+        assert_eq!(
+            tracked.map(|key| env.svm.get_account(&key).unwrap()),
+            before,
+            "a tail from the previous slot must change nothing"
         );
     }
 
+    let reports_before = [current_reports.0, current_reports.1]
+        .map(|reports| reports.map(|key| env.svm.get_account(&key).unwrap()));
     let max_steps = percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
         + usize::from(ACTIVE_CAP)
         + 4;
@@ -5428,19 +5529,20 @@ fn v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_sha
     loop {
         let market_step_before = env.svm.get_account(&env.market).unwrap();
         let portfolio_step_before = env.svm.get_account(&lp).unwrap();
+        let (observations, accounts) = complete_tail(&env, lp, current_reports);
         env.svm.expire_blockhash();
         let cu = env
             .send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    observations: observations.clone(),
+                    observations,
                 },
-                accounts.clone(),
+                accounts,
                 &[],
             )
-            .expect("stale complete-tail transaction must retain bounded Recovery progress");
+            .expect("the complete current tail must retain bounded Recovery progress");
         assert_cu_within(
-            "Recovery max-shape stale complete-tail crank",
+            "Recovery max-shape complete current tail crank",
             cu,
             1_375_000,
         );
@@ -5449,14 +5551,14 @@ fn v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_sha
         assert!(
             env.svm.get_account(&env.market).unwrap() != market_step_before
                 || env.svm.get_account(&lp).unwrap() != portfolio_step_before,
-            "every accepted stale-tail Recovery call must mutate economic state"
+            "every accepted complete-tail Recovery call must mutate economic state"
         );
         if env.market_state().1.assets[asset_slot].stale_account_count_short < stale_count_before {
             break;
         }
         assert!(
             calls <= max_steps,
-            "stale complete-tail schedule must reach committed K/F progress within its finite rank"
+            "complete-tail schedule must reach committed K/F progress within its finite rank"
         );
     }
 
@@ -5488,15 +5590,24 @@ fn v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_sha
     );
     assert_eq!(refreshed_leg.kf_epoch_snap, refreshed_asset.kf_epoch_short);
     assert_eq!(active_bitmap(&lp_after), active_bitmap_before);
+    // The Recovery asset takes nothing from its reports; the thirteen live assets are now
+    // observed in this slot at their unchanged price.
     assert_eq!(profile_after, profile_before);
+    for live_asset in 0..asset_slot {
+        let account = env.svm.get_account(&env.market).unwrap();
+        let profile = state::read_asset_oracle_profile(&account.data, live_asset).unwrap();
+        assert_eq!(profile.last_good_oracle_slot, slot, "asset {live_asset}");
+        assert_eq!(recovery_after.assets[live_asset].effective_price, 100);
+    }
     assert_eq!(
-        moved_oracles.map(|key| env.svm.get_account(&key).unwrap()),
-        feeds_before
+        [current_reports.0, current_reports.1]
+            .map(|reports| reports.map(|key| env.svm.get_account(&key).unwrap())),
+        reports_before
     );
     assert_eq!(env.token_amount(env.vault), custody_before);
     assert_eq!(recovery_after.vault as u64, custody_before);
     println!(
-        "INV-071/072/077 Recovery 14-leg/28-source/42-feed K/F progress: checkpoint={checkpoint_calls}/{checkpoint_max_cu}, recovery={calls}/{max_cu}"
+        "INV-071/072/077 Recovery 14-leg/28-source/42-feed K/F progress: first={first_cu}, checkpoint={checkpoint_calls}/{checkpoint_max_cu}, recovery={calls}/{max_cu}"
     );
 }
 

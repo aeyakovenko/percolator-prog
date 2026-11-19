@@ -3368,19 +3368,19 @@ fn v16_program_mark_writer_and_trade_exit_composition_is_source_complete() {
                 ),
                 (
                     "tests/invariants/cu/inv_045_exposed_keeper_provenance.rs",
-                    "v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybrid_catchup",
+                    "v16_program_exposed_auth_keeper_earns_nothing_in_either_settlement_order_through_hybrid_catchup",
                 ),
                 (
                     "tests/invariants/cu/inv_045_reward_maintenance_catchup.rs",
-                    "v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchup",
+                    "v16_program_keeper_maintenance_and_unreclaimed_penalties_stay_distinct_until_catchup",
                 ),
                 (
                     "tests/invariants/cu/inv_045_reward_policy_catchup.rs",
-                    "v16_program_reward_policy_succession_preserves_receipts_and_effective_price_catchup",
+                    "v16_program_reward_policy_succession_earns_nothing_during_effective_price_catchup",
                 ),
                 (
                     "tests/invariants/cu/inv_045_reward_terminal_redemption.rs",
-                    "v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order",
+                    "v16_program_hybrid_catchup_penalties_stay_in_insurance_through_resolved_cohort_redemption",
                 ),
                 (
                     "tests/invariants/cu/inv_045_hybrid_recipient_provenance.rs",

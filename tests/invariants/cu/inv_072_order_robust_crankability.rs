@@ -889,32 +889,52 @@ fn v16_program_budgeted_out_of_order_crank_refreshes_without_unearned_reward() {
 
 // user's economics, aggregate engine state, or custody.
 
-#[test]
-fn v16_program_auto_crank_refresh_not_blocked_by_unneeded_first_asset_oracle() {
-    const MARK: u64 = 1_000_000;
-    const OPEN_SLOT: u64 = 1;
-    const REFRESH_SLOT: u64 = 2;
+// Two accounts each hold a live Hybrid leg (asset 0) and an AuthMark leg (asset 1). A move of
+// the AuthMark price makes both stale. A stale account is refreshed only from a Hybrid report
+// that advanced in this slot (#426), or once the Hybrid leg's soft-stale threshold has matured
+// and its mark is canonical; the refresh cannot be taken from the previous observation.
+//
+// Order robustness holds in the form that rule allows. The report is public: any caller can
+// present it, for either account, in either order. It is presented once per slot: after it the
+// other account refreshes from the committed state with no observation at all.
+struct StaleHybridAccounts {
+    env: V16CuEnv,
+    accounts: [Pubkey; 2],
+    feed: [u8; 32],
+    opening_report: Pubkey,
+}
 
+const STALE_HYBRID_MARK: u64 = 1_000_000;
+const STALE_HYBRID_OPEN_SLOT: u64 = 1;
+const STALE_HYBRID_OPEN_TIME: i64 = 100;
+
+fn stale_hybrid_accounts_fixture(hybrid_soft_stale_slots: u64) -> StaleHybridAccounts {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
-    set_test_clock(&mut env, OPEN_SLOT, 100);
+    set_test_clock(&mut env, STALE_HYBRID_OPEN_SLOT, STALE_HYBRID_OPEN_TIME);
 
-    let stale_feed0 = [0x52u8; 32];
-    let initial0 = env.set_pyth_price_with_conf(&stale_feed0, MARK as i64, -6, 0, 100);
+    let feed = [0x52u8; 32];
+    let opening_report = env.set_pyth_price_with_conf(
+        &feed,
+        STALE_HYBRID_MARK as i64,
+        -6,
+        0,
+        STALE_HYBRID_OPEN_TIME,
+    );
     env.try_configure_hybrid_asset_with_conf_filter_cu(
         0,
         1,
         0,
-        [stale_feed0, [0u8; 32], [0u8; 32]],
-        &[initial0],
-        OPEN_SLOT,
-        100,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[opening_report],
+        STALE_HYBRID_OPEN_SLOT,
+        STALE_HYBRID_OPEN_TIME,
         0,
         0,
-        1_000,
+        hybrid_soft_stale_slots,
         0,
     )
     .expect("configure asset-0 hybrid oracle");
-    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+    env.configure_auth_mark_for_asset_as_admin(1, STALE_HYBRID_OPEN_SLOT, STALE_HYBRID_MARK);
 
     let owner_a = Keypair::new();
     let owner_b = Keypair::new();
@@ -922,98 +942,281 @@ fn v16_program_auto_crank_refresh_not_blocked_by_unneeded_first_asset_oracle() {
     let account_b = env.create_portfolio(&owner_b);
     env.deposit(&owner_a, account_a, 10_000_000);
     env.deposit(&owner_b, account_b, 10_000_000);
-    env.trade_asset_with_cu(
-        0,
-        &owner_a,
-        account_a,
-        &owner_b,
-        account_b,
-        POS_SCALE as i128,
-        MARK,
-        0,
-    );
-    env.trade_asset_with_cu(
-        1,
-        &owner_a,
-        account_a,
-        &owner_b,
-        account_b,
-        POS_SCALE as i128,
-        MARK,
-        0,
-    );
-    let a_before_update = env.portfolio_state(account_a);
-    assert!(
-        health_cert(&a_before_update).valid,
-        "setup starts from a current multi-asset account"
-    );
-    assert_eq!(
-        active_leg_for_asset(&a_before_update, 0).asset_index,
-        0,
-        "asset 0 is active"
-    );
-    assert_eq!(
-        active_leg_for_asset(&a_before_update, 1).asset_index,
-        1,
-        "asset 1 is active"
-    );
+    for asset in [0, 1] {
+        env.trade_asset_with_cu(
+            asset,
+            &owner_a,
+            account_a,
+            &owner_b,
+            account_b,
+            POS_SCALE as i128,
+            STALE_HYBRID_MARK,
+            0,
+        );
+    }
+    for account in [account_a, account_b] {
+        let state = env.portfolio_state(account);
+        assert!(
+            health_cert(&state).valid,
+            "setup starts from current multi-asset accounts"
+        );
+        assert_eq!(active_leg_for_asset(&state, 0).asset_index, 0);
+        assert_eq!(active_leg_for_asset(&state, 1).asset_index, 1);
+    }
+    StaleHybridAccounts {
+        env,
+        accounts: [account_a, account_b],
+        feed,
+        opening_report,
+    }
+}
 
-    set_test_clock(&mut env, REFRESH_SLOT, 200);
-    env.push_auth_mark_for_asset_as_admin(1, REFRESH_SLOT, MARK + 10_000);
-    env.crank(
-        account_b,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: REFRESH_SLOT,
-            observations: crank_observations(1),
-        },
-    );
-    let (_, group_after_asset1) = env.market_state();
-    assert!(
-        health_cert(&env.portfolio_state(account_a)).cert_oracle_epoch
-            < group_after_asset1.oracle_epoch,
-        "asset-1 progress makes account A stale"
-    );
-
+/// One permissionless crank of `portfolio`: the AuthMark asset observed when `auth_mark` is set,
+/// the Hybrid asset observed from `report` when one is given.
+fn stale_hybrid_refresh(
+    env: &mut V16CuEnv,
+    portfolio: Pubkey,
+    now_slot: u64,
+    auth_mark: bool,
+    report: Option<Pubkey>,
+) -> Result<u64, String> {
+    let mut observations = if auth_mark {
+        crank_observations(1)
+    } else {
+        vec![]
+    };
+    let mut accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolio, false),
+    ];
+    if let Some(report) = report {
+        observations.extend(crank_observations_with_accounts(0, 1));
+        accounts.push(AccountMeta::new_readonly(report, false));
+    }
     env.svm.expire_blockhash();
-    let stale_asset0_attempt = env.send(
+    env.send(
         ProgInstruction::PermissionlessCrank {
-            now_slot: REFRESH_SLOT,
-            observations: crank_observations_with_accounts(0, 1),
+            now_slot,
+            observations,
         },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(account_a, false),
-            AccountMeta::new_readonly(initial0, false),
-        ],
+        accounts,
         &[],
-    );
-    assert!(
-        stale_asset0_attempt.is_err(),
-        "asset-0 oracle is stale; the refresh must not depend on it"
-    );
+    )
+}
 
-    env.svm.expire_blockhash();
-    let refresh = env.send(
-        ProgInstruction::PermissionlessCrank {
-            now_slot: REFRESH_SLOT,
-            observations: vec![],
-        },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(account_a, false),
-        ],
-        &[],
+fn stale_hybrid_account_is_current(env: &V16CuEnv, portfolio: Pubkey) -> bool {
+    let group = env.market_state().1;
+    let cert = health_cert(&env.portfolio_state(portfolio));
+    cert.valid
+        && cert.cert_oracle_epoch == group.oracle_epoch
+        && cert.cert_funding_epoch == group.funding_epoch
+        && cert.cert_risk_epoch == group.risk_epoch
+}
+
+#[test]
+fn v16_program_auto_crank_refresh_takes_this_slots_hybrid_report_once_for_every_account() {
+    const REFRESH_SLOT: u64 = 2;
+    const REFRESH_TIME: i64 = 200;
+
+    // The report may arrive with either account's refresh.
+    for first in [0usize, 1] {
+        let StaleHybridAccounts {
+            mut env,
+            accounts,
+            feed,
+            opening_report,
+        } = stale_hybrid_accounts_fixture(1_000);
+        let (first_account, second_account) = (accounts[first], accounts[1 - first]);
+
+        set_test_clock(&mut env, REFRESH_SLOT, REFRESH_TIME);
+        env.push_auth_mark_for_asset_as_admin(1, REFRESH_SLOT, STALE_HYBRID_MARK + 10_000);
+        for account in accounts {
+            assert!(
+                !stale_hybrid_account_is_current(&env, account),
+                "the AuthMark move makes both accounts stale"
+            );
+        }
+        let current_report =
+            env.set_pyth_price_with_conf(&feed, STALE_HYBRID_MARK as i64, -6, 0, REFRESH_TIME);
+        let tracked = [
+            env.market,
+            accounts[0],
+            accounts[1],
+            opening_report,
+            current_report,
+        ];
+        let before = tracked.map(|key| env.svm.get_account(&key).unwrap());
+
+        // Without a Hybrid report of this slot neither account refreshes, whatever else the
+        // caller observes.
+        for account in accounts {
+            for auth_mark in [false, true] {
+                let error = stale_hybrid_refresh(&mut env, account, REFRESH_SLOT, auth_mark, None)
+                    .expect_err("a stale account must not refresh from the previous Hybrid report");
+                assert!(
+                    error.contains("Custom(22)"),
+                    "first={first} auth_mark={auth_mark}: {error}"
+                );
+            }
+            // The opening report is 100 seconds old: stale evidence, refused as such.
+            let error =
+                stale_hybrid_refresh(&mut env, account, REFRESH_SLOT, true, Some(opening_report))
+                    .expect_err("a stale Hybrid report must not refresh the account");
+            assert!(error.contains("Custom(27)"), "first={first}: {error}");
+            assert_eq!(
+                tracked.map(|key| env.svm.get_account(&key).unwrap()),
+                before,
+                "first={first}: a refused refresh must change nothing"
+            );
+        }
+
+        // One current report, presented by an unrelated payer for whichever account comes first.
+        stale_hybrid_refresh(
+            &mut env,
+            first_account,
+            REFRESH_SLOT,
+            true,
+            Some(current_report),
+        )
+        .unwrap_or_else(|error| panic!("first={first}: current report refresh: {error}"));
+        assert!(stale_hybrid_account_is_current(&env, first_account));
+        let hybrid = {
+            let market = env.svm.get_account(&env.market).unwrap();
+            state::read_asset_oracle_profile(&market.data, 0).unwrap()
+        };
+        assert_eq!(hybrid.last_good_oracle_slot, REFRESH_SLOT);
+        assert_eq!(hybrid.oracle_target_publish_time, REFRESH_TIME);
+
+        // The market is now observed for this slot: the other account refreshes from the
+        // committed state, with no observation and no report.
+        assert!(!stale_hybrid_account_is_current(&env, second_account));
+        stale_hybrid_refresh(&mut env, second_account, REFRESH_SLOT, false, None)
+            .unwrap_or_else(|error| panic!("first={first}: observation-free refresh: {error}"));
+        assert!(stale_hybrid_account_is_current(&env, second_account));
+        for account in accounts {
+            let state = env.portfolio_state(account);
+            assert_eq!(
+                active_leg_for_asset(&state, 0).basis_pos_q.unsigned_abs(),
+                POS_SCALE,
+                "refresh-only progress leaves the Hybrid leg alone"
+            );
+            assert_eq!(
+                active_leg_for_asset(&state, 1).basis_pos_q.unsigned_abs(),
+                POS_SCALE,
+                "refresh-only progress leaves the AuthMark leg alone"
+            );
+        }
+
+        // The report is good for its slot only. One slot later a new AuthMark move makes the
+        // accounts stale again, and they wait for that slot's report.
+        set_test_clock(&mut env, REFRESH_SLOT + 1, REFRESH_TIME + 1);
+        env.push_auth_mark_for_asset_as_admin(1, REFRESH_SLOT + 1, STALE_HYBRID_MARK + 20_000);
+        let error = stale_hybrid_refresh(&mut env, first_account, REFRESH_SLOT + 1, true, None)
+            .expect_err("the previous slot's report must not refresh a stale account");
+        assert!(error.contains("Custom(22)"), "first={first}: {error}");
+        let error = stale_hybrid_refresh(
+            &mut env,
+            first_account,
+            REFRESH_SLOT + 1,
+            true,
+            Some(current_report),
+        )
+        .expect_err("re-presenting the previous slot's report must not refresh a stale account");
+        assert!(error.contains("Custom(22)"), "first={first}: {error}");
+        let next_report =
+            env.set_pyth_price_with_conf(&feed, STALE_HYBRID_MARK as i64, -6, 0, REFRESH_TIME + 1);
+        stale_hybrid_refresh(
+            &mut env,
+            first_account,
+            REFRESH_SLOT + 1,
+            true,
+            Some(next_report),
+        )
+        .unwrap_or_else(|error| panic!("first={first}: next slot's report refresh: {error}"));
+        assert!(stale_hybrid_account_is_current(&env, first_account));
+    }
+}
+
+/// Cranks `portfolio` without a Hybrid report until it is current or a call is refused. After a
+/// gap of several slots the first calls only bring the market forward, one slot each.
+fn stale_hybrid_refresh_to_fixed_point(
+    env: &mut V16CuEnv,
+    portfolio: Pubkey,
+    now_slot: u64,
+    auth_mark: bool,
+) -> Result<usize, String> {
+    for call in 1..=64 {
+        stale_hybrid_refresh(env, portfolio, now_slot, auth_mark, None)?;
+        if stale_hybrid_account_is_current(env, portfolio) {
+            return Ok(call);
+        }
+    }
+    panic!("the crank neither refreshed the account nor was refused within 64 calls");
+}
+
+#[test]
+fn v16_program_auto_crank_refresh_needs_no_hybrid_report_after_soft_stale_maturity() {
+    // No Hybrid report arrives after the opening one. The soft-stale threshold matures strictly
+    // after `hybrid_soft_stale_slots` slots without one. The threshold is short here because
+    // the market catches up one slot per crank.
+    const SOFT_STALE_SLOTS: u64 = 6;
+    const LAST_UNMATURED_SLOT: u64 = STALE_HYBRID_OPEN_SLOT + SOFT_STALE_SLOTS;
+    const MATURED_SLOT: u64 = LAST_UNMATURED_SLOT + 1;
+
+    let StaleHybridAccounts {
+        mut env, accounts, ..
+    } = stale_hybrid_accounts_fixture(SOFT_STALE_SLOTS);
+
+    set_test_clock(
+        &mut env,
+        LAST_UNMATURED_SLOT,
+        STALE_HYBRID_OPEN_TIME + LAST_UNMATURED_SLOT as i64,
     );
-    assert!(
-        refresh.is_ok(),
-        "account refresh should use already-current market state, not require an unneeded first-asset oracle: {refresh:?}"
+    env.push_auth_mark_for_asset_as_admin(1, LAST_UNMATURED_SLOT, STALE_HYBRID_MARK + 10_000);
+    for account in accounts {
+        assert!(!stale_hybrid_account_is_current(&env, account));
+        let error =
+            stale_hybrid_refresh_to_fixed_point(&mut env, account, LAST_UNMATURED_SLOT, true)
+                .expect_err("one slot before maturity the refresh still waits for a report");
+        assert!(error.contains("Custom(22)"), "{error}");
+        assert!(
+            !stale_hybrid_account_is_current(&env, account),
+            "a refused refresh leaves the account stale"
+        );
+    }
+
+    // One slot later the Hybrid mark is canonical: both accounts refresh without a report, in
+    // either order, and the second one observes nothing at all.
+    set_test_clock(
+        &mut env,
+        MATURED_SLOT,
+        STALE_HYBRID_OPEN_TIME + MATURED_SLOT as i64,
     );
-    assert!(
-        health_cert(&env.portfolio_state(account_a)).cert_oracle_epoch
-            >= env.market_state().1.oracle_epoch,
-        "refresh makes the stale account current"
+    // (Each helper call returns once its account is current. Bringing the Hybrid asset forward
+    // on its mark can make the other account stale again; it refreshes the same way.)
+    stale_hybrid_refresh_to_fixed_point(&mut env, accounts[1], MATURED_SLOT, true)
+        .unwrap_or_else(|error| panic!("matured refresh of the second account: {error}"));
+    stale_hybrid_refresh_to_fixed_point(&mut env, accounts[0], MATURED_SLOT, false)
+        .unwrap_or_else(|error| panic!("matured refresh of the first account: {error}"));
+    stale_hybrid_refresh_to_fixed_point(&mut env, accounts[1], MATURED_SLOT, false)
+        .unwrap_or_else(|error| panic!("second matured refresh of the second account: {error}"));
+    for account in accounts {
+        assert!(stale_hybrid_account_is_current(&env, account));
+        let state = env.portfolio_state(account);
+        assert_eq!(
+            active_leg_for_asset(&state, 0).basis_pos_q.unsigned_abs(),
+            POS_SCALE,
+            "refresh-only progress leaves the Hybrid leg alone"
+        );
+    }
+    let hybrid = {
+        let market = env.svm.get_account(&env.market).unwrap();
+        state::read_asset_oracle_profile(&market.data, 0).unwrap()
+    };
+    assert_eq!(
+        hybrid.last_good_oracle_slot, STALE_HYBRID_OPEN_SLOT,
+        "no report was taken: the last good report is still the opening one"
     );
 }
 
@@ -1422,7 +1625,7 @@ fn inv072_plan_evidence(plan: AutoCrankPlanV16) -> Inv072PlanEvidence {
             asset_index: Some(_),
         } => Inv072PlanEvidence {
             plan: "RefreshAccount(Some)",
-            witness: "v16_program_auto_crank_refresh_not_blocked_by_unneeded_first_asset_oracle",
+            witness: "v16_program_auto_crank_refresh_takes_this_slots_hybrid_report_once_for_every_account",
         },
         AutoCrankPlanV16::RefreshAccount { asset_index: None } => Inv072PlanEvidence {
             plan: "RefreshAccount(None)",
@@ -1538,7 +1741,7 @@ fn v16_program_every_auto_crank_plan_and_hint_parser_stratum_has_public_evidence
         "v16_program_crank_authenticated_oracle_account_roles_are_exhaustive",
         "v16_attack_liquidation_cannot_omit_fresh_external_rescue_observation",
         "v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded",
-        "v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_shape",
+        "v16_attack_public_recovery_kf_progress_takes_a_current_42_feed_tail_at_max_shape",
         "v16_program_recovery_reset_crank_tail_matrix_is_order_robust",
     ];
     let parser_sources = [

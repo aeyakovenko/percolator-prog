@@ -1,6 +1,8 @@
 //! INV-045 / row 422: old liquidation penalties survive a later fresh-report handoff.
 //! A committed stale-mark liquidation precedes fresh liquidation while price still
-//! lags. Discovery fees and the old penalty remain outside every new reward/budget.
+//! lags. The effective price is trade-driven until it equals the fresh report, so
+//! neither liquidation is reclaimable: discovery fees and both penalties stay in
+//! general insurance, outside every reward and every domain budget.
 
 use super::*;
 
@@ -249,10 +251,9 @@ fn run_retained_handoff_impl(
     let mut old_penalty = 0;
     let mut new_penalties = 0;
     let mut rewards = 0;
-    let mut budgets = [0u128; 2];
+    let budgets = [0u128; 2];
     let mut peak_reject = 0;
     let mut late_rollbacks = 0;
-    let mut reward_rollbacks = 0;
     let mut liquidation_count = 0;
     let mut missing_rollbacks = 0;
     let stale_price = ENTRY - ENTRY * 24 / 10_000;
@@ -426,13 +427,12 @@ fn run_retained_handoff_impl(
             );
             assert!(closed < before.assets[0].oi_eff_long_q);
             let penalty = fee(closed, price, 5);
-            let penalty_reclaimable = phase != 0 && routes.is_none();
-            let reward = if penalty_reclaimable {
-                penalty * SHARE / 10_000
-            } else {
-                0
-            };
-            assert!(penalty > 0);
+            // The price has not reached a fresh report in either liquidation phase: it is
+            // trade-driven, so no penalty is reclaimable, whatever route discovered the mark.
+            assert_ne!(price, after.assets[0].raw_oracle_target_price);
+            assert!(!effective_price_is_authenticated(&env));
+            let reward = 0u128;
+            assert!(penalty > 0 && penalty * SHARE / 10_000 > 0);
             if phase == 0 {
                 old_penalty += penalty;
                 assert_eq!(budgets, [0, 0]);
@@ -449,18 +449,6 @@ fn run_retained_handoff_impl(
                 }
                 new_penalties += penalty;
                 rewards += reward;
-                if penalty_reclaimable {
-                    assert!(reward > 0);
-                    let retained = penalty - reward;
-                    budgets[0] += retained / 2;
-                    budgets[1] += retained.div_ceil(2);
-                    reward_rollbacks += 1;
-                } else {
-                    assert_eq!(
-                        reward, 0,
-                        "trade-origin liquidation penalties must not become cranker rewards"
-                    );
-                }
             }
             let mut expected = before_values;
             expected[0] -= penalty as i128;
@@ -571,7 +559,12 @@ fn run_retained_handoff_impl(
         ));
     }
     assert_eq!(liquidation_count, 2);
-    assert_eq!(reward_rollbacks, usize::from(routes.is_none()));
+    assert_eq!(
+        (rewards, budgets),
+        (0, [0, 0]),
+        "liquidation penalties collected before catchup must not become rewards or budgets"
+    );
+    assert!(effective_price_is_authenticated(&env));
     assert!(
         late_rollbacks >= 2,
         "fresh publication and liquidation both roll back"
@@ -650,7 +643,7 @@ fn run_retained_handoff_impl(
     assert_cu_within("retained penalty crank", peak_crank, crank_limit);
     assert_cu_within("retained penalty rejection", peak_reject, 2 * crank_limit);
     assert_cu_within("retained penalty payout", payout_cu, CUSTODY_CU_LIMIT);
-    println!("retained penalty: liquidations={liquidation_count} late_rollbacks={late_rollbacks} fixed_point_rollbacks=3 rewarded_rollbacks={reward_rollbacks} discovery={discovery} old_penalty={old_penalty} new_penalties={new_penalties} rewards={rewards} payout={payout} CU trade={peak_trade} crank={peak_crank} rejection={peak_reject} payout={payout_cu}");
+    println!("retained penalty: liquidations={liquidation_count} late_rollbacks={late_rollbacks} fixed_point_rollbacks=3 discovery={discovery} old_penalty={old_penalty} new_penalties={new_penalties} rewards={rewards} payout={payout} CU trade={peak_trade} crank={peak_crank} rejection={peak_reject} payout={payout_cu}");
     if routes.is_some() {
         assert!(missing_rollbacks >= 7);
         eprintln!("Scope I paid origin: routes={routes:?}, missing_rollbacks={missing_rollbacks}, payout_rollbacks=1");

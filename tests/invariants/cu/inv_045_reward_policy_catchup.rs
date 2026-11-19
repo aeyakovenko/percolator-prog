@@ -1,6 +1,9 @@
-//! INV-036/045/061, row422: earned rewards across policy succession during catchup.
-//! A retained liquidation instruction crosses the policy update after certification;
-//! paying the earlier receipt before or after that update must preserve entitlement.
+//! INV-036/045/061, row422: reward policy succession during catchup.
+//! A retained liquidation instruction crosses the policy update after certification.
+//! While the effective price is still catching up to a fresh report it is trade-driven,
+//! so a liquidation there earns no keeper reward and credits no domain budget under
+//! either policy: the whole penalty stays in general insurance. A keeper withdrawal
+//! before or after the policy update changes none of that.
 
 use super::*;
 
@@ -28,7 +31,7 @@ pub(super) fn withdraw_reward(
             ],
             &[owner],
         )
-        .expect("earned reward remains payable across policy succession");
+        .expect("keeper capital remains payable across policy succession");
     let after = env.market_state().1;
     assert_eq!(
         env.token_amount(tokens) as u128,
@@ -46,7 +49,7 @@ pub(super) fn withdraw_reward(
 }
 
 #[test]
-fn v16_program_reward_policy_succession_preserves_receipts_and_effective_price_catchup() {
+fn v16_program_reward_policy_succession_earns_nothing_during_effective_price_catchup() {
     const SHARES: [u16; 2] = [3_333, 7_777];
     const FINAL_TARGET: u64 = 980_000;
     let first_price = ENTRY - ENTRY * 24 / 10_000;
@@ -125,9 +128,9 @@ fn v16_program_reward_policy_succession_preserves_receipts_and_effective_price_c
         census(&env, portfolios);
 
         let mut total_fee = 0;
-        let mut total_reward = 0;
+        let total_reward = 0u128;
         let mut paid = 0;
-        let mut budgets = [0u128; 2];
+        let budgets = [0u128; 2];
         let mut episodes = Vec::new();
         for (phase, slot, report_price, price) in [
             (0, 6, MARK, first_price),
@@ -230,30 +233,41 @@ fn v16_program_reward_policy_succession_preserves_receipts_and_effective_price_c
                     0
                 );
                 let penalty = fee(closed, price, 5);
-                let reward = penalty * u128::from(SHARES[phase]) / 10_000;
-                assert!(closed > 0 && closed < before.assets[0].oi_eff_long_q && reward > 0);
+                // What the policy in force would pay on a reclaimable penalty.
+                let withheld = penalty * u128::from(SHARES[phase]) / 10_000;
+                assert!(closed > 0 && closed < before.assets[0].oi_eff_long_q && withheld > 0);
                 for wrong_price in [ENTRY, MARK, report_price, ACCEPTED_PRINT, 900_000] {
                     assert_ne!(penalty, fee(closed, wrong_price, 5));
                 }
                 if phase == 1 {
-                    assert_ne!(reward, penalty * u128::from(SHARES[0]) / 10_000);
+                    assert_ne!(withheld, penalty * u128::from(SHARES[0]) / 10_000);
                 }
+                // The price has not reached the fresh report: it is trade-driven, so the
+                // penalty is charged and nothing of it is reclaimed, under either policy.
+                assert_ne!(price, report_price);
+                assert!(!effective_price_is_authenticated(&env));
                 let mut expected = before_values;
                 expected[0] -= penalty as i128;
-                expected[4] += reward as i128;
                 assert_eq!(values(&env, portfolios), expected);
+                assert_eq!(after.insurance, before.insurance + penalty);
+                assert_eq!(
+                    after.insurance_domain_budget,
+                    before.insurance_domain_budget
+                );
                 total_fee += penalty;
-                total_reward += reward;
-                budgets[0] += (penalty - reward) / 2;
-                budgets[1] += (penalty - reward).div_ceil(2);
-                episodes.push((closed, penalty, reward));
+                episodes.push((closed, penalty, withheld));
                 liquidated = true;
                 break;
             }
             assert_eq!(
                 liquidated,
                 phase < 2,
-                "two rewarded episodes, no catchup bonus"
+                "two liquidations during catchup, none at the fixed point"
+            );
+            assert_eq!(
+                effective_price_is_authenticated(&env),
+                phase == 2,
+                "the price is authenticated only once it equals the fresh report"
             );
             // Settle the absent peers' ADL/source work before advancing the price again.
             for _ in 0..8 {
@@ -280,9 +294,10 @@ fn v16_program_reward_policy_succession_preserves_receipts_and_effective_price_c
                 group.insurance_domain_budget_remaining_total,
                 budgets.iter().sum::<u128>()
             );
+            // Every penalty collected during catchup is unbudgeted insurance.
             assert_eq!(
                 group.insurance - group.insurance_domain_budget_remaining_total,
-                discovery
+                discovery + total_fee
             );
             assert_eq!(
                 values(&env, portfolios)[4],
@@ -299,15 +314,16 @@ fn v16_program_reward_policy_succession_preserves_receipts_and_effective_price_c
                 )),
             ));
             if phase == 0 && pay_first {
+                // The keeper has earned nothing; it takes out half of its own capital.
+                let half = FUNDS[4] as u128 / 2;
                 peak_payout = peak_payout.max(withdraw_reward(
-                    &mut env,
-                    &owners[4],
-                    keeper,
-                    tokens[4],
-                    total_reward,
+                    &mut env, &owners[4], keeper, tokens[4], half,
                 ));
-                paid = total_reward;
-                assert_eq!(values(&env, portfolios)[4], FUNDS[4] as i128);
+                paid = half;
+                assert_eq!(
+                    values(&env, portfolios)[4],
+                    (FUNDS[4] as u128 - half) as i128
+                );
                 census(&env, portfolios);
             }
             assert_eq!(env.svm.get_account(&env.mint), mint);
@@ -334,7 +350,8 @@ fn v16_program_reward_policy_succession_preserves_receipts_and_effective_price_c
             group.assets[0].oi_eff_short_q
         );
         assert_eq!(env.svm.get_account(&env.mint), mint);
-        println!("policy catchup pay_first={pay_first}: episodes={episodes:?}, payout={paid}, budgets={budgets:?}, residual={residual}");
+        assert_eq!(total_reward, 0);
+        println!("policy catchup pay_first={pay_first}: episodes (closed, penalty, withheld)={episodes:?}, payout={paid}, budgets={budgets:?}, residual={residual}");
         let outcome = (
             episodes,
             paid,
@@ -347,12 +364,12 @@ fn v16_program_reward_policy_succession_preserves_receipts_and_effective_price_c
         if let Some(expected) = &reference {
             assert_eq!(
                 &outcome, expected,
-                "receipt timing cannot change policy or price attribution"
+                "withdrawal timing cannot change policy or price attribution"
             );
         } else {
             reference = Some(outcome);
         }
     }
     assert_cu_within("reward policy succession", peak_policy, CRANK_CU_LIMIT);
-    println!("row422 policy succession: 2 histories, 4 liquidations, 6 exact healthy rollbacks; crank={peak_crank}, policy={peak_policy}, payout={peak_payout} CU");
+    println!("row422 policy succession: 2 histories, 4 unrewarded catchup liquidations, 6 exact healthy rollbacks; crank={peak_crank}, policy={peak_policy}, payout={peak_payout} CU");
 }

@@ -1,6 +1,9 @@
-//! INV-045/024/036/061/066, row422: earned Hybrid rewards through full catchup
-//! and resolved redemption of the entire five-portfolio cohort. Finite public
-//! conformance only; retained versus early receipts cross both redemption orders.
+//! INV-045/024/036/061/066, row422: Hybrid liquidations through full catchup and
+//! resolved redemption of the entire five-portfolio cohort. Both liquidations fall in
+//! the lag, where the effective price is trade-driven: no reward is earned and no
+//! domain budget is credited, so the penalties stay in general insurance through
+//! resolution. Finite public conformance only; an early versus a terminal keeper
+//! withdrawal crosses both redemption orders.
 //! System/SPL/ATA/wrapper construction; only Clock, external Pyth reports, signer
 //! SOL and program loading are harness inputs. No protocol-account mutation.
 
@@ -56,13 +59,12 @@ fn treasury(env: &V16CuEnv, discovery: u128, fees: u128, rewards: u128, budgets:
     assert!(group.insurance_domain_budget[2..]
         .iter()
         .all(|value| *value == 0));
-    assert_eq!(
-        group.insurance_domain_budget_remaining_total,
-        fees - rewards
-    );
+    let budgeted = budgets.iter().sum::<u128>();
+    assert_eq!(group.insurance_domain_budget_remaining_total, budgeted);
+    // Penalties that were not reclaimable stay in general insurance, outside every budget.
     assert_eq!(
         group.insurance - group.insurance_domain_budget_remaining_total,
-        discovery
+        discovery + fees - rewards - budgeted
     );
 }
 
@@ -75,7 +77,7 @@ fn custody(env: &V16CuEnv, tokens: [Pubkey; 5], supply: u128) -> [u128; 5] {
 }
 
 #[test]
-fn v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order() {
+fn v16_program_hybrid_catchup_penalties_stay_in_insurance_through_resolved_cohort_redemption() {
     let first = ENTRY - ENTRY * 24 / 10_000;
     let second = first - first * 24 / 10_000;
     let supply = FUNDS.iter().map(|amount| u128::from(*amount)).sum::<u128>();
@@ -160,8 +162,8 @@ fn v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order()
             assert_eq!(env.market_state().1.assets[0].effective_price, ENTRY);
             assert_eq!(env.market_state().1.assets[0].raw_oracle_target_price, MARK);
             let mut fees = 0;
-            let mut rewards = 0;
-            let mut budgets = [0; 2];
+            let rewards = 0u128;
+            let budgets = [0u128; 2];
             let mut early_paid = 0;
             let mut episodes = Vec::new();
             treasury(&env, discovery, fees, rewards, budgets);
@@ -177,7 +179,7 @@ fn v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order()
                 tracked.push(report);
                 providers.push((report, env.svm.get_account(&report)));
                 let valid = observe(&env, target, owners[4].pubkey(), Some(report), Some(keeper));
-                let mut rewarded = false;
+                let mut liquidated = false;
                 for _ in 0..6 {
                     let before = env.market_state().1;
                     let before_values = values(&env, portfolios);
@@ -216,40 +218,51 @@ fn v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order()
                     assert_eq!(env.svm.get_account(&env.vault), vault);
                     let closed = before.assets[0].oi_eff_long_q - after.assets[0].oi_eff_long_q;
                     let penalty = fee(closed, price, 5);
-                    let reward = penalty * SHARE / 10_000;
-                    let mut expected_recipient = recipient;
-                    expected_recipient.capital =
-                        percolator::V16PodU128::new(recipient.capital.get() + reward);
-                    if reward != 0 {
-                        expected_recipient.health_cert.valid = 0;
-                    }
-                    assert_eq!(env.portfolio_state(keeper), expected_recipient);
+                    // What the policy would pay on a reclaimable penalty.
+                    let withheld = penalty * SHARE / 10_000;
+                    assert_eq!(
+                        env.portfolio_state(keeper),
+                        recipient,
+                        "a withheld reward leaves the named recipient untouched"
+                    );
                     if closed != 0 {
-                        assert!(phase < 2 && reward > 0 && closed < 100 * POS_SCALE);
+                        assert!(phase < 2 && withheld > 0 && closed < 100 * POS_SCALE);
                         assert!(certificate.certified_liq_deficit > 0);
                         assert_eq!(before.assets[0].effective_price, price);
                         for wrong in [ENTRY, MARK, raw, ACCEPTED_PRINT, 900_000] {
                             assert_ne!(penalty, fee(closed, wrong, 5));
                         }
+                        // The price has not reached the fresh report: it is trade-driven, so
+                        // the penalty is charged and nothing of it is reclaimed.
+                        assert_ne!(price, raw);
+                        assert_eq!(
+                            profile.effective_price_provenance,
+                            percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
+                        );
                         let mut expected_values = before_values;
                         expected_values[0] -= penalty as i128;
-                        expected_values[4] += reward as i128;
                         assert_eq!(values(&env, portfolios), expected_values);
                         fees += penalty;
-                        rewards += reward;
-                        budgets[0] += (penalty - reward) / 2;
-                        budgets[1] += (penalty - reward).div_ceil(2);
-                        episodes.push((closed, penalty, reward));
+                        episodes.push((closed, penalty, withheld));
                         liquidations += 1;
-                        rewarded = true;
+                        liquidated = true;
                     }
                     treasury(&env, discovery, fees, rewards, budgets);
                     census(&env, portfolios);
-                    if rewarded {
+                    if liquidated {
                         break;
                     }
                 }
-                assert_eq!(rewarded, phase < 2, "full catchup cannot create a bonus");
+                assert_eq!(
+                    liquidated,
+                    phase < 2,
+                    "two liquidations during catchup, none at the fixed point"
+                );
+                assert_eq!(
+                    effective_price_is_authenticated(&env),
+                    phase == 2,
+                    "the price is authenticated only once it equals the fresh report"
+                );
                 for _ in 0..8 {
                     for i in [1, 2, 3, 0] {
                         if !census(&env, portfolios)[i] {
@@ -287,9 +300,11 @@ fn v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order()
                 ));
                 rollbacks += 1;
                 if phase == 0 && pay_early {
+                    // The keeper has earned nothing; it takes out half of its own capital.
+                    let half = u128::from(FUNDS[4]) / 2;
                     let withdraw = Instruction {
                         program_id: env.program_id,
-                        data: env.withdraw_ix(keeper, rewards).encode(),
+                        data: env.withdraw_ix(keeper, half).encode(),
                         accounts: vec![
                             AccountMeta::new(owners[4].pubkey(), true),
                             AccountMeta::new(env.market, false),
@@ -307,7 +322,7 @@ fn v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order()
                         &tracked,
                         None,
                     ));
-                    early_paid = rewards;
+                    early_paid = half;
                 }
                 assert_eq!(
                     values(&env, portfolios)[4],
@@ -318,7 +333,7 @@ fn v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order()
             }
 
             let live_values = values(&env, portfolios);
-            println!("terminal catchup early={pay_early} reverse={reverse}: episodes={episodes:?}, values={live_values:?}");
+            println!("terminal catchup early={pay_early} reverse={reverse}: episodes (closed, penalty, withheld)={episodes:?}, values={live_values:?}");
             let live = env.market_state().1;
             let live_residual = live
                 .vault
@@ -511,7 +526,7 @@ fn v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order()
             for (key, account) in providers {
                 assert_eq!(env.svm.get_account(&key), account);
             }
-            println!("terminal rewards early={pay_early} reverse={reverse}: episodes={episodes:?}, paid={paid:?}, budgets={budgets:?}, residual={live_residual}");
+            println!("terminal redemption early={pay_early} reverse={reverse}: episodes={episodes:?}, paid={paid:?}, budgets={budgets:?}, residual={live_residual}");
             let outcome = (
                 episodes,
                 paid,
@@ -530,6 +545,6 @@ fn v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order()
     assert_eq!(liquidations, 8);
     assert_eq!(rollbacks, 32);
     assert!(waiting_rollbacks > 0);
-    assert_cu_within("Hybrid reward terminal redemption", peak, ACTION_CU);
-    println!("row422 terminal redemption: 4 histories, {liquidations} liquidations, {redemptions} progressing closes, {rollbacks} healthy/suffix rollbacks, {waiting_rollbacks} waiting rollbacks; peak={peak} CU");
+    assert_cu_within("Hybrid catchup terminal redemption", peak, ACTION_CU);
+    println!("row422 terminal redemption: 4 histories, {liquidations} unrewarded catchup liquidations, {redemptions} progressing closes, {rollbacks} healthy/suffix rollbacks, {waiting_rollbacks} waiting rollbacks; peak={peak} CU");
 }

@@ -430,8 +430,17 @@ sysvars/accounts and are monotonic relative to stored state. Caller-supplied fal
 untrusted and can never make a stale state fresher, accelerate expiry, or trigger favorable
 resolution.
 
+Health evidence is current-slot evidence. A stale or liquidatable account is refreshed only when
+every one of its live Hybrid legs has an external report whose publish time advanced in the current
+slot, or a mark that is canonical because the leg's soft-stale threshold has matured. A report
+taken in an earlier slot cannot refresh an account in a later slot, however fresh it is by age, and
+a refresh that omits a leg is refused whole. The report is public evidence: any caller may present
+it, and once taken in a slot it serves every account in that slot.
+
 **Required tests.** Omit or corrupt sysvars where possible, vary fallback slots, rewind stored
-slots, and test expiry-1, expiry, and expiry+1.
+slots, and test expiry-1, expiry, and expiry+1. Refresh a stale account with a live Hybrid leg with
+no report, with the previous slot's report, with a stale report and with the current one, in both
+account orders and at the maximum leg count; one slot before and at soft-stale maturity.
 **Verification:** P, F, I
 
 ### INV-021 - Account creation, reallocation, close, rent, and lamport safety
@@ -655,8 +664,18 @@ domain-local residuals.
 under the bound policy epoch. Delayed policy changes, zero-activity assets, or route choice cannot
 redirect or siphon fees.
 
+A liquidation penalty is reclaimable only at an authenticated effective price: one that is not a
+trade-driven mark and equals a fresh external target. Only then is the keeper's share paid to the
+named recipient and the rest credited to the liquidated asset's domain budgets. While the effective
+price is still catching up to a fresh report after a trade moved the mark, the penalty is charged
+at the effective price and stays whole in general insurance: no reward is paid, no domain budget is
+credited, and the named recipient's account is not touched. A later report, a later policy, or the
+order of settlement and withdrawal cannot reclassify a penalty that was collected this way.
+
 **Required tests.** Add parasitic assets, rotate fee policies, execute delayed intents, and compare
-single/batch and CPI/no-CPI paths.
+single/batch and CPI/no-CPI paths. Liquidate during catch-up and at the caught-up price, across
+policy succession, keeper settlement order, keeper maintenance, a retained earlier penalty, and
+resolved redemption in both orders.
 **Verification:** P, F, I, M
 
 ### INV-037 - Exact residual partition

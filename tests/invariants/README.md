@@ -9757,6 +9757,10 @@ git show --format= --check HEAD # post-commit
 
 ## INV-045 reward catchup through cohort redemption (row 422, 2026-09-13)
 
+> Restated on 2026-11-19 (see "INV-036/045 no keeper reward during Hybrid catch-up"): the selector is
+> now `v16_program_hybrid_catchup_penalties_stay_in_insurance_through_resolved_cohort_redemption`, and no
+> reward is earned during catch-up. The text below describes the test as first written.
+
 Owner: [cu/inv_045_reward_terminal_redemption.rs](cu/inv_045_reward_terminal_redemption.rs),
 mounted under
 `inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_terminal_redemption`.
@@ -9863,6 +9867,10 @@ git show --format= --check HEAD
 
 ## INV-045 keeper maintenance across reward catchup (row 422, 2026-09-13)
 
+> Restated on 2026-11-19 (see "INV-036/045 no keeper reward during Hybrid catch-up"): the selector is
+> now `v16_program_keeper_maintenance_and_unreclaimed_penalties_stay_distinct_until_catchup`, and no reward
+> is earned during catch-up. The text below describes the test as first written.
+
 Owner: [cu/inv_045_reward_maintenance_catchup.rs](cu/inv_045_reward_maintenance_catchup.rs),
 mounted under `inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::reward_maintenance_catchup`.
 Exactly one new selector:
@@ -9942,6 +9950,10 @@ git diff --check
 ```
 
 ## INV-045 reward policy succession during catchup (row 422, 2026-09-12)
+
+> Restated on 2026-11-19 (see "INV-036/045 no keeper reward during Hybrid catch-up"): the selector is
+> now `v16_program_reward_policy_succession_earns_nothing_during_effective_price_catchup`, and no reward is
+> earned during catch-up. The text below describes the test as first written.
 
 Owner: [cu/inv_045_reward_policy_catchup.rs](cu/inv_045_reward_policy_catchup.rs),
 mounted under
@@ -10029,6 +10041,10 @@ git show --format= --check HEAD
 ```
 
 ## INV-045 exposed AuthMark keeper during Hybrid catchup (row 422, 2026-09-13)
+
+> Restated on 2026-11-19 (see "INV-036/045 no keeper reward during Hybrid catch-up"): the selector is
+> now `v16_program_exposed_auth_keeper_earns_nothing_in_either_settlement_order_through_hybrid_catchup`,
+> and no reward is earned during catch-up. The text below describes the test as first written.
 
 Owner: [cu/inv_045_exposed_keeper_provenance.rs](cu/inv_045_exposed_keeper_provenance.rs),
 mounted under
@@ -11062,6 +11078,10 @@ git show --format= --check HEAD
 ```
 
 ## INV-045 retained liquidation penalty across fresh handoff (row 422, 2026-09-12)
+
+> Restated on 2026-11-19 (see "INV-036/045 no keeper reward during Hybrid catch-up"): the selector keeps
+> its name, and no penalty is reclaimed before catch-up on any route. The text below describes the test
+> as first written.
 
 Owner: [cu/inv_045_retained_penalty_handoff.rs](cu/inv_045_retained_penalty_handoff.rs),
 mounted under `inv_045_no_free_mark_movement::trade_origin_catchup::authenticated_reward_handoff::retained_penalty_handoff`.
@@ -31629,6 +31649,62 @@ authority; the first two fail on the program built from `0b06131f` as adapted):
 | `v16_program_terminal_disposition_and_administrative_retirement_are_source_complete` (INV-073) | the source guard on `handle_close_portfolio` also pins `terminal_public_cleanup` and its window test |
 | `v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned` (INV-085) | `handle_close_portfolio` gets an arithmetic owner row (structural, INV-073) for the window subtraction, like `handle_close_resolved` |
 
+### INV-020/072/077 Hybrid same-slot evidence: two tests restated (#448, 2026-11-19)
+
+The rule added for #426 stays: a stale or liquidatable account is refreshed only when each of its
+live Hybrid legs has a report whose publish time advanced in the current slot, or a mark that is
+canonical because the leg's soft-stale threshold has matured. `INVARIANTS.md` now states it under
+INV-020. Two tests expected a refresh from older evidence and had failed since #426 (issue #448).
+Both are restated to pin the rule; neither changes the program.
+
+| Was | Now | What it requires |
+|---|---|---|
+| `v16_program_auto_crank_refresh_not_blocked_by_unneeded_first_asset_oracle` ([`cu/inv_072_order_robust_crankability.rs`](cu/inv_072_order_robust_crankability.rs)) | `v16_program_auto_crank_refresh_takes_this_slots_hybrid_report_once_for_every_account` | Two accounts each hold a Hybrid leg and an AuthMark leg; an AuthMark move makes both stale. In both account orders: no report, or only the AuthMark observation, is `EngineNonProgress`; the 100-second-old report is `OracleStale`; nothing changes. One current report presented with either account refreshes it, and the other account then refreshes with no observation at all. One slot later the same report, and no report, are refused again. |
+| (same test) | `v16_program_auto_crank_refresh_needs_no_hybrid_report_after_soft_stale_maturity` (new) | With a soft-stale threshold of 6 slots and no report after the opening one: at the threshold's last slot the refresh is still `EngineNonProgress`; one slot later both accounts refresh without a report, and `last_good_oracle_slot` is still the opening slot. |
+| `v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_shape` ([`cu/inv_077_bounded_work_and_maximum_shape_compute.rs`](cu/inv_077_bounded_work_and_maximum_shape_compute.rs)) | `v16_attack_public_recovery_kf_progress_takes_a_current_42_feed_tail_at_max_shape` | 14 Hybrid legs, 28 sources, three reports per leg. A tail with only the moved asset's three reports, and the previous slot's complete 42-report tail, are `EngineNonProgress` with the market and both portfolios unchanged. The complete current tail refreshes the taker in 680,640 CU and gives the Recovery leg its committed K/F progress in one call of 1,018,862 CU (limit 1,375,000). The Recovery asset's oracle profile is unchanged; the thirteen live assets are observed in the slot at their unchanged price. |
+
+The rosters that name these witnesses (INV-065, INV-071, INV-072) carry the new names.
+
+**What the restated tests no longer claim.** A crank that omits a live Hybrid leg's current report
+makes no progress on a stale account, by design. Order robustness (INV-072) holds in the form the
+rule allows: the report is public, any caller can present it for any account, and it is presented
+once per slot.
+
+### INV-036/045 no keeper reward during Hybrid catch-up: five tests restated (2026-11-19)
+
+The program's rule stays (commit `01ec6161`, 2026-09-16): a liquidation penalty is reclaimable only
+at an authenticated effective price, one that is not a trade-driven mark and equals a fresh
+external target. While the effective price is still catching up to a fresh report after a trade
+moved the mark, the penalty is charged at the effective price and stays whole in general insurance:
+no reward, no domain budget, and the named recipient's account is not touched. `INVARIANTS.md` now
+states it under INV-036.
+
+Five tests written on 2026-09-12/13, before that commit, expected a reward for liquidations during
+the lag, and had failed since. Thirteen later tests of the same family expect none. A trial of the
+rule the five implied (pay when the report is at least as adverse to the liquidated side as the
+liquidation price) made exactly those five pass and thirteen of the others fail, so no single rule
+serves both families. The five are restated to the program's rule; each keeps its history.
+
+| Was | Now | What changed in the expectation |
+|---|---|---|
+| `v16_program_reward_policy_succession_preserves_receipts_and_effective_price_catchup` | `v16_program_reward_policy_succession_earns_nothing_during_effective_price_catchup` | Two liquidations at 997,600 and 995,206 close 12,001,223 and 16,653,247 units and charge 5,987 and 8,287 atoms. The 3,333 bps and 7,777 bps policies would pay 1,995 and 6,444; both are withheld. The keeper withdraws half of its own 1,000 atoms before or after the policy update; outcomes are equal. |
+| `v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybrid_catchup` | `v16_program_exposed_auth_keeper_earns_nothing_in_either_settlement_order_through_hybrid_catchup` | Same two liquidations (1,995 and 2,762 withheld) in four histories. The exposed keeper's account is byte-identical across each liquidation. It holds its own capital and its AuthMark PnL of 10,000 atoms in either direction; a withdrawal is `EngineStale` while exposed and pays after the signed close. |
+| `v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchup` | `v16_program_keeper_maintenance_and_unreclaimed_penalties_stay_distinct_until_catchup` | The keeper is funded with 10,000 atoms (was 1,000) because it now pays its 2,080 atoms of maintenance itself. Maintenance goes to the asset-0 budgets; 14,281 atoms of penalties stay in general insurance; the liquidation budgets stay `[0, 0]`. Payout 7,920 in both collection orders. |
+| `v16_program_hybrid_catchup_rewards_survive_resolved_cohort_redemption_order` | `v16_program_hybrid_catchup_penalties_stay_in_insurance_through_resolved_cohort_redemption` | All four histories pay `[3550175, 101540147, 9209964, 9245364, 1000]`: the keeper redeems its own 1,000 atoms, whether or not it took half out early. |
+| `v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup` | (name kept) | The shared scenario in `cu/inv_045_retained_penalty_handoff.rs` no longer treats the route-free history differently from the paid-origin routes: no route reclaims a penalty before catch-up. Old penalty 5,987, new penalty 8,287, rewards 0, budgets `[0, 0]`, payout 1,000. |
+
+In every restated history the price is authenticated again only at the fixed point (980,000 equal to
+the report), where no liquidation occurs. The INV-045 roster in
+`cu/inv_045_no_free_mark_movement.rs` carries the four new names. The dated sections further up
+this file describe these tests as first written; each now starts with a pointer to this section.
+
+**Still failing after this change:** one documented test,
+`v16_program_funded_report_cadence_preserves_partial_liquidation_reward_and_custody`. With funding
+on, a history that publishes a report every slot charges no premium during catch-up, while one that
+skips the gap charges longs at every replayed step from the mark of its last publication. The test
+requires equal liquidations (30,090,311 against 30,093,516 units closed). It is an open design
+question, not a test defect.
+
 ### INV-048 ADL rounding residue is typed and bounded (#449, 2026-11-19)
 
 [`stateful/inv_081_success_state_validity_over_complete_public_routes.rs`](stateful/inv_081_success_state_validity_over_complete_public_routes.rs)
@@ -32450,7 +32526,7 @@ guard is not interchangeable with these rank/terminal oracles.
 | 6. Source lien and released obligation cleanup | [CU-077] `v16_program_max_source_flat_lien_release_and_owner_exit_are_bounded`; [SF-086] `v16_program_lien_impairment_seeded_frontier_preserves_bounded_owner_exit`. Public claim/backing histories produce flat liens or exact-expiry impairment in both source orientations. | [FM] `run_bounded_lien_impairment_reference_frontier`: empty/one/two-action words, source-attribution checks, and bounded value-moving terminal exits. Shared `obligation_work` counts releasable zero-basis legs; source/encumbrance censuses and the CU witness's lien-count decrease own the separate lien obligation. |
 | 7. Resource failure, oracle loss, terminal Recovery | [SF-078] `v16_program_recovery_resource_failure_lattice_preserves_public_exit` has four public backing/insurance cells. [SF-071] `v16_program_unattributed_multi_asset_loss_reaches_liquidation_and_terminal_payout` composes public multi-asset loss and payout. [CU-078] `v16_program_unavailable_pyth_feed_has_bounded_terminal_fallback`; [SF-086] `v16_program_oracle_failure_seeded_frontier_is_exact_and_terminal` use funded Hybrid positions and authenticated feed availability. | [FM] `run_bounded_oracle_failure_reference_frontier`: empty/one/two-action words before/at stale-resolution maturity, invalid-feed rollback, restored-feed Live progress, and oracle-free terminal continuation. `run_bounded_recovery_reference_frontier`, executed by [SF-086] `v16_program_recovery_seeded_frontier_preserves_bounded_owner_exit`, adds fresh/exact/one-slot-late backing-expiry seeds and bounded exits. These are named finite environmental cells, not arbitrary resource/oracle schedules. |
 | 8. Resolved account payout and terminal slab progress | [CU-071] `v16_program_permissionless_crank_closes_capital_only_resolved_account` checks actual payment, economic closure, and rejected fixed-point rollback. [CU-066] `v16_program_resolved_payout_induction_composition_is_source_complete` is a delegated source gate. [SF-086] `v16_program_receipt_conflict_seeded_frontier_is_exact_and_terminal` builds nonfinal receipts through public resolution/payout. | [FM] `run_bounded_receipt_conflict_reference_frontier`: empty/one/two-action words at pre/exact backing expiry, immutable receipt identity, monotone paid value, exact rejection frames, and seed-local terminal outcome equality. Economic payout is distinct from subsequent signer-dependent portfolio/provider/asset/slab cleanup. |
-| 9. Repeated calls, fixed points, maximum supported work shape | [CU-071] `v16_regression_crank_idempotent_at_settlement_fixed_point`; [CU-077] `v16_attack_public_14_leg_28_source_recovery_forfeit_stays_bounded` and `v16_attack_public_recovery_kf_progress_survives_stale_42_feed_tail_at_max_shape`. These start from public funded histories; owner forfeit is a signed construction/exit route, not a permissionless crank. | Nonzero settlement precedes exact `EngineNonProgress` retry frames; maximum-shape witnesses check their own progress, custody, and CU limits. [CU harness] `V16CuEnv::send_crank_if_actionable` checks writable-state mutation on success and rollback on fixed points, not a full lexicographic rank. See [INV-077's route-to-shape limits](#inv-077-route-to-shape-cu-evidence); separate maxima do not prove their unrestricted Cartesian product. |
+| 9. Repeated calls, fixed points, maximum supported work shape | [CU-071] `v16_regression_crank_idempotent_at_settlement_fixed_point`; [CU-077] `v16_attack_public_14_leg_28_source_recovery_forfeit_stays_bounded` and `v16_attack_public_recovery_kf_progress_takes_a_current_42_feed_tail_at_max_shape`. These start from public funded histories; owner forfeit is a signed construction/exit route, not a permissionless crank. | Nonzero settlement precedes exact `EngineNonProgress` retry frames; maximum-shape witnesses check their own progress, custody, and CU limits. [CU harness] `V16CuEnv::send_crank_if_actionable` checks writable-state mutation on success and rollback on fixed points, not a full lexicographic rank. See [INV-077's route-to-shape limits](#inv-077-route-to-shape-cu-evidence); separate maxima do not prove their unrestricted Cartesian product. |
 
 Additional existing rank joins, not new roster entries: [SF-071]
 `v16_program_pending_close_residual_is_part_of_the_public_crank_rank` calls [FM]

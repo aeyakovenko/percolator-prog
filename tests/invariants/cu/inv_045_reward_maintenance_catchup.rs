@@ -1,12 +1,16 @@
-//! INV-045/024/036/041, row422: earned Hybrid rewards subsequently fund the
-//! recipient's own maintenance. Asset-0 maintenance budgets and asset-1
-//! liquidation budgets must remain distinct across fee collection order.
+//! INV-045/024/036/041, row422: a keeper that liquidates while the Hybrid price is
+//! still catching up earns nothing, so it pays its maintenance from its own capital.
+//! Asset-0 maintenance budgets, asset-1 liquidation budgets (none are credited during
+//! catchup) and the unreclaimed penalties in general insurance must remain distinct
+//! across fee collection order.
 //! Public construction and instructions only; finite conformance, row stays OPEN.
 
 use super::*;
 
 const RATE: u128 = 160;
 const SHARE: u128 = 3_333;
+/// Enough for the keeper's own maintenance over the whole history.
+const KEEPER_FUNDS: u64 = 10_000;
 
 fn observe(
     env: &V16CuEnv,
@@ -50,13 +54,15 @@ fn treasury(
     assert!(group.insurance_domain_budget[4..]
         .iter()
         .all(|amount| *amount == 0));
+    let budgeted_penalties = liquidation_budgets.iter().sum::<u128>();
     assert_eq!(
         group.insurance_domain_budget_remaining_total,
-        maintenance + fees - rewards
+        maintenance + budgeted_penalties
     );
+    // Penalties that were not reclaimable stay in general insurance, outside every budget.
     assert_eq!(
         group.insurance - group.insurance_domain_budget_remaining_total,
-        discovery
+        discovery + fees - rewards - budgeted_penalties
     );
     census(env, portfolios);
 }
@@ -111,7 +117,7 @@ fn collect_keeper(env: &mut V16CuEnv, portfolios: [Pubkey; 5], slot: u64) -> u64
 }
 
 #[test]
-fn v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchup() {
+fn v16_program_keeper_maintenance_and_unreclaimed_penalties_stay_distinct_until_catchup() {
     const FINAL: u64 = 980_000;
     let first = ENTRY - ENTRY * 24 / 10_000;
     let second = first - first * 24 / 10_000;
@@ -150,7 +156,9 @@ fn v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchu
         .unwrap();
         assert_eq!(env.market_state().0.fee_redirect_to_market_0_bps, 0);
         let owners: [Keypair; 5] = std::array::from_fn(|_| Keypair::new());
-        let funded = std::array::from_fn::<_, 5, _>(|i| fund(&mut env, &owners[i], FUNDS[i]));
+        let mut funds = FUNDS;
+        funds[4] = KEEPER_FUNDS;
+        let funded = std::array::from_fn::<_, 5, _>(|i| fund(&mut env, &owners[i], funds[i]));
         let portfolios = funded.map(|pair| pair.0);
         let tokens = funded.map(|pair| pair.1);
         let [target, peer, trader_a, trader_b, keeper] = portfolios;
@@ -169,7 +177,7 @@ fn v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchu
         tracked.extend(tokens);
         tracked.extend(owners.each_ref().map(Signer::pubkey));
         let mint = env.svm.get_account(&env.mint);
-        let supply = FUNDS.iter().map(|amount| *amount as u128).sum::<u128>();
+        let supply = funds.iter().map(|amount| *amount as u128).sum::<u128>();
         set_test_clock(&mut env, 5, 1_000);
         let advance = observe(&env, trader_a, owners[4].pubkey(), initial, None);
         submit_with_cu_limit(&mut env, &owners[4], &[advance], &tracked, None, 500_000);
@@ -191,8 +199,8 @@ fn v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchu
         assert_eq!(env.portfolio_state(keeper).last_fee_slot.get(), 1);
         treasury(&env, portfolios, discovery, 0, 0, [0; 2]);
         let mut fees = 0;
-        let mut rewards = 0;
-        let mut budgets = [0; 2];
+        let rewards = 0u128;
+        let budgets = [0u128; 2];
         let mut episodes = Vec::new();
         for (phase, slot, raw, price) in [
             (0, 6, MARK, first),
@@ -208,7 +216,7 @@ fn v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchu
                 treasury(&env, portfolios, discovery, fees, rewards, budgets);
             }
             let valid = observe(&env, target, owners[4].pubkey(), report, Some(keeper));
-            let mut rewarded = false;
+            let mut liquidated = false;
             for _ in 0..6 {
                 let before = env.market_state().1;
                 let before_target = env.portfolio_state(target);
@@ -250,20 +258,15 @@ fn v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchu
                 );
                 let closed = before.assets[1].oi_eff_long_q - after.assets[1].oi_eff_long_q;
                 let penalty = fee(closed, price, 5);
-                let reward = penalty * SHARE / 10_000;
-                let received = env.portfolio_state(keeper);
-                let mut expected_recipient = recipient;
-                expected_recipient.capital =
-                    percolator::V16PodU128::new(recipient.capital.get() + reward);
-                if reward != 0 {
-                    expected_recipient.health_cert.valid = 0;
-                }
+                // What the policy would pay on a reclaimable penalty.
+                let withheld = penalty * SHARE / 10_000;
                 assert_eq!(
-                    received, expected_recipient,
-                    "reward preserves the recipient's own fee cursor and liabilities"
+                    env.portfolio_state(keeper),
+                    recipient,
+                    "a withheld reward leaves the recipient's capital, fee cursor and liabilities untouched"
                 );
                 if closed != 0 {
-                    assert!(phase < 2 && reward > 0 && closed < 100 * POS_SCALE);
+                    assert!(phase < 2 && withheld > 0 && closed < 100 * POS_SCALE);
                     assert!(health_cert(&before_target).certified_liq_deficit > 0);
                     assert_eq!(
                         health_cert(&env.portfolio_state(target)).certified_liq_deficit,
@@ -272,6 +275,13 @@ fn v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchu
                     for wrong in [ENTRY, MARK, raw, ACCEPTED_PRINT, 900_000] {
                         assert_ne!(penalty, fee(closed, wrong, 5));
                     }
+                    // The price has not reached the fresh report: it is trade-driven, so the
+                    // penalty is charged and nothing of it is reclaimed.
+                    assert_ne!(price, raw);
+                    assert_eq!(
+                        profile.effective_price_provenance,
+                        percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_TRADE_DRIVEN
+                    );
                     assert_eq!(
                         env.portfolio_state(target).capital.get() as i128
                             + env.portfolio_state(target).pnl.get(),
@@ -279,22 +289,19 @@ fn v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchu
                             - penalty as i128
                     );
                     fees += penalty;
-                    rewards += reward;
-                    budgets[0] += (penalty - reward) / 2;
-                    budgets[1] += (penalty - reward).div_ceil(2);
-                    episodes.push((closed, penalty, reward));
-                    rewarded = true;
+                    episodes.push((closed, penalty, withheld));
+                    liquidated = true;
                     liquidations += 1;
                 }
                 treasury(&env, portfolios, discovery, fees, rewards, budgets);
-                if rewarded {
+                if liquidated {
                     break;
                 }
             }
             assert_eq!(
-                rewarded,
+                liquidated,
                 phase < 2,
-                "full catchup creates no additional reward"
+                "two liquidations during catchup, none at the fixed point"
             );
             if !collect_first && phase < 2 {
                 peak = peak.max(collect_keeper(&mut env, portfolios, slot));
@@ -331,7 +338,7 @@ fn v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchu
             let keeper_fee_slot = env.portfolio_state(keeper).last_fee_slot.get();
             assert_eq!(
                 env.portfolio_state(keeper).capital.get(),
-                FUNDS[4] as u128 + rewards - RATE * u128::from(keeper_fee_slot - 1)
+                KEEPER_FUNDS as u128 + rewards - RATE * u128::from(keeper_fee_slot - 1)
             );
             treasury(&env, portfolios, discovery, fees, rewards, budgets);
             peak = peak.max(submit_with_cu_limit(
@@ -347,9 +354,10 @@ fn v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchu
             ));
             rollbacks += 1;
         }
+        // The keeper earned nothing and paid thirteen slots of maintenance itself.
         let keeper_fees = 13 * RATE;
-        assert!(keeper_fees > FUNDS[4] as u128 && rewards > keeper_fees);
-        let payout = FUNDS[4] as u128 + rewards - keeper_fees;
+        assert!(rewards == 0 && keeper_fees < KEEPER_FUNDS as u128);
+        let payout = KEEPER_FUNDS as u128 - keeper_fees;
         let pending_fee = if collect_first { 0 } else { 7 * RATE };
         assert_eq!(
             env.portfolio_state(keeper).capital.get(),
@@ -432,7 +440,7 @@ fn v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchu
             group.insurance_domain_budget,
             residual,
         );
-        println!("row422 collect_first={collect_first}: rewards={rewards}, keeper_fees={keeper_fees}, pending_payout_fee={pending_fee}, payout={payout}, liquidation_budgets={budgets:?}, residual={residual}");
+        println!("row422 collect_first={collect_first}: unreclaimed penalties={fees}, keeper_fees={keeper_fees}, pending_payout_fee={pending_fee}, payout={payout}, liquidation_budgets={budgets:?}, residual={residual}");
         if let Some(expected) = &reference {
             assert_eq!(&outcome, expected, "maintenance order preserves every owner's entitlement and distinct fee destinations");
         } else {
@@ -440,5 +448,5 @@ fn v16_program_keeper_maintenance_preserves_distinct_reward_budgets_until_catchu
         }
     }
     assert_eq!((liquidations, rollbacks), (4, 8));
-    println!("row422 maintenance: two histories, four liquidations, eight exact rollbacks, peak CU={peak}");
+    println!("row422 maintenance: two histories, four unrewarded catchup liquidations, eight exact rollbacks, peak CU={peak}");
 }

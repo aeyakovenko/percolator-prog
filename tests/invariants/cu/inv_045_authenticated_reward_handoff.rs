@@ -33,6 +33,17 @@ mod report_cadence_rewards;
 #[path = "inv_045_clipped_liquidation_reward.rs"]
 mod clipped_liquidation_reward;
 
+/// Whether asset 0's effective price is authenticated: equal to a fresh report, rather than
+/// still catching up from a trade-driven mark. A liquidation penalty is reclaimable only then.
+/// While the price is trade-driven the penalty is still charged, but no keeper reward is paid
+/// and nothing is credited to a domain budget: the whole penalty stays in general insurance.
+fn effective_price_is_authenticated(env: &V16CuEnv) -> bool {
+    let market = env.svm.get_account(&env.market).unwrap();
+    let profile = state::read_asset_oracle_profile(&market.data, 0).unwrap();
+    profile.effective_price_provenance
+        == percolator_prog::constants::EFFECTIVE_PRICE_PROVENANCE_AUTHENTICATED
+}
+
 fn values(env: &V16CuEnv, portfolios: [Pubkey; 5]) -> [i128; 5] {
     portfolios.map(|key| {
         let account = env.portfolio_state(key);

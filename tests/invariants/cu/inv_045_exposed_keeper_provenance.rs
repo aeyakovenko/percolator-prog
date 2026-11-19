@@ -6,10 +6,12 @@
 //! PermissionlessCrank and Withdraw. Only Clock, airdrops, program loading and
 //! external Pyth reports are fixture inputs; no protocol bytes are installed.
 //! Four histories cross a long/short AuthMark keeper with settlement before/after
-//! receiving a fresh-report Hybrid reward. They check two earned receipts during
-//! lag, full catchup, exact independent fees/shares, recipient exposure framing,
-//! separate AuthMark PnL and equal owner/custody endpoints across settlement order.
-//! Withdrawal rejects while exposed; a signed AuthMark close enables reward payout.
+//! its fresh-report Hybrid liquidations. Both liquidations fall in the lag, where the
+//! effective price is trade-driven: the penalty is charged at the effective price, no
+//! receipt is earned, no domain budget is credited and the named recipient is not
+//! touched. They check full catchup, exact fees, recipient exposure framing, separate
+//! AuthMark PnL and equal owner/custody endpoints across settlement order.
+//! Withdrawal rejects while exposed; a signed AuthMark close enables the keeper's payout.
 //! This adds exposed recipients and a second oracle mode to the flat-keeper tests.
 //! CPI, underwater/shared-owner recipients, more providers, nonzero funding or
 //! maintenance, arbitrary histories and terminal redemption remain unproven.
@@ -73,10 +75,13 @@ fn settle_keeper(env: &mut V16CuEnv, owner: &Keypair, keeper: Pubkey, tracked: &
 }
 
 #[test]
-fn v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybrid_catchup() {
+fn v16_program_exposed_auth_keeper_earns_nothing_in_either_settlement_order_through_hybrid_catchup()
+{
     const SHARE: u128 = 3_333;
     const KEEPER_FUNDS: u64 = 10_000_000;
     const KEEPER_LOTS: i128 = 2;
+    // The keeper earns nothing; this much of its own capital exercises the payout route.
+    const KEEPER_PAYOUT: u128 = 1_000;
     const FINAL_TARGET: u64 = 980_000;
     let first_price = ENTRY - ENTRY * 24 / 10_000;
     let second_price = first_price - first_price * 24 / 10_000;
@@ -178,8 +183,7 @@ fn v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybri
             assert_eq!(env.portfolio_state(keeper).legs, keeper_legs);
 
             let mut total_fee = 0;
-            let mut total_reward = 0;
-            let mut budgets = [0u128; 2];
+            let budgets = [0u128; 2];
             let mut episodes = Vec::new();
             for (phase, slot, raw, price, auth_price) in [
                 (0, 6, MARK, first_price, 1_004_000),
@@ -234,7 +238,7 @@ fn v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybri
                     assert_eq!(profile.last_good_oracle_slot, slot);
                     assert_eq!(
                         after.assets[1], before.assets[1],
-                        "Hybrid reward cannot settle AuthMark"
+                        "a Hybrid liquidation cannot settle AuthMark"
                     );
                     assert_eq!(
                         [peer, trader_a, trader_b].map(|key| env.svm.get_account(&key)),
@@ -262,54 +266,55 @@ fn v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybri
                     }
                     assert!(phase < 2 && before_cert.certified_liq_deficit > 0 && current[0]);
                     let penalty = fee(closed, price, 5);
-                    let reward = penalty * SHARE / 10_000;
-                    assert!(reward > 0 && closed < before.assets[0].oi_eff_long_q);
+                    // What the policy would pay on a reclaimable penalty.
+                    let withheld = penalty * SHARE / 10_000;
+                    assert!(withheld > 0 && closed < before.assets[0].oi_eff_long_q);
                     for wrong_price in [ENTRY, MARK, raw, ACCEPTED_PRINT, 900_000, auth_price] {
                         assert_ne!(penalty, fee(closed, wrong_price, 5));
                     }
+                    // The price has not reached the fresh report: it is trade-driven, so the
+                    // penalty is charged and nothing of it is reclaimed.
+                    assert_ne!(price, raw);
+                    assert!(!effective_price_is_authenticated(&env));
                     let mut expected = before_values;
                     expected[0] -= penalty as i128;
-                    expected[4] += reward as i128;
                     assert_eq!(values(&env, portfolios), expected);
                     assert_eq!(
-                        keeper_after.capital.get(),
-                        keeper_before.capital.get() + reward
+                        keeper_after, keeper_before,
+                        "a withheld reward leaves the named recipient untouched"
                     );
-                    let mut expected_keeper = keeper_before;
-                    expected_keeper.capital =
-                        percolator::V16PodU128::new(keeper_before.capital.get() + reward);
-                    expected_keeper.health_cert.valid = 0;
+                    assert_eq!(after.insurance - before.insurance, penalty);
                     assert_eq!(
-                        keeper_after, expected_keeper,
-                        "receipt changes only capital and certificate validity"
+                        after.insurance_domain_budget,
+                        before.insurance_domain_budget
                     );
-                    assert!(
-                        !health_cert(&keeper_after).valid,
-                        "credit invalidates the recipient certificate"
-                    );
-                    assert_eq!(after.insurance - before.insurance, penalty - reward);
                     total_fee += penalty;
-                    total_reward += reward;
-                    budgets[0] += (penalty - reward) / 2;
-                    budgets[1] += (penalty - reward).div_ceil(2);
-                    episodes.push((closed, penalty, reward));
+                    episodes.push((closed, penalty, withheld));
                     liquidation_count += 1;
                     liquidated = true;
                     break;
                 }
-                assert_eq!(liquidated, phase < 2, "two receipts and no catchup bonus");
+                assert_eq!(
+                    liquidated,
+                    phase < 2,
+                    "two liquidations during catchup, none at the fixed point"
+                );
+                assert_eq!(
+                    effective_price_is_authenticated(&env),
+                    phase == 2,
+                    "the price is authenticated only once it equals the fresh report"
+                );
                 if !settle_first {
                     assert_eq!(env.market_state().1.assets[1], auth_before);
                 }
                 peak_crank = peak_crank.max(settle_keeper(&mut env, &owners[4], keeper, &tracked));
                 assert_eq!(env.market_state().1.assets[1].effective_price, auth_price);
-                let keeper_value = KEEPER_FUNDS as i128
-                    + total_reward as i128
-                    + direction * KEEPER_LOTS * i128::from(auth_price - ENTRY);
+                let keeper_value =
+                    KEEPER_FUNDS as i128 + direction * KEEPER_LOTS * i128::from(auth_price - ENTRY);
                 assert_eq!(
                     values(&env, portfolios)[4],
                     keeper_value,
-                    "own PnL and receipts remain separate"
+                    "the keeper holds its own capital and AuthMark PnL, nothing else"
                 );
 
                 for _ in 0..8 {
@@ -327,7 +332,7 @@ fn v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybri
                 assert!(census(&env, portfolios).iter().all(|current| *current));
                 assert_eq!(values(&env, portfolios)[4], keeper_value);
                 let group = env.market_state().1;
-                assert_eq!(group.insurance, discovery + total_fee - total_reward);
+                assert_eq!(group.insurance, discovery + total_fee);
                 assert_eq!(&group.insurance_domain_budget[..2], &budgets);
                 assert!(group.insurance_domain_budget[2..]
                     .iter()
@@ -336,9 +341,10 @@ fn v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybri
                     group.insurance_domain_budget_remaining_total,
                     budgets.iter().sum::<u128>()
                 );
+                // Every penalty collected during catchup is unbudgeted insurance.
                 assert_eq!(
                     group.insurance - group.insurance_domain_budget_remaining_total,
-                    discovery
+                    discovery + total_fee
                 );
                 peak_crank = peak_crank.max(submit(
                     &mut env,
@@ -362,7 +368,7 @@ fn v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybri
                     AccountMeta::new_readonly(env.vault_authority, false),
                     AccountMeta::new_readonly(spl_token::ID, false),
                 ],
-                data: env.withdraw_ix(keeper, total_reward).encode(),
+                data: env.withdraw_ix(keeper, KEEPER_PAYOUT).encode(),
             };
             submit(
                 &mut env,
@@ -412,18 +418,21 @@ fn v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybri
                 &owners[4],
                 keeper,
                 tokens[4],
-                total_reward,
+                KEEPER_PAYOUT,
             ));
             let mut expected = before_payout;
-            expected[4] -= total_reward as i128;
+            expected[4] -= KEEPER_PAYOUT as i128;
             assert_eq!(values(&env, portfolios), expected);
-            assert_eq!(expected[4], KEEPER_FUNDS as i128 + direction * 10_000);
+            assert_eq!(
+                expected[4] + KEEPER_PAYOUT as i128,
+                KEEPER_FUNDS as i128 + direction * 10_000
+            );
             assert!(tokens[..4].iter().all(|key| env.token_amount(*key) == 0));
-            assert_eq!(env.token_amount(tokens[4]) as u128, total_reward);
+            assert_eq!(env.token_amount(tokens[4]) as u128, KEEPER_PAYOUT);
             assert_eq!(env.svm.get_account(&env.mint), custody[0]);
             census(&env, portfolios);
             let group = env.market_state().1;
-            assert_eq!(group.vault + total_reward, supply);
+            assert_eq!(group.vault + KEEPER_PAYOUT, supply);
             assert_eq!(group.assets[0].effective_price, FINAL_TARGET);
             for asset in &group.assets[..2] {
                 assert_eq!(asset.oi_eff_long_q, asset.oi_eff_short_q);
@@ -431,7 +440,7 @@ fn v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybri
             assert_eq!(group.assets[1].oi_eff_long_q, 0);
             let claims = u128::try_from(expected.iter().sum::<i128>()).unwrap();
             let residual = group.vault.checked_sub(claims + group.insurance).unwrap();
-            println!("exposed keeper: direction={direction}, settle_first={settle_first}, episodes={episodes:?}, payout={total_reward}, owners={expected:?}, residual={residual}");
+            println!("exposed keeper: direction={direction}, settle_first={settle_first}, episodes (closed, penalty, withheld)={episodes:?}, payout={KEEPER_PAYOUT}, owners={expected:?}, residual={residual}");
             let outcome = (
                 episodes,
                 expected,
@@ -455,5 +464,5 @@ fn v16_program_exposed_auth_keeper_reward_commutes_with_settlement_through_hybri
         }
     }
     assert_eq!(liquidation_count, 8);
-    println!("row422 exposed AuthMark keeper: 4 histories, 8 rewarded liquidations, 12 healthy rollbacks, 4 active-withdraw rollbacks; crank={peak_crank}, payout={peak_payout} CU");
+    println!("row422 exposed AuthMark keeper: 4 histories, 8 unrewarded catchup liquidations, 12 healthy rollbacks, 4 active-withdraw rollbacks; crank={peak_crank}, payout={peak_payout} CU");
 }
