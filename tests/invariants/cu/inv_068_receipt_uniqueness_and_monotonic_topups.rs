@@ -986,8 +986,9 @@ fn v16_program_resolved_payout_secondary_rail_exhausts_shared_receipt() {
             ProgInstruction::CloseResolved {
                 fee_rate_per_slot: 0,
             },
+            // Only the owner's signature selects the secondary mint (#477).
             vec![
-                AccountMeta::new_readonly(winner_owner.pubkey(), false),
+                AccountMeta::new_readonly(winner_owner.pubkey(), true),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(winner, false),
                 AccountMeta::new(secondary_dest, false),
@@ -995,7 +996,7 @@ fn v16_program_resolved_payout_secondary_rail_exhausts_shared_receipt() {
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
             ],
-            &[],
+            &[&winner_owner],
         )
         .expect("winner closes through the secondary reserve");
     assert_cu_within(

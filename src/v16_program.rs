@@ -8090,6 +8090,7 @@ pub mod processor {
             &vault_authority,
             &cfg,
             false,
+            false,
         )?;
         if amount == 0 {
             return Ok(());
@@ -10627,6 +10628,7 @@ pub mod processor {
             &vault_authority,
             &cfg,
             !authority.is_signer,
+            false,
         )?;
         let amount_u64 = amount_to_u64(amount)?;
         require_token_balance(vault_balance, amount_u64)?;
@@ -11216,6 +11218,7 @@ pub mod processor {
                 &vault_authority,
                 &cfg,
                 !operator.is_signer,
+                false,
             )?;
             require_token_balance(vault_balance, amount_u64)?;
         }
@@ -11517,6 +11520,7 @@ pub mod processor {
                     vault_authority_ai.key,
                     &cfg_pre,
                     true,
+                    false,
                 )?;
                 transfer_tokens_signed(
                     token_program,
@@ -13977,6 +13981,7 @@ pub mod processor {
                 &vault_authority,
                 &cfg_after,
                 true,
+                !owner.is_signer,
             )?;
             let payout_u64 = amount_to_u64(payout)?;
             require_token_balance(vault_balance, payout_u64)?;
@@ -14044,6 +14049,7 @@ pub mod processor {
                 &vault_authority,
                 &cfg,
                 true,
+                !owner.is_signer,
             )?;
             let payout_u64 = amount_to_u64(payout)?;
             require_token_balance(vault_balance, payout_u64)?;
@@ -16541,6 +16547,12 @@ pub mod processor {
                 && mint.to_bytes() == cfg.secondary_collateral_mint)
     }
 
+    /// `require_primary_mint` is set for a resolved payout to a portfolio whose owner did not
+    /// sign. Value enters in the primary mint alone; `marketauth` names the secondary mint,
+    /// and its vault holds whatever was sent there. If a third party could have an owner paid
+    /// in it, the owner's claim would be cleared while its deposit stayed in the primary vault
+    /// as `CloseSlab` surplus (#477). With its signature the owner takes either mint. Reserve
+    /// payouts pass `false`: their beneficiaries may have dropped their keys.
     fn verify_withdrawable_token_accounts(
         dest_token_ai: &AccountInfo,
         expected_dest_owner: &Pubkey,
@@ -16548,10 +16560,14 @@ pub mod processor {
         expected_vault_owner: &Pubkey,
         cfg: &WrapperConfigV16,
         require_unencumbered_dest: bool,
+        require_primary_mint: bool,
     ) -> Result<u64, ProgramError> {
         let dest = unpack_token_account(dest_token_ai)?;
         let vault = unpack_token_account(vault_token_ai)?;
         if dest.mint != vault.mint || !is_withdrawable_collateral_mint(cfg, &dest.mint) {
+            return Err(PercolatorError::InvalidMint.into());
+        }
+        if require_primary_mint && dest.mint.to_bytes() != cfg.collateral_mint {
             return Err(PercolatorError::InvalidMint.into());
         }
         if dest.owner != *expected_dest_owner

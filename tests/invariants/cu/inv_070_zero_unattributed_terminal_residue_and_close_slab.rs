@@ -1453,7 +1453,8 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
             };
             let withdraw_rail = 1 - payout_rail;
             let withdraw_accounts = payout_accounts(withdraw_rail, true);
-            let close_resolved_accounts = payout_accounts(payout_rail, false);
+            // Only the owner's signature selects the secondary mint for its payout (#477).
+            let close_resolved_accounts = payout_accounts(payout_rail, payout_rail == 1);
             check_step(
                 "live cross-rail Withdraw",
                 env.send(
@@ -1598,8 +1599,10 @@ fn v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_
             for (step, ix) in terminal.into_iter().enumerate() {
                 env.svm.expire_blockhash();
                 let signers: &[&Keypair] = match step {
-                    0 => &[], // The separate fee payer alone lands the economic user payout.
-                    1 => &[&owner],
+                    // The separate fee payer alone lands the economic user payout in the
+                    // deposit mint; in the secondary mint the owner signs for it.
+                    0 if payout_rail == 0 => &[],
+                    0 | 1 => &[&owner],
                     _ => &[&env.admin],
                 };
                 check_step(

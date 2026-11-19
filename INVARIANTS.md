@@ -372,11 +372,14 @@ portfolios, vault/destination, authority/operator, and market/oracle accounts.
 
 **Statement.** All quote-token movements use the configured quote mint, canonical vault, correct
 token program, expected decimals, and canonical vault authority. Token-2022 extensions or alternate
-token programs cannot alter accounting unless explicitly supported and proven.
+token programs cannot alter accounting unless explicitly supported and proven. A resolved payout
+that a portfolio's owner did not sign is made in the primary mint; only the owner's signature
+selects the secondary mint.
 
 **Required tests.** Substitute mint, token program, decimals, vault owner, authority, destination,
 fee-on-transfer mint, frozen account, and delegated account. The internal quote delta must equal the
-actual received or sent amount.
+actual received or sent amount. Deliver a resolved portfolio payout in the secondary mint without
+the owner's signature.
 **Verification:** P, F, I
 
 ### INV-019 - CPI invocation and return-data binding

@@ -558,6 +558,19 @@ impl World {
         if admin {
             signers.push(&self.env.admin);
         }
+        // An owner signs where an instruction names it as a signer: a payout in the
+        // secondary mint needs its owner (#477).
+        for actor in &self.actors {
+            let owner = actor.owner.pubkey();
+            if instructions.iter().any(|instruction| {
+                instruction
+                    .accounts
+                    .iter()
+                    .any(|meta| meta.is_signer && meta.pubkey == owner)
+            }) {
+                signers.push(&actor.owner);
+            }
+        }
         let tx = Transaction::new_signed_with_payer(
             &all,
             Some(&self.env.payer.pubkey()),

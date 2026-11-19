@@ -97,8 +97,11 @@ impl Rail {
         self.check(world);
     }
 
+    /// A payout on this rail is signed by its owner: nobody else may select the secondary
+    /// mint for it (#477).
     fn payout(&self, world: &World, actor: usize, claim: bool) -> Instruction {
         let mut instruction = world.payout(actor, claim);
+        instruction.accounts[0].is_signer = true;
         instruction.accounts[3] = AccountMeta::new(self.destinations[actor], false);
         instruction.accounts[4] = AccountMeta::new(self.vault, false);
         instruction

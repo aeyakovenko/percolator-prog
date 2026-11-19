@@ -122,12 +122,28 @@ mod collateral_rails {
     ) -> Result<litesvm::types::TransactionMetadata, litesvm::types::FailedTransactionMetadata>
     {
         let payer = Keypair::from_bytes(&env.actors[4].signer.to_bytes()).unwrap();
+        // An owner signs where an instruction names it as a signer: a payout in the
+        // secondary mint needs its owner (#477). Actor 4 already signs as the fee payer.
+        let owners: Vec<Keypair> = env.actors[..4]
+            .iter()
+            .filter(|actor| {
+                let owner = actor.signer.pubkey();
+                instructions.iter().any(|instruction| {
+                    instruction
+                        .accounts
+                        .iter()
+                        .any(|meta| meta.is_signer && meta.pubkey == owner)
+                }) && extra.iter().all(|signer| signer.pubkey() != owner)
+            })
+            .map(|actor| Keypair::from_bytes(&actor.signer.to_bytes()).unwrap())
+            .collect();
         env.expire_blockhash();
         let mut all = vec![ComputeBudgetInstruction::set_compute_unit_limit(
             TX_CU_LIMIT as u32,
         )];
         all.extend(instructions);
         let mut signers = vec![&payer];
+        signers.extend(owners.iter());
         signers.extend_from_slice(extra);
         let tx = Transaction::new_signed_with_payer(
             &all,
@@ -304,7 +320,8 @@ mod collateral_rails {
         Instruction {
             program_id: env.program_id,
             accounts: vec![
-                AccountMeta::new_readonly(env.actors[actor].signer.pubkey(), false),
+                // Only the owner's signature selects the secondary mint for its payout.
+                AccountMeta::new_readonly(env.actors[actor].signer.pubkey(), secondary),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(env.actors[actor].portfolio, false),
                 AccountMeta::new(

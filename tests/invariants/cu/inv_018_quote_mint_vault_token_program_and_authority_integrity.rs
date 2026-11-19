@@ -846,6 +846,9 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
         "winner's terminal claim is real before the non-canonical attempt"
     );
 
+    // The owner signs every call below: only its signature selects the secondary mint (#477),
+    // so each refusal is the canonical-vault check and not that rule.
+    let invalid_vault = format!("Custom({})", PercolatorError::InvalidVaultAccount as u32);
     let secondary_dest = env.token_account_for_mint(secondary, lo_owner.pubkey(), 0);
     let market_before = env.svm.get_account(&env.market).unwrap();
     let winner_before = env.svm.get_account(&lo).unwrap();
@@ -858,7 +861,7 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
             fee_rate_per_slot: 0,
         },
         vec![
-            AccountMeta::new_readonly(lo_owner.pubkey(), false),
+            AccountMeta::new_readonly(lo_owner.pubkey(), true),
             AccountMeta::new(env.market, false),
             AccountMeta::new(lo, false),
             AccountMeta::new(secondary_dest, false),
@@ -866,11 +869,13 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
             AccountMeta::new_readonly(env.vault_authority, false),
             AccountMeta::new_readonly(spl_token::ID, false),
         ],
-        &[],
+        &[&lo_owner],
     );
     assert!(
-        rejected_close.is_err(),
-        "CloseResolved must reject a non-canonical secondary reserve"
+        rejected_close
+            .as_ref()
+            .is_err_and(|error| error.contains(&invalid_vault)),
+        "CloseResolved must reject a non-canonical secondary reserve: {rejected_close:?}"
     );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
@@ -904,7 +909,7 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
             fee_rate_per_slot: 0,
         },
         vec![
-            AccountMeta::new_readonly(lo_owner.pubkey(), false),
+            AccountMeta::new_readonly(lo_owner.pubkey(), true),
             AccountMeta::new(env.market, false),
             AccountMeta::new(lo, false),
             AccountMeta::new(secondary_dest, false),
@@ -912,7 +917,7 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
             AccountMeta::new_readonly(env.vault_authority, false),
             AccountMeta::new_readonly(spl_token::ID, false),
         ],
-        &[],
+        &[&lo_owner],
     );
     assert!(
         accepted_close.is_ok(),
@@ -1020,7 +1025,7 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
     let rejected_topup = topup_env.send(
         ProgInstruction::ClaimResolvedPayoutTopup,
         vec![
-            AccountMeta::new_readonly(topup_owner.pubkey(), false),
+            AccountMeta::new_readonly(topup_owner.pubkey(), true),
             AccountMeta::new(topup_env.market, false),
             AccountMeta::new(topup_portfolio, false),
             AccountMeta::new(topup_dest, false),
@@ -1028,11 +1033,13 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
             AccountMeta::new_readonly(topup_env.vault_authority, false),
             AccountMeta::new_readonly(spl_token::ID, false),
         ],
-        &[],
+        &[&topup_owner],
     );
     assert!(
-        rejected_topup.is_err(),
-        "ClaimResolvedPayoutTopup must reject a non-canonical secondary reserve"
+        rejected_topup
+            .as_ref()
+            .is_err_and(|error| error.contains(&invalid_vault)),
+        "ClaimResolvedPayoutTopup must reject a non-canonical secondary reserve: {rejected_topup:?}"
     );
     assert_eq!(
         topup_env.svm.get_account(&topup_env.market).unwrap(),
@@ -1064,7 +1071,7 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
     let accepted_topup = topup_env.send(
         ProgInstruction::ClaimResolvedPayoutTopup,
         vec![
-            AccountMeta::new_readonly(topup_owner.pubkey(), false),
+            AccountMeta::new_readonly(topup_owner.pubkey(), true),
             AccountMeta::new(topup_env.market, false),
             AccountMeta::new(topup_portfolio, false),
             AccountMeta::new(topup_dest, false),
@@ -1072,7 +1079,7 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
             AccountMeta::new_readonly(topup_env.vault_authority, false),
             AccountMeta::new_readonly(spl_token::ID, false),
         ],
-        &[],
+        &[&topup_owner],
     );
     assert!(
         accepted_topup.is_ok(),
@@ -6268,3 +6275,6 @@ fn v16_regression_vault_pinned_to_canonical_ata_no_fragmentation() {
     );
     assert_eq!(env.token_amount(hdest), 1_000_000, "honest user fully paid");
 }
+
+#[path = "inv_018_unsigned_portfolio_payout_mint.rs"]
+mod unsigned_portfolio_payout_mint;

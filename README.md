@@ -93,7 +93,10 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
 - **Even the asset-0 admin is bounded** — it cannot reach into another asset's funds or a user's
   collateral. **✅** (`v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral`: the
   market admin is rejected withdrawing a permissionless asset's domain insurance and a user's
-  portfolio capital; the asset's own operator / the portfolio owner can.)
+  portfolio capital; the asset's own operator / the portfolio owner can.) One path stays open
+  by design in a market with a secondary mint: after resolution a reserve claim can be paid in
+  that mint, which `marketauth` chooses (item 9 of what it can do in the
+  [threat model](#marketauth-key-threat-model)).
 
 ### Cross-margin
 - A trader may **cross-position across multiple assets in a single position account, up to the CU
@@ -233,6 +236,16 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
 - **Anyone can withdraw from either** account; **deposits go only into primary**. **✅**
   (`v16_attack_deposit_primary_only_withdraw_either`: a secondary-mint deposit rejects, while
   withdrawals settle in either the primary or secondary mint.)
+- **A resolved payout that the portfolio's owner did not sign is made in the primary mint.** **✅**
+  After resolution anyone can deliver a portfolio's payout (`CloseResolved`, a resolved
+  `PermissionlessCrank`, `ClaimResolvedPayoutTopup`). `marketauth` names the secondary mint and
+  its vault holds whatever was sent there, so only the owner's signature selects it. A third
+  party that could select it would clear a depositor's claim in a mint of the authority's
+  making and leave the deposit in the primary vault, where `CloseSlab` pays it to the authority
+  (#477). (`v16_attack_unsigned_resolved_close_cannot_pay_the_secondary_mint`,
+  `v16_attack_unsigned_topup_claim_cannot_pay_the_secondary_mint`.) Reserve payouts are not
+  covered by this rule: see item 9 of what `marketauth` can do in the
+  [threat model](#marketauth-key-threat-model).
 - The **base-unit admin can perform a 1:1 atomic swap from secondary into primary** (withdraw N from
   secondary, deposit N into primary). **✅** authority + bounds verified
   (`v16_attack_swap_secondary_unauthorized_and_bounded`). The **"change base-unit mints only when
@@ -506,11 +519,14 @@ This section describes intent and operational ordering, not argument-by-argument
     rebalance, or recovery forfeit; refresh-only cranks and rejected instructions do not advance it
 - **ClaimResolvedPayoutTopup** (tag 46)
   - permissionless resolved-payout top-up claim; pays only the stored owner receipt token account
+  - unsigned, it pays the primary mint; the owner's signature selects the secondary mint
 
 ### Post-resolution / terminal close
 - **CloseResolved** (tag 30)
   - handles resolved-market terminal PnL, fees, payout, and slot freeing for the supplied portfolio
   - verifies payout routing against the stored owner account
+  - a call the owner did not sign pays the primary mint only; with the owner's signature the
+    payout may be taken in the secondary mint (the same holds for a resolved `PermissionlessCrank`)
   - bounded and repeatable: a call does a bounded part of the work (settle the final K/F,
     settle a bankruptcy charge, detach one leg, realize one source claim, pay) and commits it;
     call it until the portfolio is terminal
@@ -921,6 +937,20 @@ These are governance powers, not bugs:
     - decommission the market, recover refundable slab lamports, and retain only the typed
       rent-exempt tombstone.
     - impact: market is permanently closed.
+9. Choose the secondary base-unit mint, in which reserve claims can be paid after resolution
+    - `UpdateBaseUnitMints` accepts any secondary mint with the primary's decimals while the
+      market holds no value (`vault`, `c_tot` and `insurance` all zero); after that both mints
+      are fixed. Anyone can send tokens to the secondary vault.
+    - after resolution a backing bucket, its earnings and terminal insurance can be delivered to
+      their beneficiary in either mint without the beneficiary's signature, so that a
+      beneficiary that has dropped its keys stays payable. Primary tokens displaced by a
+      secondary payment are external surplus, which `CloseSlab` pays to `marketauth`.
+    - impact: the insurance and backing authorities of every asset, permissionless assets 1..N
+      included, trust `marketauth` with the reserves they fund. It can have those claims paid
+      in a secondary mint of its own making and keep the primary tokens. Check a market's
+      secondary mint before funding a reserve in it; the first funder of an empty market
+      should fund a small amount, read both mints back, and only then fund the rest.
+    - portfolio payouts are not exposed: see item 9 of the next list.
 
 > **Authority model (items 3, 5, 7).** Asset-0's insurance/operator/oracle(mark)/backing authorities now
 > use the **same per-asset `asset_admin` model as assets 1..N** (`UpdateAssetAuthority { asset_index = 0 }`).
@@ -957,9 +987,10 @@ These are intended hard boundaries enforced in code and test suites:
    - covered by `v16_attack_resolved_mode_gates_all_live_ops`.
 8. Cannot force-close a live healthy asset or bypass the shutdown exit window.
    - covered by `v16_attack_force_close_healthy_asset_rejected` and `v16_attack_force_close_cannot_bypass_timeout_with_future_now_slot`.
-9. Cannot redirect user close payouts to arbitrary token accounts.
+9. Cannot redirect user close payouts to arbitrary token accounts, or have them made in the secondary mint.
    - user withdrawal paths require owner signer and owner ATA checks; resolved-close payout routing is stored-owner bound.
-   - covered by `v16_attack_close_resolved_dest_validation`.
+   - a resolved payout that the owner did not sign (`CloseResolved`, a resolved `PermissionlessCrank`, `ClaimResolvedPayoutTopup`) is made in the primary mint; only the owner's signature selects the secondary mint (#477).
+   - covered by `v16_attack_close_resolved_dest_validation`, `v16_attack_unsigned_resolved_close_cannot_pay_the_secondary_mint` and `v16_attack_unsigned_topup_claim_cannot_pay_the_secondary_mint`.
 10. Cannot use ordinary asset retire/reuse on asset 0, restart any asset while positions/loss or value-bearing source/backing/reservation state remain, restart an asset without that asset's `asset_admin`, or use asset-0 shutdown as a domain-insurance drain bypass.
    - covered by `v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts`, `v16_bpf_restart_asset_oracle_is_uniform_for_local_asset_admins`, and `v16_attack_restart_asset_oracle_rejects_backing_state_without_mutation`.
 11. Cannot close slab while funds/state remain.
