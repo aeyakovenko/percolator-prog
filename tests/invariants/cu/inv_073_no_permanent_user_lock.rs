@@ -7201,7 +7201,9 @@ fn v16_program_terminal_disposition_and_administrative_retirement_are_source_com
         "expect_signer(closer)?;",
         "let owner_signed = portfolio.header.owner == closer.key.to_bytes();",
         "let terminal_marketauth_cleanup =",
-        "if !owner_signed && !terminal_marketauth_cleanup",
+        "let terminal_public_cleanup = group.header.mode == 1",
+        ">= cfg.force_close_delay_slots;",
+        "if !owner_signed && !terminal_marketauth_cleanup && !terminal_public_cleanup",
         ".deregister_empty_materialized_portfolio_not_atomic(&portfolio.as_view())",
         "close_portfolio_account_to_market_slab(portfolio_ai, market_ai)?;",
     ] {

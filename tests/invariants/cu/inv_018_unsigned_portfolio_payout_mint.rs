@@ -9,9 +9,8 @@
 //! cleared, the deposits stay in the primary vault, and `CloseSlab` pays them to the
 //! authority.
 //!
-//! Reserve payouts (backing buckets, their earnings, terminal insurance) are outside this
-//! rule. Their payees may have dropped their keys, and INV-073 keeps them payable in either
-//! mint without a signature.
+//! Reserve payouts (backing buckets, their earnings, terminal insurance) follow the same rule;
+//! their tests are in `inv_018_unsigned_reserve_payout_mint.rs`.
 //!
 //! Every wrapper instruction is public. SPL mints and token accounts, the secondary vault's
 //! balance among them, are installed directly as in the other INV-018 fixtures, and the

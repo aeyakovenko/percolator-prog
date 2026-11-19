@@ -1,5 +1,7 @@
 //! INV-073: recovered insurance survives native redemption, wallet recreation and
-//! quote-rail changes after both insurance signing keys have disappeared.
+//! quote-rail changes after both insurance signing keys have disappeared. The
+//! payments in the native mint, which is the secondary rail here, carry the
+//! beneficiary's signature: nobody else may choose that mint for it (#477).
 //! INV-018/021/024/025/063/067/069/070/071/078/081/082 receive bounded related
 //! evidence. SPL close authority is granted before departure; it authorizes only
 //! custody redemption. Administrative expiry/retirement remains a prerequisite.
@@ -138,6 +140,7 @@ pub(super) fn finish(
     admin: &Keypair,
     asset: usize,
     absent: [Pubkey; 3],
+    secondary_payee: &Keypair,
     primary_recipient: Pubkey,
     native: &NativeCustody,
     entitlement: u64,
@@ -164,6 +167,7 @@ pub(super) fn finish(
     let profiles =
         [0, 1].map(|index| state::read_asset_oracle_profile(&market_frame.data, index).unwrap());
     assert!(matches!(entitlement, 100 | 101));
+    assert_eq!(secondary_payee.pubkey(), absent[0]);
     assert_eq!(initial.1.insurance_domain_spent[domain], 100);
     assert_eq!(initial.1.insurance, u128::from(entitlement - 100));
     assert_eq!(initial.1.vault, u128::from(BURN + entitlement));
@@ -229,6 +233,15 @@ pub(super) fn finish(
         if signed_close {
             signers.push(admin);
         }
+        // The beneficiary signs only where an instruction names it as a signer: its
+        // payment in the secondary mint.
+        let payee_signs = instructions
+            .iter()
+            .flat_map(|ix| &ix.accounts)
+            .any(|meta| meta.is_signer && meta.pubkey == absent[0]);
+        if payee_signs {
+            signers.push(secondary_payee);
+        }
         let tx = Transaction::new_signed_with_payer(
             &batch,
             Some(&env.payer.pubkey()),
@@ -238,10 +251,13 @@ pub(super) fn finish(
         tx.verify().unwrap();
         assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
         let required = usize::from(tx.message.header.num_required_signatures);
-        assert_eq!(required, 1 + usize::from(signed_close));
-        assert!(absent
-            .iter()
-            .all(|key| !tx.message.account_keys[..required].contains(key)));
+        assert_eq!(
+            required,
+            1 + usize::from(signed_close) + usize::from(payee_signs)
+        );
+        assert!(absent.iter().enumerate().all(|(index, key)| {
+            (index == 0 && payee_signs) || !tx.message.account_keys[..required].contains(key)
+        }));
         let mut keys = tx.message.account_keys.clone();
         keys.extend_from_slice(tracked);
         keys.sort_unstable();
@@ -326,7 +342,7 @@ pub(super) fn finish(
     let payment = |env: &V16CuEnv, rail: usize, amount: u64| Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new_readonly(absent[0], false),
+            AccountMeta::new_readonly(absent[0], rail == 1),
             AccountMeta::new(market_key, false),
             AccountMeta::new(recipients[rail], false),
             AccountMeta::new(vaults[rail], false),

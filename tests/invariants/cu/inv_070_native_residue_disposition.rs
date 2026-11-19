@@ -3,6 +3,8 @@
 //! own token integrity, rent, normalization, bounded continuation and validity.
 //! Row 418 additionally owns native-primary expired booked principal after a
 //! secondary-rail payment, including rollback of the complete retirement prefix.
+//! Every payment on the secondary rail carries its payee's signature: nobody else
+//! may choose that mint for it (#477). Primary-rail payments stay unsigned.
 
 use super::*;
 use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
@@ -227,7 +229,7 @@ fn run_native_residue_disposition(native_booked: bool) {
                             Instruction {
                                 program_id: env.program_id,
                                 accounts: vec![
-                                    AccountMeta::new_readonly(wallets[recipient], false),
+                                    AccountMeta::new_readonly(wallets[recipient], rail == 1),
                                     AccountMeta::new(env.market, false),
                                     AccountMeta::new(rails[rail].recipients[recipient], false),
                                     AccountMeta::new(rails[rail].vault, false),
@@ -403,8 +405,17 @@ fn run_native_residue_disposition(native_booked: bool) {
                             let ix = payout(&env, kind, native_rail, PREFIX[kind]);
                             let recipient = usize::from(kind == 2);
                             let changed = [env.market, native.vault, native.recipients[recipient]];
-                            peak =
-                                peak.max(land(&mut env, &[ix], &[], &tracked, &changed, 0, false));
+                            let payee = [&holders[recipient]];
+                            let signers: &[&Keypair] = if native_rail == 1 { &payee } else { &[] };
+                            peak = peak.max(land(
+                                &mut env,
+                                &[ix],
+                                signers,
+                                &tracked,
+                                &changed,
+                                0,
+                                false,
+                            ));
                             paid[kind][native_rail] += PREFIX[kind];
                             insurance_debits += u64::from(kind == 2);
                             payments += 1;
@@ -468,7 +479,8 @@ fn run_native_residue_disposition(native_booked: bool) {
                                 absent(&env, holder.pubkey());
                             }
                         }
-                        drop(holders);
+                        // The holders sign nothing below except their own payments in the
+                        // secondary mint.
                         let wallet_frames = wallets.map(|key| env.svm.get_account(&key));
                         check(
                             &env,
@@ -539,9 +551,19 @@ fn run_native_residue_disposition(native_booked: bool) {
                                 });
                             }
                             batch.push(payout(&env, kind, rail, CLAIMS[kind] - PREFIX[kind]));
+                            let payee = [&holders[recipient]];
+                            let signers: &[&Keypair] = if rail == 1 { &payee } else { &[] };
                             let mut rejected = batch.clone();
                             rejected.push(unsigned_close.clone());
-                            peak = peak.max(land(&mut env, &rejected, &[], &tracked, &[], 0, true));
+                            peak = peak.max(land(
+                                &mut env,
+                                &rejected,
+                                signers,
+                                &tracked,
+                                &[],
+                                0,
+                                true,
+                            ));
                             check(
                                 &env,
                                 paid,
@@ -559,7 +581,7 @@ fn run_native_residue_disposition(native_booked: bool) {
                             peak = peak.max(land(
                                 &mut env,
                                 &batch,
-                                &[],
+                                signers,
                                 &tracked,
                                 &changed,
                                 if repair { rent } else { 0 },

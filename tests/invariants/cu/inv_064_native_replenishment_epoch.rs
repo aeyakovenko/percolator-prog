@@ -1,6 +1,9 @@
 //! Row 428 / INV-064: consumed Live consent stays stale after independently
 //! funded native replenishment and resolution, on both quote withdrawal rails.
 //! Distinct owners retain independent asset epochs, ledgers and destinations.
+//! A withdrawal on the secondary rail always carries its owner's signature: nobody
+//! else may choose that mint for it (#477). The signed and unsigned variants
+//! therefore differ only on the primary rail.
 
 use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_create_public_spl_mint;
@@ -194,7 +197,7 @@ fn v16_native_replenishment_preserves_consumed_consent_across_resolved_quote_rou
             let withdrawal = |asset: usize, epoch, amount, rail: usize, signed| Instruction {
                 program_id: program,
                 accounts: vec![
-                    AccountMeta::new_readonly(wallets[asset], signed),
+                    AccountMeta::new_readonly(wallets[asset], signed || rail == 1),
                     AccountMeta::new(market, false),
                     AccountMeta::new(recipients[asset][rail], false),
                     AccountMeta::new(vaults[rail], false),
@@ -300,16 +303,18 @@ fn v16_native_replenishment_preserves_consumed_consent_across_resolved_quote_rou
                     .message
                     .header
                     .num_required_signatures,
-                1 + u8::from(signed_partial)
+                1 + u8::from(signed_partial || first_rail == 0)
             );
             for index in [5, 9, 10, 11] {
+                // 5, 9 and 11 use the rail opposite the first one; 10 uses the primary rail.
+                let on_secondary = index != 10 && first_rail == 0;
                 assert_eq!(
                     bincode::deserialize::<Transaction>(&envelopes[index])
                         .unwrap()
                         .message
                         .header
                         .num_required_signatures,
-                    1
+                    1 + u8::from(on_secondary)
                 );
             }
             let tokens = [

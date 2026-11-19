@@ -6278,3 +6278,6 @@ fn v16_regression_vault_pinned_to_canonical_ata_no_fragmentation() {
 
 #[path = "inv_018_unsigned_portfolio_payout_mint.rs"]
 mod unsigned_portfolio_payout_mint;
+
+#[path = "inv_018_unsigned_reserve_payout_mint.rs"]
+mod unsigned_reserve_payout_mint;

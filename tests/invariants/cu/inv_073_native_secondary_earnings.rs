@@ -2,6 +2,9 @@
 //! Repaired native custody pays the fee tail, while unsynced vault donations and
 //! displaced primary liquidity remain surplus through exact terminal closure.
 //! A redeemed native fee prefix remains counted after wallet loss and ATA repair.
+//! The native mint is the secondary rail here, so the provider signs its own fee
+//! payments in it: nobody else may choose that mint for it (#477). Everything on
+//! the primary rail stays unsigned.
 
 use super::*;
 use inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_create_public_spl_mint;
@@ -357,14 +360,15 @@ fn verify_native_secondary_earnings(redeem_prefix: bool) {
     .collect::<Vec<_>>();
     if redeem_prefix {
         let mut first = reserve_payout(&env, wallets, tokens, ledger, 1, redeemed);
+        first.accounts[0].is_signer = true;
         first.accounts[3].pubkey = native_provider;
         first.accounts[4].pubkey = native_vault;
-        assert!(first.accounts.iter().all(|meta| !meta.is_signer));
+        assert!(first.accounts[1..].iter().all(|meta| !meta.is_signer));
         let allowed = [env.market, ledger, native_vault, native_provider];
         peak[1] = peak[1].max(land(
             &mut env,
             &[first],
-            &[],
+            &[&provider],
             &tracked,
             &allowed,
             0,
@@ -407,6 +411,8 @@ fn verify_native_secondary_earnings(redeem_prefix: bool) {
         Some((wallets[3], balance)),
         None,
     ));
+    // The provider signs nothing below except its fee payment in the secondary mint.
+    let secondary_payee = provider.insecure_clone();
     drop((provider, operator, users));
 
     let token_image = |index: usize, amount: u64| {
@@ -592,19 +598,22 @@ fn verify_native_secondary_earnings(redeem_prefix: bool) {
         data: vec![1],
     };
     let mut tail = reserve_payout(&env, wallets, tokens, ledger, 1, TAIL - redeemed);
+    tail.accounts[0].is_signer = true;
     tail.accounts[3].pubkey = native_provider;
     tail.accounts[4].pubkey = native_vault;
     let prefix = [repair, tail];
     assert!(prefix
         .iter()
         .flat_map(|ix| &ix.accounts)
-        .all(|meta| !meta.is_signer || meta.pubkey == env.payer.pubkey()));
+        .all(|meta| !meta.is_signer
+            || meta.pubkey == env.payer.pubkey()
+            || meta.pubkey == wallets[2]));
     let overclaim = reserve_payout(&env, wallets, tokens, ledger, 1, 1);
     let rejected = [prefix[0].clone(), prefix[1].clone(), overclaim];
     peak[2] = land(
         &mut env,
         &rejected,
-        &[],
+        &[&secondary_payee],
         &tracked,
         &[],
         0,
@@ -620,7 +629,7 @@ fn verify_native_secondary_earnings(redeem_prefix: bool) {
     peak[1] = peak[1].max(land(
         &mut env,
         &prefix,
-        &[],
+        &[&secondary_payee],
         &tracked,
         &allowed,
         rent,
@@ -732,5 +741,6 @@ fn verify_native_secondary_earnings(redeem_prefix: bool) {
         assert_cu_within("native secondary earnings", value, 1_200_000);
     }
     let payments = 4 + usize::from(redeem_prefix);
-    eprintln!("row433 native-secondary earnings: 1 world, {payments} unsigned payments, 1 exact rollback, 1 closure; fee={EARNINGS}, SPL={PREFIX}, native={TAIL}, redeemed={redeemed}, unsynced={DONATION}, peak CU [setup, payment, rejection, close]={peak:?}");
+    let signed = 1 + usize::from(redeem_prefix);
+    eprintln!("row433 native-secondary earnings: 1 world, {payments} payments ({signed} in the native secondary mint, signed by the provider), 1 exact rollback, 1 closure; fee={EARNINGS}, SPL={PREFIX}, native={TAIL}, redeemed={redeemed}, unsynced={DONATION}, peak CU [setup, payment, rejection, close]={peak:?}");
 }

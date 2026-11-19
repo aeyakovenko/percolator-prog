@@ -102,6 +102,35 @@ equivalence and must not carry retained user-economic intent unless the instruct
 application-level expiry. Adding detached signatures, durable retained intent, or a persistent
 partial-fill protocol reopens INV-006, INV-008, INV-009, INV-011, and INV-059.
 
+### Exit rule
+
+One trust rule governs every payout and every wait in this plan:
+
+```text
+A live, attentive party can always take what it is owed within the exit period,
+without the cooperation of any other party.
+After that period the system or the market authority may absorb what was left unclaimed.
+```
+
+For the deployed program this means:
+
+- **Nobody discharges a claim in a form its payee did not choose.** A payment the payee did not
+  sign is made in the primary mint, to a token account the payee owns. The market authority names
+  the secondary mint, so only a payee's own signature selects it (INV-018).
+- **The exit period is the owner window plus bounded permissionless work.** For
+  `force_close_delay_slots` after resolution (0 by default, at most 10,000,000) only its owner
+  can crank a portfolio. Once the window has passed, everything a claim can wait for is
+  permissionless: cranking the remaining portfolios and removing a portfolio that is economically
+  empty. INV-071, INV-073 and INV-078 are read with this window.
+- **Usable primary custody is assumed.** Every inflow is in the primary mint, so the primary
+  vault covers every claim, but a frozen primary vault or a payee with no usable token account
+  in the primary mint blocks payment. That is a property of the mint, named here as an assumption
+  of INV-073 and INV-078.
+- **Absorption is permitted, not required.** The deployed program absorbs no claim: an absent
+  party's claim is delivered by anyone to that party's own token account in the primary mint. A
+  future rule that lets the authority absorb abandoned claims must give each claim its full exit
+  period, counted from the moment that claim became payable to its signing payee.
+
 ### Verification tags
 
 - **P** - formal proof over the actual transition or a proven-equivalent pure transition.
@@ -189,7 +218,8 @@ request binds a monotonic epoch for its exact authority scope. Authentication is
 containment: for every correctly signed authority route, the protocol also defines and enforces the
 maximum effect that a malicious current holder can have on unrelated principal, claims, exposure,
 and terminal progress. A valid signature cannot authorize effects outside that route's configured
-scope and economic envelope.
+scope and economic envelope. In particular no authority can turn another party's payable claim
+into its own, or get ahead of a live payee: see the exit rule in section 0.
 
 **Required tests.** Exercise `A -> B -> A` and `A -> zero/disabled -> A`. A request signed by the
 first incarnation of A must remain invalid after A returns. Epochs must change atomically with
@@ -372,14 +402,15 @@ portfolios, vault/destination, authority/operator, and market/oracle accounts.
 
 **Statement.** All quote-token movements use the configured quote mint, canonical vault, correct
 token program, expected decimals, and canonical vault authority. Token-2022 extensions or alternate
-token programs cannot alter accounting unless explicitly supported and proven. A resolved payout
-that a portfolio's owner did not sign is made in the primary mint; only the owner's signature
-selects the secondary mint.
+token programs cannot alter accounting unless explicitly supported and proven. A payout that its
+payee did not sign is made in the primary mint; only the payee's own signature selects the
+secondary mint. This holds for portfolio payouts and for reserve payouts alike.
 
 **Required tests.** Substitute mint, token program, decimals, vault owner, authority, destination,
 fee-on-transfer mint, frozen account, and delegated account. The internal quote delta must equal the
-actual received or sent amount. Deliver a resolved portfolio payout in the secondary mint without
-the owner's signature.
+actual received or sent amount. Deliver each kind of payout (resolved close, receipt top-up,
+backing bucket, bucket earnings, terminal insurance) in the secondary mint without its payee's
+signature, alone and bundled with the step that makes it payable.
 **Verification:** P, F, I
 
 ### INV-019 - CPI invocation and return-data binding
@@ -447,7 +478,8 @@ not economic truth or safety decisions.
 
 **Statement.** For every successful instruction, every quote atom has one debit and one credit in
 the `TokenValueFlowProof`. Value attributable to account or domain A cannot become withdrawable by
-B without explicit signed transfer or a deterministic protocol rule already binding A. Aggregate
+B without explicit signed transfer or a deterministic protocol rule already binding A. A payment
+in a mint that A did not choose is not a payment to A. Aggregate
 conservation is necessary but strictly weaker than entitlement. For each portfolio and economic
 episode, an independently maintained history ledger defines:
 
@@ -1089,7 +1121,9 @@ prior insurance consumption.
 
 **Statement.** Every actionable live or wind-down state has a permissionless successful crank or
 continuation that strictly decreases a finite lexicographic liveness rank, net of explicitly bounded
-close drift. A successful no-op crank is forbidden.
+close drift. A successful no-op crank is forbidden. Inside the owner window after resolution a
+portfolio's crank may require its owner; the statement applies to that portfolio once the window
+has passed.
 
 **Required tests.** Record rank before and after every successful crank; fuzzers fail on nondecrease
 unless the transition enters a strictly lower-priority terminal mode.
@@ -1108,15 +1142,19 @@ remain discoverable.
 ### INV-073 - No permanent user lock
 
 **Statement.** From every publicly reachable funded state, under explicit assumptions about
-authenticated time and oracle/recovery availability, a finite public sequence returns senior
-capital, settles the account into a terminal receipt, or applies an explicitly authorized
-junior-value forfeit. The sequence through terminal economic disposition is permissionless.
-Signer-gated deletion of an already economically empty portfolio is a separate mechanical step and
-must not be described as permissionless progress.
+authenticated time, oracle/recovery availability and usable primary custody, a finite public
+sequence returns senior capital, settles the account into a terminal receipt, or applies an
+explicitly authorized junior-value forfeit. The sequence through terminal economic disposition is
+permissionless once the owner window has passed. Deletion of an already economically empty
+portfolio is a separate mechanical step: its owner may do it at any time, the market authority
+after resolution, and anyone once the owner window has passed, so that a reserve beneficiary can
+finish the wind-down itself.
 
 **Required tests.** Exhaustive small-state reachability plus long stateful fuzz sequences; every
 nonterminal funded state must have a bounded permissionless path to terminal economic disposition.
-Then separately prove the exact signer and preconditions for mechanical portfolio deletion.
+Then separately prove the exact signer, window and preconditions for mechanical portfolio deletion,
+and that a reserve beneficiary can finish the wind-down and take its claim without the market
+authority.
 **Verification:** F, I, R
 
 ### INV-074 - Scope locality
@@ -1170,7 +1208,8 @@ reject unsupported shapes before activation.
 
 **Statement.** Every state where ordinary bounded progress cannot continue has a permissionless
 terminal recovery, dead-leg forfeit, exact receipt, or other senior-preserving terminal path. No
-privileged actor is required to release user capital.
+privileged actor is required to release user capital or a reserve beneficiary's claim once the
+owner window has passed.
 
 Asset and market retirement are separate administrative lifecycle conclusions. They require an
 explicit finite rank and named fairness/authority assumption when the final `CloseSlab` or

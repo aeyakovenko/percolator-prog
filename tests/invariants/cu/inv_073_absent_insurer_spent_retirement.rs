@@ -345,6 +345,10 @@ fn absent_reserve_progress(
                 assert_eq!(env.market_state(), before);
                 assert_eq!(env.svm.get_account(&env.vault), vault);
             }
+            // The dual-quote and native-custody children pay part of the recovered claim in
+            // the secondary mint, which only the beneficiary itself may choose (#477). It
+            // signs those payments and nothing else.
+            let secondary_payee = beneficiary.insecure_clone();
             drop(beneficiary);
             drop(operator);
             drop(provider);
@@ -880,6 +884,7 @@ fn absent_reserve_progress(
                         &admin,
                         asset,
                         absent,
+                        &secondary_payee,
                         reserve_token,
                         native.as_ref().unwrap(),
                         remainder + recovered,
@@ -898,6 +903,7 @@ fn absent_reserve_progress(
                         &admin,
                         asset,
                         absent,
+                        &secondary_payee,
                         reserve_token,
                         secondary.as_ref().unwrap(),
                         remainder + recovered,

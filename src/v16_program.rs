@@ -10203,7 +10203,15 @@ pub mod processor {
             let owner_signed = portfolio.header.owner == closer.key.to_bytes();
             let terminal_marketauth_cleanup =
                 group.header.mode == 1 && live_authority_matches(&cfg.marketauth, closer.key);
-            if !owner_signed && !terminal_marketauth_cleanup {
+            // After resolution an economically empty portfolio is only a storage record. Once
+            // the owner window has passed anyone may remove it, so that a reserve beneficiary
+            // can finish the wind-down without the owner or the market authority. The engine
+            // refuses a portfolio that still holds anything.
+            let terminal_public_cleanup = group.header.mode == 1
+                && authenticated_market_slot_or_fallback_view(&group)
+                    .saturating_sub(group.header.resolved_slot.get())
+                    >= cfg.force_close_delay_slots;
+            if !owner_signed && !terminal_marketauth_cleanup && !terminal_public_cleanup {
                 return Err(PercolatorError::Unauthorized.into());
             }
             portfolio
@@ -10628,7 +10636,7 @@ pub mod processor {
             &vault_authority,
             &cfg,
             !authority.is_signer,
-            false,
+            !(authority.is_signer && local_authorized),
         )?;
         let amount_u64 = amount_to_u64(amount)?;
         require_token_balance(vault_balance, amount_u64)?;
@@ -11218,7 +11226,7 @@ pub mod processor {
                 &vault_authority,
                 &cfg,
                 !operator.is_signer,
-                false,
+                !(operator.is_signer && live_authority_matches(&beneficiary, operator.key)),
             )?;
             require_token_balance(vault_balance, amount_u64)?;
         }
@@ -11520,7 +11528,7 @@ pub mod processor {
                     vault_authority_ai.key,
                     &cfg_pre,
                     true,
-                    false,
+                    true,
                 )?;
                 transfer_tokens_signed(
                     token_program,
@@ -16547,12 +16555,11 @@ pub mod processor {
                 && mint.to_bytes() == cfg.secondary_collateral_mint)
     }
 
-    /// `require_primary_mint` is set for a resolved payout to a portfolio whose owner did not
-    /// sign. Value enters in the primary mint alone; `marketauth` names the secondary mint,
-    /// and its vault holds whatever was sent there. If a third party could have an owner paid
-    /// in it, the owner's claim would be cleared while its deposit stayed in the primary vault
-    /// as `CloseSlab` surplus (#477). With its signature the owner takes either mint. Reserve
-    /// payouts pass `false`: their beneficiaries may have dropped their keys.
+    /// `require_primary_mint` is set whenever the party being paid did not sign the instruction.
+    /// Value enters in the primary mint alone; `marketauth` names the secondary mint, and its
+    /// vault holds whatever was sent there. If a third party could have a payee paid in it, the
+    /// payee's claim would be cleared while what it paid in stayed in the primary vault as
+    /// `CloseSlab` surplus (#477). With its own signature a payee takes either mint.
     fn verify_withdrawable_token_accounts(
         dest_token_ai: &AccountInfo,
         expected_dest_owner: &Pubkey,

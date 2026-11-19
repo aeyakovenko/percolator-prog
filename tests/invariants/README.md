@@ -30855,7 +30855,7 @@ charter.
 | INV-015 | P + SVM/CU | `kani/inv_015_account_ownership_layout_discriminator_and_length_validity.rs`, `public_sbf/inv_015_account_ownership_layout_discriminator_and_length_validity.rs`, and `cu/inv_015_account_ownership_layout_discriminator_and_length_validity.rs` prove the exact header predicate and every short length, then compose owner, canonical minimum/maximum length, type, alignment, all 40 engine byte domains, all six wrapper-config domains, fourteen auxiliary-ledger cases, and six oracle-profile domains through their real consuming routes. Every route has a mutating valid control and every malformed case returns an instruction error with exact persistent rollback. Public System Program creation proves `InitPortfolio` normalizes oversized uninitialized storage to the canonical wrapper length; auxiliary ledgers initialize exactly and reject overlong or malformed nonzero first use. Matcher context remains opaque external-program data and no public layout migration exists. A new account kind, persisted byte domain, migration, or alignment requirement reopens this current-surface closure. |
 | INV-016 | Static roster + SVM/CU + Cross-invariant P composition | `cu/inv_016_canonical_pda_and_seed_binding.rs` covers 57 wrong-bump/cross-role/cross-market substitutions over every PDA slot on all 11 public custody routes, a valid noncanonical ATA bump under the exact canonical-vault seed tuple, and nine matcher-delegate seed/bump substitutions with exact context/market/LP rollback plus a canonical success control. Its source-bound roster owns all 14 canonical token-moving handlers, all three PDA derivations, and every direct vault/matcher derivation callsite. A public same-pubkey LP recreation proves the intentionally repeated stateless delegate cannot revive zeroed matcher authority before fresh configuration restores a complete CPI exit. INV-001/003/004/007/012/019 supply the market-tombstone, portfolio/episode, capability, and transport proofs. A new PDA class, seed, derivation consumer, account incarnation, or close path reopens this current-surface closure. |
 | INV-017 | SVM/CU + M | `cu/inv_017_signer_writable_role_and_account_alias_safety.rs`, `stateful/inv_017_signer_writable_role_and_account_alias_safety.rs`, and `inv_017_account_role_coverage.tsv` provide source-locked exhaustive evidence for all 49 production variants. Every current successful account layout starts from a mutating public control, every pairwise semantic-role alias and required signer/writable downgrade rejects with exact rollback unless explicitly safe, and dynamic shapes are enumerated rather than sampled. This includes all trade/CPI/matcher, custody/ledger, authority/policy, oracle, crank provider/reward, lifecycle/fee activation, terminal slab, base-unit swap/replacement, Recovery/force-close, payout, and maintenance forms. Higher-arity simultaneous aliases and non-account-role economics remain owned by their separate invariants. |
-| INV-018 | P + Static roster + SVM/CU + M | `kani/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs` executes the production helpers over exact program identity, all classic-SPL option/state encodings, owner/mint partitions, and full-width amount/balance. `cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs` rejects a real Token-2022 transfer-fee/transfer-hook mint at both mint-admission routes and its executable program on a live deposit with exact rollback. Six primary-decimal worlds preserve raw-atom source/vault/capital/`c_tot` equality, and a canonical-withdrawal retry proves byte-identical noncanonical vault accounts reject before mutation while the same signed amount succeeds against the configured vault. A generic public matrix compares actual SPL and internal quote deltas across all 15 production token-moving handlers, including independently generated backing earnings, public cure, partial-receipt claim, swap, and terminal surplus sweep; INV-016 owns the source-complete canonical-vault roster. Solana runtime and deployed classic SPL Token execution are named platform assumptions; a token-program/version change reopens this current-surface closure. `cu/inv_018_unsigned_portfolio_payout_mint.rs` pins the payout-mint rule of #477: an unsigned `CloseResolved`, resolved `PermissionlessCrank` or `ClaimResolvedPayoutTopup` pays the primary mint only, the owner's signature selects the secondary mint, and reserve payouts are outside the rule. |
+| INV-018 | P + Static roster + SVM/CU + M | `kani/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs` executes the production helpers over exact program identity, all classic-SPL option/state encodings, owner/mint partitions, and full-width amount/balance. `cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs` rejects a real Token-2022 transfer-fee/transfer-hook mint at both mint-admission routes and its executable program on a live deposit with exact rollback. Six primary-decimal worlds preserve raw-atom source/vault/capital/`c_tot` equality, and a canonical-withdrawal retry proves byte-identical noncanonical vault accounts reject before mutation while the same signed amount succeeds against the configured vault. A generic public matrix compares actual SPL and internal quote deltas across all 15 production token-moving handlers, including independently generated backing earnings, public cure, partial-receipt claim, swap, and terminal surplus sweep; INV-016 owns the source-complete canonical-vault roster. Solana runtime and deployed classic SPL Token execution are named platform assumptions; a token-program/version change reopens this current-surface closure. `cu/inv_018_unsigned_portfolio_payout_mint.rs` and `cu/inv_018_unsigned_reserve_payout_mint.rs` pin the payout-mint rule of #477 for every payout: unsigned, a resolved close, receipt top-up, backing bucket or terminal insurance delivery pays the primary mint only, and the payee's own signature selects the secondary mint. They also pin that a reserve beneficiary can finish the wind-down itself: anyone removes an empty portfolio once the owner window has passed. |
 | INV-019 | P + generated F + SVM/CU + Static census | `kani/inv_019_cpi_invocation_and_return_data_binding.rs` and `cu/inv_019_cpi_invocation_and_return_data_binding.rs` prove full-width matcher field/flag binding, request freshness, single-context and batch return replay rejection, tail isolation, and current-producer provenance. A production-derived census locks both CPI handlers to the same seven fixed roles, the complete stateless delegate seed tuple, all tail exclusions, and the distinct context-byte/runtime-return transports. A distinct nested program's return is harmless before the configured matcher overwrites it but rejects with exact rollback when emitted afterward. A deployed external matcher publicly controls every hostile mode and closes/recreates the same context while the wrapper publicly closes/reinitializes the same LP address; a publicly written stale response rejects exactly before a fresh response succeeds. An eight-world stateful matrix varies route order, asset, size, and three same-address context incarnations without rewriting the LP capability while preserving rollback, exit, OI, custody, and CU invariants. Oracle routes consume authenticated account data rather than matcher return data. INV-001/002/003/004/007/012/016 compose market, asset, portfolio, episode, capability, and PDA identity. A new matcher transport, fixed role, detached capability account, or return consumer reopens this current-surface closure. |
 | INV-020 | Independent + P + Direct + F + SVM/CU | `public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, and `kani/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`. Selected Switchboard freshness uses `CurrentResult.submission_idx`; stale selected results reject exactly and account-write churn cannot refresh liveness. The finding-blind composite campaign covers both one-leg-fresh directions, all-fresh cross-epoch reports, mixed-time Hybrid initialization, ignored mixed-time crank hints, coherent update, healthy owner exit, and exact terminal payout. Two deterministic public matrices add 126 configurations across all Pyth/Switchboard/Chainlink one/two/three-leg orders and legal multiply/divide/invert/scale transforms: all 114 selected-leg skews and all 126 coherent stored-time rewinds reject exactly before coherent retries. Another 39 provider words cross configuration and crank freshness at ages 59/60/61. Three provider-role worlds compose coherent updates through a genuine liquidation, bounded reward, and exact effective owner exit; a separate shutdown/force-close/restart world proves old composite provenance cannot cross Recovery or the new manual generation and fresh trading resumes. Nine single-provider plus twenty-four multi-provider SBF worlds carry authenticated targets through DrainOnly owner exit, Recovery rollback/forfeit/restart/fresh trade, and permissionless Resolved settlement with exact custody; the composite worlds cover every provider in numerator/denominator roles, every legal multiply/divide shape, explicit invert and unit-scale histories, exact expiry, and malformed selected-account rollback. The production coherence predicate is exhaustive over all `i64` pairs/triples. The shipping `AccountInfo` reader is a thin delegate to one pure owner/key/bytes parser; a 7,183-word differential corpus covers valid provider words, every proper prefix, and every single-byte bit flip. Independent models cover 726 boundary words, 15,552 structural/semantic combinations with exact error precedence, 12,288 seeded full-width layouts, an exact non-saturating elapsed-time boundary, and 1,310,720 all-BPS wide confidence comparisons. Kani proves full-width confidence totality/fundamental zero cases, freshness, dispatch/identity/short-data rejection, canonical Pyth/Chainlink byte-field composition, independent first/last Switchboard wire-offset mappings, the complete selected-timestamp table and typed validator, invalid-domain partitions, and complete Pyth/Chainlink/Switchboard exponent-plan routing. Pyth, Switchboard, and Chainlink share one canonical scaler. Exact wide multiplication/division is conditional on `WRAPPER_WIDE_ARITHMETIC_AXIOM`, independently discharged by the bigint boundary/generated corpora and all 126 deployed provider compositions. A parser, provider, scaler, bound, or lowering change reopens the row. |
 | INV-021 | SVM/CU + shared stateful | `cu/inv_021_account_creation_reallocation_close_rent_and_lamport_safety.rs` publicly reproduces and closes issue 404 without program-state injection: transient create/reinit and underfunded canonical realloc reject exactly; active positions, source-backed claims, retained Recovery obligations, and active residual-close ledgers block dematerialization with exact rollback; canonical public cleanup remains live; close/System-refund/reinit at the same address receives a newer portfolio ID and inherits no value, position, source claim, receipt, or close state. A source-locked API test permits only canonical growth or zero-length close and proves both close paths hard-route rent to the market slab. The fixed `v16_program_portfolio_growth_close_and_reuse_preserve_unrelated_claim_exit` history adds unrelated-account growth/reuse with per-step surviving-claim, count, custody, and rent checks followed by the claimant's full SPL exit; the generic lifecycle-generator TODO remains open. INV-068's shared public lifecycle supplies the nonduplicated partial-receipt case: three premature closes reject exactly before terminal settlement and close succeed. |
@@ -31513,38 +31513,52 @@ rustfmt --edition 2021 --check tests/invariants/cu/inv_011_signed_aggregate_econ
 git diff --check
 ```
 
-### INV-018 unsigned resolved payouts and the secondary mint (#477, 2026-11-19)
+### INV-018 payouts, the secondary mint and the exit rule (#477, 2026-11-19)
 
-[`cu/inv_018_unsigned_portfolio_payout_mint.rs`](cu/inv_018_unsigned_portfolio_payout_mint.rs),
-mounted from the INV-018 file. Every wrapper instruction is public. SPL mints and token
-accounts, the secondary vault's balance among them, are installed directly as in the other
-INV-018 fixtures, and the top-up fixture installs its receipt directly like the one beside it.
+[`cu/inv_018_unsigned_portfolio_payout_mint.rs`](cu/inv_018_unsigned_portfolio_payout_mint.rs) and
+[`cu/inv_018_unsigned_reserve_payout_mint.rs`](cu/inv_018_unsigned_reserve_payout_mint.rs), both
+mounted from the INV-018 file. Every wrapper instruction is public. SPL mints and token accounts,
+the secondary vault's balance among them, are installed directly as in the other INV-018 fixtures,
+and the top-up fixture installs its receipt directly like the one beside it.
+
+**The rule this section tests** (section 0 of `INVARIANTS.md`): a live, attentive party can always
+take what it is owed within the exit period, without the cooperation of any other party.
 
 **What failed.** `marketauth` names the secondary mint while the market holds no value
 (`UpdateBaseUnitMints` checks only that its decimals match), and anyone can send tokens to the
-secondary vault. After resolution a portfolio's payout needs no owner signature
-(`CloseResolved` and the resolved `PermissionlessCrank` once `force_close_delay_slots` have
-passed, `ClaimResolvedPayoutTopup` always), and the caller chose the mint. Measured on wrapper
-`9199d869` with the same fixture: an owner deposits 1,000,000 and the market is resolved; an
-unsigned `CloseResolved` pays the owner 1,000,000 of the secondary mint and clears its claim;
-the authority removes the terminal portfolio (`ClosePortfolio`) and `CloseSlab` pays it the
-1,000,000 still in the primary vault. The owner signed nothing after its deposit.
+secondary vault. After resolution a payout needs no signature from its payee, and the caller chose
+the mint. Measured with these fixtures:
 
-**Rule.** `verify_withdrawable_token_accounts` takes `require_primary_mint`, which
-`handle_close_resolved` and `handle_claim_resolved_payout_topup` set to `!owner.is_signer`. A
-resolved payout that the stored owner did not sign must be in the primary mint; otherwise the
-call is `InvalidMint` and changes nothing. With its signature the owner takes either mint. No
-token account is parsed a second time, so the parser census stays at five sites.
+| On | What happened |
+|---|---|
+| `9199d869` | An owner deposits 1,000,000 and the market is resolved. An unsigned `CloseResolved` pays the owner 1,000,000 of the secondary mint and clears its claim. The authority removes the terminal portfolio and `CloseSlab` pays it the 1,000,000 in the primary vault. |
+| `9199d869` | Third parties fund asset 1's insurance and backing with 100,000 each. After resolution both claims are delivered unsigned in the secondary mint, and `CloseSlab` pays the authority the 200,000. |
+| `0b06131f` | A third party funds asset 1's insurance with 100,000; a depositor is paid and leaves an empty portfolio. The insurance authority's own signed withdrawal is refused (`EngineLockActive`) while that portfolio exists, and it cannot remove it (`Unauthorized`). The authority removes it and delivers the claim unsigned in its own mint in one transaction. |
 
-**Liveness.** Deposits, insurance and backing top-ups, cure deposits and the creation fee enter
-in the primary mint only, and every primary outflow except `CloseSlab` reduces the engine vault
-by the amount paid. The primary vault therefore holds at least the engine vault, and an
-unsigned payout in the primary mint can be made whenever the primary vault and a token account
-of the owner are usable. What the rule removes is paying an absent owner in the secondary mint
-when the primary rail cannot be used (a frozen primary vault, for example): that claim then
-waits for the owner's signature or for the primary rail.
+The third row is why the rule had to reach reserve payouts and portfolio deletion: the beneficiary
+had no moment in which it could act first.
 
-**Guarantee.** All under
+**Rules.**
+
+1. `verify_withdrawable_token_accounts` takes `require_primary_mint`, set at every call site to
+   "the payee did not sign": the stored owner for `CloseResolved`, the resolved crank and
+   `ClaimResolvedPayoutTopup`; the recorded beneficiary for `WithdrawBackingBucket`,
+   `WithdrawBackingBucketEarnings` and `WithdrawInsuranceAsset`. An unsigned payout in the
+   secondary mint is `InvalidMint` and changes nothing. With its own signature a payee takes either
+   mint. No token account is parsed a second time, so the parser census stays at five sites.
+2. `ClosePortfolio` in a resolved market accepts any signer once `force_close_delay_slots` have
+   passed since resolution (the market authority at once, as before). The engine still refuses a
+   portfolio that holds anything, and the rent still goes to the market slab.
+
+**Liveness.** Deposits, insurance and backing top-ups, cure deposits and the creation fee enter in
+the primary mint only, and every primary outflow except `CloseSlab` reduces the engine vault by
+the amount paid. The primary vault therefore holds at least the engine vault, and an unsigned
+payout in the primary mint can be made whenever the primary vault and a token account of the
+payee are usable. What the rule removes is paying an absent payee in the secondary mint when the
+primary rail cannot be used (a frozen primary vault, for example): that claim then waits for the
+payee's signature or for the primary rail.
+
+**Guarantee.** Under
 `inv_018_quote_mint_vault_token_program_and_authority_integrity::unsigned_portfolio_payout_mint`:
 
 - `v16_attack_unsigned_resolved_close_cannot_pay_the_secondary_mint`: both instructions, with
@@ -31559,32 +31573,61 @@ waits for the owner's signature or for the primary rail.
   `v16_program_owner_signed_topup_claim_may_take_the_secondary_mint`: the same for a receipt
   that is owed a top-up of 60.
 
-**Control.** On the program built from `da0dfad9` the two `v16_attack_*` selectors fail (the
-unsigned secondary close and top-up are accepted) and the two `v16_program_*` selectors pass.
+Under `...::unsigned_reserve_payout_mint`:
 
-**Not covered: reserve payouts.** After resolution `WithdrawBackingBucket`,
-`WithdrawBackingBucketEarnings` and the terminal `WithdrawInsuranceAsset` still deliver a claim
-to its beneficiary in either mint without the beneficiary's signature. Rows 421 and 433 require
-that for beneficiaries that have dropped their keys: ten existing selectors pay a reserve claim
-on the secondary rail unsigned (INV-024 three, INV-064 one, INV-073 six, among them
-`v16_program_recredited_insurance_switches_quote_rails_without_operator_signatures` and
-`v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_surplus`), and a
-rule for every payee contradicts all ten. The consequence is item 9 of what `marketauth` can do
-in the root README threat model: the insurance and backing authorities of a market trust its
-`marketauth` with the reserves they fund. Measured on `9199d869`: third parties fund asset 1's
-insurance and backing with 100,000 each in the primary mint; after resolution both claims are
-delivered unsigned in the secondary mint, and `CloseSlab` pays the authority the 200,000.
+- `v16_attack_unsigned_reserve_payouts_cannot_pay_the_secondary_mint`: unsigned backing and
+  insurance deliveries in the secondary mint are `InvalidMint` with the market and both vaults
+  byte-identical; unsigned in the primary mint they pay 100,000 each and leave the primary vault
+  empty.
+- `v16_program_reserve_payees_may_take_the_secondary_mint_with_their_signature`.
+- `v16_attack_cleanup_cannot_be_bundled_with_a_delivery_in_the_authority_mint`: the third row of
+  the table. The authority's bundle is refused whole (`InvalidMint`, the portfolio still there).
+  The insurance authority then removes the empty portfolio and takes its 100,000 in the primary
+  mint in one transaction of its own.
+- `v16_program_anyone_deletes_an_empty_portfolio_once_the_owner_window_has_passed`: with a window
+  of 50 slots, a stranger's deletion is `Unauthorized` at the last slot of the window and accepted
+  at the next; the rent goes to the market and the caller gains nothing. A portfolio that still
+  holds its deposit is refused for everyone but its owner (`EngineLockActive`).
+- `v16_attack_live_portfolio_is_deleted_by_its_owner_alone`: in a Live market a stranger and the
+  market authority are both `Unauthorized`.
 
-**Existing selectors re-signed** (amounts, errors and account frames unchanged; each also
-passes on the program built from `da0dfad9`):
+**Control.** On the program built from `da0dfad9` the two portfolio `v16_attack_*` selectors
+fail. On the program built from `0b06131f` they pass, and three of the five selectors of the
+reserve file fail: `v16_attack_unsigned_reserve_payouts_cannot_pay_the_secondary_mint` (the
+unsigned delivery is accepted), `v16_attack_cleanup_cannot_be_bundled_with_a_delivery_in_the_authority_mint`
+(the bundle is accepted) and `v16_program_anyone_deletes_an_empty_portfolio_once_the_owner_window_has_passed`
+(the stranger is `Unauthorized`).
+
+**Existing selectors whose secondary-rail payouts now carry the payee's signature** (amounts,
+errors and account frames unchanged; primary-rail payouts in them stay unsigned):
 
 | Selector (owner invariant) | What changed |
 |---|---|
-| `v16_attack_terminal_secondary_payouts_reject_noncanonical_vault` (INV-018) | the owner signs the four secondary calls (two with a noncanonical vault, two accepted). The two refusals now assert `InvalidVaultAccount`, so the selector still pins the canonical-vault check and not this rule |
+| `v16_attack_terminal_secondary_payouts_reject_noncanonical_vault` (INV-018) | the owner signs the four secondary calls (two with a noncanonical vault, two accepted). The two refusals assert `InvalidVaultAccount`, so the selector still pins the canonical-vault check and not this rule |
 | `v16_program_resolved_payout_secondary_rail_exhausts_shared_receipt` (INV-068) | the winner signs its secondary close; the primary retries after it stay unsigned |
 | `v16_program_late_expiry_claimant_orders_share_secondary_liquidity_without_losing_receipts` (INV-067) | `Rail::payout` names the owner as a signer, and `World::land` signs for each owner an instruction names |
 | `v16_program_dual_quote_terminal_history_classifies_stock_and_exact_tombstone_rent` (INV-070) | in the six worlds whose resolved payout is on the secondary rail the owner signs the `CloseResolved`; in the six primary-rail worlds the fee payer alone still lands it |
 | stateful `v16_program_partial_receipt_topups_are_collateral_rail_independent`, `v16_program_atomic_receipt_retries_pay_once_across_collateral_rails` (INV-068) | `payout_instruction` names the owner as a signer on the secondary rail, and `send` signs for the owners so named |
+| `v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_surplus` (INV-073, row 433) | the holders are kept; of the 24 payments the 12 on the primary rail stay keeper-only and the 12 on the secondary rail are signed by their payee |
+| `v16_program_native_primary_booked_residue_survives_dual_quote_retirement_retry`, `v16_program_native_residue_and_recreated_reserves_reconcile_quote_variant_retirement` (INV-073 / INV-070) | the holders are kept after their wallets are drained and sign only their secondary-rail payments, in the rejected bundle and in its retry |
+| `v16_program_absent_provider_dual_quote_earnings_share_one_ledger_and_close`, `v16_program_redeemed_native_fee_prefix_survives_absent_provider_and_dual_quote_close` (INV-073 / INV-024, rows 420 and 433) | the provider signs the one fee payment that is on the secondary rail; the prefix or suffix on the primary rail, the principal and the insurance stay unsigned |
+| `v16_program_native_secondary_earnings_repair_excludes_donations_and_closes_both_rails`, `v16_program_redeemed_native_secondary_earnings_preserve_ledger_through_repair_and_close` (INV-024, row 433) | the native mint is the secondary rail, so the provider signs its native fee payments (one, or two with the redeemed prefix) |
+| `v16_program_recredited_insurance_switches_quote_rails_without_operator_signatures` (INV-073, row 421) | the insurance authority signs its secondary-rail payment; the operator still signs nothing |
+| `v16_program_recredited_insurance_recreates_native_custody_without_role_signatures` (INV-073) | the native mint is the secondary rail, so the insurance authority signs the two native payments; custody repair and the classic payment stay keeper-only |
+| `v16_native_replenishment_preserves_consumed_consent_across_resolved_quote_routes` (INV-064, row 428) | a withdrawal on the secondary rail always carries the owner's signature, so the signed and unsigned variants differ only on the primary rail |
+
+Rows 421 and 433 had required unsigned payouts to switch rails for beneficiaries whose keys are
+gone. That is what the rule forbids: a beneficiary that cannot sign is paid in the primary mint.
+
+**Existing selectors that pinned the old deletion rule** (only the owner or the market
+authority; the first two fail on the program built from `0b06131f` as adapted):
+
+| Selector (owner invariant) | What changed |
+|---|---|
+| `v16_program_funded_insurer_handoff_preserves_stale_deadline_and_permissionless_user_exit` (INV-005) | the successor insurer's deregistration used to be `Unauthorized`. The owner window has passed there, so it is now admitted; it is bundled with the insurer's payout, which still fails with `EngineLockActive` while the other portfolio exists, and the removal rolls back with it |
+| `v16_program_reassigned_canonical_custody_keeps_absent_owner_claims_through_retirement` (INV-082) | the keeper's deletion used to be `Unauthorized`. It is now admitted and bundled with the misdirected insurance payment the selector already used, which fails with `InvalidTokenAccount` and rolls the removal back |
+| `v16_program_terminal_disposition_and_administrative_retirement_are_source_complete` (INV-073) | the source guard on `handle_close_portfolio` also pins `terminal_public_cleanup` and its window test |
+| `v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned` (INV-085) | `handle_close_portfolio` gets an arithmetic owner row (structural, INV-073) for the window subtraction, like `handle_close_resolved` |
 
 ### INV-038 executing evidence and mixed-history gap
 

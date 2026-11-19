@@ -1,7 +1,9 @@
-//! INV-073/070/024, row433: unsigned reserve claims survive a change of quote rail.
-//! Two backing domains and insurance share dual SPL/native custody. A distinct
-//! keeper pays partial claims on one rail and their remainders on the other;
-//! primary stock displaced by secondary payment remains raw surplus for CloseSlab.
+//! INV-073/070/024, row433: reserve claims survive a change of quote rail.
+//! Two backing domains and insurance share dual SPL/native custody. Partial claims
+//! are paid on one rail and their remainders on the other. On the primary rail a
+//! distinct keeper pays and nobody else signs. On the secondary rail the payee signs
+//! its own payment: nobody else may choose that mint for it (#477).
+//! Primary stock displaced by secondary payment remains raw surplus for CloseSlab.
 //! Four fixed histories cover both native-rail placements and reserve orders.
 //! No user liabilities, earned fees, custody repair, or absent-admin close is claimed.
 
@@ -320,13 +322,13 @@ fn reserve_world(native_rail: usize) -> (V16CuEnv, Keypair, [Keypair; 3], [Rail;
 fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_surplus() {
     let mut worlds = 0;
     let mut payments = 0;
+    let mut unsigned_payments = 0;
     let mut peak = [0u64; 2];
     for native_rail in 0..2 {
         for reverse in [false, true] {
             let (mut env, admin, holders, rails) = reserve_world(native_rail);
             let wallets = holders.each_ref().map(|holder| holder.pubkey());
             let mints = rails.each_ref().map(|rail| rail.mint);
-            drop(holders);
             env.resolve();
             let sequences = env.control_sequences(0);
             let resolved_market = env.svm.get_account(&env.market).unwrap();
@@ -530,10 +532,12 @@ fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_
                             amount: amount.into(),
                         }
                     };
+                    // Only the payee selects the secondary mint for its claim.
+                    let payee_signs = rail == 1;
                     let ix = Instruction {
                         program_id: env.program_id,
                         accounts: vec![
-                            AccountMeta::new_readonly(wallets[recipient], false),
+                            AccountMeta::new_readonly(wallets[recipient], payee_signs),
                             AccountMeta::new(env.market, false),
                             AccountMeta::new(rails[rail].recipients[recipient], false),
                             AccountMeta::new(rails[rail].vault, false),
@@ -542,7 +546,11 @@ fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_
                         ],
                         data: instruction.encode(),
                     };
-                    assert!(ix.accounts.iter().all(|meta| !meta.is_signer));
+                    assert!(ix
+                        .accounts
+                        .iter()
+                        .enumerate()
+                        .all(|(index, meta)| meta.is_signer == (index == 0 && payee_signs)));
                     assert!(!ix
                         .accounts
                         .iter()
@@ -553,10 +561,13 @@ fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_
                         rails[rail].vault,
                         rails[rail].recipients[recipient],
                     ];
-                    peak[0] = peak[0].max(execute(&mut env, ix, &[], &tracked, &changed));
+                    let payee = [&holders[recipient]];
+                    let signers: &[&Keypair] = if payee_signs { &payee } else { &[] };
+                    peak[0] = peak[0].max(execute(&mut env, ix, signers, &tracked, &changed));
                     paid[kind][rail] += amount;
                     insurance_debits += u64::from(kind == 2);
                     payments += 1;
+                    unsigned_payments += u64::from(!payee_signs);
                     assert_eq!(before - env.market_state().1.vault, amount.into());
                     check(&env, paid, insurance_debits, false);
                 }
@@ -608,6 +619,6 @@ fn v16_program_unsigned_dual_quote_reserves_preserve_domain_claims_and_terminal_
             worlds += 1;
         }
     }
-    assert_eq!((worlds, payments), (4, 24));
-    eprintln!("row433 dual-quote reserve progress: worlds={worlds}, unsigned_payments={payments}, closures={worlds}, peak_cu={peak:?}");
+    assert_eq!((worlds, payments, unsigned_payments), (4, 24, 12));
+    eprintln!("row433 dual-quote reserve progress: worlds={worlds}, payments={payments}, unsigned_primary_payments={unsigned_payments}, closures={worlds}, peak_cu={peak:?}");
 }

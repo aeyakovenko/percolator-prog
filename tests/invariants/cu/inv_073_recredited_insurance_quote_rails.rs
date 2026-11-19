@@ -1,7 +1,9 @@
 //! INV-073 / row421: recovered insurance has one claim across both quote rails.
 //! Public loss settlement spends 100 primary atoms after both insurance keys are
-//! dropped. Backing expiry exposes a 100-atom recovery; unsigned payouts switch
-//! rails without counting donated secondary liquidity as another entitlement.
+//! dropped. Backing expiry exposes a 100-atom recovery; its payouts switch rails
+//! without counting donated secondary liquidity as another entitlement. On the
+//! primary rail nobody signs. On the secondary rail the beneficiary signs its own
+//! payment: nobody else may choose that mint for it (#477).
 //! Recredit/payment rollback and paid-prefix rollback precede exact dual-vault
 //! retirement. This finite history requires portfolio owners and the close admin.
 
@@ -115,6 +117,7 @@ pub(super) fn finish(
     admin: &Keypair,
     asset: usize,
     absent: [Pubkey; 3],
+    secondary_payee: &Keypair,
     primary_recipient: Pubkey,
     secondary: &Secondary,
     entitlement: u64,
@@ -138,6 +141,7 @@ pub(super) fn finish(
     let sequences = [0, 1].map(|index| env.control_sequences(index));
     let absent_frames = absent.map(|key| env.svm.get_account(&key));
     assert!(matches!(entitlement, 100 | 101));
+    assert_eq!(secondary_payee.pubkey(), absent[0]);
     assert!(!absent.contains(&env.payer.pubkey()));
     assert_ne!(env.payer.pubkey(), admin.pubkey());
     assert_eq!(initial.1.insurance_domain_spent[domain], 100);
@@ -194,6 +198,15 @@ pub(super) fn finish(
         if signed_close {
             signers.push(admin);
         }
+        // The beneficiary signs only where an instruction names it as a signer: its
+        // payment in the secondary mint.
+        let payee_signs = instructions
+            .iter()
+            .flat_map(|ix| &ix.accounts)
+            .any(|meta| meta.is_signer && meta.pubkey == absent[0]);
+        if payee_signs {
+            signers.push(secondary_payee);
+        }
         let tx = Transaction::new_signed_with_payer(
             &batch,
             Some(&env.payer.pubkey()),
@@ -203,10 +216,13 @@ pub(super) fn finish(
         tx.verify().unwrap();
         assert!(bincode::serialized_size(&tx).unwrap() <= 1_232);
         let required = usize::from(tx.message.header.num_required_signatures);
-        assert_eq!(required, 1 + usize::from(signed_close));
-        assert!(absent
-            .iter()
-            .all(|key| !tx.message.account_keys[..required].contains(key)));
+        assert_eq!(
+            required,
+            1 + usize::from(signed_close) + usize::from(payee_signs)
+        );
+        assert!(absent.iter().enumerate().all(|(index, key)| {
+            (index == 0 && payee_signs) || !tx.message.account_keys[..required].contains(key)
+        }));
         let mut keys = tx.message.account_keys.clone();
         keys.extend_from_slice(tracked);
         keys.sort_unstable();
@@ -267,7 +283,7 @@ pub(super) fn finish(
     let withdrawal_at = |rail: usize, amount: u64, authority_epoch: u64| Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new_readonly(absent[0], false),
+            AccountMeta::new_readonly(absent[0], rail == 1),
             AccountMeta::new(market_key, false),
             AccountMeta::new(recipients[rail], false),
             AccountMeta::new(vaults[rail], false),
@@ -287,11 +303,15 @@ pub(super) fn finish(
     };
     let first_rail = usize::from(secondary_first);
     let last_rail = 1 - first_rail;
-    for ix in [
-        withdrawal(env, first_rail, FIRST),
-        withdrawal(env, last_rail, entitlement - FIRST),
+    for (rail, ix) in [
+        (first_rail, withdrawal(env, first_rail, FIRST)),
+        (last_rail, withdrawal(env, last_rail, entitlement - FIRST)),
     ] {
-        assert!(ix.accounts.iter().all(|meta| !meta.is_signer));
+        assert!(ix
+            .accounts
+            .iter()
+            .enumerate()
+            .all(|(index, meta)| meta.is_signer == (index == 0 && rail == 1)));
         assert!(!ix
             .accounts
             .iter()

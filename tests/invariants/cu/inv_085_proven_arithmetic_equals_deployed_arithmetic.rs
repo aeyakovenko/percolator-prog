@@ -1773,6 +1773,7 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         ArithmeticOwner { function: "hybrid_target_for_crank_view", class: "STRUCTURAL", evidence: "INV-088" },
         ArithmeticOwner { function: "zero_move_funding_path_for_profile_view", class: "STRUCTURAL", evidence: "INV-088" },
         ArithmeticOwner { function: "handle_close_resolved", class: "STRUCTURAL", evidence: "INV-073" },
+        ArithmeticOwner { function: "handle_close_portfolio", class: "STRUCTURAL", evidence: "INV-073" },
         ArithmeticOwner { function: "handle_force_close_abandoned_asset", class: "STRUCTURAL", evidence: "INV-088" },
         ArithmeticOwner { function: "handle_permissionless_crank_zero_copy", class: "STRUCTURAL", evidence: "INV-088" },
     ];

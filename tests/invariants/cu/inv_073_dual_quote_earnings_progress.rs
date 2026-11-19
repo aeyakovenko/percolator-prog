@@ -3,6 +3,8 @@
 //! one rail, a rejected suffix+close bundle rolls back the suffix and ledger
 //! initialization state, and the suffix then retries on the other rail. Principal
 //! and insurance stay separate until their own unsigned terminal withdrawals.
+//! The fee payment on the secondary rail carries the provider's signature, and
+//! nothing else does: nobody but the payee may choose that mint for it (#477).
 //! Native-primary worlds additionally restore an absent ATA inside the unsigned
 //! fee payment and roll back both creation and payment at a premature close.
 //! A redeemed native fee prefix survives wallet disappearance, cross-rail fee
@@ -60,6 +62,7 @@ fn verify_dual_quote_earnings_histories(redeem_prefix: bool) {
             terminal_earnings_world_with_dual_spl_quote(true)
         };
         let provider_key = provider.pubkey();
+        let secondary_payee = provider.insecure_clone();
         assert_eq!(provider_key, wallets[2]);
         assert_eq!(env.token_amount(tokens[2]), 0);
         assert_eq!(env.token_amount(secondary.provider_token), 0);
@@ -155,10 +158,11 @@ fn verify_dual_quote_earnings_histories(redeem_prefix: bool) {
                 ixs.push(repair.clone());
             }
             ixs.push(ix);
-            assert!(ixs
-                .iter()
-                .flat_map(|ix| &ix.accounts)
-                .all(|meta| { !meta.is_signer || meta.pubkey == payer_key }));
+            assert!(ixs.iter().flat_map(|ix| &ix.accounts).all(|meta| {
+                !meta.is_signer
+                    || meta.pubkey == payer_key
+                    || (rail == 1 && meta.pubkey == provider_key)
+            }));
             ixs
         };
         // Expected images only: never installed into LiteSVM.
@@ -182,7 +186,7 @@ fn verify_dual_quote_earnings_histories(redeem_prefix: bool) {
             Instruction {
                 program_id: env.program_id,
                 accounts: vec![
-                    AccountMeta::new_readonly(provider_key, false),
+                    AccountMeta::new_readonly(provider_key, rail == 1),
                     AccountMeta::new(env.market, false),
                     AccountMeta::new(ledger, false),
                     AccountMeta::new(dest, false),
@@ -451,7 +455,10 @@ fn verify_dual_quote_earnings_histories(redeem_prefix: bool) {
         check(&env, [0, 0], 0, 0, 0, false);
         let second_rail = 1 - first_rail;
         let first = payout(&env, first_rail, PREFIX);
-        assert!(first.accounts.iter().all(|meta| !meta.is_signer));
+        assert!(first.accounts[1..].iter().all(|meta| !meta.is_signer));
+        let payee = [&secondary_payee];
+        let first_signers: &[&Keypair] = if first_rail == 1 { &payee } else { &[] };
+        let second_signers: &[&Keypair] = if second_rail == 1 { &payee } else { &[] };
         let first_allowed = [
             env.market,
             ledger,
@@ -465,7 +472,7 @@ fn verify_dual_quote_earnings_histories(redeem_prefix: bool) {
             peak[1] = peak[1].max(land(
                 &mut env,
                 &rejected,
-                &[],
+                first_signers,
                 &tracked,
                 &[],
                 0,
@@ -478,7 +485,7 @@ fn verify_dual_quote_earnings_histories(redeem_prefix: bool) {
         peak[0] = peak[0].max(land(
             &mut env,
             &first,
-            &[],
+            first_signers,
             &tracked,
             &first_allowed,
             if native && first_rail == 0 && !redeem_prefix {
@@ -540,7 +547,7 @@ fn verify_dual_quote_earnings_histories(redeem_prefix: bool) {
         peak[1] = peak[1].max(land(
             &mut env,
             &rejected,
-            &[],
+            second_signers,
             &tracked,
             &[],
             0,
@@ -559,7 +566,7 @@ fn verify_dual_quote_earnings_histories(redeem_prefix: bool) {
         peak[0] = peak[0].max(land(
             &mut env,
             &suffix,
-            &[],
+            second_signers,
             &tracked,
             &suffix_allowed,
             if native && second_rail == 0 { rent } else { 0 },

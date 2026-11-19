@@ -577,7 +577,9 @@ fn v16_program_reassigned_canonical_custody_keeps_absent_owner_claims_through_re
                     ));
                 }
 
-                // Only the configured market authority may perform mechanical deletion.
+                // Mechanical deletion: the market authority at once, anyone once the owner
+                // window has passed. Here it has, so the keeper's deletion is admitted, and
+                // the bundle rolls back at the misdirected insurance payment after it.
                 let admin = Keypair::from_bytes(&env.admin.to_bytes()).unwrap();
                 let close = |env: &V16CuEnv, i: usize, closer| {
                     instruction(
@@ -590,15 +592,6 @@ fn v16_program_reassigned_canonical_custody_keeps_absent_owner_claims_through_re
                         ],
                     )
                 };
-                let unauthorized = close(&env, first, keeper.pubkey());
-                peak = peak.max(execute(
-                    &mut env,
-                    &keeper,
-                    &[unauthorized],
-                    &[],
-                    &tracked,
-                    Some((0, PercolatorError::Unauthorized as u32)),
-                ));
                 let market_rent = env.svm.get_account(&env.market).unwrap().lamports;
                 let portfolio_rent: u64 = portfolios
                     .into_iter()
@@ -623,6 +616,18 @@ fn v16_program_reassigned_canonical_custody_keeps_absent_owner_claims_through_re
                         ],
                     )
                 };
+                let admitted = [
+                    close(&env, first, keeper.pubkey()),
+                    insurance(&env, original[2]),
+                ];
+                peak = peak.max(execute(
+                    &mut env,
+                    &keeper,
+                    &admitted,
+                    &[&admin],
+                    &tracked,
+                    Some((1, PercolatorError::InvalidTokenAccount as u32)),
+                ));
                 cleanup.push(insurance(&env, original[2]));
                 peak = peak.max(execute(
                     &mut env,

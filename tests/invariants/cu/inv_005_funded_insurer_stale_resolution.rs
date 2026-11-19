@@ -637,14 +637,20 @@ fn v16_program_funded_insurer_handoff_preserves_stale_deadline_and_permissionles
                     ],
                 )
             };
-            let ix = deregister(&env, &successor, order[0]);
+            // The owner window has passed, so anyone may remove an empty portfolio, the
+            // successor insurer included. Its payout still waits for the other portfolio:
+            // the bundle fails there and the removal rolls back with it.
+            let bundle = [
+                deregister(&env, &successor, order[0]),
+                payout(&env, &successor, wallets[1], remaining_insurance, true),
+            ];
             submit(
                 &mut env,
                 &protected,
-                &[ix],
+                &bundle,
                 &[&successor],
                 &[],
-                Some((0, PercolatorError::Unauthorized)),
+                Some((1, PercolatorError::EngineLockActive)),
             );
             let bundle = [
                 deregister(&env, &admin, order[0]),
