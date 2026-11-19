@@ -521,7 +521,9 @@ This section describes intent and operational ordering, not argument-by-argument
   - a call that could only wait for that fails with `EngineNonProgress` and changes nothing.
     Settling never waits: cranking every remaining portfolio (this instruction or a resolved
     `PermissionlessCrank`, both unsigned once `force_close_delay_slots` have passed since
-    resolution) ends the wait
+    resolution) ends the wait. Until then only its owner can crank a portfolio, so an owner
+    that stays silent holds the positions that wait for it to the end of that window and no
+    longer
 - **CloseSlab**
   - requires the market authority and advances bounded expiry/recredit normalization before final reclaim
   - once all claims are terminal, burns booked classic SPL residue; booked native wSOL residue

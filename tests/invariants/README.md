@@ -31881,6 +31881,18 @@ changes state; a receipt that is owed a rounding atom collects it once its bucke
 **Control.** On engine `52659c02` the test fails in the order W, T, X: "paid [0, 291791000,
 10208999] ... account 1 is owed 251989602".
 
+**The wait and the owner window.**
+`inv_066_resolved_payout_fairness_and_order_independence::bankrupt_shortfall_close_order::v16_program_silent_owner_holds_the_other_side_only_for_the_owner_window`:
+the same world with a fourth account L (10M, long one unit against W, solvent) and an owner
+window (`force_close_delay_slots`) of 50 slots. Inside the window an unsigned crank of any
+account is refused (`ExpectedSigner`). L pays its loss under its own signature and waits while
+W has not settled; once W and X have settled, L leaves with its capital, inside the window and
+before T has been touched. W and X then wait for T, whose owner stays silent, to the last slot
+of the window: their own cranks are `EngineNonProgress` and nothing else leaves the vault. Once
+the window has passed anyone cranks T and the market drains unsigned: T is paid nothing, L its
+capital exactly, W and X their weight shares to within two atoms. An owner that stays silent
+therefore holds the positions that wait for it for the owner window at most.
+
 **What a resolved market looks like now.** These follow from the rule and are what the
 existing selectors below had to be re-staged for:
 
