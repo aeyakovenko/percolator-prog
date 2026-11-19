@@ -21496,7 +21496,6 @@ pub fn verify_stale_claim_snapshot_barrier_route_matrix(seed: [u8; 32]) -> Resul
     const WINNER_DEPOSIT: u128 = 1_000;
     const LOSER_DEPOSIT: u128 = 100;
     const EXPECTED_CLAIM: u128 = 200;
-    const EXPECTED_JUNIOR_CLAIM: u128 = EXPECTED_CLAIM - LOSER_DEPOSIT;
 
     fn independent_resolved_blockers(group: &MarketGroupV16) -> Result<u64, String> {
         let asset = group
@@ -21695,9 +21694,14 @@ pub fn verify_stale_claim_snapshot_barrier_route_matrix(seed: [u8; 32]) -> Resul
                 &format!("{label} after loser settlement"),
                 &env,
             )?;
+            // The loser has settled and left. The winner's settled position kept its loss
+            // weight until then (engine #269) and is the one payout blocker left; its
+            // next call detaches it.
             let (_, all_settled_group) = env.primary_market_state();
-            if independent_resolved_blockers(&all_settled_group)? != 0
-                || all_settled_group.resolved_payout_blocker_count != 0
+            if independent_resolved_blockers(&all_settled_group)? != 1
+                || all_settled_group.resolved_payout_blocker_count != 1
+                || !portfolio_has_active_asset(&env.primary_portfolio(winner), ASSET as usize)
+                || portfolio_has_active_asset(&env.primary_portfolio(loser), ASSET as usize)
                 || all_settled_group.stale_certificate_count != 0
                 || all_settled_group.b_stale_account_count != 0
                 || all_settled_group.negative_pnl_account_count != 0
@@ -21719,11 +21723,17 @@ pub fn verify_stale_claim_snapshot_barrier_route_matrix(seed: [u8; 32]) -> Resul
                 ));
             }
 
-            let mut snapshot_steps = 0u8;
+            // The loser's shortfall was booked onto the winner's position, which is still
+            // attached (engine #269). The winner's next call debits its claim to what
+            // the loser paid in; the call after that realizes the claim from that backing
+            // and pays. No junior face is left, so no payout snapshot is captured at all:
+            // the stale claim was never snapshotted unmaterialized, and every bound stayed
+            // at or above the claim.
+            let backed_claim_num = LOSER_DEPOSIT
+                .checked_mul(BOUND_SCALE)
+                .ok_or_else(|| format!("{label}: backed claim scale overflow"))?;
+            let mut winner_steps = 0u8;
             for step in 0..8 {
-                if env.primary_market_state().1.payout_snapshot_captured {
-                    break;
-                }
                 let market_before = env.market_data(false);
                 let portfolio_before = env.primary_portfolio_data(winner);
                 let destination_before = env.token_amount(env.actors[winner].destination_token);
@@ -21735,47 +21745,54 @@ pub fn verify_stale_claim_snapshot_barrier_route_matrix(seed: [u8; 32]) -> Resul
                     {
                         break;
                     }
-                    Err(error) => return Err(format!("{label} snapshot step {step}: {error}")),
+                    Err(error) => return Err(format!("{label} winner step {step}: {error}")),
                 }
                 if env.market_data(false) == market_before
                     && env.primary_portfolio_data(winner) == portfolio_before
                     && env.token_amount(env.actors[winner].destination_token) == destination_before
                 {
                     return Err(format!(
-                        "{label}: successful snapshot step {step} made no progress"
+                        "{label}: successful winner step {step} made no progress"
                     ));
                 }
-                snapshot_steps = snapshot_steps
+                let (_, group) = env.primary_market_state();
+                let expected_bound = if step == 0 { backed_claim_num } else { 0 };
+                if group.payout_snapshot_captured
+                    || group.pnl_pos_bound_tot_num != expected_bound
+                    || group.source_claim_bound_total_num != expected_bound
+                {
+                    return Err(format!(
+                        "{label}: winner step {step} left snapshot={}, bound={}/{} for an exact                          claim bound of {expected_bound}",
+                        group.payout_snapshot_captured,
+                        group.pnl_pos_bound_tot_num,
+                        group.source_claim_bound_total_num,
+                    ));
+                }
+                winner_steps = winner_steps
                     .checked_add(1)
-                    .ok_or_else(|| format!("{label}: snapshot step count overflow"))?;
+                    .ok_or_else(|| format!("{label}: winner step count overflow"))?;
             }
-            let (_, snapshotted_group) = env.primary_market_state();
+            let (_, terminal_group) = env.primary_market_state();
             let terminal_winner = env.primary_portfolio(winner);
-            if !snapshotted_group.payout_snapshot_captured
-                || snapshot_steps == 0
-                || snapshotted_group.payout_snapshot_pnl_pos_tot != EXPECTED_JUNIOR_CLAIM
-                || snapshotted_group
-                    .resolved_payout_ledger
-                    .terminal_claim_exact_receipts_num
-                    != EXPECTED_JUNIOR_CLAIM * BOUND_SCALE
-                || snapshotted_group
-                    .resolved_payout_ledger
-                    .terminal_claim_bound_unreceipted_num
-                    != 0
+            if winner_steps != 2
+                || terminal_group.payout_snapshot_captured
+                || terminal_group.resolved_payout_ledger != ResolvedPayoutLedgerV16::default()
+                || independent_resolved_blockers(&terminal_group)? != 0
+                || terminal_group.resolved_payout_blocker_count != 0
+                || terminal_winner.capital.get() != 0
+                || terminal_winner.pnl.get() != 0
+                || env.token_amount(env.actors[winner].destination_token)
+                    != winner_destination_before
+                        + u64::try_from(WINNER_DEPOSIT + LOSER_DEPOSIT)
+                            .map_err(|_| format!("{label}: winner entitlement exceeds SPL range"))?
             {
                 return Err(format!(
-                    "{label}: terminal snapshot omitted the settled claim after {snapshot_steps} \
-                     steps: snapshot={}, face={}, ledger={:?}, blockers={}, stale/b/negative={}/{}/{}, \
-                     source_total={}, pnl_bound={}, winner capital/pnl/reserved={}/{}/{}",
-                    snapshotted_group.payout_snapshot_captured,
-                    snapshotted_group.payout_snapshot_pnl_pos_tot,
-                    snapshotted_group.resolved_payout_ledger,
-                    snapshotted_group.resolved_payout_blocker_count,
-                    snapshotted_group.stale_certificate_count,
-                    snapshotted_group.b_stale_account_count,
-                    snapshotted_group.negative_pnl_account_count,
-                    snapshotted_group.source_claim_bound_total_num,
-                    snapshotted_group.pnl_pos_bound_tot_num,
+                    "{label}: the debited claim was not realized from its backing in {winner_steps}                      steps: snapshot={}, ledger={:?}, blockers={}, source_total={}, pnl_bound={},                      winner capital/pnl/reserved={}/{}/{}",
+                    terminal_group.payout_snapshot_captured,
+                    terminal_group.resolved_payout_ledger,
+                    terminal_group.resolved_payout_blocker_count,
+                    terminal_group.source_claim_bound_total_num,
+                    terminal_group.pnl_pos_bound_tot_num,
                     terminal_winner.capital.get(),
                     terminal_winner.pnl.get(),
                     terminal_winner.reserved_pnl.get(),
@@ -24088,8 +24105,7 @@ pub fn reproduce_fractional_cap_settlement(
             .checked_add(1)
             .ok_or("PR 365 close slot overflow")?,
     );
-    let (long_payout_u128, _) = drain_resolved_actor(&mut env, 0)?;
-    let (short_payout_u128, _) = drain_resolved_actor(&mut env, 1)?;
+    let [long_payout_u128, short_payout_u128] = drain_resolved_actors_in_order(&mut env, [0, 1])?;
     let long_payout =
         u64::try_from(long_payout_u128).map_err(|_| "PR 365 long payout exceeds SPL range")?;
     let short_payout =
@@ -24405,8 +24421,7 @@ fn run_pending_mark_resolve_world(
     }
     let effective_mark = resolved.assets[0].effective_price;
     env.warp_to_slot(RESOLVE_SLOT + 1);
-    let (short_payout, _) = drain_resolved_actor(&mut env, 1)?;
-    let (long_payout, _) = drain_resolved_actor(&mut env, 0)?;
+    let [short_payout, long_payout] = drain_resolved_actors_in_order(&mut env, [1, 0])?;
     let long_payout =
         u64::try_from(long_payout).map_err(|_| "PR 255 long payout exceeds SPL range")?;
     let short_payout =
@@ -31525,10 +31540,8 @@ fn run_prospective_funding_world(
     }
     env.resolve_market()
         .map_err(|error| format!("PR 380 resolve payout world: {error}"))?;
-    let (stamper_short_payout, _) = drain_resolved_actor(&mut env, 3)?;
-    let (victim_payout, _) = drain_resolved_actor(&mut env, 1)?;
-    let (attacker_payout, _) = drain_resolved_actor(&mut env, 0)?;
-    let (stamper_long_payout, _) = drain_resolved_actor(&mut env, 2)?;
+    let [stamper_short_payout, victim_payout, attacker_payout, stamper_long_payout] =
+        drain_resolved_actors_in_order(&mut env, [3, 1, 0, 2])?;
     let coalition_payout = attacker_payout
         .checked_add(stamper_long_payout)
         .and_then(|value| value.checked_add(stamper_short_payout))
@@ -33046,6 +33059,33 @@ fn run_terminal_dust_payout_world(
         vault_remaining,
         observed_token_supply: env.token_supply_observed(),
     })
+}
+
+/// Drains `actors` in order, each to its fixed point, and comes back to an account that had
+/// to wait. Since engine #269 a position keeps its loss weight until the other side of
+/// its asset has settled its final K/F, so the first account drained can stop with its
+/// position attached and nothing paid. Returns each actor's payout, in the order given.
+fn drain_resolved_actors_in_order<const N: usize>(
+    env: &mut V16Svm,
+    actors: [usize; N],
+) -> Result<[u128; N], String> {
+    let mut payouts = [0u128; N];
+    for _ in 0..=N {
+        let mut progressed = false;
+        for (index, actor) in actors.into_iter().enumerate() {
+            let (payout, calls) = drain_resolved_actor(env, actor)?;
+            payouts[index] = payouts[index]
+                .checked_add(payout)
+                .ok_or("resolved payout sum overflow")?;
+            progressed |= calls != 0 || payout != 0;
+        }
+        if !progressed {
+            return Ok(payouts);
+        }
+    }
+    Err(format!(
+        "resolved actors {actors:?} did not reach a common fixed point"
+    ))
 }
 
 fn drain_resolved_actor(env: &mut V16Svm, actor: usize) -> Result<(u128, u16), String> {

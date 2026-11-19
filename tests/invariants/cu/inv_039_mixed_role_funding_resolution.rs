@@ -369,6 +369,25 @@ fn close_all_checked(
                         *peak = (*peak).max(cu);
                         assert_ne!(world.frame(), before);
                         progressed = true;
+                        // A settled position keeps its loss weight until the other side of
+                        // its asset has settled (engine #269). While every leg of the
+                        // account waits for that, a retry is rejected and rolls back exactly.
+                        let account = world.env.portfolio_state(world.actors[actor].portfolio);
+                        let legs = percolator::active_bitmap_count_ones(active_bitmap(&account));
+                        if legs != 0
+                            && resolved_legs_waiting_for_the_other_side(
+                                &world.env.market_state().1,
+                                &account,
+                            ) == legs as usize
+                        {
+                            let waiting = world.frame();
+                            let error = world
+                                .payout(actor, false)
+                                .expect_err("a close that only waits is not a successful call");
+                            assert!(is_engine_non_progress_error(&error), "{error}");
+                            assert_eq!(world.frame(), waiting);
+                            waiting_rejections += 1;
+                        }
                     }
                     Err(error) => {
                         assert!(is_engine_non_progress_error(&error), "{error}");

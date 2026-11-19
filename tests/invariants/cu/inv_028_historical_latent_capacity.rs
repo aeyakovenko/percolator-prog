@@ -880,6 +880,7 @@ fn v16_program_latent_capacity_at_resolution_preserves_attribution_and_exit() {
                 .encode(),
             };
             let mut saw_full_table = false;
+            let mut settlements = 0;
             for round in 0..(2 * DOMAINS + 8) {
                 if h.portfolios
                     .iter()
@@ -892,6 +893,8 @@ fn v16_program_latent_capacity_at_resolution_preserves_attribution_and_exit() {
                         continue;
                     }
                     let before = h.env.portfolio_state(h.portfolios[actor]);
+                    let waiting =
+                        resolved_legs_waiting_for_the_other_side(&h.env.market_state().1, &before);
                     let claims_before = h.source_claims(actor);
                     let market_before = h.env.svm.get_account(&h.env.market);
                     let peer = h.env.svm.get_account(&h.portfolios[1 - actor]);
@@ -910,7 +913,13 @@ fn v16_program_latent_capacity_at_resolution_preserves_attribution_and_exit() {
                     let active_before =
                         percolator::active_bitmap_count_ones(active_bitmap(&before));
                     let active_after = percolator::active_bitmap_count_ones(active_bitmap(&after));
-                    if active_before != 0 {
+                    if active_before != 0 && waiting == active_before as usize {
+                        // Every leg waits for the other account to settle its final K/F:
+                        // this call settles and pays nothing.
+                        assert_eq!(active_after, active_before, "settled legs wait");
+                        assert_eq!(h.env.token_amount(h.tokens[actor]), old_paid);
+                        settlements += 1;
+                    } else if active_before != 0 {
                         assert_eq!(active_after + 1, active_before, "one bounded leg detach");
                         let detached: Vec<_> = assets
                             .iter()
@@ -988,6 +997,10 @@ fn v16_program_latent_capacity_at_resolution_preserves_attribution_and_exit() {
             assert!(
                 saw_full_table,
                 "terminal settlement must actually fill both reserved slots"
+            );
+            assert!(
+                settlements <= 1,
+                "only the first account closed can have to wait"
             );
             for actor in order {
                 assert!(resolved_portfolio_is_terminal(&h.env, h.portfolios[actor]));

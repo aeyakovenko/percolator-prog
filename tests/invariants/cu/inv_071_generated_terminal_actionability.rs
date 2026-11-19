@@ -591,6 +591,26 @@ fn advance_user(world: &mut World, actor: usize, h: &History, receipt_only: bool
 }
 
 fn settle_receipts(world: &mut World, h: &History) {
+    // Since engine #269 a real position keeps its loss weight while any account in the
+    // market owes a loss that is not booked. All three losing accounts therefore book their
+    // shortfall before the first of them can detach, each in at most two rank-lowering
+    // calls (one of them first expires a lapsed backing bucket).
+    for actor in h.order(vec![1, 4, 6]) {
+        for call in 0.. {
+            let before = user_rank(world, actor);
+            if before[4] == 0 {
+                break;
+            }
+            assert!(call < 2, "user {actor} books its shortfall in two calls");
+            world.land(&[world.payout(actor, false, h.crank)], false, None);
+            let after = user_rank(world, actor);
+            assert!(
+                after < before,
+                "user {actor} must book its shortfall: {before:?} -> {after:?}"
+            );
+        }
+    }
+    assert_eq!(world.env.market_state().1.negative_pnl_account_count, 0);
     for actor in h.order(vec![1, 4, 6]) {
         advance_user(world, actor, h, false);
     }

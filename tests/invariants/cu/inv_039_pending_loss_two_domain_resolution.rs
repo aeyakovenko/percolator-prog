@@ -131,6 +131,11 @@ fn setup_with_deposits(reverse: bool, peak: &mut u64, deposits: [u128; 5]) -> At
 struct DebtModel {
     initial: [CloseProgressLedgerV16; 2],
     booked: [bool; 2],
+    /// The holder has absorbed its B debit. Since engine #269 the call that settles a
+    /// B charge against a gain reports progress with the leg still attached, so that the
+    /// next call places the backing that was behind the debited claim; that next call
+    /// releases the leg.
+    debited: [bool; 2],
     released: [bool; 2],
 }
 
@@ -169,7 +174,8 @@ impl DebtModel {
                 "domain {pair}: only its debtor can book this residual"
             );
             assert_close_partition(expected_close, residuals[pair]);
-            assert!(!self.released[pair] || self.booked[pair]);
+            assert!(!self.debited[pair] || self.booked[pair]);
+            assert!(!self.released[pair] || self.debited[pair]);
         }
         for (actor, a) in world.actors.iter().enumerate() {
             let account = world.env.portfolio_state(a.portfolio);
@@ -185,7 +191,7 @@ impl DebtModel {
                 0
             };
             let expected = match actor {
-                0 | 2 if !self.released[actor / 2] => deposits[actor] + gains[actor / 2],
+                0 | 2 if !self.debited[actor / 2] => deposits[actor] + gains[actor / 2],
                 1 | 3 if !self.booked[actor / 2] => {
                     assert_eq!(account.capital.get(), 0);
                     assert_eq!(account.pnl.get(), -(residuals[actor / 2] as i128));
@@ -259,6 +265,7 @@ fn v16_program_two_bankrupt_domains_preserve_pending_debt_across_resolution_orde
                         )
                     }),
                     booked: [false; 2],
+                    debited: [false; 2],
                     released: [false; 2],
                 };
                 for close in model.initial {
@@ -325,6 +332,10 @@ fn v16_program_two_bankrupt_domains_preserve_pending_debt_across_resolution_orde
                     );
                 }
 
+                // The holder absorbs its B debit in one call and is released by the next.
+                model.close(&mut world, 2 * early, &mut peak_terminal);
+                model.debited[early] = true;
+                model.check(&world);
                 model.close(&mut world, 2 * early, &mut peak_terminal);
                 model.released[early] = true;
                 model.check(&world);
@@ -354,16 +365,17 @@ fn v16_program_two_bankrupt_domains_preserve_pending_debt_across_resolution_orde
                     model.close(&mut world, actor, &mut peak_terminal);
                     model.check(&world);
                 }
-                for round in 0..2 {
+                for round in 0..3 {
                     for actor in holders {
                         if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio)
                         {
                             continue;
                         }
                         // Residual booking alone does not make the global payout census ready:
-                        // the second holder must first absorb its own outstanding B debit.
+                        // the second holder must first absorb its own outstanding B debit and
+                        // be released, one call each.
                         if actor == 2 * early && !model.released[late] {
-                            assert_eq!(round, 0);
+                            assert!(round < 2);
                             let waiting = terminal_instruction(&world, actor);
                             peak_terminal = peak_terminal.max(reject(
                                 &mut world,
@@ -382,7 +394,11 @@ fn v16_program_two_bankrupt_domains_preserve_pending_debt_across_resolution_orde
                             ));
                             model.check(&world);
                             model.close(&mut world, actor, &mut peak_terminal);
-                            model.released[actor / 2] = true;
+                            if model.debited[actor / 2] {
+                                model.released[actor / 2] = true;
+                            } else {
+                                model.debited[actor / 2] = true;
+                            }
                         }
                         model.check(&world);
                     }
@@ -417,6 +433,8 @@ fn v16_program_two_bankrupt_domains_preserve_pending_debt_across_resolution_orde
         }
     }
     assert_eq!(worlds, 8);
-    assert_eq!(claim_waits, 4);
+    // The first holder waits while the second absorbs its debit and again while it is
+    // released when it is asked first (two waits in four worlds), once otherwise.
+    assert_eq!(claim_waits, 12);
     println!("INV-039 two bankrupt domains: {worlds} worlds, 24 prefix rollbacks, {claim_waits} claim-gate rollbacks, 40 rejected terminal retries, 40 terminal deletions; peak CU setup={peak_setup}, terminal={peak_terminal}");
 }

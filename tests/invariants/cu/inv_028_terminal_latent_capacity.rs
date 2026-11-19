@@ -50,7 +50,16 @@ fn census(h: &History) {
     }
 }
 
-fn terminal_step(h: &mut History, actor: usize, automatic: bool, signed: bool) -> (u64, usize) {
+/// One terminal call. `settles_only` is the first call after resolution: since engine #269
+/// a position keeps its loss weight until the other side of its asset has settled its
+/// final K/F, so the first account to be closed settles every leg and waits.
+fn terminal_step(
+    h: &mut History,
+    actor: usize,
+    automatic: bool,
+    signed: bool,
+    settles_only: bool,
+) -> (u64, usize) {
     let before = h.env.portfolio_state(h.portfolios[actor]);
     let active_before = percolator::active_bitmap_count_ones(active_bitmap(&before));
     let claims_before = h.source_claims(actor);
@@ -118,7 +127,15 @@ fn terminal_step(h: &mut History, actor: usize, automatic: bool, signed: bool) -
     let sources_after = claims_after.iter().filter(|c| **c != 0).count();
     let paid = h.env.token_amount(h.tokens[actor]) - paid_before;
     assert_eq!(vault_before - h.env.token_amount(h.env.vault), paid);
-    if active_before > 0 {
+    if settles_only {
+        assert_eq!(actor, 1, "the loser is closed first");
+        assert_eq!(
+            active_after, active_before,
+            "settled legs wait for the other side"
+        );
+        assert_eq!(paid, 0, "a settlement that waits pays nothing");
+        assert_eq!(after.capital.get(), CAPITAL - h.claims.iter().sum::<u128>());
+    } else if active_before > 0 {
         assert_eq!(
             active_after + 1,
             active_before,
@@ -134,7 +151,8 @@ fn terminal_step(h: &mut History, actor: usize, automatic: bool, signed: bool) -
                 assert_eq!(after.capital.get(), CAPITAL - h.claims.iter().sum::<u128>());
             }
         } else if actor == 0 {
-            assert_eq!(sources_after + 1, sources_before);
+            // The loser's last leg is still attached, so no claim is realized yet.
+            assert_eq!(sources_after, sources_before);
         }
     } else if sources_before > 0 {
         assert_eq!(
@@ -288,7 +306,7 @@ fn v16_program_full_latent_settlement_survives_terminal_owner_window_expiry() {
             let expiry = h.env.market_state().1.resolved_slot + OWNER_WINDOW;
             h.slot = expiry - 1;
             h.env.svm.warp_to_slot(h.slot);
-            let (mut max_terminal, bytes) = terminal_step(&mut h, 1, false, true);
+            let (mut max_terminal, bytes) = terminal_step(&mut h, 1, false, true, true);
             max_bytes = max_bytes.max(bytes);
             assert_eq!(h.env.svm.get_account(&h.portfolios[0]), winner);
             assert_eq!(h.source_claims(0), retained);
@@ -296,7 +314,7 @@ fn v16_program_full_latent_settlement_survives_terminal_owner_window_expiry() {
             h.slot = expiry + late;
             h.env.svm.warp_to_slot(h.slot);
             let mut steps = 1;
-            for _ in 0..(ASSETS + DOMAINS + 2) {
+            for _ in 0..(ASSETS + DOMAINS + 3) {
                 if h.portfolios
                     .iter()
                     .all(|p| resolved_portfolio_is_terminal(&h.env, *p))
@@ -307,13 +325,14 @@ fn v16_program_full_latent_settlement_survives_terminal_owner_window_expiry() {
                     if resolved_portfolio_is_terminal(&h.env, h.portfolios[actor]) {
                         continue;
                     }
-                    let (cu, bytes) = terminal_step(&mut h, actor, automatic, false);
+                    let (cu, bytes) = terminal_step(&mut h, actor, automatic, false, false);
                     max_terminal = max_terminal.max(cu);
                     max_bytes = max_bytes.max(bytes);
                     steps += 1;
                 }
             }
-            assert_eq!(steps, 2 * ASSETS + DOMAINS - 1);
+            // One settlement, then every leg and every source domain in a call of its own.
+            assert_eq!(steps, 2 * ASSETS + DOMAINS + 1);
             for actor in 0..2 {
                 assert!(resolved_portfolio_is_terminal(&h.env, h.portfolios[actor]));
                 assert_eq!(

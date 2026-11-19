@@ -347,10 +347,14 @@ impl History {
         DEPOSITS.iter().sum::<u128>() + self.backing + 1
     }
 
-    // Fixed public checkpoints: 0 resolved; 1/2 debtor payouts; 3 flat debt cleared;
+    // Fixed public checkpoints: 0 resolved; 1 flat debt cleared; 2/3 debtor payouts;
     // 4 waiting leg detached; 5 source conversion/payout; 6 unrelated expiry;
     // 7 first receipt; 8 shared expiry; 9 waiting payout; 10 top-up; 11 receipt cleanup.
     // Expectations use deposits, quantities and mark delta, never observed rates.
+    //
+    // The flat debt is cleared first: since engine #269 a real position keeps its
+    // loss weight while any account in the market owes a loss that is not booked, so the
+    // debtors' positions cannot leave, and they cannot be paid, before it.
     fn check(self, world: &World, stage: u8) {
         let group = world.env.market_state().1;
         let portfolios: Vec<_> = world
@@ -376,7 +380,7 @@ impl History {
         let mut capital = DEPOSITS;
         capital[5] = 0;
         let mut pnl = FACE.map(|v| v as i128);
-        pnl[5] = if stage < 3 {
+        pnl[5] = if stage < 1 {
             -(FACE[4] as i128 - DEPOSITS[5] as i128)
         } else {
             0
@@ -385,7 +389,7 @@ impl History {
         let mut active = [true, true, true, true, false, false];
         let mut settled_loss = 0;
         for (index, debtor) in self.debtors.into_iter().enumerate() {
-            if stage > index as u8 {
+            if stage > index as u8 + 1 {
                 settled_loss += FACE[debtor - 1];
                 capital[debtor] = 0;
                 paid[debtor] = DEPOSITS[debtor] - FACE[debtor - 1];
@@ -771,12 +775,12 @@ fn v16_program_late_debtor_source_cap_preserves_receipt_residual_entitlement() {
                             .unwrap(),
                         )
                     });
+                    step(&mut world, history, 1, 5, false, &mut evidence);
                     let first_debt = world.payout(debtors[0], false);
-                    rollback(&mut world, history, 0, vec![first_debt], 1, &mut evidence);
+                    rollback(&mut world, history, 1, vec![first_debt], 1, &mut evidence);
                     for (stage, actor) in [
-                        (1, debtors[0]),
-                        (2, debtors[1]),
-                        (3, 5),
+                        (2, debtors[0]),
+                        (3, debtors[1]),
                         (4, history.waiting()),
                         (5, converter),
                         (6, 4),

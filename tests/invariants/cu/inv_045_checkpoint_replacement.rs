@@ -132,6 +132,51 @@ fn frame(world: &World, matcher: Matcher, tx: &Transaction) -> BTreeMap<Pubkey, 
 }
 
 #[track_caller]
+/// Whether a resolved close would be rejected as non-progress.
+///
+/// Since engine #269 a settled position keeps its loss weight until the other side of
+/// its asset has settled its final K/F, and a close that can only wait for that is rejected.
+/// The payout driver checks that rejection's exact rollback itself; only an accepted close
+/// has a prefix to roll back.
+fn close_waits(world: &mut World, close: &Instruction) -> bool {
+    world.env.svm.expire_blockhash();
+    let mut signers = vec![&world.env.payer];
+    for owner in &world.owners {
+        if close
+            .accounts
+            .iter()
+            .any(|meta| meta.is_signer && meta.pubkey == owner.pubkey())
+        {
+            signers.push(owner);
+        }
+    }
+    let tx = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            ComputeBudgetInstruction::set_compute_unit_limit(CU_LIMIT),
+            close.clone(),
+        ],
+        Some(&world.env.payer.pubkey()),
+        &signers,
+        world.env.svm.latest_blockhash(),
+    );
+    match world.env.svm.simulate_transaction(tx.into()) {
+        Ok(_) => false,
+        Err(failed) => {
+            assert_eq!(
+                failed.err,
+                TransactionError::InstructionError(
+                    2,
+                    InstructionError::Custom(PercolatorError::EngineNonProgress as u32)
+                ),
+                "{:?}",
+                failed.meta.logs
+            );
+            true
+        }
+    }
+}
+
 fn transact(world: &mut World, matcher: Matcher, prefix: &[Instruction], reject: bool) -> usize {
     world.env.svm.expire_blockhash();
     let mut instructions = vec![
@@ -577,7 +622,7 @@ fn v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolv
                     100,
                     dust,
                     |world, actor, instruction| {
-                        if rollback {
+                        if rollback && !close_waits(world, instruction) {
                             let payments =
                                 transact(world, matcher, std::slice::from_ref(instruction), true);
                             close_spl_rollbacks += payments;
@@ -616,8 +661,10 @@ fn v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolv
         }
     }
     assert_eq!(worlds, 8);
-    // Pinned public rollback evidence: 42 trade/crank prefixes plus 11 resolved
-    // close attempts in each of the 4 rollback worlds (#457 general netting).
-    assert_eq!(rollbacks, 86);
+    // Pinned public rollback evidence: 42 trade/crank prefixes plus 12 accepted resolved
+    // closes in each of the 4 rollback worlds (#457 general netting; one more than before
+    // engine #269, the settlement of a position that then waits for the other side).
+    // A close rejected as non-progress has no prefix to roll back.
+    assert_eq!(rollbacks, 90);
     eprintln!("row425 overlapping checkpoints: worlds={worlds}, rollbacks={rollbacks}, SPL prefixes rolled back={spl_rollbacks}, payouts={}, peak CU={peak_cu}, bound={CU_LIMIT}", worlds * 4);
 }

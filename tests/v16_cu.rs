@@ -41,8 +41,8 @@ const MULTI_ASSET_OPEN_TRADE_CU_LIMIT: u64 = 750_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 const MAX_10M_MARKET_SLOTS: usize = 5_682;
 const CERTIFIED_ENGINE_GIT_SOURCE: &str =
-    "git+https://github.com/aeyakovenko/percolator?rev=52659c02165439c84d99711231c1bf1c74cefc46#\
-     52659c02165439c84d99711231c1bf1c74cefc46";
+    "git+https://github.com/aeyakovenko/percolator?rev=add1d0276a7346565f206c8ed8d214bd1cb904ef#\
+     add1d0276a7346565f206c8ed8d214bd1cb904ef";
 
 fn assert_certified_engine_pin(context: &str) {
     assert!(
@@ -430,6 +430,54 @@ fn has_active_leg_for_asset(account: &PortfolioAccountV16, asset_index: usize) -
 
 fn active_bitmap(account: &PortfolioAccountV16) -> percolator::V16ActiveBitmap {
     state::portfolio_active_bitmap(account)
+}
+
+/// How many attached legs of `account` have not settled the latest K/F change of their side.
+/// After resolution that change is the final one, and one resolved close settles it.
+fn legs_with_unsettled_kf(group: &MarketGroupV16, account: &PortfolioAccountV16) -> usize {
+    account
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .filter(|leg| {
+            let asset = &group.assets[leg.asset_index as usize];
+            leg.active
+                && leg.kf_epoch_snap
+                    < match leg.side {
+                        percolator::SideV16::Long => asset.kf_epoch_long,
+                        percolator::SideV16::Short => asset.kf_epoch_short,
+                    }
+        })
+        .count()
+}
+
+/// How many attached legs of `account` wait for the other side of their asset, read from
+/// stored state (the detach rule of engine #269).
+///
+/// A bankrupt account's unpaid loss is shared by the loss weight attached opposite it when
+/// it is booked. A real position (nonzero basis and loss weight) therefore keeps its leg
+/// after resolution while a stored leg on the other side of its asset has not settled its
+/// final K/F, or while any account in the market owes an unbooked loss or carries an
+/// unsettled B charge. A resolved close detaches one of the account's other legs per call.
+fn resolved_legs_waiting_for_the_other_side(
+    group: &MarketGroupV16,
+    account: &PortfolioAccountV16,
+) -> usize {
+    let market_wide = group.negative_pnl_account_count != 0 || group.b_stale_account_count != 0;
+    account
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .filter(|leg| leg.active && leg.basis_pos_q != 0 && leg.loss_weight != 0)
+        .filter(|leg| {
+            let asset = &group.assets[leg.asset_index as usize];
+            let unsettled_opposite = match leg.side {
+                percolator::SideV16::Long => asset.stale_account_count_short,
+                percolator::SideV16::Short => asset.stale_account_count_long,
+            };
+            market_wide || unsettled_opposite != 0
+        })
+        .count()
 }
 
 fn leg(account: &PortfolioAccountV16, slot: usize) -> percolator::PortfolioLegV16 {
@@ -3763,6 +3811,29 @@ impl V16CuEnv {
 
     fn close_resolved(&mut self, owner: &Keypair, portfolio: Pubkey) -> Pubkey {
         self.close_resolved_with_cu(owner, portfolio).0
+    }
+
+    /// One resolved close that settles `portfolio` and leaves every leg attached.
+    ///
+    /// Since engine #269 a position keeps its loss weight after resolution until the
+    /// other side of its asset has settled its final K/F. A bankruptcy found there is shared
+    /// by the positions opposite it when it is booked, so a leg that had left earlier would
+    /// leave its share to the others. A cohort therefore settles on both sides before its
+    /// first leg detaches. The call pays nothing.
+    fn settle_resolved_and_wait(&mut self, owner: &Keypair, portfolio: Pubkey) -> u64 {
+        let legs = |env: &Self| {
+            percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(portfolio)))
+        };
+        let before = legs(self);
+        assert_ne!(before, 0, "a flat portfolio has nothing to settle");
+        let (dest, cu) = self.close_resolved_with_cu(owner, portfolio);
+        assert_eq!(
+            self.token_amount(dest),
+            0,
+            "a settlement that waits pays nothing"
+        );
+        assert_eq!(legs(self), before, "settled legs wait for the other side");
+        cu
     }
 
     fn close_resolved_with_cu(&mut self, owner: &Keypair, portfolio: Pubkey) -> (Pubkey, u64) {

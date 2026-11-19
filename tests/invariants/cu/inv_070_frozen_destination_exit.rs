@@ -401,7 +401,17 @@ fn v16_program_frozen_destinations_preserve_pnl_exit_without_freeze_authority() 
             });
             let mut peak = [0; 3];
             let mut paid = [false; 2];
-            // Each solvent leg detaches and pays in one call, losing leg first.
+            // The winner settles its final K/F first: the loser's leg cannot leave before the
+            // other side of its asset has settled (engine #269). The loser settled in
+            // Live, so the winner's leg detaches in the same call. Its gain is not paid while
+            // the loser's leg is attached, so the call succeeds with the frozen destination.
+            let settled = [env.market, portfolios[0]];
+            peak[0] = peak[0]
+                .max(step(&mut env, &[payouts[0].clone()], &[], &tracked, &settled, 0).unwrap());
+            assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, 0);
+            assert_eq!(env.market_state().1.assets[0].oi_eff_short_q, POS_SCALE);
+            assert!(!resolved_portfolio_is_terminal(&env, portfolios[0]));
+            // Each account then pays in one call, losing leg first.
             for i in [1, 0] {
                 let (error, cu) =
                     step(&mut env, &[payouts[i].clone()], &[], &tracked, &[], 0).unwrap_err();

@@ -308,6 +308,7 @@ fn v16_program_losses_on_the_lien_bound_first_settled_after_resolution_close_at_
 /// Accounts that never traded with the stuck account. X won 1,000 from Y on
 /// asset 0 and both settled before resolution; F only deposited. While the
 /// fourteen-leg account could not settle, X was paid nothing, capital included.
+/// Now it settles in a bounded number of calls and both X and Y are paid in full.
 #[test]
 fn v16_program_a_fourteen_leg_loser_does_not_hold_up_unrelated_winners() {
     const UNITS: [i128; 14] = [15, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21];
@@ -362,8 +363,11 @@ fn v16_program_a_fourteen_leg_loser_does_not_hold_up_unrelated_winners() {
     pair.env.svm.warp_to_slot(now);
     let label = "bystanders beside a fourteen-leg loser";
 
-    // Before the fourteen-leg account is touched: the loser and the flat account
-    // close, and the winner waits for the market's unsettled legs.
+    // Before the fourteen-leg account is touched: the flat account closes. X and Y hold
+    // positions on asset 0, where the fourteen-leg pair has legs that have not settled
+    // their final K/F. Since engine #269 a position keeps its loss weight until the
+    // other side of its asset has settled, so Y waits with its position attached, and X
+    // waits for the market's unsettled legs as before.
     let mut paid = [0u128; 3];
     for index in [2usize, 1, 0] {
         paid[index] += close_as_far_as_possible(
@@ -375,11 +379,20 @@ fn v16_program_a_fourteen_leg_loser_does_not_hold_up_unrelated_winners() {
         )
         .0;
     }
-    assert_eq!(paid, [0, deposits[1] - gain, deposits[2]]);
-    assert!(!resolved_portfolio_is_terminal(&pair.env, portfolios[0]));
+    assert_eq!(paid, [0, 0, deposits[2]]);
+    for index in [0, 1] {
+        assert!(!resolved_portfolio_is_terminal(
+            &pair.env,
+            portfolios[index]
+        ));
+        assert!(has_active_leg_for_asset(
+            &pair.env.portfolio_state(portfolios[index]),
+            0
+        ));
+    }
 
     // The fourteen-leg account and its counterparty settle, in a bounded number
-    // of calls, and then the winner is paid in full.
+    // of calls, and then the loser and the winner are paid in full.
     for _ in 0..4 {
         for (owner, portfolio) in [
             (pair.lp_owner.pubkey(), pair.lp),
@@ -388,11 +401,32 @@ fn v16_program_a_fourteen_leg_loser_does_not_hold_up_unrelated_winners() {
             close_as_far_as_possible(&mut pair.env, owner, portfolio, now, label);
         }
     }
+    // The fourteen-leg loser is closed. Its counterparty has detached every leg and, like
+    // every account with a gain, is paid once no position is left in the market: X's and
+    // Y's can leave now.
     assert!(resolved_portfolio_is_terminal(&pair.env, pair.lp));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &pair.env.portfolio_state(pair.taker)
+    )));
+    for index in [1usize, 0] {
+        paid[index] += close_as_far_as_possible(
+            &mut pair.env,
+            owners[index].pubkey(),
+            portfolios[index],
+            now,
+            label,
+        )
+        .0;
+    }
+    assert_eq!(paid, [deposits[0] + gain, deposits[1] - gain, deposits[2]]);
+    close_as_far_as_possible(
+        &mut pair.env,
+        pair.taker_owner.pubkey(),
+        pair.taker,
+        now,
+        label,
+    );
     assert!(resolved_portfolio_is_terminal(&pair.env, pair.taker));
-    paid[0] +=
-        close_as_far_as_possible(&mut pair.env, owners[0].pubkey(), portfolios[0], now, label).0;
-    assert_eq!(paid[0], deposits[0] + gain);
     for portfolio in portfolios {
         assert!(resolved_portfolio_is_terminal(&pair.env, portfolio));
     }

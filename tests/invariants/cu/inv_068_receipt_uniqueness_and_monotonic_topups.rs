@@ -802,11 +802,13 @@ fn v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail() {
     }
 
     env.resolve();
+    // The loser's leg cannot leave before the winner opposite it has settled.
+    env.settle_resolved_and_wait(&winner_owner, winner);
     let loser_dest = env.close_resolved(&loser_owner, loser);
     assert_eq!(
         env.token_amount(loser_dest),
         900_000,
-        "loser payout funds the terminal vault before winner settlement",
+        "loser payout funds the terminal vault before the winner is paid",
     );
     let winner_dest = env.close_resolved(&winner_owner, winner);
     assert_eq!(env.token_amount(winner_dest), 1_100_000);
@@ -971,6 +973,8 @@ fn v16_program_resolved_payout_secondary_rail_exhausts_shared_receipt() {
     }
     env.resolve();
 
+    // The loser's leg cannot leave before the winner opposite it has settled.
+    env.settle_resolved_and_wait(&winner_owner, winner);
     let _ = env.close_resolved(&loser_owner, loser);
     assert_eq!(env.market_state().1.vault, 1_100_000);
     assert_eq!(env.token_amount(env.vault), 1_100_000);

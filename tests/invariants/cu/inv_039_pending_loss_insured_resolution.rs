@@ -17,6 +17,11 @@ struct InsuredDebtBook {
     initial: [CloseProgressLedgerV16; 2],
     insurance: [u128; 2],
     booked: [bool; 2],
+    /// The holder has absorbed the B debit its domain's insurance did not cover. Since
+    /// engine #269 the call that settles a B charge against a gain reports progress
+    /// with the obligation still attached, so that the next call places the backing that
+    /// was behind the debited claim; that next call releases the obligation.
+    debited: [bool; 2],
     released: [bool; 2],
     source: Pubkey,
 }
@@ -81,7 +86,8 @@ impl InsuredDebtBook {
                 &actual,
             )
             .unwrap();
-            assert!(!self.released[pair] || self.booked[pair]);
+            assert!(!self.debited[pair] || self.booked[pair]);
+            assert!(!self.released[pair] || self.debited[pair]);
         }
         assert_eq!(group.insurance_domain_budget, budgets);
         assert_eq!(group.insurance_domain_spent, spent);
@@ -111,7 +117,7 @@ impl InsuredDebtBook {
                 0
             };
             let expected = match actor {
-                0 | 2 if !self.released[actor / 2] => {
+                0 | 2 if !self.debited[actor / 2] => {
                     (ATTRIBUTION_DEPOSITS[actor] + GAINS[actor / 2]) as i128
                 }
                 1 | 3 if !self.booked[actor / 2] => -(RESIDUALS[actor / 2] as i128),
@@ -162,7 +168,15 @@ impl InsuredDebtBook {
             self.booked[actor / 2] = true;
         } else if actor == 0 || actor == 2 {
             if self.booked[actor / 2] {
-                self.released[actor / 2] = true;
+                // A residual the insurance did not cover is a B debit: one call absorbs it,
+                // the next releases the obligation. Without a debit the first call releases.
+                let debit = RESIDUALS[actor / 2] > self.insurance[actor / 2];
+                if debit && !self.debited[actor / 2] {
+                    self.debited[actor / 2] = true;
+                } else {
+                    self.debited[actor / 2] = true;
+                    self.released[actor / 2] = true;
+                }
             } else {
                 assert_eq!(
                     Some(active_leg_for_asset(
@@ -359,6 +373,7 @@ fn v16_program_insured_pending_domains_preserve_exact_debt_through_resolution_or
                             }),
                             insurance,
                             booked: [false; 2],
+                            debited: [false; 2],
                             released: [false; 2],
                             source,
                         };
@@ -440,7 +455,11 @@ fn v16_program_insured_pending_domains_preserve_exact_debt_through_resolution_or
                             book.check(&world);
                             book.step(&mut world, 2 * early + 1, &mut peak);
                         }
+                        // The early holder absorbs its debit, then is released.
                         book.step(&mut world, 2 * early, &mut peak);
+                        assert!(book.debited[early] && !book.released[early]);
+                        book.step(&mut world, 2 * early, &mut peak);
+                        assert!(book.released[early]);
                         book.step(&mut world, 2 * late, &mut peak);
                         peak = peak.max(reject_pending_deletion(&mut world, 2 * late));
                         rollbacks += 1;
@@ -469,7 +488,7 @@ fn v16_program_insured_pending_domains_preserve_exact_debt_through_resolution_or
                                 book.step(&mut world, actor, &mut peak);
                             }
                         }
-                        for _ in 0..2 {
+                        for _ in 0..3 {
                             for actor in holders {
                                 if resolved_portfolio_is_terminal(
                                     &world.env,

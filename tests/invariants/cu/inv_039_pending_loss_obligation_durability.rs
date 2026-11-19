@@ -1199,6 +1199,40 @@ fn run_recovery_resolved_pending_obligation_order(
     let mut debtor_payout;
     let pending_long_before_debtor;
     let weight_long_before_debtor;
+    // Since engine #269 a real position keeps its loss weight until the other side of
+    // its asset has settled its final K/F and no account in the market owes an unbooked
+    // loss. Before the debtor's position can leave, the victim opposite it settles and the
+    // auxiliary debtor books its own shortfall. Neither step touches the target asset's
+    // obligation, loss weight or B index.
+    let mut auxiliary_debtor_early = 0u128;
+    let mut settle_others = |env: &mut V16CuEnv| {
+        let before = env.market_state().1.assets[TARGET_ASSET as usize];
+        env.settle_resolved_and_wait(&victim_owner, victim);
+        auxiliary_debtor_early += try_close_resolved_until_stalled_or_asset_detaches(
+            env,
+            &auxiliary_debtor_owner,
+            auxiliary_debtor,
+            AUXILIARY_ASSET as usize,
+            label,
+        );
+        let after = env.market_state().1.assets[TARGET_ASSET as usize];
+        assert_eq!(
+            (
+                after.pending_obligation_count_long,
+                after.loss_weight_sum_long,
+                after.loss_weight_sum_short,
+                after.b_long_num,
+                after.b_short_num
+            ),
+            (
+                before.pending_obligation_count_long,
+                before.loss_weight_sum_long,
+                before.loss_weight_sum_short,
+                before.b_long_num,
+                before.b_short_num
+            )
+        );
+    };
     if attacker_first {
         attacker_payout = try_close_resolved_until_stalled_or_asset_detaches(
             &mut env,
@@ -1211,6 +1245,7 @@ fn run_recovery_resolved_pending_obligation_order(
         pending_long_before_debtor = after_early_clear.pending_obligation_count_long;
         weight_long_before_debtor = after_early_clear.loss_weight_sum_long;
         assert_eq!(after_early_clear.b_long_num, 0);
+        settle_others(&mut env);
         debtor_payout = close_resolved_until_asset_detaches(
             &mut env,
             &debtor_owner,
@@ -1228,6 +1263,7 @@ fn run_recovery_resolved_pending_obligation_order(
     } else {
         pending_long_before_debtor = unresolved_target.pending_obligation_count_long;
         weight_long_before_debtor = unresolved_target.loss_weight_sum_long;
+        settle_others(&mut env);
         debtor_payout = close_resolved_until_asset_detaches(
             &mut env,
             &debtor_owner,
@@ -1277,7 +1313,7 @@ fn run_recovery_resolved_pending_obligation_order(
         victim_payout: tail[1],
         debtor_payout,
         auxiliary_winner_payout: tail[3],
-        auxiliary_debtor_payout: tail[4],
+        auxiliary_debtor_payout: auxiliary_debtor_early + tail[4],
         pending_long_before_debtor,
         weight_long_before_debtor,
         target_b_long_num: target.b_long_num,

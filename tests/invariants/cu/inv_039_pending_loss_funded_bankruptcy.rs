@@ -237,6 +237,7 @@ fn v16_program_funded_bankrupt_domains_preserve_input_derived_pending_debt() {
                     )
                 }),
                 booked: [false; 2],
+                debited: [false; 2],
                 released: [false; 2],
             };
             for close in model.initial {
@@ -282,6 +283,11 @@ fn v16_program_funded_bankrupt_domains_preserve_input_derived_pending_debt() {
             ));
             inputs.check(&world, &model);
 
+            // The holder absorbs its B debit in one call and is released by the next
+            // (engine #269).
+            model.close(&mut world, 2 * early, &mut peak_terminal);
+            model.debited[early] = true;
+            inputs.check(&world, &model);
             model.close(&mut world, 2 * early, &mut peak_terminal);
             model.released[early] = true;
             inputs.check(&world, &model);
@@ -308,7 +314,9 @@ fn v16_program_funded_bankrupt_domains_preserve_input_derived_pending_debt() {
                 PercolatorError::EngineNonProgress,
             ));
             inputs.check(&world, &model);
-            for actor in [2 * late, 2 * early] {
+            // The late holder absorbs its debit, is released and paid; then the early
+            // holder, which waited for it, is paid.
+            for actor in [2 * late, 2 * late, 2 * early] {
                 let bundle = [terminal_instruction(&world, actor), suffix.clone()];
                 peak_terminal = peak_terminal.max(reject(
                     &mut world,
@@ -318,7 +326,11 @@ fn v16_program_funded_bankrupt_domains_preserve_input_derived_pending_debt() {
                 ));
                 inputs.check(&world, &model);
                 model.close(&mut world, actor, &mut peak_terminal);
-                model.released[actor / 2] = true;
+                if model.debited[actor / 2] {
+                    model.released[actor / 2] = true;
+                } else {
+                    model.debited[actor / 2] = true;
+                }
                 inputs.check(&world, &model);
             }
             let paid: [u128; 5] = std::array::from_fn(|actor| {

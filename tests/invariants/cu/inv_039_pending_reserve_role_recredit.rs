@@ -408,6 +408,7 @@ fn v16_program_pending_claimant_reserve_roles_preserve_attribution_through_close
                         }),
                         insurance: INSURANCE,
                         booked: [false; 2],
+                        debited: [false; 2],
                         released: [false; 2],
                         source,
                     };
@@ -432,7 +433,12 @@ fn v16_program_pending_claimant_reserve_roles_preserve_attribution_through_close
                         rollbacks += 1;
                         debt.check(&world);
                         debt.step(&mut world, 2 * pair + 1, &mut peak);
+                        // The holder absorbs its B debit, then is released (engine #269).
                         debt.step(&mut world, 2 * pair, &mut peak);
+                        if !debt.released[pair] {
+                            debt.step(&mut world, 2 * pair, &mut peak);
+                        }
+                        assert!(debt.released[pair]);
                     }
                     let order = if schedule == 0 {
                         [0, 2, 4, 1, 3]

@@ -137,6 +137,17 @@ fn v16_program_native_pnl_terminal_sync_and_close_retry_preserves_unsynced_donat
         }
         .encode(),
     });
+    // The loser's leg cannot leave before the winner opposite it has settled its final K/F
+    // (engine #269). The loser settled in Live, so the winner's leg detaches in the
+    // same call; its gain stays unpaid while the loser's leg is attached.
+    let settle_cu = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), payouts[0].clone()],
+        &[],
+    )
+    .unwrap();
+    env.svm.expire_blockhash();
     let loser_cu = send_raw_ixs(
         &mut env.svm,
         &env.payer,
@@ -150,7 +161,7 @@ fn v16_program_native_pnl_terminal_sync_and_close_retry_preserves_unsynced_donat
         let ps = portfolios.map(|key| env.portfolio_state(key));
         assert_eq!(group.mode, MarketModeV16::Resolved);
         assert_eq!(group.assets[0].effective_price, EXIT);
-        assert_eq!(group.assets[0].oi_eff_long_q, POS_SCALE);
+        assert_eq!(group.assets[0].oi_eff_long_q, 0);
         assert_eq!(group.assets[0].oi_eff_short_q, 0);
         assert_eq!(group.materialized_portfolio_count, 2);
         assert_eq!(group.vault, PAYOUT[0].into());
@@ -370,7 +381,14 @@ fn v16_program_native_pnl_terminal_sync_and_close_retry_preserves_unsynced_donat
     assert_eq!(PAYOUT.iter().sum::<u64>(), CAPITAL.iter().sum::<u64>());
     let rollback_cu = failed.meta.compute_units_consumed;
     let retry_cu = committed.compute_units_consumed;
-    for cu in [setup_peak, loser_cu, donation_cu, rollback_cu, retry_cu] {
+    for cu in [
+        setup_peak,
+        settle_cu,
+        loser_cu,
+        donation_cu,
+        rollback_cu,
+        retry_cu,
+    ] {
         assert_cu_within("native PnL sync/close retry", cu, LIMIT);
     }
     println!("INV-070 native PnL sync retry: paid={PAYOUT:?}, synced_surplus={DONATION}, exact_rollbacks=1, close_calls=1, CU[setup,loser,donation,rollback,retry]=[{setup_peak},{loser_cu},{donation_cu},{rollback_cu},{retry_cu}]");

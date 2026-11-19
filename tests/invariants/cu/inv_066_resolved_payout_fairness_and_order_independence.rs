@@ -1465,7 +1465,7 @@ fn inv066_handler_body<'a>(production: &'a str, function: &str) -> &'a str {
 
 #[test]
 fn v16_program_resolved_payout_induction_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "52659c02165439c84d99711231c1bf1c74cefc46";
+    const ENGINE_PIN: &str = "add1d0276a7346565f206c8ed8d214bd1cb904ef";
     const CLASSES: &[Inv066PayoutClass] = &[
         Inv066PayoutClass {
             class: "snapshot-bound receipt materialization",
@@ -1729,3 +1729,6 @@ fn v16_program_resolved_payout_induction_composition_is_source_complete() {
         "a new direct top-up route requires composition evidence",
     );
 }
+
+#[path = "inv_066_bankrupt_shortfall_close_order.rs"]
+mod bankrupt_shortfall_close_order;

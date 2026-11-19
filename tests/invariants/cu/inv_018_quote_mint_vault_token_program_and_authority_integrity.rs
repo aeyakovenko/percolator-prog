@@ -837,6 +837,8 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
     }
     env.resolve();
 
+    // The loser's leg cannot leave before the winner opposite it has settled.
+    env.settle_resolved_and_wait(&lo_owner, lo);
     let _ = env.close_resolved(&sh_owner, sh);
     let (_, after_loser) = env.market_state();
     assert_eq!(

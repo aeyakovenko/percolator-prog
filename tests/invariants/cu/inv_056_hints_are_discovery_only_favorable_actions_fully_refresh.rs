@@ -1123,6 +1123,7 @@ fn v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded() {
 fn v16_program_recovery_and_resolved_dispatch_treat_hints_as_discovery_only() {
     let PublicActiveCloseFixture {
         mut env,
+        loss_owner,
         loss,
         live_counterparty_owner,
         live_counterparty,
@@ -1219,6 +1220,48 @@ fn v16_program_recovery_and_resolved_dispatch_treat_hints_as_discovery_only() {
         vault_before,
         "Recovery finalization snapshots accounting without moving SPL custody"
     );
+
+    // Since engine #269 a real position keeps its loss weight while any account in the
+    // market owes a loss that is not booked. The bankrupt account therefore books its
+    // shortfall before either claimant can detach and be paid. That step carries no hint.
+    let signed_close = |env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey| {
+        let destination = env.token_account(owner.pubkey(), 0);
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        );
+        (destination, result)
+    };
+    for call in 0.. {
+        assert!(
+            call < 8,
+            "the bankrupt account books its shortfall in bounded calls"
+        );
+        let (destination, result) = signed_close(&mut env, &loss_owner, loss);
+        match result {
+            Ok(cu) => {
+                assert_cu_within("INV-056 resolved shortfall booking", cu, CRANK_CU_LIMIT);
+                assert_eq!(env.token_amount(destination), 0);
+            }
+            Err(error) => {
+                assert!(is_engine_non_progress_error(&error), "{error}");
+                break;
+            }
+        }
+    }
+    assert_eq!(env.market_state().1.negative_pnl_account_count, 0);
 
     let duplicate_hint_dest = env.token_account(live_counterparty_owner.pubkey(), 0);
     let resolved_close = |env: &mut V16CuEnv, observations: Vec<CrankObservationHint>| {

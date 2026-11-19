@@ -607,11 +607,13 @@ fn v16_program_paid_claimant_preserves_peer_latent_capacity_and_late_exit() {
             h.slot = h.env.market_state().1.resolved_slot + OWNER_WINDOW;
             h.env.svm.warp_to_slot(h.slot);
 
-            // The live claimant has consumed its share. Drain the debtor before
-            // registering the late owner's last claim against the remaining backing.
-            let cu = h
-                .env
-                .send(
+            // The live claimant has consumed its share. The debtor's leg keeps its loss
+            // weight until the late owner, on the other side of its asset, has settled its
+            // final K/F (engine #269), so the debtor cannot be drained before the late
+            // owner's last claim is registered: its first call settles and pays nothing.
+            let debtor_close = |h: &mut SharedHistory| {
+                h.env.svm.expire_blockhash();
+                h.env.send(
                     ProgInstruction::CloseResolved {
                         fee_rate_per_slot: 0,
                     },
@@ -626,18 +628,27 @@ fn v16_program_paid_claimant_preserves_peer_latent_capacity_and_late_exit() {
                     ],
                     &[],
                 )
-                .expect("debtor exits while the late claimant retains a latent domain");
+            };
+            let cu = debtor_close(&mut h).expect("the debtor settles while its leg waits");
             h.record(cu);
             terminal_calls += 1;
-            h.positions[DEBTOR] = [0; ASSETS];
-            assert!(resolved_portfolio_is_terminal(&h.env, h.portfolios[DEBTOR]));
+            assert!(!resolved_portfolio_is_terminal(
+                &h.env,
+                h.portfolios[DEBTOR]
+            ));
+            assert_eq!(h.env.token_amount(h.tokens[DEBTOR]), 0);
             assert_eq!(
-                h.env.token_amount(h.tokens[DEBTOR]) as u128,
-                CAPITAL - expected.iter().flatten().sum::<u128>()
+                resolved_legs_waiting_for_the_other_side(
+                    &h.env.market_state().1,
+                    &h.env.portfolio_state(h.portfolios[DEBTOR]),
+                ),
+                1,
+                "the debtor's leg waits for the late owner"
             );
             assert_eq!(peers.map(|key| h.env.svm.get_account(&key)), frames);
             h.check();
 
+            // The paid owner left exact backing for the peer's registered and latent claims.
             assert_eq!(h.env.svm.get_account(&h.portfolios[late]), late_frame);
             assert_eq!(h.claims(first), [0; DOMAINS]);
             assert_eq!(h.claims(late)[latent_domain], 0);
@@ -655,6 +666,48 @@ fn v16_program_paid_claimant_preserves_peer_latent_capacity_and_late_exit() {
                     late_claims[d] * BOUND_SCALE
                 );
             }
+
+            // The late owner registers its last claim; its leg detaches, and its claims
+            // wait for the debtor's leg.
+            let debtor_frames = [h.portfolios[DEBTOR], h.tokens[DEBTOR]];
+            let debtor_before = debtor_frames.map(|key| h.env.svm.get_account(&key));
+            terminal_calls += h.advance_claimant(late, true, true);
+            assert_eq!(
+                debtor_frames.map(|key| h.env.svm.get_account(&key)),
+                debtor_before
+            );
+
+            let late_materialized = h.env.svm.get_account(&h.portfolios[late]);
+            let cu = debtor_close(&mut h)
+                .expect("debtor exits once the late claimant has registered its last claim");
+            h.record(cu);
+            terminal_calls += 1;
+            h.positions[DEBTOR] = [0; ASSETS];
+            assert!(resolved_portfolio_is_terminal(&h.env, h.portfolios[DEBTOR]));
+            assert_eq!(
+                h.env.token_amount(h.tokens[DEBTOR]) as u128,
+                CAPITAL - expected.iter().flatten().sum::<u128>()
+            );
+            assert_eq!(
+                h.env.svm.get_account(&h.portfolios[late]),
+                late_materialized
+            );
+            assert_eq!(h.env.svm.get_account(&h.portfolios[first]), frames[first]);
+            assert_eq!(h.env.svm.get_account(&h.tokens[first]), frames[2 + first]);
+            h.check();
+            let group = h.env.market_state().1;
+            let late_claims = h.claims(late);
+            assert_eq!(late_claims, expected[late]);
+            for d in 0..DOMAINS {
+                assert_eq!(
+                    group.source_backing_buckets[d].fresh_unliened_backing_num,
+                    expected[late][d] * BOUND_SCALE,
+                );
+                assert_eq!(
+                    group.source_credit[d].positive_claim_bound_num,
+                    late_claims[d] * BOUND_SCALE
+                );
+            }
             assert_eq!(group.vault, CAPITAL + expected[late].iter().sum::<u128>());
 
             let paid_frames = [
@@ -664,8 +717,7 @@ fn v16_program_paid_claimant_preserves_peer_latent_capacity_and_late_exit() {
                 h.tokens[DEBTOR],
             ];
             let paid = paid_frames.map(|key| h.env.svm.get_account(&key));
-            // With no remaining peer leg, the first crank can materialize the
-            // last claim and realize one source in the same bounded instruction.
+            // With no remaining peer leg, every call realizes one source domain.
             let late_calls = h.advance_claimant(late, true, false);
             assert_eq!(late_calls, DOMAINS);
             terminal_calls += late_calls;
@@ -704,15 +756,17 @@ fn v16_program_paid_claimant_preserves_peer_latent_capacity_and_late_exit() {
             peak_packet = peak_packet.max(h.peak_packet);
         }
     }
-    assert_eq!(terminal_calls, 4 * (DOMAINS + 1));
+    // Per world: the debtor's settlement, the late owner's registration, the debtor's exit
+    // and one call per source domain.
+    assert_eq!(terminal_calls, 4 * (DOMAINS + 3));
     println!("INV-028 paid claimant / latent peer: worlds=4, terminal_calls={terminal_calls}, peak_cu={peak_cu}, peak_packet={peak_packet}");
 }
 
 #[test]
 fn v16_program_full_source_tables_preserve_partial_receipt_through_peer_exit() {
     assert!(include_str!("../../../Cargo.lock").contains(
-        "git+https://github.com/aeyakovenko/percolator?rev=52659c02165439c84d99711231c1bf1c74cefc46#\
-         52659c02165439c84d99711231c1bf1c74cefc46"
+        "git+https://github.com/aeyakovenko/percolator?rev=add1d0276a7346565f206c8ed8d214bd1cb904ef#\
+         add1d0276a7346565f206c8ed8d214bd1cb904ef"
     ));
     let mut h = SharedHistory::new();
     for asset in 0..ASSETS {
@@ -978,8 +1032,8 @@ fn v16_program_full_source_tables_preserve_partial_receipt_through_peer_exit() {
 fn v16_program_shared_history_preserves_late_claimant_capacity_and_exact_exit() {
     // Revalidate this control locally without recertifying the shared roster.
     assert!(include_str!("../../../Cargo.lock").contains(
-        "git+https://github.com/aeyakovenko/percolator?rev=52659c02165439c84d99711231c1bf1c74cefc46#\
-         52659c02165439c84d99711231c1bf1c74cefc46"
+        "git+https://github.com/aeyakovenko/percolator?rev=add1d0276a7346565f206c8ed8d214bd1cb904ef#\
+         add1d0276a7346565f206c8ed8d214bd1cb904ef"
     ));
     let mut peak_cu = 0;
     let mut peak_packet = 0;

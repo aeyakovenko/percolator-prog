@@ -265,7 +265,13 @@ fn assert_custody(world: &FundedWorld) {
 
 // This fixed-clock, two-asset rank measures economic work, not a decoded selector plan.
 // Cleanup can create a receipt, so account normalization precedes receipt debt in the tuple.
-fn exit_rank(world: &FundedWorld, actor: usize) -> (usize, usize, usize, u128, u128, bool, u128) {
+// Settling a leg's final K/F and advancing the fee anchor to the resolved slot are work of
+// their own: since engine #269 a position keeps its loss weight until the other side
+// of its asset has settled, so a call can do either and leave the leg attached.
+fn exit_rank(
+    world: &FundedWorld,
+    actor: usize,
+) -> (usize, usize, u64, usize, usize, u128, u128, bool, u128) {
     let account = world.env.portfolio_state(world.portfolios[actor]);
     let receipt = resolved_receipt(&account);
     let group = world.env.market_state().1;
@@ -278,6 +284,10 @@ fn exit_rank(world: &FundedWorld, actor: usize) -> (usize, usize, usize, u128, u
         .count();
     (
         expiry_work,
+        legs_with_unsettled_kf(&group, &account),
+        group
+            .resolved_slot
+            .saturating_sub(account.last_fee_slot.get()),
         account.legs.iter().filter(|leg| leg.active != 0).count(),
         account
             .source_domains
@@ -678,10 +688,14 @@ fn v16_program_recovery_claim_and_deferred_liability_preserve_keeper_exit() {
                     }
                     assert!(waiting_for_debtor && calls[0] > 0);
                     let waiting = world.env.portfolio_state(world.portfolios[0]);
+                    // The claimant's Recovery leg is gone. Its live position keeps its loss
+                    // weight until the debtor opposite it has settled (engine #269).
                     assert_eq!(
                         exit_rank(&world, 0),
-                        (0, 0, 2, PRINCIPAL[0], total_gain, true, 0)
+                        (0, 0, 0, 1, 2, PRINCIPAL[0], total_gain, true, 0)
                     );
+                    assert!(has_active_leg_for_asset(&waiting, live_asset));
+                    assert!(!has_active_leg_for_asset(&waiting, recovery_asset));
                     assert!(!resolved_receipt(&waiting).present);
                     assert_eq!(world.env.token_amount(world.tokens[0]), 0);
                     for role in 0..2 {

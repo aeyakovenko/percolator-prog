@@ -511,6 +511,17 @@ This section describes intent and operational ordering, not argument-by-argument
 - **CloseResolved** (tag 30)
   - handles resolved-market terminal PnL, fees, payout, and slot freeing for the supplied portfolio
   - verifies payout routing against the stored owner account
+  - bounded and repeatable: a call does a bounded part of the work (settle the final K/F,
+    settle a bankruptcy charge, detach one leg, realize one source claim, pay) and commits it;
+    call it until the portfolio is terminal
+  - a position stays attached, and its capital with it, until every position on the other side
+    of its asset has settled its final K/F and no account in the market owes a loss that is not
+    yet booked. A bankrupt account's shortfall is shared by the positions opposite it when it
+    is booked, so a position that left earlier would leave its share to the others
+  - a call that could only wait for that fails with `EngineNonProgress` and changes nothing.
+    Settling never waits: cranking every remaining portfolio (this instruction or a resolved
+    `PermissionlessCrank`, both unsigned once `force_close_delay_slots` have passed since
+    resolution) ends the wait
 - **CloseSlab**
   - requires the market authority and advances bounded expiry/recredit normalization before final reclaim
   - once all claims are terminal, burns booked classic SPL residue; booked native wSOL residue

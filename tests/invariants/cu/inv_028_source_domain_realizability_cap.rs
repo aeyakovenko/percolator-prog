@@ -243,6 +243,7 @@ fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
     let mut target_errors = Vec::new();
     let mut loser_progressed = false;
     let mut loser_errors = Vec::new();
+    let mut loser_waits = 0;
     for round in 0..8 {
         for (owner, portfolio, destination) in [
             (target_owner.pubkey(), target, target_destination),
@@ -325,7 +326,20 @@ fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
                         env.svm.get_account(&loser_destination).unwrap(),
                         destination_before
                     );
-                    loser_errors.push(error);
+                    // A settled leg keeps its loss weight until the other side of its asset
+                    // has settled its final K/F (engine #269). Being told to come back
+                    // for that reason is a wait, not a blocked path.
+                    let account = env.portfolio_state(trigger_peer);
+                    let legs = percolator::active_bitmap_count_ones(active_bitmap(&account));
+                    if is_engine_non_progress_error(&error)
+                        && legs != 0
+                        && resolved_legs_waiting_for_the_other_side(&env.market_state().1, &account)
+                            == legs as usize
+                    {
+                        loser_waits += 1;
+                    } else {
+                        loser_errors.push(error);
+                    }
                 }
             }
         }
@@ -345,6 +359,10 @@ fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
     assert!(
         loser_errors.is_empty(),
         "the prospective-loss path must remain live after source impairment: {loser_errors:?}"
+    );
+    assert_eq!(
+        loser_waits, 1,
+        "the settled loser waits once, for the winner opposite it to settle"
     );
 
     for (label, portfolio) in [

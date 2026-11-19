@@ -22,7 +22,7 @@
 //! resolves and pays every funded owner without owner or administrator signatures.
 //! This is not completed-hint replay, a resource-failure lattice, or an engine proof.
 
-use super::{crank_observations, crank_observations_for_assets};
+use super::{crank_observations, crank_observations_for_assets, legs_with_unsettled_kf};
 use crate::support::fuzz_model::{
     assert_public_encumbrance_census, assert_public_stock_census, run_scenario, Action, HintMode,
     Scenario, SmallMarketConfig, SubstitutionKind, TradeRoute,
@@ -202,6 +202,10 @@ struct Inv082MixedRank {
     mode: u8,
     accrual_slots: u64,
     wait_slots: u64,
+    /// Legs that have not settled the final K/F of their side. Since engine #269 a
+    /// position keeps its loss weight until the other side of its asset has settled, so a
+    /// resolved call can settle a leg, register its gain and leave it attached.
+    unsettled_legs: usize,
     active_legs: u64,
     occupied_sources: usize,
     pnl_accounts: usize,
@@ -330,6 +334,7 @@ fn v16_program_mixed_recovery_active_terminal_accrual_has_bounded_public_exit() 
                 mode => panic!("unconstructed market mode: {mode:?}"),
             };
             let mut legs = 0u64;
+            let mut unsettled = 0usize;
             let mut sources = 0usize;
             let mut pnl = 0usize;
             let mut receipts = 0usize;
@@ -342,6 +347,7 @@ fn v16_program_mixed_recovery_active_terminal_accrual_has_bounded_public_exit() 
                     .iter()
                     .map(|word| u64::from(word.get().count_ones()))
                     .sum::<u64>();
+                unsettled += legs_with_unsettled_kf(&market, &account);
                 sources += account
                     .source_domains
                     .iter()
@@ -357,6 +363,7 @@ fn v16_program_mixed_recovery_active_terminal_accrual_has_bounded_public_exit() 
                 mode,
                 accrual_slots: accrual,
                 wait_slots: wait,
+                unsettled_legs: unsettled,
                 active_legs: legs,
                 occupied_sources: sources,
                 pnl_accounts: pnl,

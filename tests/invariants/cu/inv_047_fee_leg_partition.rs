@@ -1066,6 +1066,14 @@ fn v16_program_retained_resolution_routes_preserve_unsettled_fee_payouts() {
 
             fixture.env.svm.warp_to_slot(RESOLVE_SLOT + 1);
             let winner = usize::from(direction < 0);
+            // The loser's position keeps its loss weight until the winner opposite it has
+            // settled its final K/F (engine #269), so the winner settles first.
+            fixture.env.svm.expire_blockhash();
+            peak_cu = peak_cu.max(
+                fixture
+                    .env
+                    .settle_resolved_and_wait(&fixture.owners[winner], fixture.portfolios[winner]),
+            );
             for actor in [1 - winner, winner] {
                 let expected = u64::try_from(
                     (CAPITAL - owner_fee) as i128

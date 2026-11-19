@@ -104,14 +104,21 @@ pub(super) fn reject(
     failure.meta.compute_units_consumed
 }
 
+/// `debited`: the holder has absorbed its B debit. Since engine #269 the call that
+/// settles a B charge against a gain reports progress with the obligation still attached,
+/// so that the next call places the backing that was behind the debited claim; that next
+/// call releases the obligation and pays.
 fn assert_prefix(
     world: &AttributionWorld,
     gain: u128,
     initial_close: CloseProgressLedgerV16,
     booked: bool,
+    debited: bool,
     finished: [bool; 5],
     expected: [u128; 5],
 ) {
+    assert!(!debited || booked);
+    assert!(!finished[0] || debited);
     world.check([0; 4], [!finished[0], false, false, false]);
     let residual = gain - ATTRIBUTION_DEPOSITS[1];
     let mut close = initial_close;
@@ -133,7 +140,8 @@ fn assert_prefix(
             ATTRIBUTION_DEPOSITS[i]
         };
         let pnl = match i {
-            0 if !finished[0] => gain as i128,
+            0 if !debited => gain as i128,
+            0 if !finished[0] => (gain - residual) as i128,
             1 if !booked => -(residual as i128),
             _ => 0,
         };
@@ -223,7 +231,15 @@ fn v16_program_expired_bankrupt_close_preserves_pending_cohort_entitlement_acros
                                 assert_eq!(world.env.svm.get_account(&key), account);
                             }
                         }
-                        assert_prefix(&world, gain, initial_close, false, [false; 5], expected);
+                        assert_prefix(
+                            &world,
+                            gain,
+                            initial_close,
+                            false,
+                            false,
+                            [false; 5],
+                            expected,
+                        );
                     }
                 } else {
                     for _ in 0..4 {
@@ -254,7 +270,15 @@ fn v16_program_expired_bankrupt_close_preserves_pending_cohort_entitlement_acros
                     );
                     // Resolve before the retained holder settles the newly booked B debit.
                     peak_cu = peak_cu.max(world.env.resolve());
-                    assert_prefix(&world, gain, initial_close, true, [false; 5], expected);
+                    assert_prefix(
+                        &world,
+                        gain,
+                        initial_close,
+                        true,
+                        false,
+                        [false; 5],
+                        expected,
+                    );
                 }
                 assert_eq!(world.env.svm.get_account(&holder), holder_before);
                 let resolved_slot = world.env.market_state().1.resolved_slot;
@@ -263,13 +287,17 @@ fn v16_program_expired_bankrupt_close_preserves_pending_cohort_entitlement_acros
                 // receipt creation and payout. Both must preserve the same retry entitlement.
                 peak_cu = peak_cu.max(reject_after_close(&mut world, usize::from(expired)));
                 let mut booked = !expired;
+                let mut debited = false;
                 let mut finished = [false; 5];
-                for step in 0..=usize::from(expired) {
+                // The holder's last call releases the obligation and pays; the one before it
+                // absorbs the B debit. In the expired route its first call only refreshes.
+                let last = 1 + usize::from(expired);
+                for step in 0..=last {
                     for actor in order {
                         if finished[actor] {
                             continue;
                         }
-                        if expired && step == 1 && actor == 0 {
+                        if step >= 1 && actor == 0 {
                             peak_cu = peak_cu.max(reject_after_close(&mut world, actor));
                         }
                         let before = world.frame();
@@ -300,11 +328,35 @@ fn v16_program_expired_bankrupt_close_preserves_pending_cohort_entitlement_acros
                             }
                         }
                         booked |= actor == 1;
-                        finished[actor] = actor != 0 || !expired || step == 1;
-                        assert_prefix(&world, gain, initial_close, booked, finished, expected);
-                        if !finished[0] {
+                        if actor == 0 {
+                            debited = step + 1 >= last;
+                            finished[0] = step == last;
+                        } else {
+                            finished[actor] = true;
+                        }
+                        assert_prefix(
+                            &world,
+                            gain,
+                            initial_close,
+                            booked,
+                            debited,
+                            finished,
+                            expected,
+                        );
+                        if !debited {
                             assert_eq!(active_leg_for_asset(&world.env.portfolio_state(holder), 1), retained_leg,
                                 "refresh and debtor settlement cannot silently retire the original loss weight");
+                        } else if !finished[0] {
+                            let leg = active_leg_for_asset(&world.env.portfolio_state(holder), 1);
+                            assert_eq!(
+                                (leg.side, leg.basis_pos_q, leg.loss_weight),
+                                (
+                                    retained_leg.side,
+                                    retained_leg.basis_pos_q,
+                                    retained_leg.loss_weight
+                                ),
+                                "the debited obligation keeps its loss weight until it is released"
+                            );
                         }
                         if expired && finished[0] {
                             assert!(resolved_receipt(&world.env.portfolio_state(holder)).present);
@@ -349,5 +401,5 @@ fn v16_program_expired_bankrupt_close_preserves_pending_cohort_entitlement_acros
         }
     }
     assert_eq!(worlds, 8);
-    println!("INV-039 preempted bankruptcy: worlds={worlds}, prefix_rollbacks=12, terminal_retries=40, portfolio_deletions=40, peak_continuation_cu={peak_cu}");
+    println!("INV-039 preempted bankruptcy: worlds={worlds}, prefix_rollbacks=20, terminal_retries=40, portfolio_deletions=40, peak_continuation_cu={peak_cu}");
 }

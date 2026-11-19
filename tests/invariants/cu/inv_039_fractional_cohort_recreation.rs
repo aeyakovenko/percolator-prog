@@ -313,6 +313,7 @@ fn v16_program_fractional_cohort_debt_survives_funded_debtor_recreation_and_reso
                         deleted: [false; 5],
                         converted: [None; 2],
                         backing_expired: false,
+                        stranded_joined: 0,
                     };
                     check_classes(&world, &book);
                     let donor = world.actors[4].owner.insecure_clone();

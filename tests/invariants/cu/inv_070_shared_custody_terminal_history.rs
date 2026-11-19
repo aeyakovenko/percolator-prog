@@ -63,6 +63,7 @@ struct Evidence {
     rollbacks: usize,
     successful_aborted_wrappers: usize,
     payments: usize,
+    settle_only: usize,
     detach_only: usize,
     topups: usize,
     expiries: usize,
@@ -481,6 +482,8 @@ fn run(
     let mut amounts = vec![0u64; portfolios.len()];
     let mut paid = vec![false; portfolios.len()];
     let mut detached = vec![false; portfolios.len()];
+    // Final K/F settled by a resolved call.
+    let mut settled = vec![false; portfolios.len()];
     let mut deleted = vec![false; portfolios.len()];
     let mut archived = [0u64; 2];
     let mut custody = [0u64; 2];
@@ -623,17 +626,21 @@ fn run(
         Some((0, PercolatorError::EngineLockActive as u32, 0)),
         evidence,
     );
-    // One fresh leg per portfolio: the first pass detaches every leg. Earlier
-    // winners then receive their claims in a second, finite pass (topped up below).
+    // One fresh leg per portfolio. Since engine #269 a position keeps its loss weight
+    // until the other side of its asset has settled its final K/F, so the losing cohort,
+    // asked first, settles and waits. The winners then settle and detach, the losers detach
+    // and exit in a second pass, and the winners receive their claims in a third, finite
+    // pass (topped up below).
     let mut schedule = history.order.clone();
-    schedule.extend(
-        history
-            .order
-            .iter()
-            .copied()
-            .filter(|i| i % 2 == history.winner)
-            .take(history.lots.len() - 1),
-    );
+    for winners in [false, true] {
+        schedule.extend(
+            history
+                .order
+                .iter()
+                .copied()
+                .filter(|i| (i % 2 == history.winner) == winners),
+        );
+    }
     for &i in &schedule {
         let owner = i % 2;
         if owner == history.winner && detached.iter().filter(|d| !**d).count() <= 1 {
@@ -705,6 +712,26 @@ fn run(
             evidence,
         );
         evidence.recreations += usize::from(needs_creation);
+        present[owner] = true;
+        let waits = (0..portfolios.len()).any(|j| j % 2 != owner && !settled[j]);
+        settled[i] = true;
+        if waits {
+            // A portfolio opposite this one is unsettled: the call settles, the leg stays
+            // attached and nothing is paid.
+            assert_ne!(owner, history.winner, "the losing cohort is asked first");
+            assert_eq!(env.token_amount(destinations[owner]), custody[owner]);
+            let account = env.portfolio_state(portfolios[i]);
+            assert_eq!(
+                (account.capital.get(), account.pnl.get()),
+                (history.entitlement(i).into(), 0)
+            );
+            assert!(has_active_leg_for_asset(&account, 0));
+            evidence.settle_only += 1;
+            check(
+                &env, &amounts, &paid, &detached, &deleted, archived, custody, closes, present,
+            );
+            continue;
+        }
         detached[i] = true;
         let pays = owner != history.winner || detached.iter().all(|d| *d);
         let delta = env.token_amount(destinations[owner]) - custody[owner];
@@ -1106,7 +1133,10 @@ fn v16_program_generated_shared_custody_recreation_preserves_terminal_owner_valu
     assert_eq!(worlds, 32);
     assert_eq!(winning_sides, 3);
     assert_eq!(evidence.payments, 192);
-    assert_eq!(evidence.detach_only, 64);
+    // Every loser settles and waits once, and no winner is paid by the call that detaches
+    // its leg: the losers opposite it are still attached then.
+    assert_eq!(evidence.settle_only, 96);
+    assert_eq!(evidence.detach_only, 96);
     // Engine S2 (#246): the losing cohorts' Resolved losses join the funded provider domain in
     // full, so every winner is paid at face by its first paying close. In these worlds no
     // winner keeps a receipt for a later top-up and none waits on the fresh bucket's expiry;
@@ -1115,9 +1145,9 @@ fn v16_program_generated_shared_custody_recreation_preserves_terminal_owner_valu
     assert_eq!(evidence.expiries, 0);
     assert_eq!(evidence.recreations, 64);
     assert_eq!(evidence.custody_closes, 128);
-    assert_eq!(evidence.rollbacks, 608);
-    assert_eq!(evidence.successful_aborted_wrappers, 480);
-    println!("row418 shared custody: worlds={worlds}, payments={}, detach_only={}, topups={}, expiries={}, custody_closes={}, recreations={}, rollbacks={}, aborted_wrapper_successes={}, commits={}, peak_CU={}, limit={LIMIT}",
-        evidence.payments, evidence.detach_only, evidence.topups, evidence.expiries, evidence.custody_closes, evidence.recreations, evidence.rollbacks,
+    assert_eq!(evidence.rollbacks, 736);
+    assert_eq!(evidence.successful_aborted_wrappers, 608);
+    println!("row418 shared custody: worlds={worlds}, payments={}, settle_only={}, detach_only={}, topups={}, expiries={}, custody_closes={}, recreations={}, rollbacks={}, aborted_wrapper_successes={}, commits={}, peak_CU={}, limit={LIMIT}",
+        evidence.payments, evidence.settle_only, evidence.detach_only, evidence.topups, evidence.expiries, evidence.custody_closes, evidence.recreations, evidence.rollbacks,
         evidence.successful_aborted_wrappers, evidence.commits, evidence.peak);
 }

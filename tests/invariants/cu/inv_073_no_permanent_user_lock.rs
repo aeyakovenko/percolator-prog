@@ -1274,18 +1274,24 @@ fn v16_program_restarted_asset_with_retained_live_leg_has_bounded_stale_exit() {
             env.svm.warp_to_slot(RESOLVE_SLOT + EXIT_DELAY);
             let mut closes = 0;
             let mut max_exit_cu = 0;
+            // Attached legs, legs that have not settled their final K/F, and unpaid owners.
+            // Since engine #269 a position keeps its loss weight until the other side
+            // of its asset has settled, so the first owner asked settles both legs and waits.
             let exit_rank = |env: &V16CuEnv| -> u32 {
+                let group = env.market_state().1;
                 (0..2)
                     .map(|i| {
-                        percolator::active_bitmap_count_ones(active_bitmap(
-                            &env.portfolio_state(portfolios[i]),
-                        )) + u32::from(u128::from(env.token_amount(destinations[i])) < EXPECTED[i])
+                        let account = env.portfolio_state(portfolios[i]);
+                        percolator::active_bitmap_count_ones(active_bitmap(&account))
+                            + legs_with_unsettled_kf(&group, &account) as u32
+                            + u32::from(u128::from(env.token_amount(destinations[i])) < EXPECTED[i])
                     })
                     .sum()
             };
-            assert_eq!(exit_rank(&env), 6);
-            // Each owner detaches two canonical slots and receives one payout. No signer or
-            // oracle refresh can break a fixed point; six rank-lowering calls must suffice.
+            assert_eq!(exit_rank(&env), 10);
+            // Each owner settles and detaches two canonical slots and receives one payout.
+            // No signer or oracle refresh can break a fixed point; six rank-lowering calls
+            // must suffice.
             for _ in 0..3 {
                 for i in exit_order {
                     if resolved_portfolio_is_terminal(&env, portfolios[i]) {
@@ -6849,7 +6855,7 @@ fn inv073_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str
 
 #[test]
 fn v16_program_terminal_disposition_and_administrative_retirement_are_source_complete() {
-    const ENGINE_PIN: &str = "52659c02165439c84d99711231c1bf1c74cefc46";
+    const ENGINE_PIN: &str = "add1d0276a7346565f206c8ed8d214bd1cb904ef";
     const PHASES: &[Inv073TerminalPhase] = &[
         Inv073TerminalPhase {
             rank_lane: "economic-work",

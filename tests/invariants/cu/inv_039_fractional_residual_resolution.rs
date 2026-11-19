@@ -95,6 +95,11 @@ struct Book {
     deleted: [bool; 5],
     converted: [Option<u128>; 2],
     backing_expired: bool,
+    /// Source backing beyond the claims left after the holders' debits, already in the
+    /// junior pool. Engine `52659c02` moves it there as soon as a close passes over a leg of
+    /// the asset; since engine #269 a holder's obligation is still attached for a call
+    /// after its debit, so that call makes the move instead of the bucket's expiry.
+    stranded_joined: u128,
 }
 
 impl Book {
@@ -126,13 +131,31 @@ impl Book {
             }
     }
 
-    // Source backing not converted to claims; it stays reserved until its bucket expires.
+    // Source backing not converted to claims and not stranded; it stays reserved until its
+    // bucket expires.
     fn fresh_backing(&self) -> u128 {
         if self.backing_expired {
             0
         } else {
-            self.source_backing() - self.converted.iter().flatten().sum::<u128>()
+            self.source_backing()
+                - self.converted.iter().flatten().sum::<u128>()
+                - self.stranded_joined
         }
+    }
+
+    // Claim face still registered against the source domain.
+    fn remaining_face(&self) -> u128 {
+        (0..2)
+            .filter(|i| self.converted[*i].is_none())
+            .map(|i| {
+                self.input.gains()[i]
+                    - if self.settled[i] {
+                        self.input.losses()[i]
+                    } else {
+                        0
+                    }
+            })
+            .sum()
     }
 
     fn junior_pool(&self) -> u128 {
@@ -145,7 +168,7 @@ impl Book {
             // Expired source rounding joins the terminal pool.
             self.source_backing() - self.converted.iter().flatten().sum::<u128>()
         } else {
-            0
+            self.stranded_joined
         }
     }
 
@@ -178,7 +201,7 @@ impl Book {
     }
 
     fn record_conversion(&mut self, pair: usize) {
-        let backing = self.source_backing() - self.converted.iter().flatten().sum::<u128>();
+        let backing = self.fresh_backing();
         let faces: [u128; 2] = std::array::from_fn(|i| {
             if self.converted[i].is_some() {
                 0
@@ -392,20 +415,9 @@ impl Book {
             accounts.push(account);
         }
         let source = group.source_credit[2 + (1 - side)];
-        let remaining_face: u128 = (0..2)
-            .filter(|i| self.converted[*i].is_none())
-            .map(|i| {
-                input.gains()[i]
-                    - if self.settled[i] {
-                        input.losses()[i]
-                    } else {
-                        0
-                    }
-            })
-            .sum();
         assert_eq!(
             source.positive_claim_bound_num,
-            remaining_face * BOUND_SCALE
+            self.remaining_face() * BOUND_SCALE
         );
         assert_eq!(
             source.fresh_reserved_backing_num,
@@ -475,6 +487,18 @@ impl Book {
 
     fn close(&mut self, world: &mut AttributionWorld, actor: usize, peak: &mut u64) {
         let before = world.frame();
+        // A close that passes over a holder's attached obligation first places the source
+        // backing no remaining claim can own.
+        let stranded = if (actor == 0 || actor == 2)
+            && !self.backing_expired
+            && has_active_leg_for_asset(
+                &world.env.portfolio_state(world.actors[actor].portfolio),
+                1,
+            ) {
+            self.fresh_backing().saturating_sub(self.remaining_face())
+        } else {
+            0
+        };
         let cu = match world.payout(actor, false) {
             Ok(cu) => cu,
             Err(error) => {
@@ -486,6 +510,7 @@ impl Book {
         };
         assert_cu_within("fractional residual resolved close", cu, CUSTODY_CU_LIMIT);
         *peak = (*peak).max(cu);
+        self.stranded_joined += stranded;
         if actor == 1 {
             self.booked = true;
         }
@@ -737,6 +762,7 @@ fn v16_program_fractional_cohort_residual_preserves_owner_floors_through_resolut
                                 deleted: [false; 5],
                                 converted: [None; 2],
                                 backing_expired: false,
+                                stranded_joined: 0,
                             };
                             book.check(&world);
                             if live_booking {

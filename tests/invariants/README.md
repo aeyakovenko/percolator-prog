@@ -29230,7 +29230,7 @@ Verification at this checkpoint:
 | Focused INV-014 bidirectional delayed-control supersession | 30 public worlds per generated seed; 240 worlds at the default 8 seeds; 105.20 seconds | all 15 retained control families reject exact stale bytes after a real newer public mutation in both retained-higher/current-lower and retained-lower/current-higher payload orders; the Recovery-restart cells additionally require empty Recovery, exact global-frontier consumption and one-step advance, empty Active post-state, and zero SPL-supply delta |
 | Focused INV-029 exact receipt replacement | 1/1 named partial-receipt world plus the shared 12-world underfunded terminal model | every visible receipt atomically replaces its recorded prior unreceipted bound with the exact full-face claim, preserves conservative inequality, never increases total claim mass, and remains payout/custody live |
 | Focused INV-029 aggregate and receipt induction | 2/2 Kani with 6/6 constructive covers plus one source-complete composition gate | arbitrary full-`u64` add, burn, and frame steps preserve account, source-domain, and market claim aggregates; arbitrary partial/full receipt replacement preserves exact claim mass. The exact pinned engine add/burn/aggregate contracts and complete wrapper transition roster provide the implementation link without duplicating engine arithmetic. |
-| Focused INV-029 stale-claim snapshot barrier | 8/8 public worlds across four trade routes and both winning sides | two authenticated capped price steps leave a 200-atom favorable claim unmaterialized behind an independently rebuilt stale/stored-position barrier; winner-only settlement books it exactly but cannot snapshot or pay, loser settlement contributes exactly 100 principal atoms, and the terminal snapshot captures the remaining 100-atom junior face before total user payout reconciles to the original 1,100 atoms |
+| Focused INV-029 stale-claim snapshot barrier | 8/8 public worlds across four trade routes and both winning sides | two authenticated capped price steps leave a 200-atom favorable claim unmaterialized behind an independently rebuilt stale/stored-position barrier; winner-only settlement books it exactly but cannot snapshot or pay, loser settlement contributes exactly 100 principal atoms and books its 100-atom shortfall onto the winner's still-attached position (engine #269), the winner's claim is debited to the backed 100 atoms and realized from backing with no junior face and no snapshot, and total user payout reconciles to the original 1,100 atoms |
 | Focused INV-029 exact-only deployed profile | 239 stateful public tests including the focused seeded frontiers, 11,285 bounded public words/42,563 transitions including the post-claim recovery edge, twelve terminal schedules, and 1/1 source-complete composition | after every generated or bounded successful public transition, each domain's exact claim equals its positive bound and complete portfolio attribution; in Live mode, each portfolio's aggregate source-claim face also equals its exact positive-PnL face. The graph exhausts depth three, then applies every action to all 685 exact authenticated tracked wrapper states at that frontier; each key includes byte-identical tracked account/balance state and authenticated Clock. Recovery adds 549 worlds and 1,053 checked transitions; lien-impairment, receipt-conflict, and oracle-failure each add 366 worlds and 702 transitions from independently rebuilt public seeds. All run the same source-credit and claim oracles; the receipt product additionally requires exact bound replacement, fully-receipted-rate payment, and terminal order equivalence, while the oracle product crosses unavailable/malformed/recovered feeds around hard-stale maturity. The combined evidence must traverse nonzero claim-changing edges, and every partial receipt must have an observed exact bound replacement. The wrapper exposes no non-exact bound or rebucketing ingress, so approximate-bucket range/rebucketing proofs remain N/A unless that optional profile is introduced |
 | Focused INV-030 source-credit transition causality and malformed state | 239 stateful public tests including the focused seeded frontiers, 11,285 bounded public words/42,563 transitions including the post-claim recovery edge, and 4/4 focused CU | every generated public action, successful permissionless crank, and bounded live/terminal edge enforces the independent transition relation: unchanged formula inputs preserve the rate, every formula-input mutation advances `credit_epoch`, and rate improvements require more backing or a smaller claim. The reduced depth-four frontier extends every one of 685 exact authenticated tracked depth-three wrapper states by all 13 actions. Recovery applies that relation to 1,053 edges across fresh/exact/one-slot-late backing; lien-impairment, receipt-conflict, and oracle-failure each apply it to 702 edges. Every reached world retains a funded bounded exit. The graphs exercise 93+ input mutations, both rate directions, claim-reduction recovery, and a dedicated public post-claim backing recovery edge. Twenty malformed relation cases and two exact source-boundary truncations reject with complete economic rollback; a source-complete gate binds the pin-owned writer lock and INV-088 transition roster |
 | Focused INV-030 wrapper codec and transition induction | 2/2 Kani with 3/3 constructive induction covers plus one source-complete composition gate | arbitrary values for every one of the twelve source-credit fields survive the deployed account codec exactly; arbitrary successful frame, recompute, and reincarnation steps preserve the canonical rate contract through wrapper commit. Exact division remains owned by the pinned engine and named arithmetic axiom. |
@@ -31841,6 +31841,101 @@ Reuse the default-feature SBF via `PERCOLATOR_FUZZ_SBF`; no SBF rebuild is neede
 The unchanged matcher artifact SHA-256 is
 `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf93`.
 
+### INV-066 bankrupt shortfall across close orders (2026-11-19)
+
+[`cu/inv_066_bankrupt_shortfall_close_order.rs`](cu/inv_066_bankrupt_shortfall_close_order.rs), on
+engine `add1d0276a7346565f206c8ed8d214bd1cb904ef` (percolator #269). Public wrapper instructions
+only, `production_risk_params()` with funding off.
+
+**What failed.** A bankrupt account's unpaid loss is shared by the positions on the other side of
+its asset, by loss weight, when it is booked. A resolved close detached a settled leg at once, so
+a winner that closed before the bankrupt account had been touched left with its whole gain and
+its share fell on the positions still attached, their capital included. On engine `52659c02`
+(wrapper `9199d869`): T deposits 52M and is long 1,000.2 units against W (200M, short 1,000) and
+X (50M, short 0.2); the mark falls 4.7% at slots 20 and 40 and nobody cranks T; the oracle goes
+stale and the market is resolved permissionlessly. One `PermissionlessCrank` per account per
+round:
+
+| First to close | T | W | X |
+|---|---|---|---|
+| T | 0 | 251,989,602 | 50,010,398 |
+| W | 0 | 291,791,000 | 10,208,999 |
+| X | 0 | 251,981,641 | 50,018,358 |
+
+With W first, X loses 39.8M of its 50M on a position worth 200,000.
+
+**Engine rule.** A real position (nonzero basis and loss weight) now stays attached after
+resolution while a stored leg on the other side of its asset has not settled its final K/F, or
+while any account in the market owes a loss that is not booked or carries an unsettled B charge.
+Settling K/F, settling a B charge and booking a shortfall never wait, so the wait ends once the
+remaining accounts have been cranked. A call that could only wait is `EngineNonProgress` and
+changes nothing.
+
+**Guarantee.**
+`inv_066_resolved_payout_fairness_and_order_independence::bankrupt_shortfall_close_order::v16_program_bankrupt_shortfall_is_shared_by_weight_in_every_close_order`:
+in all six close orders T is paid nothing, W and X are paid their deposit and gain less their
+weight share of T's shortfall to within two atoms (251,989,602 and 50,010,398), X keeps its
+deposit, value is conserved and at most three atoms stay in the vault. Every accepted call
+changes state; a receipt that is owed a rounding atom collects it once its bucket has lapsed.
+
+**Control.** On engine `52659c02` the test fails in the order W, T, X: "paid [0, 291791000,
+10208999] ... account 1 is owed 251989602".
+
+**What a resolved market looks like now.** These follow from the rule and are what the
+existing selectors below had to be re-staged for:
+
+- An account's first call settles it. Its position leaves only when the other side of its asset
+  has settled, so in a cohort that reaches resolution unsettled the first account asked settles
+  and waits, and a loser's capital is paid after the winners opposite it have settled.
+- The second condition is market-wide: an account that owes an unbooked loss holds every
+  position in the market, also on assets it does not hold and also when it has no leg left.
+  Bankrupt accounts are therefore booked first.
+- A B charge settled against a gain takes a call of its own: the call reports progress with the
+  position (or the zero-size obligation) still attached, and the next call releases it. That
+  next call also moves source backing that no remaining claim can own to the junior pool at
+  once, instead of when its bucket lapses.
+- A winner whose counterparty is short of its loss is debited through B while it is still
+  attached. Before, a winner that had already detached kept its whole face and the unbacked part
+  became a junior receipt. The amounts paid are the same in every selector below.
+
+**Existing selectors re-staged** (payouts unchanged in each; details in the test files):
+
+| Selector (owner invariant) | What changed |
+|---|---|
+| `v16_attack_terminal_secondary_payouts_reject_noncanonical_vault` (INV-018); `v16_program_resolved_receipt_replays_extract_no_value_on_any_public_rail`, `v16_program_resolved_payout_secondary_rail_exhausts_shared_receipt` (INV-068); `v16_program_retained_resolution_routes_preserve_unsettled_fee_payouts` (INV-047) | the winner settles (new helper `settle_resolved_and_wait`) before the loser is closed |
+| `v16_program_native_pnl_terminal_sync_and_close_retry_preserves_unsynced_donation`, `v16_program_frozen_destinations_preserve_pnl_exit_without_freeze_authority` (INV-070) | the winner settles first; the loser had settled in Live, so the winner's leg detaches in that call and its gain stays unpaid until the loser has left |
+| `v16_program_generated_shared_custody_recreation_preserves_terminal_owner_value` (INV-070) | passes: losers settle and wait, winners settle and detach, losers exit, winners claim. New evidence counter `settle_only` 96; `detach_only` 64 to 96; rollbacks 608 to 736; aborted wrappers 480 to 608 |
+| `v16_program_full_latent_settlement_survives_terminal_owner_window_expiry` (INV-028) | first call is a settlement; steps `2*ASSETS + DOMAINS - 1` to `2*ASSETS + DOMAINS + 1` |
+| `v16_program_latent_capacity_at_resolution_preserves_attribution_and_exit` (INV-028) | per-call rule read from stored state (`resolved_legs_waiting_for_the_other_side`): every leg waits, or exactly one detaches |
+| `v16_program_paid_claimant_preserves_peer_latent_capacity_and_late_exit` (INV-028) | the debtor cannot be drained before the late owner registers its last claim: debtor settles, late owner registers, debtor exits, late owner realizes; calls per world `DOMAINS + 1` to `DOMAINS + 3` |
+| `v16_program_shared_expiry_progress_matrix_preserves_terminal_progress` (INV-028) | the loser's path accepts one `EngineNonProgress`, only while stored state shows its leg waiting |
+| `v16_program_two_bankrupt_domains_preserve_pending_debt_across_resolution_order`, `v16_program_funded_bankrupt_domains_preserve_input_derived_pending_debt`, `v16_program_insured_pending_domains_preserve_exact_debt_through_resolution_orders`, `v16_program_pending_claimant_reserve_roles_preserve_attribution_through_close_and_recredit`, `v16_program_expired_bankrupt_close_preserves_pending_cohort_entitlement_across_routes` (INV-039) | the debt models gain a state between booked and released: the holder absorbs its B debit in one call and is released by the next |
+| `v16_program_fractional_cohort_residual_preserves_owner_floors_through_resolution_orders`, `v16_program_fractional_cohort_debt_survives_funded_debtor_recreation_and_resolution` (INV-039) | the book tracks source backing beyond the remaining claims joining the junior pool when a close passes over a holder's attached obligation (one atom in the worlds with a cash residue) |
+| `v16_program_solvent_mixed_funding_preserves_input_derived_owner_entitlements` (INV-039) | one close order no longer calls an account while it waits; the drain probes a retry in that state and requires `EngineNonProgress` with exact rollback |
+| `v16_attack_recovery_resolved_cannot_clear_unreleased_loss_weight_before_debtor` (INV-039) | the victim settles and the bankrupt account on the other asset books before the debtor's position can leave |
+| `v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolved_payouts` (INV-045) | the rollback probe skips a close that simulation shows would only wait; pinned rollbacks 86 to 90 |
+| `v16_program_recovery_and_resolved_dispatch_treat_hints_as_discovery_only` (INV-056) | the bankrupt account books before the hinted and the unhinted claimant close |
+| `v16_program_late_debtor_source_cap_preserves_receipt_residual_entitlement` (INV-067) | the flat bankrupt account is cleared at stage 1 instead of stage 3 |
+| `v16_program_generated_receipts_and_reserves_have_constructible_terminal_progress` (INV-071) | the three bankrupt accounts book before the first of them detaches |
+| `v16_program_recovery_claim_and_deferred_liability_preserve_keeper_exit`, `v16_program_restarted_asset_with_retained_live_leg_has_bounded_stale_exit` (INV-073); `v16_program_mixed_recovery_active_terminal_accrual_has_bounded_public_exit` (INV-082) | the exit ranks count legs with unsettled final K/F (and, in the first, the fee anchor's lag): a call can settle without detaching |
+| `v16_program_max_shape_short_b_budget_has_exact_public_progress` (INV-077) | exact CU pin 554,832 to 554,814 |
+| `v16_program_a_fourteen_leg_loser_does_not_hold_up_unrelated_winners` (INV-077) | the settled loser beside the fourteen-leg pair waits too until the pair's legs on its asset have settled |
+| stateful `v16_program_pr365_fractional_cap_settlement_fuzz` (INV-038); `v16_program_pr255_resolve_requires_public_catchup_fuzz`, `v16_program_pr380_prospective_funding_preservation_fuzz` (INV-039) | "drain A, then B" comes back to an account that had to wait (`drain_resolved_actors_in_order`) |
+| stateful `v16_program_stale_positive_claim_blocks_snapshot_until_exactly_materialized` (INV-029) | the last stage changed subject, see below |
+
+**INV-029 stale-claim snapshot barrier.** Winner 1,000, loser 100, claim 200. Before, the winner
+had detached when the loser settled, kept 200 of face over 100 of backing, and the test required
+a payout snapshot holding the unbacked 100 as junior face. Now the winner is still attached, the
+loser's shortfall is a B debit on its claim, the claim of 100 is realized from backing and no
+snapshot is captured. The matrix requires that path exactly: one blocker after the loser's
+settlement, the bound still 200, a debit to 100, then a payment of 1,100. Payouts are as before
+(1,100 and 0). A booked debit is final, where a junior receipt could have been topped up later.
+
+**CU.** Costliest resolved call of `source_lien_loss_refresh::resolved_loss_settlement`, loser
+first / winner first, limit 1.25M: fourteen legs over 28 claims 929,462 / 913,766 (was 918,820 /
+919,250); two big legs first 900,520 / 867,394; two big legs last 1,140,096 / 1,190,149; lapsed
+claims 842,248 / 854,213.
+
 ### INV-024/068 retained payout, replenishment, and retry
 
 The PR427 revision on `codex/invariant-fidelity-reopen-20260904` adds one test under
@@ -32796,7 +32891,7 @@ what the books say; only the provider principal is left in the vault.
 | same | 14 legs; the two the order settles last burn all 28 claims, in the last settling call | 1,103,109 / 1,179,627 |
 | `v16_program_fourteen_leg_loss_over_lapsed_claims_first_settled_after_resolution_closes` | 14 legs over 28 claims in lapsed domains, capital for exactly the loss | 832,405 / 859,697 |
 | `v16_program_losses_on_the_lien_bound_first_settled_after_resolution_close_at_once` | 7 legs over 27 liened claims, 11 over 6 | below the limit, not printed |
-| `v16_program_a_fourteen_leg_loser_does_not_hold_up_unrelated_winners` | the first shape beside a settled winner, a settled loser and a flat account | n/a: the winner waits while the LP's legs are unsettled and is then paid 101,000 in full |
+| `v16_program_a_fourteen_leg_loser_does_not_hold_up_unrelated_winners` | the first shape beside a settled winner, a settled loser and a flat account | n/a: the winner waits while the LP's legs are unsettled and is then paid 101,000 in full (since engine #269 the settled loser waits too, see "INV-066 bankrupt shortfall across close orders") |
 
 All five tests fail on engine `5e3af071`: four on a resolved call that exceeds the transaction
 limit, the two-big-legs test on the 1.25M guardrail. On `a55aceb3` the three that close a pair
