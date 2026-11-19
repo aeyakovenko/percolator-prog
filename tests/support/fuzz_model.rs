@@ -5,7 +5,7 @@ use super::v16_svm::{
 use percolator::{
     active_bitmap_is_empty, v16_domain_pair_for_asset_index, AssetLifecycleV16, AssetStateV16,
     BackingBucketStatusV16, CloseProgressLedgerV16, HealthCertV16, MarketModeV16, PortfolioLegV16,
-    ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16, BOUND_SCALE,
+    ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16, ADL_ONE, BOUND_SCALE,
     CREDIT_RATE_SCALE, MAX_MARGIN_BPS, PORTFOLIO_SOURCE_DOMAIN_CAP, POS_SCALE,
 };
 use percolator_prog::{
@@ -3063,12 +3063,21 @@ struct MatchedBookObligationCensus {
     social_loss_dust_num: [u128; 2],
     explicit_unallocated_loss_num: [u128; 2],
     terminal_unmatched_effective_q: [u128; 2],
+    /// Sum of the rounded-up effective quantities of a side's current-epoch legs, minus that
+    /// side's effective-OI counter. Zero while the side's A index is `ADL_ONE`; otherwise typed
+    /// and bounded by `ScenarioRunner::adl_rounding_residue_bound` (issue #449).
+    adl_rounding_residue_q: [i128; 2],
 }
 
 pub struct ScenarioRunner {
     env: V16Svm,
     positions: [[i128; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
     expected_effective_oi: [[u128; 2]; ASSET_COUNT],
+    /// Per asset side: `(side epoch, reductions)`, the number of leg reductions this model has
+    /// seen on that side while its A index was below `ADL_ONE` in that epoch. Each such
+    /// reduction re-bases one leg and can add less than one raw unit to the side's rounding
+    /// residue (issue #449); a side reset starts a new epoch and a new count.
+    adl_haircut_reductions: [[(u64, u64); 2]; ASSET_COUNT],
     liveness_limit: usize,
     retained: VecDeque<RetainedTrade>,
     last_trade_rejection: Option<String>,
@@ -3115,6 +3124,7 @@ impl ScenarioRunner {
             env,
             positions: [[0; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
             expected_effective_oi: [[0; 2]; ASSET_COUNT],
+            adl_haircut_reductions: [[(0, 0); 2]; ASSET_COUNT],
             liveness_limit,
             retained: VecDeque::new(),
             last_trade_rejection: None,
@@ -6226,6 +6236,79 @@ impl ScenarioRunner {
         }
     }
 
+    /// One leg on `leg.side` of `asset` was reduced or closed. If the side's A index was below
+    /// the leg's basis at that moment, the engine removed the leg's rounded-up quantity from the
+    /// side counter while the leg gave up less than that in exact exposure: the difference, less
+    /// than one raw unit, joins the side's rounding residue (issue #449). A side reset starts a
+    /// new epoch, and with it a new count.
+    fn note_adl_haircut_reduction(
+        &mut self,
+        group_before: &MarketGroupV16,
+        asset: usize,
+        leg: PortfolioLegV16,
+    ) {
+        let engine_asset = &group_before.assets[asset];
+        let (current_a, epoch) = match leg.side {
+            SideV16::Long => (engine_asset.a_long, engine_asset.epoch_long),
+            SideV16::Short => (engine_asset.a_short, engine_asset.epoch_short),
+        };
+        if leg.epoch_snap != epoch || current_a >= leg.a_basis {
+            return;
+        }
+        let entry = &mut self.adl_haircut_reductions[asset][Self::side_index(leg.side)];
+        if entry.0 != epoch {
+            *entry = (epoch, 0);
+        }
+        entry.1 = entry.1.saturating_add(1);
+    }
+
+    /// Exclusive bound on the magnitude of a haircut side's rounding residue (issue #449):
+    /// the number of legs that still carry quantity, plus the reductions counted on that side in
+    /// its current epoch.
+    ///
+    /// Write `x_i = raw_i * A / a_basis` for a leg's exact exposure, `e_i = ceil(x_i)` for the
+    /// quantity the engine works with, and `O` for the side counter. A haircut multiplies every
+    /// `x_i` by at most `O'/O`, so it cannot lift `sum(x_i)` above `O`. A reduction by `q` takes
+    /// `q` from `O` and from `e_i`, and re-bases the leg so that `x_i` sits just under the new
+    /// `e_i`; a close takes `e_i` from `O` and `x_i` from the sum. Either moves `sum(x_i) - O` by
+    /// less than one unit in each direction, and nothing else moves it up. With
+    /// `sum(e_i) - sum(x_i)` in `[0, legs)`, the residue `sum(e_i) - O` stays inside
+    /// `(-reductions, legs + reductions)`. The index floor of a haircut lowers `sum(x_i)` by a
+    /// further `sum(raw_i) / a_basis` each time, far below one unit at this world's sizes. The
+    /// census checks the symmetric envelope `|residue| < legs + reductions` named in the issue.
+    fn adl_rounding_residue_bound(
+        &self,
+        asset: usize,
+        side: usize,
+        side_epoch: u64,
+        legs: u64,
+    ) -> u128 {
+        let (epoch, reductions) = self.adl_haircut_reductions[asset][side];
+        u128::from(legs)
+            + if epoch == side_epoch {
+                u128::from(reductions)
+            } else {
+                0
+            }
+    }
+
+    /// Legs of the primary actors that carry quantity on one side of `asset` right now.
+    fn side_leg_count(&self, asset: usize, side: SideV16) -> u64 {
+        (0..PRIMARY_ACTOR_COUNT)
+            .map(|actor| {
+                decoded_legs(&self.env.primary_portfolio(actor))
+                    .into_iter()
+                    .filter(|leg| {
+                        leg.active
+                            && leg.asset_index as usize == asset
+                            && leg.side == side
+                            && leg.basis_pos_q != 0
+                    })
+                    .count() as u64
+            })
+            .sum()
+    }
+
     fn replace_expected_oi(
         &mut self,
         asset: usize,
@@ -6296,6 +6379,7 @@ impl ScenarioRunner {
                             ));
                         }
                         self.replace_expected_oi(asset, old_leg.side, old_effective_q, 0, context)?;
+                        self.note_adl_haircut_reduction(group_before, asset, old_leg);
                     }
                 }
                 (Some(old_leg), Some(new_leg)) if old_leg.side == new_leg.side => {
@@ -6330,8 +6414,17 @@ impl ScenarioRunner {
                             SideV16::Long => group_after.assets[asset].oi_eff_long_q,
                             SideV16::Short => group_after.assets[asset].oi_eff_short_q,
                         };
-                        let exhausted_rounding_residue = old_effective_q.checked_sub(ledger_before)
-                            == Some(1)
+                        // The leg's rounded-up quantity can exceed everything its side still
+                        // carries, by as much as the side's typed rounding residue (issue #449).
+                        let residue_bound = self.adl_rounding_residue_bound(
+                            asset,
+                            side_index,
+                            old_leg.epoch_snap,
+                            self.side_leg_count(asset, old_leg.side),
+                        );
+                        let exhausted_rounding_residue = old_effective_q
+                            .checked_sub(ledger_before)
+                            .is_some_and(|overshoot| overshoot != 0 && overshoot < residue_bound)
                             && deployed_before == ledger_before
                             && deployed_after == 0
                             && new_effective_q == 0
@@ -6371,6 +6464,9 @@ impl ScenarioRunner {
                                 context,
                             )?;
                         }
+                        if new_leg.basis_pos_q.unsigned_abs() < old_leg.basis_pos_q.unsigned_abs() {
+                            self.note_adl_haircut_reduction(group_before, asset, old_leg);
+                        }
                     }
                 }
                 (Some(old_leg), Some(new_leg)) => {
@@ -6387,6 +6483,7 @@ impl ScenarioRunner {
                             allow_internal_exhausted_reset,
                         )?;
                         self.replace_expected_oi(asset, old_leg.side, old_effective_q, 0, context)?;
+                        self.note_adl_haircut_reduction(group_before, asset, old_leg);
                     }
                     let new_effective_q =
                         Self::leg_effective_oi(&group_after, asset, new_leg, false)?;
@@ -7257,6 +7354,7 @@ impl ScenarioRunner {
         group: &MarketGroupV16,
     ) -> Result<[MatchedBookObligationCensus; ASSET_COUNT], String> {
         let mut census = [MatchedBookObligationCensus::default(); ASSET_COUNT];
+        let mut effective_legs = [[0u64; 2]; ASSET_COUNT];
         for actor in 0..PRIMARY_ACTOR_COUNT {
             let account = self.env.primary_portfolio(actor);
             for leg in decoded_legs(&account).into_iter().filter(|leg| leg.active) {
@@ -7304,6 +7402,7 @@ impl ScenarioRunner {
                 census[asset].effective_q[side] = census[asset].effective_q[side]
                     .checked_add(effective_q)
                     .ok_or("matched-book effective exposure overflow")?;
+                effective_legs[asset][side] += u64::from(raw_q != 0);
                 census[asset].adl_reduced_raw_q[side] = census[asset].adl_reduced_raw_q[side]
                     .checked_add(adl_residue_q)
                     .ok_or("matched-book ADL residue overflow")?;
@@ -7353,20 +7452,52 @@ impl ScenarioRunner {
                 engine_asset.explicit_unallocated_loss_long,
                 engine_asset.explicit_unallocated_loss_short,
             ];
-            if entry.effective_q[0] >= entry.effective_q[1] {
-                entry.terminal_unmatched_effective_q[0] = entry.effective_q[0]
-                    .checked_sub(entry.effective_q[1])
-                    .ok_or("matched-book long terminal difference underflow")?;
-            } else {
-                entry.terminal_unmatched_effective_q[1] = entry.effective_q[1]
-                    .checked_sub(entry.effective_q[0])
-                    .ok_or("matched-book short terminal difference underflow")?;
+            // Each side's legs against that side's own counter. They agree exactly while the
+            // side's A index is `ADL_ONE`. Below it every leg is rounded up on its own, so the
+            // sum is typed as ADL rounding residue and held inside its bound (issue #449).
+            let deployed_oi = [engine_asset.oi_eff_long_q, engine_asset.oi_eff_short_q];
+            let side_a = [engine_asset.a_long, engine_asset.a_short];
+            let side_epoch = [engine_asset.epoch_long, engine_asset.epoch_short];
+            for side in 0..2 {
+                let residue = i128::try_from(entry.effective_q[side])
+                    .ok()
+                    .zip(i128::try_from(deployed_oi[side]).ok())
+                    .and_then(|(legs_q, counter_q)| legs_q.checked_sub(counter_q))
+                    .ok_or("matched-book rounding residue overflow")?;
+                let bound = if side_a[side] == ADL_ONE {
+                    0
+                } else {
+                    self.adl_rounding_residue_bound(
+                        asset,
+                        side,
+                        side_epoch[side],
+                        effective_legs[asset][side],
+                    )
+                };
+                if residue != 0 && residue.unsigned_abs() >= bound {
+                    return Err(format!(
+                        "asset {asset} side {side} has unclassified effective exposure imbalance: \
+                         legs sum to {}, the side counter is {}, A is {}, and the ADL rounding \
+                         residue {residue} is outside its bound {bound} ({} legs)",
+                        entry.effective_q[side],
+                        deployed_oi[side],
+                        side_a[side],
+                        effective_legs[asset][side],
+                    ));
+                }
+                entry.adl_rounding_residue_q[side] = residue;
             }
             let terminal_class = group.mode != MarketModeV16::Live
                 || !matches!(
                     engine_asset.lifecycle,
                     AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
                 );
+            // What one side carries beyond the other, net of the residue typed above.
+            if deployed_oi[0] >= deployed_oi[1] {
+                entry.terminal_unmatched_effective_q[0] = deployed_oi[0] - deployed_oi[1];
+            } else {
+                entry.terminal_unmatched_effective_q[1] = deployed_oi[1] - deployed_oi[0];
+            }
             if entry.terminal_unmatched_effective_q != [0, 0] && !terminal_class {
                 return Err(format!(
                     "live asset {asset} has unclassified effective exposure imbalance {:?}",
@@ -7375,6 +7506,15 @@ impl ScenarioRunner {
             }
         }
         Ok(census)
+    }
+
+    /// Per asset and side, the typed ADL rounding residue of the current state: the legs'
+    /// rounded-up effective quantities minus the side counter (issue #449).
+    fn adl_rounding_residue(&self) -> Result<[[i128; 2]; ASSET_COUNT], String> {
+        let (_, group) = self.env.primary_market_state();
+        Ok(self
+            .matched_book_obligation_census(&group)?
+            .map(|entry| entry.adl_rounding_residue_q))
     }
 
     fn assert_positions_match(&self) -> Result<(), String> {
@@ -7629,13 +7769,29 @@ impl ScenarioRunner {
                 ));
             }
             let obligations = obligation_census[asset];
-            if obligations.effective_q != [engine_asset.oi_eff_long_q, engine_asset.oi_eff_short_q]
+            let unit_a = [
+                engine_asset.a_long == ADL_ONE,
+                engine_asset.a_short == ADL_ONE,
+            ];
+            let typed_effective_q = [0, 1].map(|side| {
+                i128::try_from(obligations.effective_q[side])
+                    .ok()
+                    .and_then(|legs_q| legs_q.checked_sub(obligations.adl_rounding_residue_q[side]))
+                    .and_then(|typed_q| u128::try_from(typed_q).ok())
+            });
+            if typed_effective_q
+                != [
+                    Some(engine_asset.oi_eff_long_q),
+                    Some(engine_asset.oi_eff_short_q),
+                ]
+                || (0..2).any(|side| unit_a[side] && obligations.adl_rounding_residue_q[side] != 0)
             {
                 return Err(format!(
-                    "asset {asset} effective OI is not the sum of independently decoded effective legs: deployed={}/{}, census={:?}",
+                    "asset {asset} effective OI is not the sum of independently decoded effective legs: deployed={}/{}, census={:?}, typed ADL rounding residue={:?}",
                     engine_asset.oi_eff_long_q,
                     engine_asset.oi_eff_short_q,
                     obligations.effective_q,
+                    obligations.adl_rounding_residue_q,
                 ));
             }
             if obligations.pending_obligation_count
@@ -8013,6 +8169,17 @@ pub fn run_scenario(scenario: &Scenario) -> Result<Coverage, String> {
     progress_runner.coverage.merge(liquidation_coverage);
     progress_runner.coverage.assert_pull_request_non_vacuity()?;
     Ok(progress_runner.coverage)
+}
+
+/// Run the first `actions` actions of `scenario` through every shared oracle and report each
+/// asset side's typed ADL rounding residue: `[asset][long, short]` (issue #449).
+pub fn adl_rounding_residue_after(
+    scenario: &Scenario,
+    actions: usize,
+) -> Result<[[i128; 2]; ASSET_COUNT], String> {
+    let mut runner = ScenarioRunner::new(scenario)?;
+    runner.run_safety_prefix(&scenario.actions[..actions])?;
+    runner.adl_rounding_residue()
 }
 
 pub fn verify_constructible_crank_observation_subset(

@@ -846,17 +846,34 @@ Pending-loss obligations are reconciled by their own ledgers and must not be sil
 repair an OI mismatch unless the canonical specification explicitly defines an OI-carrying
 obligation class. In normal live state, effective long and short OI match.
 
+The two OI equations hold exactly on a side whose A index is `ADL_ONE`. On a haircut side each
+leg's effective quantity is rounded up on its own (INV-051), so the legs do not sum to the side
+counter exactly. The difference is typed as **ADL rounding residue** and is bounded: its magnitude
+is less than the number of legs that carry quantity on that side, plus the number of reductions,
+closes and haircuts applied to that side since its A index left `ADL_ONE`. In exact terms a haircut
+never lifts a side's exposure above its counter and, through the floor of the A index, lowers it by
+less than a tenth of a raw unit; each reduction or close moves the two apart by less than one raw
+unit. A side reset returns the A index to `ADL_ONE` and the residue to zero.
+
+Known limit (wrapper issue #449): that bound grows with the number of reductions. A party that
+holds legs on a haircut side can therefore build up exposure the counters do not carry, less than
+one raw unit per reduction, until the side resets. A bound that does not depend on history needs
+the engine to keep each side's sum of raw basis and derive the A index from it; the engine does not
+do that today.
+
 Every difference between raw user basis and effective OI must be uniquely typed as an ADL haircut,
-pending-loss obligation, B obligation, close residual, or Recovery obligation owned by an exact
-asset, side, portfolio/close episode, and generation. An untyped balancing ghost value is not
-evidence of matched-book integrity. No obligation may be counted both as effective exposure and as
-a protocol residual.
+ADL rounding residue, pending-loss obligation, B obligation, close residual, or Recovery obligation
+owned by an exact asset, side, portfolio/close episode, and generation. An untyped balancing ghost
+value is not evidence of matched-book integrity. No obligation may be counted both as effective
+exposure and as a protocol residual.
 
 **Required tests.** Recompute the logical aggregate from all portfolios in the bounded test universe
 after trade, liquidation, rebalance, reset, resolved close, and recovery, and compare it with the
-maintained O(1) counters. Independently classify every non-user balancing delta into one disjoint
-protocol-obligation kind and prove each kind has a public writer, a bounded progress route, and an
-exact terminal sink.
+maintained O(1) counters: each side's legs against that side's own counter, exactly on an unhaircut
+side and inside the rounding-residue bound on a haircut side. Independently classify every non-user
+balancing delta into one disjoint protocol-obligation kind and prove each kind has a public writer,
+a bounded progress route, and an exact terminal sink. Pin the per-reduction growth of the rounding
+residue on the deployed program.
 **Verification:** P, F, M
 
 ### INV-049 - Canonical single net leg per asset generation

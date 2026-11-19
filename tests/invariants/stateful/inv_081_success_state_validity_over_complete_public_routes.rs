@@ -122,6 +122,94 @@ fn v16_program_designated_liquidity_provider_has_public_exit_after_unilateral_re
     );
 }
 
+/// Issue #449, the case the public-interface fuzz drew on 2026-11-19. A unilateral reduction
+/// lowers the short side's A index on asset 1 to 2/7. The two remaining shorts have exact sizes
+/// 357,142.86 and 142,857.14 and are each rounded up on their own, to 357,143 and 142,858,
+/// against a side counter of 500,000. The reference model types the extra unit as ADL rounding
+/// residue, not as an unmatched position, and every portfolio still exits by both campaigns.
+#[test]
+fn v16_program_adl_rounding_residue_is_typed_and_every_portfolio_exits() {
+    let scenario = Scenario {
+        seed: [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 39, 45, 184, 69, 152, 85, 152, 123, 3, 229, 144, 164, 180,
+            35, 206, 24, 234, 168, 234, 41, 183, 55, 3,
+        ],
+        config: SmallMarketConfig {
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 2,
+            max_abs_funding_e9_per_slot: 0,
+            maintenance_fee_per_slot: 1,
+        },
+        actions: vec![
+            Action::TopUpInsurance {
+                domain: 124,
+                amount: 244,
+            },
+            Action::AdvanceBlockhash,
+            Action::PushMark {
+                asset: 132,
+                dt: 3,
+                move_bps: -62,
+            },
+            Action::Trade {
+                route: TradeRoute::BatchNoCpi,
+                taker: 235,
+                maker: 139,
+                asset: 142,
+                units: 3,
+                fee_bps: 19,
+                price_move_bps: 279,
+                prefer_reduce: false,
+            },
+            Action::RebalanceReduce {
+                actor: 143,
+                asset: 223,
+            },
+            Action::DrainOnlyAsset { asset: 151 },
+            Action::Trade {
+                route: TradeRoute::NoCpi,
+                taker: 162,
+                maker: 93,
+                asset: 134,
+                units: 2,
+                fee_bps: 21,
+                price_move_bps: -975,
+                prefer_reduce: true,
+            },
+            Action::Crank {
+                actor: 25,
+                hints: HintMode::Empty,
+            },
+            Action::Withdraw {
+                actor: 224,
+                amount: 391,
+            },
+            Action::ResolveStalePermissionless { dt: 108 },
+        ],
+    };
+
+    assert_eq!(
+        adl_rounding_residue_after(&scenario, 4).expect("history before the unilateral reduction"),
+        [[0, 0]; 3],
+        "no side is haircut yet, so legs and counters agree exactly"
+    );
+    assert_eq!(
+        adl_rounding_residue_after(&scenario, 5).expect("the unilateral reduction is admitted"),
+        [[0, 0], [0, 1], [0, 0]],
+        "the haircut short side of asset 1 carries exactly one unit of rounding residue"
+    );
+
+    let coverage = run_scenario(&scenario).expect("every portfolio exits with the residue typed");
+    assert_ne!(
+        coverage.rebalance_reductions, 0,
+        "setup must execute a real unilateral reduction"
+    );
+    assert_ne!(
+        coverage.user_positions_closed, 0,
+        "the haircut legs must reach public terminal exits"
+    );
+}
+
 #[test]
 fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
     let scenario = Scenario {

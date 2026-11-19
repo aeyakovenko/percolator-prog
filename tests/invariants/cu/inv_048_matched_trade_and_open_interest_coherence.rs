@@ -344,6 +344,12 @@ fn v16_program_typed_matched_book_obligation_oracle_is_source_complete() {
             path: "tests/invariants/stateful/inv_061_deterministic_bounded_liquidation.rs",
             witness: "v16_program_resolved_adl_close_order_matrix_preserves_funded_exits",
         },
+        Inv048ObligationOwner {
+            category: "ADL rounding residue",
+            census_field: "adl_rounding_residue_q",
+            path: "tests/invariants/stateful/inv_081_success_state_validity_over_complete_public_routes.rs",
+            witness: "v16_program_adl_rounding_residue_is_typed_and_every_portfolio_exits",
+        },
     ];
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -398,9 +404,15 @@ fn v16_program_typed_matched_book_obligation_oracle_is_source_complete() {
             obligation.witness,
         );
     }
-    assert_eq!(categories.len(), 13, "matched-book obligation roster drift");
+    assert_eq!(categories.len(), 14, "matched-book obligation roster drift");
     assert!(model.contains("effective + ADL residue + reset residue"));
     assert!(model.contains("effective OI is not the sum of independently decoded effective legs"));
+    // Issue #449: legs and counter agree exactly on an unhaircut side; below `ADL_ONE` the
+    // difference is typed and bounded by the legs plus the reductions counted on that side.
+    assert!(model.contains("if residue != 0 && residue.unsigned_abs() >= bound {"));
+    assert!(model.contains("let bound = if side_a[side] == ADL_ONE {\n                    0"));
+    assert!(model.contains("fn adl_rounding_residue_bound("));
+    assert!(model.contains("fn note_adl_haircut_reduction("));
 }
 
 #[test]
