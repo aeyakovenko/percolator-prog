@@ -304,6 +304,38 @@ Benefits:
 ### Native 128-bit arithmetic
 Positions and PnL use native `i128`/`u128` (`POS_SCALE = 1_000_000`, `ADL_ONE = 1_000_000_000_000_000`). There are no I256/U256 wrapper types for positions or PnL. Positions use the ADL A/K coefficient mechanism defined in the spec.
 
+### Time is counted in slots
+Every rate and every timer of the program and the engine is per slot. The one exception is oracle
+staleness, which is measured in seconds against the feed's own publish time (`max_staleness_secs`).
+The program reads the slot from the clock sysvar and never converts slots to seconds.
+
+- **Per-slot rates:** the funding premium cap (`max_abs_funding_e9_per_slot`), the maintenance fee
+  (`maintenance_fee_per_slot`), the backing utilization fee (`backing_fee_*_e9_per_slot`), the
+  effective-price movement cap (`max_price_move_bps_per_slot`) and EWMA mark smoothing
+  (`mark_ewma_halflife_slots`).
+- **Windows in slots:** the accrual window (`max_accrual_dt_slots`), PnL warmup (`h_min`, `h_max`),
+  backing expiry and the freshness horizon, `min_funding_lifetime_slots`,
+  `max_bankrupt_close_lifetime_slots`, `asset_activation_cooldown_slots`, the owner and exit window
+  (`force_close_delay_slots`), `hybrid_soft_stale_slots` and `permissionless_resolve_stale_slots`.
+
+A market's parameters therefore mean what its operator intended only at the slot time they were
+chosen for. If the cluster's target slot time falls, every per-slot rate accrues proportionally
+faster per second and every slot window lasts proportionally shorter, with no instruction and no
+configuration change. At half the slot time, funding, fees and the price movement allowed per second
+double, and every window lasts half as long in wall-clock time (#403).
+
+What does not change: the engine's safety arguments are stated per slot. The price cap bounds the
+move between two cranks counted in slots, an exit window is a number of slots in which a live user's
+instruction can land, and none of them reads a duration in seconds. What does change is everything
+an operator sized in wall-clock terms: fee and funding levels per day, how long a person has to react
+inside an owner or exit window, and how much keeper latency a window tolerates. Choose slot counts
+and per-slot rates for the shortest slot time the market is meant to live through, and convert fee
+quotes from "per day" with the slot time in force.
+
+The program does not rescale anything by a measured slot duration. That would need a trusted source
+of slot time inside the program and a different time model in the engine, and it has not been
+designed.
+
 ### Two trade paths
 - **TradeNoCpi**: no external matcher; used for baseline integration, local testing, and deterministic program-test scenarios.
 - **TradeCpi**: production matcher path; the LP owner configures a matcher program/context once on

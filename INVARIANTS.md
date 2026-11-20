@@ -448,6 +448,13 @@ whether a feed is admissible (`1..=MAX_ORACLE_PRICE`), is still its six-decimal 
 six-decimal legs, as the program did, made a leg worth 0.00041 known to one part in 410, and two
 feed tuples with the same cross-rate could store targets 24 bps apart.
 
+**Scope: time is a count of slots.** Every rate and every window of the program and the engine is
+per slot; only oracle staleness is in seconds, against the feed's own publish time. No invariant in
+this charter is stated in seconds, and none depends on how long a slot lasts. A shorter slot time
+on the cluster makes every per-slot rate accrue faster per second and every slot window shorter in
+wall-clock time, with no instruction and no configuration change (#403); the program does not
+rescale by a measured slot duration.
+
 **Required tests.** Omit or corrupt sysvars where possible, vary fallback slots, rewind stored
 slots, and test expiry-1, expiry, and expiry+1. Refresh a stale account with a live Hybrid leg with
 no report, with the previous slot's report, with a stale report and with the current one, in both

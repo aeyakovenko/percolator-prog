@@ -31790,6 +31790,13 @@ memory, lets a spent-backing history be cleared beside a lapsed unused bucket, a
 other transition: against the previous pin, 3,000 solvent wind-downs, 8,000 drained insolvent
 histories and 2,400,000 call results of random Live histories are identical (engine PR).
 
+### INV-020 scope: time is counted in slots (#403, 2026-11-20)
+
+Documentation only. Every rate and every timer of the program and the engine is per slot, and
+nothing is rescaled when the cluster's slot time changes. The README ("Time is counted in slots")
+and INV-020 now say what a shorter slot time does to each of them and what it leaves alone. No
+test changes.
+
 ### INV-073 the keeper hand-off guardrail no longer depends on the keys a run draws (2026-11-20)
 
 Tests only. `v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature`
