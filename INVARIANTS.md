@@ -824,6 +824,15 @@ self-controlled, zero-fee, zero-size, or zero-price route bypasses the cap.
 mark_after in movement_envelope(mark_before, elapsed_slots, configured_cap)
 ```
 
+**Scope: funding is not independent of report cadence.** The envelope bounds the mark. It does not
+make funding the same for every publication history. A published report re-anchors the funding
+mark of a fresh hybrid asset to the accepted price path, and the funding mark is not moved
+retroactively: over slots in which no report was published, the replayed steps use the mark of the
+last report. Two histories with the same target that differ only in how often the report is
+renewed therefore accrue different funding, by at most `max_abs_funding_e9_per_slot` of the
+notional per slot of the gap. Without funding they are one history and agree exactly. Publication
+is permissionless, so the side that would pay can end a gap.
+
 **Required tests.** Differentially compare every mark-updating route over all zero/boundary cases
 and repeated same-slot calls.
 **Verification:** P, F, I, M

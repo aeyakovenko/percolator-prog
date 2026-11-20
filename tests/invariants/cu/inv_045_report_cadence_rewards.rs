@@ -1,5 +1,9 @@
 //! INV-020/024/036/041/045/061/062/080: report cadence across paid-price catchup.
 //! Fixed-target renewals and eager/delayed market cranks precede the same liquidation.
+//! Without funding the two cadences are one history and must agree exactly. With funding they
+//! are different inputs: publishing a report re-anchors the funding mark, so the cadence decides
+//! how much premium a gap accrues. The funded test checks each cadence against its own model
+//! and the difference between them against the modelled funding and the rate cap.
 //! A still-fresh, older equal-price report rejects even after a liquidation prefix.
 //! System/SPL/wrapper setup; only Clock and external oracle accounts are harness inputs.
 
@@ -11,7 +15,7 @@ fn v16_program_paid_price_catchup_report_cadence_preserves_reward_and_rejects_re
 }
 
 #[test]
-fn v16_program_funded_report_cadence_preserves_partial_liquidation_reward_and_custody() {
+fn v16_program_funded_report_cadence_differs_only_by_modelled_funding_and_preserves_custody() {
     run_report_cadence(1_000);
 }
 
@@ -284,6 +288,31 @@ fn v16_program_paid_rediscovery_revokes_prior_reward_authentication_until_recatc
 }
 
 fn run_report_cadence(max_funding: u64) {
+    // CRANK_CU_LIMIT (325,000) is the suite's generic per-crank guardrail, not a keeper budget.
+    // With funding on, the liquidation transaction of the endpoint-14 history replays eight funded
+    // steps and measured 326,407 CU once the program validates the market header before every
+    // crank commits (about 1,295 CU per crank). The funded histories get this test-local bound;
+    // every transaction is still asserted within it. The unfunded histories keep the generic one.
+    const FUNDED_CADENCE_CU_LIMIT: u64 = 340_000;
+    let cadence_cu_limit = if max_funding == 0 {
+        CRANK_CU_LIMIT
+    } else {
+        FUNDED_CADENCE_CU_LIMIT
+    };
+    let submit = |env: &mut V16CuEnv,
+                  signer: &Keypair,
+                  instructions: &[Instruction],
+                  tracked: &[Pubkey],
+                  rejection: Option<(u8, InstructionError)>| {
+        submit_with_cu_limit(
+            env,
+            signer,
+            instructions,
+            tracked,
+            rejection,
+            cadence_cu_limit,
+        )
+    };
     const REPORT: u64 = 980_000;
     const SHARE: u128 = 3_333;
     // Funding accrues exactly (#458), one path step per slot: each side's A-scaled
@@ -591,13 +620,46 @@ fn run_report_cadence(max_funding: u64) {
             );
             assert_eq!(values(&env, portfolios)[4], 0);
             census(&env, portfolios);
-            if let Some(expected) = &reference {
-                assert_eq!(
-                    &result, expected,
-                    "renewal/crank cadence changed liquidation economics"
-                );
+            if let Some((expected, lazy_funding)) = &reference {
+                if max_funding == 0 {
+                    assert_eq!(
+                        &result, expected,
+                        "renewal/crank cadence changed liquidation economics"
+                    );
+                } else {
+                    // With funding on, the two cadences are different inputs, not two routes to
+                    // one history: a report re-anchors the funding mark to the accepted path, so
+                    // the eager history pays no premium after slot 6, while the lazy one keeps
+                    // its slot-6 mark through the gap and its longs pay the capped premium at
+                    // every replayed step. Each history has been checked above against its own
+                    // model. Across the two, the target's value before its penalty differs by
+                    // exactly the modelled funding, and that difference is within the rate cap
+                    // times the notional over the steps of the gap. The size of the liquidation
+                    // follows the target's equity, so it may differ as well.
+                    let gap = funding_atoms[0] - lazy_funding;
+                    assert_eq!(
+                        (result.3[0] + result.1 as i128) - (expected.3[0] + expected.1 as i128),
+                        gap,
+                        "the cadences differ by something other than modelled funding"
+                    );
+                    let bound: i128 = (7..=endpoint)
+                        .map(|step| {
+                            (100 * i128::from(max_funding) * i128::from(path_price(step)))
+                                .div_euclid(1_000_000_000)
+                                + 1
+                        })
+                        .sum();
+                    assert!(
+                        (0..=bound).contains(&gap),
+                        "the lazy history's longs pay at most the capped premium per step: {gap} > {bound}"
+                    );
+                    assert_eq!(
+                        result.3[4] - result.2 as i128,
+                        expected.3[4] - expected.2 as i128
+                    );
+                }
             } else {
-                reference = Some(result);
+                reference = Some((result, funding_atoms[0]));
             }
             println!("funding={max_funding} endpoint={endpoint} eager={eager}: price={price}, liquidation={result:?}, payout={payout}");
         }

@@ -182,7 +182,7 @@ entries. Closest existing selectors (names are exact leaf selectors):
 
 | Existing owner | Covered selectors and boundary |
 | --- | --- |
-| `cu/inv_045_report_cadence_rewards.rs` | `v16_program_paid_price_catchup_report_cadence_preserves_reward_and_rejects_regression`, `v16_program_funded_report_cadence_preserves_partial_liquidation_reward_and_custody`, `v16_program_paid_rediscovery_revokes_prior_reward_authentication_until_recatchup`: cadence, funding and paid rediscovery with fully collected partial-close penalties. |
+| `cu/inv_045_report_cadence_rewards.rs` | `v16_program_paid_price_catchup_report_cadence_preserves_reward_and_rejects_regression`, `v16_program_funded_report_cadence_differs_only_by_modelled_funding_and_preserves_custody`, `v16_program_paid_rediscovery_revokes_prior_reward_authentication_until_recatchup`: cadence, funding and paid rediscovery with fully collected partial-close penalties. |
 | `cu/inv_045_authenticated_reward_handoff.rs` | `v16_program_paid_discovery_fresh_handoff_authenticates_liquidation_and_keeper_exit`, `v16_program_nonzero_funding_fresh_handoff_preserves_owner_and_keeper_entitlement`: fresh handoff, funded owner value and keeper exit. |
 | `cu/inv_045_corroborated_mark_fees.rs` | `v16_program_corroborated_paid_mark_only_distributes_new_liquidation_fees`: old discovery reserve exclusion and common ownership, with an unclipped new fee. |
 | `cu/inv_045_retained_penalty_handoff.rs` | `v16_program_retained_stale_penalty_survives_fresh_liquidation_and_catchup`: old retained penalties across later episodes. |
@@ -31675,6 +31675,48 @@ makes no progress on a stale account, by design. Order robustness (INV-072) hold
 rule allows: the report is public, any caller can present it for any account, and it is presented
 once per slot.
 
+### INV-045 funding over a report gap (2026-11-20)
+
+Tests only; no program change. This closes the last documented red test of the suite.
+
+**What the test required.** `run_report_cadence` runs one price history twice, with a report
+published in every slot (eager) and with reports only at the two ends of the gap (lazy), and
+required identical liquidations. Without funding that holds and is still asserted exactly
+(`v16_program_paid_price_catchup_report_cadence_preserves_reward_and_rejects_regression`). With
+funding (`max_abs_funding_e9_per_slot = 1,000`) it stopped holding when funding became exact
+(#458); before that, the whole-unit floor rounded the gap's sub-unit steps to zero and the two
+cadences agreed by accident.
+
+**What the program does.** For a fresh hybrid asset a published report sets the funding mark to
+the accepted path price, from the report's slot on (`canonical_accrual_path_for_target_view`:
+only steps at or after `last_good_oracle_slot` move the mark; the funding mark is deliberately
+not retroactive). An eager history therefore carries no premium after slot 6. A lazy history has
+no report inside the gap, keeps its slot-6 mark above the falling path, and its longs pay the
+capped premium at every replayed step. The two cadences are different inputs to funding, not two
+routes to one history.
+
+**Decision (2026-11-20): accepted and documented.** Cadence is an input to funding, bounded by the
+rate cap times the notional per slot of the gap; publication is permissionless, so the paying side
+can end a gap. `INVARIANTS.md` states it under INV-045 and the root README under premium funding.
+The alternative, replaying the mark update over fixed-target gaps, would change the program's
+funding semantics and was not taken.
+
+**The restated test,**
+`v16_program_funded_report_cadence_differs_only_by_modelled_funding_and_preserves_custody`
+(renamed from `..._preserves_partial_liquidation_reward_and_custody`): each cadence is checked
+against its own model as before (the funding index at every publication, the target's value, the
+funding totals, insurance, budgets, custody, the keeper's payout). Across the two cadences the
+target's value before its penalty differs by exactly the modelled funding, 199 atoms at endpoint 8
+and 789 at endpoint 14, and that difference is within the cap bound. The size of the liquidation
+follows the target's equity and so differs as well (30,093,516 against 30,090,311 units at
+endpoint 8).
+
+**Compute.** The funded endpoint-14 liquidation transaction measures 326,407 CU with the
+commit-time header check of the section below, 1,407 above the suite's generic per-crank
+guardrail of 325,000 (it was never measured while the test was red). As in
+`inv_073_recovery_claim_liability_exit.rs`, the funded histories get a test-local bound of
+340,000; every transaction is still asserted within it, and the unfunded histories keep 325,000.
+
 ### INV-036/045 no keeper reward during Hybrid catch-up: five tests restated (2026-11-19)
 
 The program's rule stays (commit `01ec6161`, 2026-09-16): a liquidation penalty is reclaimable only
@@ -31703,7 +31745,9 @@ the report), where no liquidation occurs. The INV-045 roster in
 `cu/inv_045_no_free_mark_movement.rs` carries the four new names. The dated sections further up
 this file describe these tests as first written; each now starts with a pointer to this section.
 
-**Still failing after this change:** one documented test,
+**Still failing after this change** (restated on 2026-11-20 as
+`v16_program_funded_report_cadence_differs_only_by_modelled_funding_and_preserves_custody`, see
+"INV-045 funding over a report gap" above): one documented test,
 `v16_program_funded_report_cadence_preserves_partial_liquidation_reward_and_custody`. With funding
 on, a history that publishes a report every slot charges no premium during catch-up, while one that
 skips the gap charges longs at every replayed step from the mark of its last publication. The test
