@@ -790,6 +790,12 @@ loss. For all value-bearing histories, the normalized outcome also obeys a coali
 partition, retry, route switch, interleaving, or relevant landing order can make the participating
 coalition better off than its signed and protocol-defined aggregate envelope.
 
+**Scope: resolved closes before the payout snapshot.** INV-066 names the cases in which the order
+of permissionless closes still decides what one account is paid. In the measured ones the account
+is paid less in some orders and nobody is paid more. In one, a B charge booked onto an account that
+had already settled, the order also decides which legs share the shortfall (engine specification,
+the rule that a real position keeps its loss weight). This statement does not cover those cases.
+
 **Required tests.** Permute equal-priority legs, hints, claim order, and continuation order; compare
 normalized outcomes.
 **Verification:** F, M, R
@@ -1153,7 +1159,26 @@ retirement/reactivation.
 
 **Statement.** Payout entitlement derives from an immutable snapshot and exact proven claim face.
 Authority actions cannot reduce the unreceipted bound except atomically with protocol-proven removal
-of the same claim. Valid claimant orders differ only by designated conservative rounding residue.
+of the same claim. Once the snapshot is captured, valid claimant orders differ only by designated
+conservative rounding residue.
+
+**Scope: before the snapshot.** The snapshot is captured when no position, stale account, loss
+barrier or negative PnL is left. Until then the order of the permissionless closes can still decide
+what an account is paid, in the cases the engine specification lists under "What close order can
+still decide": remainders below one atom; a backing bucket that lapses between two closes; claim
+face with nothing behind it, which a loss first settled after resolution cancels one for one; a
+loss that its own domain cannot take and that joins the junior pool, where a gain registered after
+it is paid at the junior rate; and a B charge booked onto an account that had already settled,
+whose shortfall a leg that detached in between does not share. None of them keeps an account from
+closing. Measured on the pinned engine: in 8,000 random insolvent histories closed in up to 24
+orders each, the order changes a payment by more than 3 atoms in one (2,500,445 atoms, of 2.2
+billion paid); with up to six unsettled maximum price steps before resolution, in 13 of 8,000
+(10,890,345 atoms at most). In each of those the payment of exactly one account varies and the
+difference is paid to no other account: it stays in the vault as residue (INV-070). The last two
+cases can move value between accounts (among junior claimants when the junior pool is short, and
+from the legs that stayed to the one that left); no history of either set shows a payment that
+moved from one account to another. These are measurements, not a proof: order independence before
+the snapshot is not claimed beyond them.
 
 **Required tests.** Permute claim order, attempted authority refinements, top-ups, exact receipt
 replacement, and recovery transitions.

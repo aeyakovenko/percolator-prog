@@ -31797,6 +31797,15 @@ nothing is rescaled when the cluster's slot time changes. The README ("Time is c
 and INV-020 now say what a shorter slot time does to each of them and what it leaves alone. No
 test changes.
 
+### INV-066 and INV-041 scope: order independence from the payout snapshot (2026-11-20)
+
+Documentation only. INV-066's order-independence sentence holds from the capture of the payout
+snapshot, and the charter now says so. It names the cases in which the order of permissionless
+closes can decide what one account is paid before the snapshot, with the engine's measurements
+(engine `dca48d20`, specification section "What close order can still decide"; engine issues 132
+and 175). INV-041 carries the matching scope note. No test changes: the tests of both invariants
+pass as they are.
+
 ### INV-073 the keeper hand-off guardrail no longer depends on the keys a run draws (2026-11-20)
 
 Tests only. `v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature`
