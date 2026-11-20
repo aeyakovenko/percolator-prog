@@ -437,6 +437,17 @@ taken in an earlier slot cannot refresh an account in a later slot, however fres
 a refresh that omits a leg is refused whole. The report is public evidence: any caller may present
 it, and once taken in a slot it serves every account in that slot.
 
+**A composite price is rounded once, from legs that carry twelve decimals (#462).** A composite
+target is a product or quotient of up to three authenticated feed values, optionally inverted and
+divided by a unit scale. It is the floor, at six decimals, of the exact composite of the legs'
+values taken at twelve decimals: no intermediate value is rounded, and a leg enters with the digits
+its feed has down to the twelfth decimal. So a leg contributes a relative error of at most one part
+in its twelve-decimal value, which is one in a million for the smallest admissible leg (0.000001)
+and less than a billionth for a leg worth 0.001 or more. What is stored per leg, and what decides
+whether a feed is admissible (`1..=MAX_ORACLE_PRICE`), is still its six-decimal value. Composing
+six-decimal legs, as the program did, made a leg worth 0.00041 known to one part in 410, and two
+feed tuples with the same cross-rate could store targets 24 bps apart.
+
 **Required tests.** Omit or corrupt sysvars where possible, vary fallback slots, rewind stored
 slots, and test expiry-1, expiry, and expiry+1. Refresh a stale account with a live Hybrid leg with
 no report, with the previous slot's report, with a stale report and with the current one, in both

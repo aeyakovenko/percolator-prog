@@ -1738,7 +1738,12 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         ArithmeticOwner { function: "market_from_wire_boxed", class: "STRUCTURAL", evidence: "INV-015" },
         ArithmeticOwner { function: "write_market_wire", class: "STRUCTURAL", evidence: "INV-025" },
         ArithmeticOwner { function: "scale_decimal_exponent_to_e6", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
-        ArithmeticOwner { function: "compose_price_e6", class: "ORACLE", evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms" },
+        ArithmeticOwner { function: "scale_admitted_decimal_exponent_to_e12", class: "ORACLE", evidence: "v16_program_oracle_leg_at_twelve_decimals_is_the_floor_of_the_feed_value" },
+        ArithmeticOwner { function: "product_of_u64_factors", class: "ORACLE", evidence: "v16_program_floor_ratio_of_u64_products_matches_bigint" },
+        ArithmeticOwner { function: "divide_limbs_by_u64", class: "ORACLE", evidence: "v16_program_floor_ratio_of_u64_products_matches_bigint" },
+        ArithmeticOwner { function: "floor_ratio_of_u64_products", class: "ORACLE", evidence: "v16_program_floor_ratio_of_u64_products_matches_bigint" },
+        ArithmeticOwner { function: "floor_scaled_ratio_of_u64_products", class: "ORACLE", evidence: "v16_program_floor_scaled_ratio_of_u64_products_matches_bigint" },
+        ArithmeticOwner { function: "compose_price_e6", class: "ORACLE", evidence: "v16_program_composite_price_is_the_floor_of_the_exact_ratio_of_twelve_decimal_legs" },
         ArithmeticOwner { function: "mul_u128_by_u16_wide", class: "ORACLE", evidence: "host_oracle_confidence_comparison_exhausts_bps_for_wide_boundary_pairs" },
         ArithmeticOwner { function: "clamp_toward_engine_dt", class: "ORACLE", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
         ArithmeticOwner { function: "adverse_trade_price_delta", class: "POLICY", evidence: "v16_program_policy_arithmetic_matches_independent_full_width_corpus" },
@@ -1794,6 +1799,11 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         "/ percolator::",
         "% den",
         "% denominator",
+        // The composite oracle's exact ratio of 64-bit factors: its limb arithmetic, and
+        // every function that calls it.
+        "/ divisor",
+        ">> 64",
+        "ratio_of_u64_products(",
     ];
     const CANONICAL_ADAPTERS: &[&str] = &[
         "fee_share_floor",
@@ -1816,17 +1826,24 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
         .split("    #[cfg(test)]\n    mod tests")
         .next()
         .expect("production prefix exists");
-    assert_eq!(
-        production
-            .matches("scale_decimal_exponent_to_e6(")
-            .count(),
-        4,
-        "one canonical decimal scaler must have exactly the Pyth, Switchboard, and Chainlink callers",
-    );
+    // A feed value becomes a price in one place, `scaled_oracle_leg_price`, which calls each
+    // of the two canonical scalers once: six decimals to store and to admit, twelve to
+    // compose from (#462).
+    for (scaler, uses) in [
+        ("scale_decimal_exponent_to_e6(", 2),
+        ("scale_admitted_decimal_exponent_to_e12(", 2),
+        ("scaled_oracle_leg_price(", 4),
+    ] {
+        assert_eq!(
+            production.matches(scaler).count(),
+            uses,
+            "one canonical decimal scaler per scale, with exactly the Pyth, Switchboard, and Chainlink callers: {scaler}",
+        );
+    }
     for provider_call in [
-        "scale_decimal_exponent_to_e6(i128::from(msg.price), msg.exponent)",
-        "scale_decimal_exponent_to_e6(observation.value, -MAX_EXPO_ABS)",
-        "scale_decimal_exponent_to_e6(answer, -i32::from(decimals))",
+        "scaled_oracle_leg_price(i128::from(msg.price), msg.exponent, msg.publish_time)",
+        "scaled_oracle_leg_price(observation.value, -MAX_EXPO_ABS, observation.publish_time)",
+        "scaled_oracle_leg_price(answer, -i32::from(decimals), publish_time)",
     ] {
         assert_eq!(
             production.matches(provider_call).count(),
@@ -1859,6 +1876,7 @@ fn v16_program_wide_arithmetic_surface_is_source_complete_and_canonically_owned(
 
     let witness_sources = [
         include_str!("inv_085_proven_arithmetic_equals_deployed_arithmetic.rs"),
+        include_str!("inv_038_composite_leg_precision.rs"),
         include_str!("inv_020_authenticated_clock_slot_and_oracle_provenance.rs"),
         include_str!("inv_045_no_free_mark_movement.rs"),
         include_str!("../public_sbf/inv_045_no_free_mark_movement.rs"),

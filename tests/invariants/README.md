@@ -31675,6 +31675,56 @@ makes no progress on a stale account, by design. Order robustness (INV-072) hold
 rule allows: the report is public, any caller can present it for any account, and it is presented
 once per slot.
 
+### INV-020/038 a composite price is rounded once, from twelve-decimal legs (#462, 2026-11-20)
+
+**The defect.** A composite target is a product or quotient of up to three feed values. The
+composition itself has been one exact ratio rounded once since #381, but its legs entered at six
+decimals, floored by `scale_decimal_exponent_to_e6` first. A product or quotient carries the
+relative error of each leg whole, and a leg worth 0.00041 is 410 at six decimals: known to one part
+in 410, which is 24 bps, the whole per-slot cap of a production market. Two authenticated tuples
+with the same cross-rate, (0.00041000, 150.000000) and (0.00041099, 149.638677), stored targets of
+61,500 and 61,351. An account within 24 bps of maintenance could be liquidated on that rounding.
+The inverse of a single low-priced feed had the same defect.
+
+**The change.** Every feed reader returns the leg at six decimals and at twelve
+(`OracleLegPriceV16`). The six-decimal value is what is stored per leg and what decides whether the
+feed is admissible, exactly as before. The twelve-decimal value is what `compose_price_e6` computes
+from: one exact ratio `product(multiplied) / product(divided) * 10^k`, through the inversion and
+the unit scale, floored once. The same tuples now store 61,500 and 61,499.
+
+The arithmetic stays in `u128` wherever the terms fit, where one native division gives the floor;
+that is every composite shape except three legs multiplied together. That one, and its inverse,
+go through a short limb routine (`floor_ratio_of_u64_products`: the product of at most four 64-bit
+factors, divided by one 64-bit factor after another, which is the floor of the whole ratio because
+`floor(floor(n / a) / b) == floor(n / (a * b))`). Powers of ten come from a table.
+
+**What a leg can still be off by.** One part in its twelve-decimal value: a millionth for the
+smallest admissible leg (0.000001), less than a billionth for a leg worth 0.001 or more. A feed
+with no digit beyond its sixth decimal composes exactly as it did.
+
+**Tests** (`cu/inv_038_composite_leg_precision.rs`):
+
+| Test | What it requires |
+|---|---|
+| `v16_program_composite_target_does_not_move_on_the_rounding_of_a_low_priced_leg` | the two tuples through the program: fully verified Pyth reports at exponents -10 and -6, a two-leg product configured by `ConfigureHybridOracle` and observed by a crank. The stored target is 61,500 and then 61,499; the stored legs are still the six-decimal values |
+| `v16_program_composite_of_a_low_priced_leg_follows_the_cross_rate` | the same at the arithmetic level, with what six-decimal legs gave (61,351) beside it, and the inverse of a single low-priced feed |
+| `v16_program_composite_price_is_the_floor_of_the_exact_ratio_of_twelve_decimal_legs` | against arbitrary-precision arithmetic: one, two and three legs across the admissible range and at its edges, every multiply/divide pattern, with and without inversion, three unit scales. About 220,000 priced cases and 340,000 refused ones, the refusals for the same reason as the reference |
+| `v16_program_composite_price_of_six_decimal_legs_is_unchanged` | legs that are whole at six decimals give exactly the composite the old arithmetic gave, written out independently |
+| `v16_program_oracle_leg_at_twelve_decimals_is_the_floor_of_the_feed_value` | through the byte-level reader, every exponent from -18 to 18: both scales are the floor of the feed value, the six-decimal one is the floor of the twelve-decimal one, and a value outside the admissible range is refused |
+| `v16_program_floor_ratio_of_u64_products_matches_bigint`, `v16_program_floor_scaled_ratio_of_u64_products_matches_bigint` | the two arithmetic routines against arbitrary precision, 200,000 cases each, including the cases they refuse |
+| `v16_program_composite_from_finer_reports_costs_a_bounded_amount_more` | the same three-leg composite from exponent -6 and from exponent -10 reports stores the same target; the finer reports cost 543 CU more for the composite (bound 1,000) |
+
+The owner's composite matrix (`v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms`)
+and the rest of INV-020, INV-045 and INV-046 pass unchanged: their feeds are whole at six decimals.
+The two source-locked arithmetic censuses (INV-038 truncating operations, INV-085 wide arithmetic)
+carry the new functions with their evidence, and INV-085 now requires one call site per provider of
+`scaled_oracle_leg_price`, the one place a feed value becomes a price.
+
+**Compute.** The 14-asset, three-feed refresh measures 955,887 CU (953,297 before this change;
+guardrail 975,000). With reports finer than six decimals on all 42 legs it would be about 7,600
+more. The exact pin of `v16_program_max_shape_short_b_budget_has_exact_public_progress` is
+unchanged at 556,277.
+
 ### INV-073 the keeper hand-off guardrail no longer depends on the keys a run draws (2026-11-20)
 
 Tests only. `v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature`

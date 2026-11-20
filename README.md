@@ -663,6 +663,8 @@ asset slots can be activated, drained, retired, and reused independently. Reused
 monotonic `market_id`, and stale portfolio legs/source claims/close ledgers from the retired id fail
 closed.
 
+A composite target is a product or quotient of up to three feed values (`oracle_leg_flags`), optionally inverted and divided by `unit_scale`. It is computed as one exact ratio and floored once, at six decimals, from legs taken at twelve decimals, so a low-priced leg does not move the target by its own rounding: a leg worth 0.00041 is known to one part in 410 million, where six-decimal legs knew it to one part in 410, the whole 24 bps per-slot cap of a production market (#462). The six-decimal value of each leg is what is stored and what decides whether the feed is admissible.
+
 While the external oracle is fresh, the wrapper uses the external composite as the index and refreshes the fallback mark baseline to that accepted external price. If the supplied Pyth update is stale but the market's own `last_good_oracle_slot` has not crossed the soft-stale window, the wrapper rejects instead of falling back; a caller-chosen stale account is not proof that the feed is after-hours. Once the soft-stale window has elapsed, price-taking paths fall back to the fee-weighted EWMA mark and `TradeCpi`/`TradeNoCpi` charge:
 
 ```text

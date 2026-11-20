@@ -4988,13 +4988,122 @@ pub mod oracle_v16 {
         Some((shift >= 0, shift.unsigned_abs()))
     }
 
+    /// One authenticated feed value. `price_e6` is the value floored to six decimals, which is
+    /// what the program stores per leg and what bounds an admissible feed (`1..=MAX_ORACLE_PRICE`).
+    /// `price_e12` is the same value floored to twelve decimals, which is what a composite is
+    /// computed from: a leg worth 0.00041 is 410 at six decimals, where one unit is 24 bps of
+    /// the leg, and 410,990,000 at twelve (#462). `price_e12 / 1e6 == price_e6` always.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct OracleLegPriceV16 {
+        pub price_e6: u64,
+        pub price_e12: u64,
+        pub publish_time: i64,
+    }
+
+    /// Twelve-decimal units per six-decimal unit.
+    pub const ORACLE_E12_PER_E6: u64 = 1_000_000;
+    /// `10^k` for every `k` whose power fits `u128`. A table lookup where the composition
+    /// would otherwise raise ten to a power on every leg and every gate.
+    const POW10_U128: [u128; 39] = [
+        1,
+        10,
+        100,
+        1000,
+        10000,
+        100000,
+        1000000,
+        10000000,
+        100000000,
+        1000000000,
+        10000000000,
+        100000000000,
+        1000000000000,
+        10000000000000,
+        100000000000000,
+        1000000000000000,
+        10000000000000000,
+        100000000000000000,
+        1000000000000000000,
+        10000000000000000000,
+        100000000000000000000,
+        1000000000000000000000,
+        10000000000000000000000,
+        100000000000000000000000,
+        1000000000000000000000000,
+        10000000000000000000000000,
+        100000000000000000000000000,
+        1000000000000000000000000000,
+        10000000000000000000000000000,
+        100000000000000000000000000000,
+        1000000000000000000000000000000,
+        10000000000000000000000000000000,
+        100000000000000000000000000000000,
+        1000000000000000000000000000000000,
+        10000000000000000000000000000000000,
+        100000000000000000000000000000000000,
+        1000000000000000000000000000000000000,
+        10000000000000000000000000000000000000,
+        100000000000000000000000000000000000000,
+    ];
+    /// One, at twelve decimals.
+    pub const ORACLE_E12: u64 = 1_000_000_000_000;
+
+    /// The value `mantissa * 10^exponent` floored to twelve decimals, for a value whose
+    /// six-decimal floor `scale_decimal_exponent_to_e6` has already accepted. That floor is in
+    /// `1..=MAX_ORACLE_PRICE`, so this one is in `1e6..(MAX_ORACLE_PRICE + 1) * 1e6`: it fits
+    /// `u64`, the multiplication cannot overflow, and its own floor to six decimals is the
+    /// accepted value again. Nothing is re-checked here but the conversion.
+    fn scale_admitted_decimal_exponent_to_e12(
+        mantissa: i128,
+        exponent: i32,
+    ) -> Result<u64, ProgramError> {
+        if mantissa <= 0 || !(-MAX_EXPO_ABS..=MAX_EXPO_ABS).contains(&exponent) {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        // -6..=30: every such power of ten fits `u128`.
+        let shift = exponent + 12;
+        let factor = POW10_U128[shift.unsigned_abs() as usize];
+        let mantissa = mantissa as u128;
+        let out = if shift >= 0 {
+            mantissa
+                .checked_mul(factor)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?
+        } else {
+            mantissa / factor
+        };
+        u64::try_from(out).map_err(|_| PercolatorError::OracleInvalid.into())
+    }
+
+    /// The one place a feed's `(mantissa, exponent)` becomes a price, at both scales. The
+    /// six-decimal value decides whether the feed is admissible, exactly as before.
+    fn scaled_oracle_leg_price(
+        mantissa: i128,
+        exponent: i32,
+        publish_time: i64,
+    ) -> Result<OracleLegPriceV16, ProgramError> {
+        let price_e6 = scale_decimal_exponent_to_e6(mantissa, exponent)?;
+        let price_e12 = if exponent >= -6 {
+            // The feed has no digit beyond the sixth decimal: nothing was floored away, and
+            // an accepted six-decimal value times 10^6 is at most 10^18.
+            price_e6 * ORACLE_E12_PER_E6
+        } else {
+            scale_admitted_decimal_exponent_to_e12(mantissa, exponent)?
+        };
+        Ok(OracleLegPriceV16 {
+            price_e6,
+            price_e12,
+            publish_time,
+        })
+    }
+
     fn scale_decimal_exponent_to_e6(mantissa: i128, exponent: i32) -> Result<u64, ProgramError> {
         if mantissa <= 0 {
             return Err(PercolatorError::OracleInvalid.into());
         }
         let (multiply, power) =
             decimal_scale_plan_to_e6(exponent).ok_or(PercolatorError::OracleInvalid)?;
-        let factor = 10u128.pow(power);
+        // At most 10^24: a table lookup instead of raising ten to the power on every leg.
+        let factor = POW10_U128[power as usize];
         let mantissa = mantissa as u128;
         let out = if multiply {
             mantissa
@@ -5009,13 +5118,13 @@ pub mod oracle_v16 {
         Ok(out as u64)
     }
 
-    fn read_pyth_price_e6_from_bytes(
+    fn read_pyth_leg_price_from_bytes(
         data: &[u8],
         expected_feed_id: &[u8; 32],
         now_unix_ts: i64,
         max_staleness_secs: u64,
         conf_bps: u16,
-    ) -> Result<(u64, i64), ProgramError> {
+    ) -> Result<OracleLegPriceV16, ProgramError> {
         if data.len() < PRICE_UPDATE_V2_MIN_LEN {
             return Err(ProgramError::InvalidAccountData);
         }
@@ -5042,8 +5151,7 @@ pub mod oracle_v16 {
         if oracle_confidence_is_too_wide(msg.conf as u128, price_u, conf_bps) {
             return Err(PercolatorError::OracleConfTooWide.into());
         }
-        scale_decimal_exponent_to_e6(i128::from(msg.price), msg.exponent)
-            .map(|price| (price, msg.publish_time))
+        scaled_oracle_leg_price(i128::from(msg.price), msg.exponent, msg.publish_time)
     }
 
     #[inline]
@@ -5117,6 +5225,16 @@ pub mod oracle_v16 {
         max_staleness_secs: u64,
         conf_bps: u16,
     ) -> Result<(u64, i64), ProgramError> {
+        validate_switchboard_observation(observation, now_unix_ts, max_staleness_secs, conf_bps)
+            .map(|leg| (leg.price_e6, leg.publish_time))
+    }
+
+    fn validate_switchboard_observation(
+        observation: SwitchboardObservationV16,
+        now_unix_ts: i64,
+        max_staleness_secs: u64,
+        conf_bps: u16,
+    ) -> Result<OracleLegPriceV16, ProgramError> {
         if observation.feed_hash == [0u8; 32]
             || observation.min_sample_size == 0
             || observation.num_samples < observation.min_sample_size
@@ -5140,8 +5258,7 @@ pub mod oracle_v16 {
         if oracle_confidence_is_too_wide(observation.std_dev as u128, value_u, conf_bps) {
             return Err(PercolatorError::OracleConfTooWide.into());
         }
-        scale_decimal_exponent_to_e6(observation.value, -MAX_EXPO_ABS)
-            .map(|price| (price, observation.publish_time))
+        scaled_oracle_leg_price(observation.value, -MAX_EXPO_ABS, observation.publish_time)
     }
 
     pub fn read_switchboard_observation_from_bytes(
@@ -5183,18 +5300,18 @@ pub mod oracle_v16 {
         })
     }
 
-    fn read_switchboard_price_e6_from_bytes(
+    fn read_switchboard_leg_price_from_bytes(
         account_key: &Pubkey,
         data: &[u8],
         expected_feed_key: &[u8; 32],
         now_unix_ts: i64,
         max_staleness_secs: u64,
         conf_bps: u16,
-    ) -> Result<(u64, i64), ProgramError> {
+    ) -> Result<OracleLegPriceV16, ProgramError> {
         if account_key.to_bytes() != *expected_feed_key {
             return Err(PercolatorError::InvalidOracleKey.into());
         }
-        validate_switchboard_observation_e6(
+        validate_switchboard_observation(
             read_switchboard_observation_from_bytes(data)?,
             now_unix_ts,
             max_staleness_secs,
@@ -5202,13 +5319,13 @@ pub mod oracle_v16 {
         )
     }
 
-    fn read_chainlink_price_e6_from_bytes(
+    fn read_chainlink_leg_price_from_bytes(
         account_key: &Pubkey,
         data: &[u8],
         expected_feed_key: &[u8; 32],
         now_unix_ts: i64,
         max_staleness_secs: u64,
-    ) -> Result<(u64, i64), ProgramError> {
+    ) -> Result<OracleLegPriceV16, ProgramError> {
         if account_key.to_bytes() != *expected_feed_key {
             return Err(PercolatorError::InvalidOracleKey.into());
         }
@@ -5237,8 +5354,7 @@ pub mod oracle_v16 {
         if !oracle_publish_time_is_fresh(publish_time, now_unix_ts, max_staleness_secs) {
             return Err(PercolatorError::OracleStale.into());
         }
-        scale_decimal_exponent_to_e6(answer, -i32::from(decimals))
-            .map(|price| (price, publish_time))
+        scaled_oracle_leg_price(answer, -i32::from(decimals), publish_time)
     }
 
     pub fn read_oracle_price_e6_from_bytes(
@@ -5250,8 +5366,29 @@ pub mod oracle_v16 {
         max_staleness_secs: u64,
         conf_bps: u16,
     ) -> Result<(u64, i64), ProgramError> {
+        read_oracle_leg_price_from_bytes(
+            owner,
+            account_key,
+            data,
+            expected_feed_id,
+            now_unix_ts,
+            max_staleness_secs,
+            conf_bps,
+        )
+        .map(|leg| (leg.price_e6, leg.publish_time))
+    }
+
+    pub fn read_oracle_leg_price_from_bytes(
+        owner: &Pubkey,
+        account_key: &Pubkey,
+        data: &[u8],
+        expected_feed_id: &[u8; 32],
+        now_unix_ts: i64,
+        max_staleness_secs: u64,
+        conf_bps: u16,
+    ) -> Result<OracleLegPriceV16, ProgramError> {
         if *owner == PYTH_RECEIVER_PROGRAM_ID {
-            read_pyth_price_e6_from_bytes(
+            read_pyth_leg_price_from_bytes(
                 data,
                 expected_feed_id,
                 now_unix_ts,
@@ -5261,7 +5398,7 @@ pub mod oracle_v16 {
         } else if *owner == SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID
             || *owner == SWITCHBOARD_ON_DEMAND_DEVNET_PROGRAM_ID
         {
-            read_switchboard_price_e6_from_bytes(
+            read_switchboard_leg_price_from_bytes(
                 account_key,
                 data,
                 expected_feed_id,
@@ -5270,7 +5407,7 @@ pub mod oracle_v16 {
                 conf_bps,
             )
         } else if *owner == CHAINLINK_STORE_PROGRAM_ID {
-            read_chainlink_price_e6_from_bytes(
+            read_chainlink_leg_price_from_bytes(
                 account_key,
                 data,
                 expected_feed_id,
@@ -5289,8 +5426,25 @@ pub mod oracle_v16 {
         max_staleness_secs: u64,
         conf_bps: u16,
     ) -> Result<(u64, i64), ProgramError> {
+        read_oracle_leg_price(
+            price_ai,
+            expected_feed_id,
+            now_unix_ts,
+            max_staleness_secs,
+            conf_bps,
+        )
+        .map(|leg| (leg.price_e6, leg.publish_time))
+    }
+
+    fn read_oracle_leg_price(
+        price_ai: &AccountInfo,
+        expected_feed_id: &[u8; 32],
+        now_unix_ts: i64,
+        max_staleness_secs: u64,
+        conf_bps: u16,
+    ) -> Result<OracleLegPriceV16, ProgramError> {
         let data = price_ai.try_borrow_data()?;
-        read_oracle_price_e6_from_bytes(
+        read_oracle_leg_price_from_bytes(
             price_ai.owner,
             price_ai.key,
             &data,
@@ -5301,74 +5455,225 @@ pub mod oracle_v16 {
         )
     }
 
-    fn compose_price_e6(
-        prices_e6: &[u64],
+    /// The product of at most four 64-bit factors as four little-endian 64-bit limbs. Four
+    /// 64-bit factors cannot exceed 256 bits, so `None` means more than four factors.
+    fn product_of_u64_factors(factors: &[u64]) -> Option<[u64; 4]> {
+        if factors.len() > 4 {
+            return None;
+        }
+        let mut limbs = [1u64, 0, 0, 0];
+        for factor in factors {
+            let mut carry = 0u128;
+            for limb in limbs.iter_mut() {
+                // (2^64 - 1)^2 + (2^64 - 1) < 2^128
+                let wide = u128::from(*limb) * u128::from(*factor) + carry;
+                *limb = wide as u64;
+                carry = wide >> 64;
+            }
+            if carry != 0 {
+                return None;
+            }
+        }
+        Some(limbs)
+    }
+
+    /// `limbs / divisor`, floored, in place. `divisor` is not zero.
+    fn divide_limbs_by_u64(limbs: &mut [u64; 4], divisor: u64) {
+        let divisor = u128::from(divisor);
+        let mut remainder = 0u128;
+        for limb in limbs.iter_mut().rev() {
+            if remainder == 0 && *limb == 0 {
+                continue;
+            }
+            // remainder < divisor < 2^64, so the dividend is below 2^128 and the quotient
+            // below 2^64.
+            let dividend = (remainder << 64) | u128::from(*limb);
+            let quotient = dividend / divisor;
+            remainder = dividend - quotient * divisor;
+            *limb = quotient as u64;
+        }
+    }
+
+    /// `floor(product(numerators) / product(denominators))`, exactly, for at most four 64-bit
+    /// numerator factors and any number of 64-bit denominator factors. The numerator is
+    /// divided by one denominator factor after another, flooring each time, and for positive
+    /// integers `floor(floor(n / a) / b) == floor(n / (a * b))`, so the result is the floor of
+    /// the whole ratio and nothing was rounded on the way. `None` if there are more than four
+    /// numerator factors, a denominator factor is zero, or the result does not fit `u128`.
+    pub fn floor_ratio_of_u64_products(numerators: &[u64], denominators: &[u64]) -> Option<u128> {
+        let mut limbs = product_of_u64_factors(numerators)?;
+        for divisor in denominators {
+            if *divisor == 0 {
+                return None;
+            }
+            divide_limbs_by_u64(&mut limbs, *divisor);
+        }
+        if limbs[2] != 0 || limbs[3] != 0 {
+            return None;
+        }
+        Some(u128::from(limbs[1]) << 64 | u128::from(limbs[0]))
+    }
+
+    /// `floor(product(numerators) * 10^pow10 / product(denominators))`, exactly, with the power
+    /// of ten on the denominator side when `pow10` is negative. At most three 64-bit factors a
+    /// side and `|pow10| <= 54`.
+    ///
+    /// Everything is tried in `u128` first, where one native division is the floor. Every
+    /// composite shape fits there except three legs multiplied together; that one, and its
+    /// inverse, go through `floor_ratio_of_u64_products`, with the power of ten split into
+    /// factors of at most `10^18`. `None` if a denominator factor is zero, the arguments are
+    /// out of range, the result does not fit `u128`, or the terms (both products, the power
+    /// of ten and the scaled product) do not all fit `u128` and the numerator with a positive
+    /// power of ten would be more than four 64-bit factors.
+    pub fn floor_scaled_ratio_of_u64_products(
+        numerators: &[u64],
+        denominators: &[u64],
+        pow10: i32,
+    ) -> Option<u128> {
+        if numerators.len() > 3
+            || denominators.len() > 3
+            || pow10.unsigned_abs() > 54
+            || denominators.contains(&0)
+        {
+            return None;
+        }
+        // The product of at most three 64-bit factors: two never overflow `u128`.
+        let product = |factors: &[u64]| -> Option<u128> {
+            match factors {
+                [] => Some(1),
+                [a] => Some(u128::from(*a)),
+                [a, b] => Some(u128::from(*a) * u128::from(*b)),
+                [a, b, c] => (u128::from(*a) * u128::from(*b)).checked_mul(u128::from(*c)),
+                _ => None,
+            }
+        };
+        let narrow = || -> Option<u128> {
+            let mut numerator = product(numerators)?;
+            let mut denominator = product(denominators)?;
+            let scale = *POW10_U128.get(pow10.unsigned_abs() as usize)?;
+            if pow10 >= 0 {
+                numerator = numerator.checked_mul(scale)?;
+            } else {
+                denominator = denominator.checked_mul(scale)?;
+            }
+            Some(numerator / denominator)
+        };
+        if let Some(quotient) = narrow() {
+            return Some(quotient);
+        }
+
+        // Wide: the factors of one side, then the power of ten as factors of at most 10^18.
+        const TEN_18: u64 = 1_000_000_000_000_000_000;
+        let mut wide_numerators = [1u64; 4];
+        let mut wide_denominators = [1u64; 6];
+        let (mut numerator_len, mut denominator_len) = (numerators.len(), denominators.len());
+        wide_numerators[..numerator_len].copy_from_slice(numerators);
+        wide_denominators[..denominator_len].copy_from_slice(denominators);
+        let (scaled, scaled_len): (&mut [u64], &mut usize) = if pow10 >= 0 {
+            (&mut wide_numerators, &mut numerator_len)
+        } else {
+            (&mut wide_denominators, &mut denominator_len)
+        };
+        let mut remaining = pow10.unsigned_abs();
+        while remaining != 0 {
+            if *scaled_len == scaled.len() {
+                return None;
+            }
+            let step = remaining.min(18);
+            scaled[*scaled_len] = if step == 18 { TEN_18 } else { 10u64.pow(step) };
+            *scaled_len += 1;
+            remaining -= step;
+        }
+        floor_ratio_of_u64_products(
+            &wide_numerators[..numerator_len],
+            &wide_denominators[..denominator_len],
+        )
+    }
+
+    /// The composite price at six decimals, from legs at twelve decimals (`ORACLE_E12` is one).
+    ///
+    /// The composite is kept as one exact ratio through every configured leg, the inversion
+    /// and the unit scale, and floored once at the end. The legs come in at twelve decimals and
+    /// not at the six they are stored at: a composite is a product or a quotient, so the
+    /// relative error of a floored leg carries into it whole, and at six decimals a leg worth
+    /// 0.00041 is known to one part in 410 (#462). At twelve the same leg is known to one part
+    /// in 410 million, and the smallest admissible leg, 0.000001, to one part in a million.
+    pub fn compose_price_e6(
+        legs_e12: &[u64],
         flags: u8,
         invert: u8,
         unit_scale: u32,
     ) -> Result<u64, ProgramError> {
-        if prices_e6.is_empty()
-            || prices_e6.len() > ORACLE_LEG_CAP
+        if legs_e12.is_empty()
+            || legs_e12.len() > ORACLE_LEG_CAP
             || invert > 1
             || (flags & !ORACLE_LEG_FLAGS_MASK) != 0
-            || (prices_e6.len() == 1 && flags != 0)
-            || (prices_e6.len() == 2 && (flags & ORACLE_LEG_FLAG_DIVIDE_LEG3) != 0)
+            || (legs_e12.len() == 1 && flags != 0)
+            || (legs_e12.len() == 2 && (flags & ORACLE_LEG_FLAG_DIVIDE_LEG3) != 0)
         {
             return Err(PercolatorError::EngineInvalidConfig.into());
         }
-        if prices_e6
-            .iter()
-            .any(|price| *price == 0 || *price > percolator::MAX_ORACLE_PRICE)
-        {
+        // An admissible leg is `1..=MAX_ORACLE_PRICE` once floored to six decimals.
+        if legs_e12.iter().any(|leg| {
+            let floor_e6 = *leg / ORACLE_E12_PER_E6;
+            floor_e6 == 0 || floor_e6 > percolator::MAX_ORACLE_PRICE
+        }) {
             return Err(PercolatorError::OracleInvalid.into());
         }
 
-        // Keep the exact checked rational through all configured legs. At the three-leg cap,
-        // MAX_ORACLE_PRICE-bounded products fit in u128.
-        let mut numerator = prices_e6[0] as u128;
-        let mut denominator = 1u128;
+        // The price at six decimals is
+        //     product(multiplied) / product(divided) * 10^pow10,
+        // with a leg `L` worth `L / 10^12`: the first leg alone is `L * 10^-6`, a multiplied
+        // leg takes twelve from the exponent and a divided leg adds twelve.
+        let mut multiplied = [1u64; ORACLE_LEG_CAP];
+        let mut divided = [1u64; ORACLE_LEG_CAP];
+        let (mut multiplied_len, mut divided_len) = (1usize, 0usize);
+        multiplied[0] = legs_e12[0];
+        let mut pow10 = -6i32;
+        let mut price = u128::from(legs_e12[0] / ORACLE_E12_PER_E6);
         let mut i = 1usize;
-        while i < prices_e6.len() {
+        while i < legs_e12.len() {
             let divides = match i {
                 1 => (flags & ORACLE_LEG_FLAG_DIVIDE_LEG2) != 0,
                 2 => (flags & ORACLE_LEG_FLAG_DIVIDE_LEG3) != 0,
                 _ => false,
             };
             if divides {
-                numerator = numerator
-                    .checked_mul(1_000_000)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                denominator = denominator
-                    .checked_mul(prices_e6[i] as u128)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                divided[divided_len] = legs_e12[i];
+                divided_len += 1;
+                pow10 += 12;
             } else {
-                numerator = numerator
-                    .checked_mul(prices_e6[i] as u128)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                denominator = denominator
-                    .checked_mul(1_000_000)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                multiplied[multiplied_len] = legs_e12[i];
+                multiplied_len += 1;
+                pow10 -= 12;
             }
 
-            // Preserve the old per-leg range gate without feeding its rounded value into the next
-            // leg. Only the final quotient becomes the published E6 price.
-            let intermediate = numerator / denominator;
-            if intermediate == 0 || intermediate > percolator::MAX_ORACLE_PRICE as u128 {
+            // The per-leg range gate, on the exact price so far. Its floored value is not
+            // fed into the next leg.
+            price = floor_scaled_ratio_of_u64_products(
+                &multiplied[..multiplied_len],
+                &divided[..divided_len],
+                pow10,
+            )
+            .ok_or(PercolatorError::OracleInvalid)?;
+            if price == 0 || price > percolator::MAX_ORACLE_PRICE as u128 {
                 return Err(PercolatorError::OracleInvalid.into());
             }
             i += 1;
         }
 
         if invert != 0 {
-            let inverted_numerator = denominator
-                .checked_mul(1_000_000_000_000)
-                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-            denominator = numerator;
-            numerator = inverted_numerator;
+            // One over the price, at six decimals: 10^12 over the same ratio.
+            price = floor_scaled_ratio_of_u64_products(
+                &divided[..divided_len],
+                &multiplied[..multiplied_len],
+                12 - pow10,
+            )
+            .ok_or(PercolatorError::OracleInvalid)?;
         }
-        let mut price = numerator / denominator;
         if unit_scale > 1 {
-            price /= unit_scale as u128;
+            // Flooring the floored ratio by one more factor is still the floor of the whole.
+            price = price / unit_scale as u128;
         }
         if price == 0 || price > percolator::MAX_ORACLE_PRICE as u128 {
             return Err(PercolatorError::OracleInvalid.into());
@@ -5390,20 +5695,31 @@ pub mod oracle_v16 {
         now_unix_ts: i64,
         max_staleness_secs: u64,
         conf_filter_bps: u16,
-    ) -> Result<([u64; ORACLE_LEG_CAP], [i64; ORACLE_LEG_CAP], i64), ProgramError> {
+    ) -> Result<
+        (
+            [u64; ORACLE_LEG_CAP],
+            [u64; ORACLE_LEG_CAP],
+            [i64; ORACLE_LEG_CAP],
+            i64,
+        ),
+        ProgramError,
+    > {
+        // Six decimals to store per leg, twelve to compose from.
         let mut prices = [0u64; ORACLE_LEG_CAP];
+        let mut prices_e12 = [0u64; ORACLE_LEG_CAP];
         let mut publish_times = [0i64; ORACLE_LEG_CAP];
         let mut i = 0usize;
         while i < count {
-            let (price, publish_time) = read_oracle_price_e6(
+            let leg = read_oracle_leg_price(
                 &oracle_accounts[i],
                 &expected_feeds[i],
                 now_unix_ts,
                 max_staleness_secs,
                 conf_filter_bps,
             )?;
-            prices[i] = price;
-            publish_times[i] = publish_time;
+            prices[i] = leg.price_e6;
+            prices_e12[i] = leg.price_e12;
+            publish_times[i] = leg.publish_time;
             i += 1;
         }
 
@@ -5411,7 +5727,7 @@ pub mod oracle_v16 {
             return Err(PercolatorError::OracleStale.into());
         }
         let common_publish_time = publish_times[0];
-        Ok((prices, publish_times, common_publish_time))
+        Ok((prices, prices_e12, publish_times, common_publish_time))
     }
 
     fn commit_observed_oracle_legs(
@@ -5470,7 +5786,7 @@ pub mod oracle_v16 {
         ) {
             return Err(PercolatorError::EngineInvalidConfig.into());
         }
-        let (prices, publish_times, common_publish_time) = read_coherent_oracle_legs(
+        let (prices, prices_e12, publish_times, common_publish_time) = read_coherent_oracle_legs(
             oracle_accounts,
             &config.oracle_leg_feeds,
             count,
@@ -5479,7 +5795,7 @@ pub mod oracle_v16 {
             config.conf_filter_bps,
         )?;
         let composed_price = compose_price_e6(
-            &prices[..count],
+            &prices_e12[..count],
             config.oracle_leg_flags,
             config.invert,
             config.unit_scale,
@@ -5513,7 +5829,7 @@ pub mod oracle_v16 {
         ) {
             return Err(PercolatorError::EngineInvalidConfig.into());
         }
-        let (prices, publish_times, common_publish_time) = read_coherent_oracle_legs(
+        let (prices, prices_e12, publish_times, common_publish_time) = read_coherent_oracle_legs(
             oracle_accounts,
             &profile.oracle_leg_feeds,
             count,
@@ -5522,7 +5838,7 @@ pub mod oracle_v16 {
             profile.conf_filter_bps,
         )?;
         let composed_price = compose_price_e6(
-            &prices[..count],
+            &prices_e12[..count],
             profile.oracle_leg_flags,
             profile.invert,
             profile.unit_scale,

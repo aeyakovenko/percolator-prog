@@ -12,6 +12,9 @@
 
 use super::*;
 
+#[path = "inv_038_composite_leg_precision.rs"]
+mod composite_leg_precision;
+
 fn inv038_source_defines_test(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
     let mut test_attribute = false;
@@ -769,9 +772,10 @@ fn v16_program_truncating_arithmetic_surface_has_a_semantic_owner() {
         },
         RoundingOwner {
             function: "compose_price_e6",
-            operations: 2,
+            operations: 3,
             class: "ORACLE",
-            evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms",
+            evidence:
+                "v16_program_composite_price_is_the_floor_of_the_exact_ratio_of_twelve_decimal_legs",
         },
         RoundingOwner {
             function: "credit_fee_to_domain_budget_view",
@@ -900,10 +904,28 @@ fn v16_program_truncating_arithmetic_surface_has_a_semantic_owner() {
             evidence: "v16_program_maintenance_fee_split_is_cadence_independent",
         },
         RoundingOwner {
+            function: "scale_admitted_decimal_exponent_to_e12",
+            operations: 1,
+            class: "ORACLE",
+            evidence: "v16_program_oracle_leg_at_twelve_decimals_is_the_floor_of_the_feed_value",
+        },
+        RoundingOwner {
             function: "scale_decimal_exponent_to_e6",
             operations: 1,
             class: "ORACLE",
             evidence: "v16_program_composite_epoch_coherence_crosses_all_providers_and_transforms",
+        },
+        RoundingOwner {
+            function: "divide_limbs_by_u64",
+            operations: 1,
+            class: "ORACLE",
+            evidence: "v16_program_floor_ratio_of_u64_products_matches_bigint",
+        },
+        RoundingOwner {
+            function: "floor_scaled_ratio_of_u64_products",
+            operations: 1,
+            class: "ORACLE",
+            evidence: "v16_program_floor_scaled_ratio_of_u64_products_matches_bigint",
         },
         RoundingOwner {
             function: "trade_fee_budgeted_amounts_with_mark_externality_view",
@@ -961,6 +983,7 @@ fn v16_program_truncating_arithmetic_surface_has_a_semantic_owner() {
         include_str!("inv_036_fee_destination_and_policy_version_integrity.rs"),
         include_str!("inv_037_exact_residual_partition.rs"),
         include_str!("inv_038_rounding_and_ratio_conservation.rs"),
+        include_str!("inv_038_composite_leg_precision.rs"),
         include_str!("inv_085_proven_arithmetic_equals_deployed_arithmetic.rs"),
         include_str!("../public_sbf/inv_038_rounding_and_ratio_conservation.rs"),
         include_str!("../public_sbf/inv_045_no_free_mark_movement.rs"),
