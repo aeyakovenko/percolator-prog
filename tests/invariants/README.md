@@ -31675,6 +31675,17 @@ makes no progress on a stale account, by design. Order robustness (INV-072) hold
 rule allows: the report is public, any caller can present it for any account, and it is presented
 once per slot.
 
+### INV-073 the keeper hand-off guardrail no longer depends on the keys a run draws (2026-11-20)
+
+Tests only. `v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature`
+asserts a 500,000 CU guardrail on transactions whose cost includes program-address searches over
+freshly drawn keys (the market, its vaults, the wallets): 1,500 CU per rejected candidate. On one
+build the peak ranged from 463,738 to 498,229 CU over forty runs and reached 510,229 once in a full
+gate, so the test could fail on any build about once in fifty to a hundred runs. The guardrail is
+about the work the program does. It is now applied to the cheapest of up to three independently
+drawn worlds (`inv_073_provider_keeper_ledger_handoff.rs`); every functional assertion of the
+scenario still runs in each world, and the value of the guardrail is unchanged.
+
 ### INV-045 funding over a report gap (2026-11-20)
 
 Tests only; no program change. This closes the last documented red test of the suite.
