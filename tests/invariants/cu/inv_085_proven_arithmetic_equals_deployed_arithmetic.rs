@@ -1115,7 +1115,7 @@ fn v16_program_market_init_fee_matches_repeated_doubling_at_supported_and_overfl
         (u128::MAX, 32),
         (1, 4_095),
         (1, 4_096),
-        (1, 5_682),
+        (1, 5_585),
         (1, usize::MAX),
     ];
     for (base_fee, asset_index) in cases {

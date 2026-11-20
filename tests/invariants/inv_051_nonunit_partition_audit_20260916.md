@@ -1,5 +1,9 @@
 # INV-051 nonunit-ADL owner reduction partitions
 
+> Restated on 2026-11-20 with the engine's side rule (wrapper issue #449). The selector is now
+> `v16_program_nonunit_adl_reduction_partitions_follow_the_side_rule_to_a_funded_exit`; see the section
+> "INV-048/051 each side's A index is derived from its raw-basis sum (#449 fixed in the engine, 2026-11-20)" in [README.md](README.md). The text below describes the test as first written.
+
 Base: `056cd6ba65dcea8a1c7309aa94f73011bc4020f2` (`origin/main`). Engine:
 `94979ede7db934545e53a8f210dd063a9ea3ea63`. Discovery used landed source only;
 no open issue/PR tests or fixes were inspected or imported.

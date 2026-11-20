@@ -251,7 +251,7 @@ fn run(
     let expected_raw = if expected_close == 0 {
         raw
     } else {
-        reference_raw_basis_for_current_effective(&before, stale_leg, remaining)
+        reference_raw_basis_after_reduction(&before, stale_leg, remaining)
     };
     if remaining == 0 {
         assert!(!has_active_leg_for_asset(&accounts[0], ASSET), "{label}");

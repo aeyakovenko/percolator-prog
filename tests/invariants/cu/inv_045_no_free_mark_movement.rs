@@ -3278,7 +3278,7 @@ fn inv045_function_body<'a>(production: &'a str, function: &str) -> &'a str {
 
 #[test]
 fn v16_program_mark_writer_and_trade_exit_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "add1d0276a7346565f206c8ed8d214bd1cb904ef";
+    const ENGINE_PIN: &str = "c030aa4055b28d7380092388cb4445d5405afb52";
     const CLASSES: &[Inv045MarkClass] = &[
         Inv045MarkClass {
             class: "full-width mark and fee arithmetic",

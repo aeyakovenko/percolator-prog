@@ -42,7 +42,7 @@ mod dual_adl_matched_partitions;
 mod adl_residue_harvest_449;
 
 #[test]
-fn v16_program_nonunit_adl_reduction_partitions_preserve_raw_basis_and_funded_exit() {
+fn v16_program_nonunit_adl_reduction_partitions_follow_the_side_rule_to_a_funded_exit() {
     use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
 
     // One quantity atom must reduce risk notional, or the public progress gate rejects dust.
@@ -52,7 +52,7 @@ fn v16_program_nonunit_adl_reduction_partitions_preserve_raw_basis_and_funded_ex
     let mut reductions = 0;
     let mut rejections = 0;
     let mut raw_subtraction_controls = 0;
-    let mut inverse_ceil_controls = 0;
+    let mut unit_a_returns = 0;
     let mut max_cu = 0;
     for open_q in [11, 3 * POS_SCALE + 7] {
         for sign in [-1i128, 1] {
@@ -62,7 +62,7 @@ fn v16_program_nonunit_adl_reduction_partitions_preserve_raw_basis_and_funded_ex
                 vec![1, effective_q - 2],
                 vec![effective_q - 2, 1],
             ];
-            let mut canonical_endpoint = None;
+            let mut aggregate_endpoint = None;
             for parts in partitions {
                 let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
                     initial_price: PRICE,
@@ -182,19 +182,17 @@ fn v16_program_nonunit_adl_reduction_partitions_preserve_raw_basis_and_funded_ex
                     let passive = env.svm.get_account(&seed).unwrap();
                     let stale_request = request(&env, reduce_q);
                     remaining -= reduce_q;
+                    let a_before = if sign == 1 {
+                        before.assets[0].a_short
+                    } else {
+                        before.assets[0].a_long
+                    };
+                    // The side rule decides the raw basis the leg keeps (#449). Subtracting
+                    // the request from the raw basis is counted as a control.
                     let expected_raw =
-                        reference_raw_basis_for_current_effective(&before, old_leg, remaining);
+                        reference_raw_basis_after_reduction(&before, old_leg, remaining);
                     raw_subtraction_controls +=
                         usize::from(old_leg.basis_pos_q.unsigned_abs() - reduce_q != expected_raw);
-                    inverse_ceil_controls += usize::from(
-                        support::reference_math::mul_div_ceil(
-                            remaining,
-                            old_leg.a_basis,
-                            current_a,
-                        )
-                        .unwrap()
-                            != expected_raw,
-                    );
                     env.svm.expire_blockhash();
                     let cu = env.rebalance_reduce_with_cu(&owner, target, 0, reduce_q);
                     assert_cu_within("nonunit ADL partition reduction", cu, CUSTODY_CU_LIMIT);
@@ -204,14 +202,23 @@ fn v16_program_nonunit_adl_reduction_partitions_preserve_raw_basis_and_funded_ex
                     let next_leg = active_leg_for_asset(&env.portfolio_state(target), 0);
                     assert_eq!(next_leg.basis_pos_q, -sign * expected_raw as i128);
                     assert_eq!(next_leg.a_basis, old_leg.a_basis);
+                    // The leg is alone on its side: the side's raw-basis sum is its raw basis,
+                    // the index is derived from that and the counter, and the leg carries
+                    // exactly the counter.
+                    let (a_after, raw_sum_after) = if sign == 1 {
+                        (
+                            after.assets[0].a_short,
+                            after.assets[0].raw_basis_sum_short_q,
+                        )
+                    } else {
+                        (after.assets[0].a_long, after.assets[0].raw_basis_sum_long_q)
+                    };
+                    assert_eq!(raw_sum_after, expected_raw);
                     assert_eq!(
-                        if sign == 1 {
-                            after.assets[0].a_short
-                        } else {
-                            after.assets[0].a_long
-                        },
-                        current_a
+                        a_after,
+                        reference_side_adl_index(remaining, expected_raw, a_before)
                     );
+                    unit_a_returns += usize::from(a_after == ADL_ONE);
                     assert_eq!(
                         reference_current_epoch_effective_abs(&after, next_leg),
                         remaining
@@ -248,13 +255,25 @@ fn v16_program_nonunit_adl_reduction_partitions_preserve_raw_basis_and_funded_ex
                     rejections += 1;
                 }
                 assert_eq!(remaining, 1);
+                // Every reduction is rounded against the reducing leg, so splitting one never
+                // leaves the owner more raw basis than making it at once. The first partition
+                // is the aggregate one.
                 let endpoint = active_leg_for_asset(&env.portfolio_state(target), 0);
-                let endpoint = (endpoint.basis_pos_q, endpoint.a_basis);
-                assert_eq!(
-                    *canonical_endpoint.get_or_insert(endpoint),
-                    endpoint,
-                    "aggregate, split and reversed reductions retain identical owner basis"
+                let endpoint_raw = endpoint.basis_pos_q.unsigned_abs();
+                assert_eq!(endpoint.basis_pos_q.signum(), -sign);
+                assert_eq!(endpoint.a_basis, ADL_ONE);
+                assert!(
+                    (1..=*aggregate_endpoint.get_or_insert(endpoint_raw)).contains(&endpoint_raw),
+                    "split and reversed reductions retain no more owner basis than the aggregate"
                 );
+                let target_a_before_exit = {
+                    let asset = env.market_state().1.assets[0];
+                    if sign == 1 {
+                        asset.a_short
+                    } else {
+                        asset.a_long
+                    }
+                };
                 env.svm.expire_blockhash();
                 let cu = env.rebalance_reduce_with_cu(&owner, target, 0, 1);
                 assert_cu_within("nonunit ADL one-atom exit", cu, CUSTODY_CU_LIMIT);
@@ -268,9 +287,21 @@ fn v16_program_nonunit_adl_reduction_partitions_preserve_raw_basis_and_funded_ex
                     ),
                     (0, 0)
                 );
+                // The passive side still holds a haircut leg and resets. The owner's side is
+                // empty: it resets only if its index was still below unit when its last leg
+                // left; a side that returned to unit A needs no reset.
+                let target_mode = if target_a_before_exit == ADL_ONE {
+                    SideModeV16::Normal
+                } else {
+                    SideModeV16::ResetPending
+                };
                 assert_eq!(
                     (closed.assets[0].mode_long, closed.assets[0].mode_short),
-                    (SideModeV16::ResetPending, SideModeV16::ResetPending)
+                    if sign == 1 {
+                        (SideModeV16::ResetPending, target_mode)
+                    } else {
+                        (target_mode, SideModeV16::ResetPending)
+                    }
                 );
                 let cu = env
                     .send(
@@ -289,10 +320,15 @@ fn v16_program_nonunit_adl_reduction_partitions_preserve_raw_basis_and_funded_ex
                 assert_cu_within("nonunit ADL passive cleanup", cu, CUSTODY_CU_LIMIT);
                 max_cu = max_cu.max(cu);
                 assert!(!has_active_leg_for_asset(&env.portfolio_state(seed), 0));
-                for side in [0, 1] {
-                    let cu = env.finalize_reset_side_with_cu(0, side);
-                    assert_cu_within("nonunit ADL reset finalization", cu, CUSTODY_CU_LIMIT);
-                    max_cu = max_cu.max(cu);
+                for (side, mode) in [closed.assets[0].mode_long, closed.assets[0].mode_short]
+                    .into_iter()
+                    .enumerate()
+                {
+                    if mode == SideModeV16::ResetPending {
+                        let cu = env.finalize_reset_side_with_cu(0, side as u8);
+                        assert_cu_within("nonunit ADL reset finalization", cu, CUSTODY_CU_LIMIT);
+                        max_cu = max_cu.max(cu);
+                    }
                 }
                 let reset = env.market_state().1.assets[0];
                 assert_eq!((reset.a_long, reset.a_short), (ADL_ONE, ADL_ONE));
@@ -320,9 +356,16 @@ fn v16_program_nonunit_adl_reduction_partitions_preserve_raw_basis_and_funded_ex
             }
         }
     }
+    eprintln!(
+        "INV-051 nonunit partitions: worlds={worlds}, partition_reductions={reductions}, \
+         exact_rejections={rejections}, raw_subtraction_controls={raw_subtraction_controls}, \
+         unit_a_returns={unit_a_returns}, max_exit_cu={max_cu}"
+    );
     assert_eq!((worlds, reductions, rejections), (12, 20, 32));
-    assert_eq!((raw_subtraction_controls, inverse_ceil_controls), (16, 20));
-    eprintln!("INV-051 nonunit partitions: worlds={worlds}, partition_reductions={reductions}, exact_rejections={rejections}, raw_subtraction_controls={raw_subtraction_controls}, inverse_ceil_controls={inverse_ceil_controls}, max_exit_cu={max_cu}");
+    // Sixteen of the twenty reductions keep a raw basis that plain subtraction would not, and
+    // sixteen leave the owner's side back at unit A: every world reaches it at one remaining
+    // atom, where the leg keeps one raw unit.
+    assert_eq!((raw_subtraction_controls, unit_a_returns), (16, 16));
 }
 
 #[test]

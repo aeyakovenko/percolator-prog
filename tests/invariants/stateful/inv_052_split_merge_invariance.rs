@@ -1359,21 +1359,14 @@ fn run_backing_conversion_partition(
     })
 }
 
-fn rebalance_snapshot_without_adl_rounding(
-    mut snapshot: CanonicalPrefixSnapshot,
-) -> CanonicalPrefixSnapshot {
-    snapshot.group.assets[0].a_short = 0;
-    snapshot
-}
-
-fn expected_rebalance_a(mut oi_q: u128, reductions: &[u128]) -> u128 {
-    let mut a = ADL_ONE;
-    for reduction in reductions.iter().copied() {
-        let next_oi = oi_q.checked_sub(reduction).unwrap();
-        a = a.checked_mul(next_oi).unwrap() / oi_q;
-        oi_q = next_oi;
-    }
-    a
+/// The passive side's A index after the owner's unilateral reductions. The engine derives it
+/// from the side's two totals (issue #449): its raw basis stays at the opening quantity and its
+/// effective OI is what the reductions left, however they were split.
+fn expected_rebalance_a(open_q: u128, reductions: &[u128]) -> u128 {
+    let remaining_q = reductions.iter().fold(open_q, |oi_q, reduction| {
+        oi_q.checked_sub(*reduction).unwrap()
+    });
+    ADL_ONE.checked_mul(remaining_q).unwrap() / open_q
 }
 
 fn counterparty_effective_scan(outcome: &RebalancePartitionOutcome) -> u128 {
@@ -5922,43 +5915,34 @@ proptest! {
         let aggregate_a = aggregate.snapshot.group.assets[0].a_short;
         let split_a = split.snapshot.group.assets[0].a_short;
         let reversed_a = reversed.snapshot.group.assets[0].a_short;
+        // The index is derived from the side's totals, so it does not depend on the partition
+        // at all: no rounding accumulates across the parts.
         prop_assert_eq!(aggregate_a, expected_rebalance_a(open_q, &[reduction_q]));
-        prop_assert_eq!(split_a, expected_rebalance_a(open_q, &[first_q, second_q]));
-        prop_assert_eq!(reversed_a, expected_rebalance_a(open_q, &[second_q, first_q]));
-        prop_assert!(split_a <= aggregate_a);
-        prop_assert!(reversed_a <= aggregate_a);
-        prop_assert!(aggregate_a - split_a <= 1);
-        prop_assert!(aggregate_a - reversed_a <= 1);
+        prop_assert_eq!(split_a, aggregate_a);
+        prop_assert_eq!(reversed_a, aggregate_a);
 
-        let aggregate_without_a =
-            rebalance_snapshot_without_adl_rounding(aggregate.snapshot.clone());
-        let split_without_a = rebalance_snapshot_without_adl_rounding(split.snapshot.clone());
-        let reversed_without_a =
-            rebalance_snapshot_without_adl_rounding(reversed.snapshot.clone());
         prop_assert!(
-            aggregate_without_a == split_without_a,
-            "aggregate/split rebalance divergence outside bounded A rounding: {}",
+            aggregate.snapshot == split.snapshot,
+            "aggregate/split rebalance divergence: {}",
             prefix_difference(
-                std::slice::from_ref(&aggregate_without_a),
-                std::slice::from_ref(&split_without_a),
+                std::slice::from_ref(&aggregate.snapshot),
+                std::slice::from_ref(&split.snapshot),
             ),
         );
         prop_assert!(
-            aggregate_without_a == reversed_without_a,
-            "aggregate/reversed rebalance divergence outside bounded A rounding: {}",
+            aggregate.snapshot == reversed.snapshot,
+            "aggregate/reversed rebalance divergence: {}",
             prefix_difference(
-                std::slice::from_ref(&aggregate_without_a),
-                std::slice::from_ref(&reversed_without_a),
+                std::slice::from_ref(&aggregate.snapshot),
+                std::slice::from_ref(&reversed.snapshot),
             ),
         );
 
         let aggregate_effective = counterparty_effective_scan(&aggregate);
         let split_effective = counterparty_effective_scan(&split);
         let reversed_effective = counterparty_effective_scan(&reversed);
-        prop_assert!(split_effective <= aggregate_effective);
-        prop_assert!(reversed_effective <= aggregate_effective);
-        prop_assert!(aggregate_effective - split_effective <= 1);
-        prop_assert!(aggregate_effective - reversed_effective <= 1);
+        prop_assert_eq!(split_effective, aggregate_effective);
+        prop_assert_eq!(reversed_effective, aggregate_effective);
         let expected_basis = i128::try_from(open_q - reduction_q).unwrap();
         prop_assert_eq!(aggregate.final_basis_q, expected_basis);
         prop_assert_eq!(aggregate.final_basis_q, split.final_basis_q);

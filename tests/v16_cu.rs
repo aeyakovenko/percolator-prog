@@ -39,10 +39,10 @@ const CUSTODY_CU_LIMIT: u64 = 300_000;
 const TRADE_CU_LIMIT: u64 = 345_000;
 const MULTI_ASSET_OPEN_TRADE_CU_LIMIT: u64 = 750_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
-const MAX_10M_MARKET_SLOTS: usize = 5_682;
+const MAX_10M_MARKET_SLOTS: usize = 5_585;
 const CERTIFIED_ENGINE_GIT_SOURCE: &str =
-    "git+https://github.com/aeyakovenko/percolator?rev=add1d0276a7346565f206c8ed8d214bd1cb904ef#\
-     add1d0276a7346565f206c8ed8d214bd1cb904ef";
+    "git+https://github.com/aeyakovenko/percolator?rev=c030aa4055b28d7380092388cb4445d5405afb52#\
+     c030aa4055b28d7380092388cb4445d5405afb52";
 
 fn assert_certified_engine_pin(context: &str) {
     assert!(
@@ -402,22 +402,134 @@ fn reference_current_epoch_effective_abs(
         .expect("bounded reference ADL effective quantity")
 }
 
-fn reference_raw_basis_for_current_effective(
+/// Raw basis a current-epoch leg keeps when its effective quantity is reduced to
+/// `remaining_effective_q` on its own side, restated from the engine's side rule (engine
+/// `spec.md` section 5, "Side A index"; wrapper issue #449). `group` is the state before the
+/// reduction.
+///
+/// The reduction takes `d = effective - remaining` out of the side's effective OI, and the side's
+/// A index is then derived again from the side's totals. Counting a leg's share of its side as
+/// `raw * oi / raw_sum`, the leg keeps the largest raw basis for which its share falls by at least
+/// `d` and is no more than `remaining`; never less than one unit, and never less than the side
+/// needs to carry what is left. At unit A that is `remaining` itself. A full close keeps nothing.
+fn reference_raw_basis_after_reduction(
     group: &MarketGroupV16,
     leg: percolator::PortfolioLegV16,
-    effective_abs_q: u128,
+    remaining_effective_q: u128,
 ) -> u128 {
+    use support::reference_math::{mul_div_ceil, mul_div_floor};
     let asset = group.assets[leg.asset_index as usize];
-    let (current_a, current_epoch) = match leg.side {
-        SideV16::Long => (asset.a_long, asset.epoch_long),
-        SideV16::Short => (asset.a_short, asset.epoch_short),
+    let (current_a, current_epoch, oi_q, raw_sum_q) = match leg.side {
+        SideV16::Long => (
+            asset.a_long,
+            asset.epoch_long,
+            asset.oi_eff_long_q,
+            asset.raw_basis_sum_long_q,
+        ),
+        SideV16::Short => (
+            asset.a_short,
+            asset.epoch_short,
+            asset.oi_eff_short_q,
+            asset.raw_basis_sum_short_q,
+        ),
     };
     assert_eq!(
         leg.epoch_snap, current_epoch,
         "raw-basis oracle requires a current-epoch leg"
     );
-    support::reference_math::mul_div_floor(effective_abs_q, leg.a_basis, current_a)
-        .expect("bounded reference retained raw basis")
+    assert_eq!(
+        leg.a_basis,
+        percolator::ADL_ONE,
+        "every current-epoch leg is based at unit A"
+    );
+    let raw_q = leg.basis_pos_q.unsigned_abs();
+    let effective_q = mul_div_ceil(raw_q, current_a, leg.a_basis)
+        .expect("bounded reference ADL effective quantity");
+    assert!(
+        remaining_effective_q <= effective_q
+            && effective_q <= oi_q
+            && raw_q <= raw_sum_q
+            && oi_q <= raw_sum_q,
+        "raw-basis oracle: leg raw {raw_q} effective {effective_q} -> {remaining_effective_q} \
+         does not fit its side (oi {oi_q}, raw sum {raw_sum_q})"
+    );
+    if remaining_effective_q == 0 {
+        return 0;
+    }
+    if remaining_effective_q == effective_q {
+        return raw_q;
+    }
+    if oi_q == raw_sum_q {
+        return remaining_effective_q;
+    }
+    let reduce_q = effective_q - remaining_effective_q;
+    let oi_after_q = oi_q - reduce_q;
+    let other_raw_q = raw_sum_q - raw_q;
+    let by_share_q = raw_q.saturating_sub(
+        mul_div_ceil(reduce_q, raw_sum_q, oi_q).expect("bounded reference share given up"),
+    );
+    let by_target_q = if oi_after_q > remaining_effective_q {
+        mul_div_floor(
+            remaining_effective_q,
+            other_raw_q,
+            oi_after_q - remaining_effective_q,
+        )
+        .expect("bounded reference share kept")
+    } else {
+        raw_q
+    };
+    by_share_q
+        .min(by_target_q)
+        .max(oi_after_q.saturating_sub(other_raw_q))
+        .max(1)
+}
+
+/// `reference_raw_basis_after_reduction` for a leg that is alone on its side, in closed form for
+/// fixtures that state their expectations before any state exists. The side's raw-basis sum is
+/// the leg's raw basis and the leg carries exactly the side's effective OI `oi_q`, so reducing to
+/// `remaining_effective_q` gives up `ceil(d * raw / oi)` of raw basis and keeps at least
+/// `remaining_effective_q`.
+fn reference_sole_leg_raw_basis_after_reduction(
+    raw_q: u128,
+    oi_q: u128,
+    remaining_effective_q: u128,
+) -> u128 {
+    assert!(
+        remaining_effective_q <= oi_q && oi_q <= raw_q && oi_q != 0,
+        "sole-leg raw-basis oracle: raw {raw_q}, oi {oi_q} -> {remaining_effective_q}"
+    );
+    if remaining_effective_q == 0 {
+        return 0;
+    }
+    if remaining_effective_q == oi_q {
+        return raw_q;
+    }
+    let given_up_q =
+        support::reference_math::mul_div_ceil(oi_q - remaining_effective_q, raw_q, oi_q)
+            .expect("bounded reference share given up");
+    raw_q
+        .saturating_sub(given_up_q)
+        .max(remaining_effective_q)
+        .max(1)
+}
+
+/// The A index a side's totals imply after a change (engine `spec.md` section 5, "Side A
+/// index"): `ADL_ONE` when effective OI and raw-basis sum agree, otherwise the floor of their
+/// ratio and at least 1. A side with no raw basis keeps `previous_a`.
+fn reference_side_adl_index(oi_q: u128, raw_sum_q: u128, previous_a: u128) -> u128 {
+    if raw_sum_q == 0 {
+        return previous_a;
+    }
+    assert!(
+        oi_q <= raw_sum_q,
+        "effective OI {oi_q} above raw basis {raw_sum_q}"
+    );
+    if oi_q == raw_sum_q {
+        return percolator::ADL_ONE;
+    }
+    support::reference_math::mul_div_floor(percolator::ADL_ONE, oi_q, raw_sum_q)
+        .expect("bounded reference side A index")
+        .max(1)
 }
 
 fn has_active_leg_for_asset(account: &PortfolioAccountV16, asset_index: usize) -> bool {

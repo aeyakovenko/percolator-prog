@@ -171,7 +171,7 @@ fn v16_program_backing_fee_gate_preserves_post_adl_owner_only_reduction() {
     let epoch_before = env.portfolio_position_epoch(short);
     let effective_before = reference_current_epoch_effective_abs(&group_before, short_leg);
     let reduce_q = effective_before / 2;
-    let expected_raw_after = reference_raw_basis_for_current_effective(
+    let expected_raw_after = reference_raw_basis_after_reduction(
         &group_before,
         short_leg,
         effective_before - reduce_q,

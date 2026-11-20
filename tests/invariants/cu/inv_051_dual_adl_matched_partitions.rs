@@ -1,11 +1,13 @@
-//! INV-051 with INV-047/048/052: matched reductions convert both nonunit bases.
+//! INV-051 with INV-047/048/052: matched reductions re-base both nonunit legs by the side rule.
 //!
 //! Existing INV-051 partitions use unilateral RebalanceReduce, changing the passive
 //! side's A each time. INV-050 reduces one scaled maker against a unit-index taker;
 //! INV-086's dual-ADL worlds select liquidation/recovery quantities. None compares
-//! aggregate/split/reversed matched fills with two distinct, fixed nonunit indices.
-//! Here both retained bases must independently invert the same remaining effective
-//! quantity; neither raw subtraction nor sharing one party's A is equivalent.
+//! aggregate/split/reversed matched fills with two distinct nonunit indices.
+//! Here each side holds one haircut leg. After every fill the leg keeps the raw basis the
+//! engine's side rule derives (issue #449), the side's raw-basis sum and derived A index follow
+//! it, and the leg carries exactly the side counter. Raw subtraction is counted as a control.
+//! Splitting a reduction never leaves an owner more raw basis than making it at once.
 //! Fixed-price public histories also reconcile each owner's rounded fee and payout.
 //! The two-asset selector additionally compares genuine batch clear/resize with
 //! ordered singles, including an oversized effective close and a funded retry.
@@ -36,6 +38,7 @@ fn check_book(env: &V16Svm, direction: i128, remaining: u128, fee: u128) {
     let mut oi = [0; 2];
     let mut counts = [0; 2];
     let mut weights = [0; 2];
+    let mut raw_sums = [0; 2];
     assert_eq!(group.mode, MarketModeV16::Live);
     for actor in 0..PRIMARY_ACTOR_COUNT {
         let portfolio = env.primary_portfolio(actor);
@@ -76,6 +79,7 @@ fn check_book(env: &V16Svm, direction: i128, remaining: u128, fee: u128) {
             assert_eq!(effective, remaining, "actor {actor}");
             oi[side] += effective;
             counts[side] += 1;
+            raw_sums[side] += leg.basis_pos_q.unsigned_abs();
             let weight = mul_div_ceil(
                 leg.basis_pos_q.unsigned_abs(),
                 percolator::SOCIAL_WEIGHT_SCALE,
@@ -88,6 +92,19 @@ fn check_book(env: &V16Svm, direction: i128, remaining: u128, fee: u128) {
     }
     assert_eq!(oi, [remaining; 2]);
     assert_eq!([asset.oi_eff_long_q, asset.oi_eff_short_q], oi);
+    // Each side keeps the sum of its legs' raw basis, and its A index is the one the two totals
+    // imply (#449).
+    assert_eq!(
+        [asset.raw_basis_sum_long_q, asset.raw_basis_sum_short_q],
+        raw_sums
+    );
+    assert_eq!(
+        [asset.a_long, asset.a_short],
+        [
+            reference_side_adl_index(oi[0], raw_sums[0], asset.a_long),
+            reference_side_adl_index(oi[1], raw_sums[1], asset.a_short),
+        ]
+    );
     assert_eq!(
         [asset.stored_pos_count_long, asset.stored_pos_count_short],
         counts
@@ -112,28 +129,29 @@ fn check_book(env: &V16Svm, direction: i128, remaining: u128, fee: u128) {
 }
 
 #[test]
-fn v16_program_dual_adl_matched_partitions_preserve_both_bases_and_fee_adjusted_exits() {
+fn v16_program_dual_adl_matched_partitions_follow_the_side_rule_to_fee_adjusted_exits() {
     let mut worlds = 0;
     let mut fills = 0;
     let mut raw_subtraction_differences = 0;
-    let mut shared_index_differences = 0;
-    let mut inverse_ceil_differences = 0;
+    let mut unit_a_returns = 0;
     let mut peak_cu = 0;
     for open in [31, 3 * POS_SCALE + 7] {
         let first = open - open / 3;
         let effective = first - first / 4;
-        // Actor 0 reduces first; actor 1 then reduces its already scaled exposure.
-        let owner_a = [
-            mul_div_floor(ADL_ONE, effective, first).unwrap(),
-            mul_div_floor(ADL_ONE, first, open).unwrap(),
-        ];
-        assert_ne!(owner_a[0], owner_a[1]);
+        // Actor 0 reduces first, at unit A, and keeps `first` of raw basis. Actor 1 then reduces
+        // its already scaled exposure by `first / 4`: alone on its side, it gives up that share
+        // of its raw basis, rounded up.
         let start_raw = [
             first,
-            mul_div_floor(effective, ADL_ONE, owner_a[1]).unwrap(),
+            (open - mul_div_ceil(first / 4, open, first).unwrap()).max(effective),
         ];
+        let owner_a = [
+            mul_div_floor(ADL_ONE, effective, start_raw[0]).unwrap(),
+            mul_div_floor(ADL_ONE, effective, start_raw[1]).unwrap(),
+        ];
+        assert_ne!(owner_a[0], owner_a[1]);
         for direction in [-1i128, 1] {
-            let mut common_basis = None;
+            let mut aggregate_basis: Option<[u128; 2]> = None;
             let mut route_endpoints = [None, None, None];
             for route_offset in 0..ROUTES.len() {
                 for (partition, parts) in [
@@ -197,22 +215,22 @@ fn v16_program_dual_adl_matched_partitions_preserve_both_bases_and_fee_adjusted_
                     let mut remaining = effective;
                     let mut paid = 0;
                     let mut last_raw = start_raw;
+                    let mut last_a = staged_a;
                     for (step, q) in parts.iter().copied().chain([1]).enumerate() {
                         let route = ROUTES[(route_offset + step) % ROUTES.len()];
                         remaining -= q;
-                        let expected_raw =
-                            owner_a.map(|a| mul_div_floor(remaining, ADL_ONE, a).unwrap());
+                        // The side rule, from the state before the fill, names the raw basis
+                        // each leg keeps. Raw subtraction is counted as a control.
+                        let before = env.primary_market_state().1;
+                        last_a = [before.assets[0].a_long, before.assets[0].a_short];
+                        let legs_before = [0, 1]
+                            .map(|actor| active_leg_for_asset(&env.primary_portfolio(actor), 0));
+                        let expected_raw = legs_before.map(|leg| {
+                            reference_raw_basis_after_reduction(&before, leg, remaining)
+                        });
                         for actor in 0..2 {
                             raw_subtraction_differences +=
                                 usize::from(last_raw[actor] - q != expected_raw[actor]);
-                            shared_index_differences += usize::from(
-                                mul_div_floor(remaining, ADL_ONE, owner_a[1 - actor]).unwrap()
-                                    != expected_raw[actor],
-                            );
-                            inverse_ceil_differences += usize::from(
-                                mul_div_ceil(remaining, ADL_ONE, owner_a[actor]).unwrap()
-                                    != expected_raw[actor],
-                            );
                         }
                         let result = execute_trade_route(
                             &mut env, route, 0, 1, 0, -direction * q as i128, PRICE, FEE_BPS,
@@ -229,7 +247,10 @@ fn v16_program_dual_adl_matched_partitions_preserve_both_bases_and_fee_adjusted_
                         assert_eq!(passive_keys.map(|key| env.svm.get_account(&key)), passive);
                         if remaining != 0 {
                             let group = env.primary_market_state().1;
-                            assert_eq!([group.assets[0].a_long, group.assets[0].a_short], staged_a);
+                            unit_a_returns += [group.assets[0].a_long, group.assets[0].a_short]
+                                .into_iter()
+                                .filter(|a| *a == ADL_ONE)
+                                .count();
                             let legs = [0, 1].map(|actor| {
                                 active_leg_for_asset(&env.primary_portfolio(actor), 0)
                             });
@@ -241,8 +262,16 @@ fn v16_program_dual_adl_matched_partitions_preserve_both_bases_and_fee_adjusted_
                                 assert_eq!(legs[actor].a_basis, initial_legs[actor].a_basis);
                             }
                             if remaining == 1 {
-                                // Exact position equality; only the independently bounded fees differ.
-                                assert_eq!(*common_basis.get_or_insert(legs), legs);
+                                // Every reduction is rounded against the reducing leg, so a
+                                // split never leaves an owner more raw basis than the aggregate
+                                // fill (partition 0). The transport does not matter at all.
+                                let aggregate = *aggregate_basis.get_or_insert(expected_raw);
+                                for actor in 0..2 {
+                                    assert!(
+                                        (1..=aggregate[actor]).contains(&expected_raw[actor]),
+                                        "partition {partition} actor {actor}: {expected_raw:?} vs aggregate {aggregate:?}"
+                                    );
+                                }
                                 let endpoint = (legs, paid);
                                 assert_eq!(
                                     *route_endpoints[partition].get_or_insert(endpoint),
@@ -258,13 +287,25 @@ fn v16_program_dual_adl_matched_partitions_preserve_both_bases_and_fee_adjusted_
                     assert!(
                         paid >= aggregate_fee && paid <= aggregate_fee + parts.len() as u128 - 1
                     );
+                    // Both sides are empty. A side whose index was still below unit when its
+                    // last leg left resets; one that had returned to unit A needs no reset.
                     let closed = env.primary_market_state().1.assets[0];
                     assert_eq!(
                         [closed.mode_long, closed.mode_short],
-                        [SideModeV16::ResetPending; 2]
+                        last_a.map(|a| if a == ADL_ONE {
+                            SideModeV16::Normal
+                        } else {
+                            SideModeV16::ResetPending
+                        })
                     );
-                    for side in [0, 1] {
-                        let result = env.finalize_reset_side(0, side).unwrap();
+                    for (side, mode) in [closed.mode_long, closed.mode_short]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        if mode != SideModeV16::ResetPending {
+                            continue;
+                        }
+                        let result = env.finalize_reset_side(0, side as u8).unwrap();
                         assert_cu_within(
                             "dual-ADL matched reset",
                             result.compute_units,
@@ -312,12 +353,16 @@ fn v16_program_dual_adl_matched_partitions_preserve_both_bases_and_fee_adjusted_
             }
         }
     }
+    println!(
+        "dual-ADL matched partitions: {worlds} worlds, {fills} fills; raw-subtraction \
+         distinctions={raw_subtraction_differences}, sides back at unit A after a \
+         fill={unit_a_returns}, peak CU={peak_cu}"
+    );
     assert_eq!(worlds, 48);
     assert_eq!(fills, 128);
     assert!(raw_subtraction_differences > 0);
-    assert!(shared_index_differences > 0);
-    assert!(inverse_ceil_differences > 0);
-    println!("dual-ADL matched partitions: {worlds} worlds, {fills} fills, {} resets, {} payouts; raw/shared-index/inverse-ceil distinctions={raw_subtraction_differences}/{shared_index_differences}/{inverse_ceil_differences}; peak {peak_cu} CU", 2 * worlds, 2 * worlds);
+    // Every world reaches one remaining atom with one raw unit on each side: unit A again.
+    assert!(unit_a_returns >= 2 * worlds);
 }
 
 #[test]
@@ -328,23 +373,26 @@ fn v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles() {
     let open = [3 * POS_SCALE + 7, 5 * POS_SCALE + 11];
     let first = [open[0] - open[0] / 3, open[1] - open[1] / 5];
     let effective = [first[0] - first[0] / 4, first[1] - first[1] / 3];
-    let indices = std::array::from_fn::<_, 2, _>(|asset| {
-        [
-            mul_div_floor(ADL_ONE, effective[asset], first[asset]).unwrap(),
-            mul_div_floor(ADL_ONE, first[asset], open[asset]).unwrap(),
-        ]
-    });
+    // Per asset: actor 0 reduces first, at unit A, and keeps `first` of raw basis. Actor 1 then
+    // reduces its already scaled exposure and, alone on its side, gives up that share of its raw
+    // basis, rounded up (the side rule of issue #449).
     let initial_raw = std::array::from_fn::<_, 2, _>(|asset| {
         [
             first[asset],
-            mul_div_floor(effective[asset], ADL_ONE, indices[asset][1]).unwrap(),
+            (open[asset]
+                - mul_div_ceil(first[asset] - effective[asset], open[asset], first[asset])
+                    .unwrap())
+            .max(effective[asset]),
         ]
+    });
+    let indices = std::array::from_fn::<_, 2, _>(|asset| {
+        initial_raw[asset].map(|raw| mul_div_floor(ADL_ONE, effective[asset], raw).unwrap())
     });
     let mut worlds = 0;
     let mut rejects = 0;
+    let mut resets = 0;
     let mut peak_cu = 0;
-    let mut inverse_distinctions = 0;
-    let mut wrong_asset_distinctions = 0;
+    let mut raw_subtraction_distinctions = 0;
     for direction in [-1i128, 1] {
         let signs = [direction, -direction];
         let mut common_endpoint = None;
@@ -401,7 +449,14 @@ fn v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles() {
                 let mut remaining = effective;
                 let mut raw = initial_raw;
                 let mut paid = 0;
-                let check = |env: &V16Svm, remaining: [u128; 2], raw: [[u128; 2]; 2], paid| {
+                // Whether each side of each asset has begun its reset: a side whose index is
+                // below unit when its last leg leaves resets, and its epoch advances.
+                let mut reset_begun = [[false; 2]; 2];
+                let check = |env: &V16Svm,
+                             remaining: [u128; 2],
+                             raw: [[u128; 2]; 2],
+                             reset_begun: [[bool; 2]; 2],
+                             paid| {
                     let group = env.primary_market_state().1;
                     assert_eq!(group.mode, MarketModeV16::Live);
                     for actor in 0..PRIMARY_ACTOR_COUNT {
@@ -423,17 +478,32 @@ fn v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles() {
                     for asset in 0..2 {
                         let state = group.assets[asset];
                         let live = remaining[asset] != 0;
-                        let expected_a = if !live {
-                            [ADL_ONE; 2]
-                        } else if signs[asset] > 0 {
-                            indices[asset]
+                        // Side order [long, short]; actor 0 holds the side `signs[asset]` names.
+                        let side_raw = if signs[asset] > 0 {
+                            raw[asset]
                         } else {
-                            [indices[asset][1], indices[asset][0]]
+                            [raw[asset][1], raw[asset][0]]
                         };
-                        assert_eq!([state.a_long, state.a_short], expected_a);
+                        // Each side keeps its leg's raw basis as its raw-basis sum, and its A
+                        // index is the one that sum and the side counter imply. An empty side
+                        // is at unit A, after a reset or because it never needed one.
+                        assert_eq!(
+                            [state.raw_basis_sum_long_q, state.raw_basis_sum_short_q],
+                            side_raw
+                        );
+                        assert_eq!(
+                            [state.a_long, state.a_short],
+                            side_raw.map(|raw| reference_side_adl_index(
+                                remaining[asset],
+                                raw,
+                                ADL_ONE
+                            ))
+                        );
                         assert_eq!(
                             [state.epoch_long, state.epoch_short],
-                            epochs[asset].map(|epoch| epoch + u64::from(!live))
+                            [0, 1]
+                                .map(|side| epochs[asset][side]
+                                    + u64::from(reset_begun[asset][side]))
                         );
                         assert_eq!(
                             [state.oi_eff_long_q, state.oi_eff_short_q],
@@ -441,11 +511,11 @@ fn v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles() {
                         );
                         assert_eq!(
                             [state.mode_long, state.mode_short],
-                            [if live {
-                                SideModeV16::Normal
-                            } else {
+                            reset_begun[asset].map(|begun| if begun {
                                 SideModeV16::ResetPending
-                            }; 2]
+                            } else {
+                                SideModeV16::Normal
+                            })
                         );
                         assert_eq!(
                             [state.stored_pos_count_long, state.stored_pos_count_short],
@@ -490,9 +560,18 @@ fn v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles() {
                                     SideV16::Short
                                 }
                             );
+                            // Alone on its side, the leg carries exactly the side counter.
                             assert_eq!(
-                                mul_div_ceil(raw[asset][actor], indices[asset][actor], ADL_ONE)
-                                    .unwrap(),
+                                mul_div_ceil(
+                                    raw[asset][actor],
+                                    if sign > 0 {
+                                        state.a_long
+                                    } else {
+                                        state.a_short
+                                    },
+                                    ADL_ONE
+                                )
+                                .unwrap(),
                                 remaining[asset]
                             );
                             let weight = mul_div_ceil(
@@ -519,7 +598,20 @@ fn v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles() {
                     assert_public_stock_census("two-asset nonunit reduction", env).unwrap();
                     assert_public_encumbrance_census("two-asset nonunit reduction", env).unwrap();
                 };
-                check(&env, remaining, raw, paid);
+                check(&env, remaining, raw, reset_begun, paid);
+                let staged_a =
+                    [0, 1].map(|asset| [staged.assets[asset].a_long, staged.assets[asset].a_short]);
+                for asset in 0..2 {
+                    assert_eq!(
+                        staged_a[asset],
+                        if signs[asset] > 0 {
+                            indices[asset]
+                        } else {
+                            [indices[asset][1], indices[asset][0]]
+                        }
+                    );
+                    assert!(staged_a[asset].iter().all(|a| *a < ADL_ONE));
+                }
 
                 let send_batch = |env: &mut V16Svm, quantities: [u128; 2]| {
                     let group = env.primary_market_state().1;
@@ -582,7 +674,7 @@ fn v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles() {
                             .collect::<Vec<_>>(),
                         before
                     );
-                    check(&env, remaining, raw, paid);
+                    check(&env, remaining, raw, reset_begun, paid);
                     rejects += 1;
                 }
                 let chunks = if batch {
@@ -591,6 +683,16 @@ fn v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles() {
                     order.map(|asset| vec![asset]).to_vec()
                 };
                 for chunk in chunks {
+                    // The side rule, from the state before the instruction, names the raw basis
+                    // each leg keeps. Distinct assets do not interact inside a batch.
+                    let before = env.primary_market_state().1;
+                    let legs_before = [0, 1].map(|asset| {
+                        [0, 1].map(|actor| {
+                            let account = env.primary_portfolio(actor);
+                            has_active_leg_for_asset(&account, asset)
+                                .then(|| active_leg_for_asset(&account, asset))
+                        })
+                    });
                     let result = if batch {
                         send_batch(&mut env, quantities)
                     } else {
@@ -616,21 +718,23 @@ fn v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles() {
                     for asset in chunk {
                         remaining[asset] -= quantities[asset];
                         for actor in 0..2 {
+                            let leg = legs_before[asset][actor].expect("leg before the fill");
+                            let a_before = match leg.side {
+                                SideV16::Long => before.assets[asset].a_long,
+                                SideV16::Short => before.assets[asset].a_short,
+                            };
                             let next =
-                                mul_div_floor(remaining[asset], ADL_ONE, indices[asset][actor])
-                                    .unwrap();
-                            inverse_distinctions +=
+                                reference_raw_basis_after_reduction(&before, leg, remaining[asset]);
+                            raw_subtraction_distinctions +=
                                 usize::from(raw[asset][actor] - quantities[asset] != next);
-                            wrong_asset_distinctions += usize::from(
-                                mul_div_floor(remaining[asset], ADL_ONE, indices[1 - asset][actor])
-                                    .unwrap()
-                                    != next,
-                            );
                             raw[asset][actor] = next;
+                            if remaining[asset] == 0 && a_before != ADL_ONE {
+                                reset_begun[asset][usize::from(leg.side == SideV16::Short)] = true;
+                            }
                         }
                         paid += mul_div_ceil(quantities[asset], FEE_BPS as u128, 10_000).unwrap();
                     }
-                    check(&env, remaining, raw, paid);
+                    check(&env, remaining, raw, reset_begun, paid);
                     let group = env.primary_market_state().1;
                     for actor in 0..2 {
                         let account = env.primary_portfolio(actor);
@@ -653,6 +757,13 @@ fn v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles() {
                 );
                 assert_eq!(*common_endpoint.get_or_insert(endpoint), endpoint,
                     "batch and both single-asset orders must preserve the same retained bases and fees");
+                let before_residual = env.primary_market_state().1.assets[1];
+                for (side, a) in [before_residual.a_long, before_residual.a_short]
+                    .into_iter()
+                    .enumerate()
+                {
+                    reset_begun[1][side] = a != ADL_ONE;
+                }
                 let result = execute_trade_route(
                     &mut env,
                     route,
@@ -671,10 +782,14 @@ fn v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles() {
                     TRADE_CU_LIMIT,
                 );
                 paid += mul_div_ceil(RESIDUAL, FEE_BPS as u128, 10_000).unwrap();
-                check(&env, [0; 2], [[0; 2]; 2], paid);
+                check(&env, [0; 2], [[0; 2]; 2], reset_begun, paid);
                 for asset in order {
                     for side in [0, 1] {
-                        let result = env.finalize_reset_side(asset as u16, side).unwrap();
+                        if !reset_begun[asset][side] {
+                            continue;
+                        }
+                        let result = env.finalize_reset_side(asset as u16, side as u8).unwrap();
+                        resets += 1;
                         peak_cu = peak_cu.max(result.compute_units);
                         assert_cu_within(
                             "nonunit vector reset",
@@ -725,8 +840,11 @@ fn v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles() {
             }
         }
     }
-    assert_eq!((worlds, rejects), (16, 8));
-    assert!(inverse_distinctions > 0);
-    assert_eq!(wrong_asset_distinctions, 32);
-    println!("nonunit two-asset clear/resize: {worlds} worlds, {rejects} exact rollbacks, 64 resets, 32 payouts; raw subtraction/wrong-asset index distinctions={inverse_distinctions}/{wrong_asset_distinctions}; peak {peak_cu} CU");
+    println!(
+        "nonunit two-asset clear/resize: {worlds} worlds, {rejects} exact rollbacks, {resets} \
+         resets, 32 payouts; raw-subtraction distinctions={raw_subtraction_distinctions}, \
+         peak CU={peak_cu}"
+    );
+    assert_eq!((worlds, rejects, resets), (16, 8, 64));
+    assert!(raw_subtraction_distinctions > 0);
 }

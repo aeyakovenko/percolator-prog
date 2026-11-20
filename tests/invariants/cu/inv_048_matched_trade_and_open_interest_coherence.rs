@@ -407,22 +407,32 @@ fn v16_program_typed_matched_book_obligation_oracle_is_source_complete() {
     assert_eq!(categories.len(), 14, "matched-book obligation roster drift");
     assert!(model.contains("effective + ADL residue + reset residue"));
     assert!(model.contains("effective OI is not the sum of independently decoded effective legs"));
-    // Issue #449: legs and counter agree exactly on an unhaircut side; below `ADL_ONE` the
-    // difference is typed and bounded by the legs plus the reductions counted on that side.
-    assert!(model.contains("if residue != 0 && residue.unsigned_abs() >= bound {"));
-    assert!(model.contains("let bound = if side_a[side] == ADL_ONE {\n                    0"));
-    assert!(model.contains("fn adl_rounding_residue_bound("));
-    assert!(model.contains("fn note_adl_haircut_reduction("));
+    // Issue #449: the engine keeps each side's raw-basis sum and derives the A index from it, and
+    // the model checks both exactly. Legs and counter agree on an unhaircut side; below
+    // `ADL_ONE` the difference is typed and stays under the number of legs, whatever the
+    // history. A reduction on a haircut side keeps the raw basis the side rule derives.
+    assert!(model.contains("keeps raw basis sum {} where its legs hold {}"));
+    assert!(model.contains("has A {} where its totals {book:?} give {derived_a}"));
+    assert!(model.contains("if !Self::adl_rounding_residue_allowed("));
+    assert!(model.contains(
+        "if side_a == ADL_ONE {\n            residue_q == 0\n        } else if side_oi_q == 0 {\n            residue_q == u128::from(legs)\n        } else {\n            residue_q < u128::from(legs)\n        }"
+    ));
+    assert!(model.contains("fn raw_after_reduction(&self, raw_q: u128, reduce_q: u128)"));
+    assert!(model.contains(
+        "kept raw basis \\\n                 {new_raw_q} where the side rule keeps {kept_raw_q}"
+    ));
 }
 
 #[test]
 fn v16_program_position_mutation_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "add1d0276a7346565f206c8ed8d214bd1cb904ef";
+    const ENGINE_PIN: &str = "c030aa4055b28d7380092388cb4445d5405afb52";
     const ENGINE_CONTRACTS: &[&str] = &[
         "contract_check_kernel_attach_leg",
         "contract_check_kernel_resize_leg_same_side",
         "contract_check_kernel_retain_leg_as_pending_obligation",
         "contract_check_kernel_clear_leg",
+        "contract_check_kernel_side_adl_index",
+        "contract_check_kernel_raw_basis_after_adl_reduction",
         "contract_check_kernel_classify_position_delta",
         "contract_check_kernel_reduce_position_delta",
         "composition_attach_body_frame_division_stubbed",
@@ -550,7 +560,7 @@ fn v16_program_position_mutation_composition_is_source_complete() {
             "unclassified OI proof {contract}",
         );
     }
-    assert_eq!(contracts.len(), 16, "OI engine-proof roster drift");
+    assert_eq!(contracts.len(), 18, "OI engine-proof roster drift");
 
     let production = include_str!("../../../src/v16_program.rs");
     let production = production

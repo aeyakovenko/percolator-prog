@@ -35,7 +35,7 @@
 //! eight source domains before crossing all 42 authenticated feed references. Both a 13+1 split and
 //! the all-at-once schedule remain bounded; repeated complete-tail calls consume prior source work,
 //! reach a strict liquidation at no more than 1.201M CU, and then restore current health.
-//! Finally, a fully public maximum-market construction appends all 5,682 configured assets after
+//! Finally, a fully public maximum-market construction appends all 5,585 configured assets after
 //! both funded portfolios already hold fourteen legs and twenty-eight source records. Thirty
 //! bounded automatic cranks refresh both accounts, unilateral reduction lands below 1.179M CU,
 //! and ResetPending cleanup plus every remaining owner exit completes without state injection.
@@ -3367,9 +3367,12 @@ fn v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded() {
         )
         .expect("42-reference max-shape oracle crank");
     println!("v16 all-14 three-feed oracle refresh CU: {refresh_cu}");
+    // Guardrail, not a protocol limit (that is the 1.4M transaction budget). It was 950,000
+    // until the engine's asset record gained the two raw-basis sums (#449): every asset read
+    // and write then cost a little more, and this path went from 949,752 to just over 950,000.
     assert!(
-        refresh_cu <= 950_000,
-        "all-14 three-feed refresh exceeded 950k CU: {refresh_cu}"
+        refresh_cu <= 975_000,
+        "all-14 three-feed refresh exceeded 975k CU: {refresh_cu}"
     );
 
     let after_portfolio = env.portfolio_state(taker_account);

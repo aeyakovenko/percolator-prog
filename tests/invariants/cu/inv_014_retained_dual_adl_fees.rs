@@ -1,10 +1,11 @@
 //! Row 411: retained fee consent after two public ADL reductions. Different
-//! nonunit bases must resize independently while every route charges effective
-//! fill, including policy detours, successful-prefix rollback and owner exits.
+//! nonunit bases must resize independently, each by the engine's side rule (issue #449),
+//! while every route charges effective fill, including policy detours,
+//! successful-prefix rollback and owner exits.
 //! Bounded INV-010/011/014/024/036/047/081 evidence; no position-image injection.
 
 use super::*;
-use crate::support::reference_math::{mul_div_ceil, mul_div_floor};
+use crate::support::reference_math::mul_div_ceil;
 
 const CAP: u64 = 37;
 const RESIDUAL: u128 = POS_SCALE + 3;
@@ -158,18 +159,22 @@ fn v16_retained_dual_adl_reductions_bound_effective_fees_across_policy_and_route
     let open = QUANTITY.unsigned_abs();
     let first = open - open / 3;
     let effective = first - first / 4;
-    let indices = [
-        mul_div_floor(ADL_ONE, effective, first).unwrap(),
-        mul_div_floor(ADL_ONE, first, open).unwrap(),
-    ];
+    // Actor 0 reduces first, at unit A, and keeps `first` of raw basis. Actor 1 then reduces
+    // its already scaled exposure and, alone on its side, gives up that share of its raw basis
+    // (rounded up). Each side's A index is the one its counter and raw-basis sum imply. The
+    // matched resize to `RESIDUAL` re-bases both legs the same way and moves both indices.
     let raw = [
         first,
-        mul_div_floor(effective, ADL_ONE, indices[1]).unwrap(),
+        reference_sole_leg_raw_basis_after_reduction(open, first, effective),
     ];
-    let resized = indices.map(|a| mul_div_floor(RESIDUAL, ADL_ONE, a).unwrap());
+    let indices = raw.map(|raw| reference_side_adl_index(effective, raw, ADL_ONE));
+    let resized =
+        raw.map(|raw| reference_sole_leg_raw_basis_after_reduction(raw, effective, RESIDUAL));
+    let resized_indices = resized.map(|raw| reference_side_adl_index(RESIDUAL, raw, ADL_ONE));
     let quantity = effective - RESIDUAL;
     assert_ne!(indices[0], indices[1]);
     assert!(indices.iter().all(|a| *a > 0 && *a < ADL_ONE));
+    assert!(resized_indices.iter().all(|a| *a > 0 && *a < ADL_ONE));
     // A raw-basis fee oracle would overcharge both roles, by different amounts.
     for actor in 0..2 {
         assert!(charge(raw[actor] - resized[actor], CAP) > charge(quantity, CAP));
@@ -307,7 +312,15 @@ fn v16_retained_dual_adl_reductions_bound_effective_fees_across_policy_and_route
                     let rate = if cpi { final_rate } else { CAP };
                     let mut fees = charge(quantity, rate);
                     assert!(fees <= charge(quantity, CAP));
-                    check(&w, direction, indices, resized, RESIDUAL, fees, true);
+                    check(
+                        &w,
+                        direction,
+                        resized_indices,
+                        resized,
+                        RESIDUAL,
+                        fees,
+                        true,
+                    );
                     assert_eq!(
                         w.portfolios.map(|key| w.env.portfolio_position_epoch(key)),
                         epochs.map(|epoch| epoch + 1)
@@ -322,7 +335,15 @@ fn v16_retained_dual_adl_reductions_bound_effective_fees_across_policy_and_route
                         [0, 0, 0],
                     ));
                     rollbacks += 1;
-                    check(&w, direction, indices, resized, RESIDUAL, fees, true);
+                    check(
+                        &w,
+                        direction,
+                        resized_indices,
+                        resized,
+                        RESIDUAL,
+                        fees,
+                        true,
+                    );
 
                     let tx = w.sign(
                         &[reduction(&w, cpi, batch, -direction * RESIDUAL as i128)],

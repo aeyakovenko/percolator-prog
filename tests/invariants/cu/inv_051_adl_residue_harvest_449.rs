@@ -1,19 +1,22 @@
-//! INV-051 / issue #449, adversarial harvest of the ADL-effective ceiling residue through the
-//! deployed BPF program.
+//! INV-051 / issue #449: packed same-side reductions leave no exposure that a side counter does
+//! not cover, through the deployed BPF program.
 //!
 //! The attacker owns every portfolio on both sides of one asset. One owner key signs for all of
 //! them. After a unilateral RebalanceReduce lowers `a_long`, the attacker packs as many cheap
-//! same-side reducing instructions as one transaction allows: 1232-byte packet, 1.4M CU. It then
-//! measures the phantom exposure from engine state after every transaction:
-//!   G_num = sum(raw * A) - OI * ADL_ONE   per side, current-epoch legs
-//!   D     = sum(ceil(raw * A / ADL_ONE)) - OI
-//! The engine-level search (engine `tests/adl_residue_harvest_449.rs`) shows each same-side
-//! reducing op adds < 1 raw unit. Here we pin, on production BPF:
-//!   * growth per transaction < same-side reducing instructions per transaction;
+//! same-side reducing instructions as one transaction allows: 1232-byte packet, 1.4M CU.
+//!
+//! Before the engine fix each such instruction could leave up to one raw unit of exposure above
+//! the side counter, and the amount added up over a history. The engine now keeps each side's
+//! raw-basis sum and derives the side's A index from it after every change, so two measurements
+//! hold in every state, whatever came before. Per side, over current-epoch legs:
+//!   G_num = sum(raw * A) - OI * ADL_ONE          in (-sum(raw), 0]
+//!   D     = sum(ceil(raw * A / ADL_ONE)) - OI    in [0, legs)
+//! The first says the legs' exact exposure never exceeds the counter and is short of it by less
+//! than `sum(raw) / ADL_ONE`; the second that only the legs' own rounding separates their
+//! quantities from the counter. Pinned here on production BPF, after every packed transaction:
+//!   * both ranges, the engine's raw-basis sums and its derived A indices;
 //!   * the maximum such instructions per transaction (packet-bound, not CU-bound);
-//!   * the fees each transaction pays (signatures plus protocol trade fees, in quote atoms);
 //!   * that a single BatchTradeNoCpi ix cannot reduce more than one long leg per asset.
-//! It also prints the attack economics used in the #449 verdict.
 
 use super::*;
 
@@ -23,7 +26,6 @@ const N_LONGS: usize = 4;
 const OPEN_BASE: u128 = 1_000 * POS_SCALE;
 const CAPITAL: u128 = 4_000 * POS_SCALE;
 const PACKET_BYTES: usize = 1232;
-const LAMPORTS_PER_SIGNATURE: u64 = 5_000;
 
 struct Book {
     env: V16CuEnv,
@@ -77,12 +79,15 @@ impl Book {
             .unwrap_or(0)
     }
 
-    /// [long, short]: (G_num, D)
+    /// [long, short]: (G_num, D), after checking each side against the engine's own totals and
+    /// against the two ranges the side rule guarantees in every state.
     fn census(&self) -> [(i128, i128); 2] {
         let group = self.env.market_state().1;
         let a = group.assets[0];
         let mut exact = [0u128; 2];
         let mut ceil = [0u128; 2];
+        let mut raw_sum = [0u128; 2];
+        let mut legs = [0i128; 2];
         for p in self.all() {
             if let Some(leg) = self.leg(p) {
                 let (cur, ep, s) = match leg.side {
@@ -96,14 +101,40 @@ impl Book {
                 let raw = leg.basis_pos_q.unsigned_abs();
                 exact[s] += raw * cur;
                 ceil[s] += raw * cur / ADL_ONE + u128::from(raw * cur % ADL_ONE != 0);
+                raw_sum[s] += raw;
+                legs[s] += 1;
             }
         }
         let oi = [a.oi_eff_long_q, a.oi_eff_short_q];
+        let index = [a.a_long, a.a_short];
+        let engine_raw_sum = [a.raw_basis_sum_long_q, a.raw_basis_sum_short_q];
         [0, 1].map(|s| {
-            (
-                exact[s] as i128 - (oi[s] * ADL_ONE) as i128,
-                ceil[s] as i128 - oi[s] as i128,
-            )
+            // The engine's raw-basis sum is the legs' sum, and its A index is what the two
+            // totals imply.
+            assert_eq!(engine_raw_sum[s], raw_sum[s], "side {s} raw-basis sum");
+            assert!(oi[s] != 0 && oi[s] <= raw_sum[s], "side {s} totals");
+            let derived = if oi[s] == raw_sum[s] {
+                ADL_ONE
+            } else {
+                (ADL_ONE * oi[s] / raw_sum[s]).max(1)
+            };
+            assert_eq!(index[s], derived, "side {s} A index");
+            let g_num = exact[s] as i128 - (oi[s] * ADL_ONE) as i128;
+            let d = ceil[s] as i128 - oi[s] as i128;
+            // Exposure never exceeds the side counter and is short of it by less than
+            // `raw_sum / ADL_ONE`.
+            assert!(
+                g_num <= 0 && -g_num < raw_sum[s] as i128,
+                "side {s}: exposure numerator {g_num} outside (-{}, 0]",
+                raw_sum[s]
+            );
+            // The legs' rounded-up quantities exceed the counter by less than one per leg.
+            assert!(
+                (0..legs[s]).contains(&d),
+                "side {s}: rounded-up surplus {d} outside [0, {})",
+                legs[s]
+            );
+            (g_num, d)
         })
     }
 
@@ -328,8 +359,7 @@ fn build(book: &Book, pack: Pack, ops: usize, round: usize) -> (Vec<Instruction>
 }
 
 #[test]
-fn v16_program_issue_449_packed_harvest_growth_per_tx_is_bounded_by_reducing_ops() {
-    let mut summary = Vec::new();
+fn v16_program_issue_449_packed_reductions_leave_no_uncovered_exposure() {
     for pack in [
         Pack::ShapeAndBilateral,
         Pack::BilateralOnly,
@@ -356,7 +386,11 @@ fn v16_program_issue_449_packed_harvest_growth_per_tx_is_bounded_by_reducing_ops
             assert_eq!(book.env.svm.get_account(&book.env.market).unwrap(), before);
             max_ops -= 1;
         }
-        assert!(max_ops >= 2, "{pack:?}: no room for a harvest");
+        assert!(max_ops >= 2, "{pack:?}: no room for a packed transaction");
+        assert!(
+            max_ops <= 19,
+            "{pack:?}: packing changed ({max_ops} ops/tx); review the #449 measurements"
+        );
         let probe = book.tx(&build(&book, pack, max_ops, 0).0);
         let bytes = tx_bytes(&probe);
         let sigs = probe.message.header.num_required_signatures as u64;
@@ -365,11 +399,11 @@ fn v16_program_issue_449_packed_harvest_growth_per_tx_is_bounded_by_reducing_ops
         let rounds = 40;
         let mut max_cu = 0u64;
         let mut fee_atoms = 0i128;
-        let mut long_ops = 0usize;
-        let mut max_growth_per_tx = [0i128; 2];
-        let g_start = book.census();
+        let mut reducing_ops = [0usize; 2];
+        // `census` holds both sides inside their ranges before the first packed transaction...
+        let start = book.census();
+        let mut widest = start;
         for r in 0..rounds {
-            let before = book.census();
             let value_before = book.capital_and_pnl();
             let (ixs, reducing) = build(&book, pack, max_ops, r);
             let tx = book.tx(&ixs);
@@ -382,24 +416,12 @@ fn v16_program_issue_449_packed_harvest_growth_per_tx_is_bounded_by_reducing_ops
             let cu = meta.compute_units_consumed;
             assert!(cu <= 1_400_000);
             max_cu = max_cu.max(cu);
+            // ...and after every one of them, however many reductions it packed.
             let after = book.census();
             fee_atoms += value_before - book.capital_and_pnl();
-            long_ops += reducing[0];
             for s in 0..2 {
-                let growth = after[s].0 - before[s].0;
-                max_growth_per_tx[s] = max_growth_per_tx[s].max(growth);
-                // REGRESSION GUARD: per-tx phantom growth < same-side reducing ops in the tx
-                assert!(
-                    growth < (reducing[s].max(1) * ADL_ONE as usize) as i128,
-                    "{pack:?} round {r} side {s}: growth {growth} vs {} reducing ops",
-                    reducing[s]
-                );
-                // ceilings exceed exact exposure by < 1 per leg
-                let legs = if s == 0 { N_LONGS } else { 2 };
-                assert!(
-                    after[s].1 * ADL_ONE as i128 - after[s].0
-                        < ((legs + 1) as i128) * ADL_ONE as i128
-                );
+                reducing_ops[s] += reducing[s];
+                widest[s] = (widest[s].0.min(after[s].0), widest[s].1.max(after[s].1));
             }
             let a = book.env.market_state().1.assets[0];
             assert!(
@@ -407,93 +429,29 @@ fn v16_program_issue_449_packed_harvest_growth_per_tx_is_bounded_by_reducing_ops
                 "book must stay live"
             );
         }
-        let g_end = book.census();
-        let growth_long = g_end[0].0 - g_start[0].0;
-        let growth_short = g_end[1].0 - g_start[1].0;
-        let net = (growth_long - growth_short) as f64 / ADL_ONE as f64;
-        let per_tx = net / rounds as f64;
-        let fee_per_tx = fee_atoms as f64 / rounds as f64;
+        let end = book.census();
         eprintln!(
-            "#449 {pack:?}: ops/tx={max_ops} ({binding}-bound; packet allows {packet_ops}) bytes={bytes} sigs={sigs} max_cu={max_cu} \
-             protocol_fee/tx={fee_per_tx:.1} atoms long_reducing_ops={long_ops} \
-             dG_long={:.3} dG_short={:.3} net phantom/tx={per_tx:.4} raw \
-             max growth/tx=[{:.4},{:.4}] D_end={:?}",
-            growth_long as f64 / ADL_ONE as f64,
-            growth_short as f64 / ADL_ONE as f64,
-            max_growth_per_tx[0] as f64 / ADL_ONE as f64,
-            max_growth_per_tx[1] as f64 / ADL_ONE as f64,
-            [g_end[0].1, g_end[1].1],
+            "#449 {pack:?}: ops/tx={max_ops} ({binding}-bound; packet allows {packet_ops}) \
+             bytes={bytes} sigs={sigs} max_cu={max_cu} protocol_fee/tx={:.1} atoms \
+             reducing_ops={reducing_ops:?} exposure numerator start={:?} end={:?} lowest={:?} \
+             (always in (-sum(raw), 0]) rounded-up surplus end={:?} highest={:?}",
+            fee_atoms as f64 / rounds as f64,
+            [start[0].0, start[1].0],
+            [end[0].0, end[1].0],
+            [widest[0].0, widest[1].0],
+            [end[0].1, end[1].1],
+            [widest[0].1, widest[1].1],
         );
-        // whole-run guard: phantom never exceeds the reducing-op count
-        assert!(growth_long < (long_ops * ADL_ONE as usize) as i128);
-        summary.push((
-            pack,
-            max_ops,
-            sigs,
-            max_cu,
-            fee_per_tx,
-            per_tx,
-            long_ops / rounds,
-        ));
-    }
-
-    // Attack economics. The phantom is directional. A +10% move pays G * 0.1 * P / POS_SCALE
-    // atoms of face value, realizable only by diluting a same-domain winner (engine test
-    // `harvest_449_realization_is_capped_by_phantom_and_directional`). A -10% move costs the
-    // same amount in full. Costs per tx: signatures plus protocol trade fees. The trade fee
-    // scales with P: ceil(q * P / POS_SCALE * bps / 1e4) per 1-raw trade.
-    // "bound" uses the hard ceiling of < 1 raw unit per long-reducing ix.
-    let sol_usd = 200.0;
-    let atoms_per_usd = 1e6; // 6-decimal quote
-    let sig_atoms =
-        |sigs: u64| (sigs * LAMPORTS_PER_SIGNATURE) as f64 * 1e-9 * sol_usd * atoms_per_usd;
-    for (pack, ops, sigs, cu, fee_at_p0, phantom_per_tx, long_ops_per_tx) in summary {
         assert!(
-            ops <= 19,
-            "{pack:?}: packing changed ({ops} ops/tx) - re-run #449 economics"
+            reducing_ops[0] + reducing_ops[1] >= rounds * max_ops,
+            "{pack:?}: every packed instruction is a same-side reduction on some side"
         );
-        if phantom_per_tx <= 0.0 {
-            eprintln!("#449 economics {pack:?}: no net one-sided phantom");
-            continue;
-        }
-        for (label, g_tx) in [
-            ("measured", phantom_per_tx),
-            ("bound", long_ops_per_tx as f64),
-        ] {
-            // trade fee per tx at P0 is per-atom-notional; flip price where +10% face gain/tx
-            // equals cost/tx (sigs + fees scaling with price)
-            let fee_rate_per_usd = fee_at_p0 / (PRICE as f64 / atoms_per_usd); // atoms per $ of P
-            let gain_rate_per_usd = g_tx / POS_SCALE as f64 * 0.1 * atoms_per_usd;
-            let flip = if gain_rate_per_usd > fee_rate_per_usd {
-                format!(
-                    "${:.0}/base",
-                    sig_atoms(sigs) / (gain_rate_per_usd - fee_rate_per_usd)
-                )
-            } else {
-                "never (protocol fee alone exceeds the +10% gain)".to_string()
-            };
-            eprintln!(
-                "#449 economics {pack:?} [{label}] ops/tx={ops} cu={cu} sigs={sigs}: phantom/tx={g_tx:.3} raw, \
-                 txs per 1 base unit of phantom={:.3e}, flip price={flip}",
-                POS_SCALE as f64 / g_tx,
-            );
-            for price_usd in [1.0f64, 100.0, 3_000.0, 100_000.0] {
-                let cost = sig_atoms(sigs) + fee_rate_per_usd * price_usd.max(1.0);
-                let gain = gain_rate_per_usd * price_usd;
-                eprintln!(
-                    "#449     P=${price_usd}: cost/tx={cost:.0} atoms, +/-10% face/tx={gain:.1} atoms; \
-                     1 base unit of phantom costs ${:.0} for a +/-${:.2} swing",
-                    cost * POS_SCALE as f64 / g_tx / atoms_per_usd,
-                    0.1 * price_usd
-                );
-            }
-        }
     }
 }
 
 /// A single BatchTradeNoCpi instruction cannot touch the same long leg more than once on one
-/// asset. Batch legs must name distinct assets, and each asset carries its own phantom. So a
-/// batch never beats one same-side reducing op per (asset, side).
+/// asset: batch legs must name distinct assets. The side totals stay exact either way (`census`
+/// checks them after each instruction).
 #[test]
 fn v16_program_issue_449_batch_cannot_multi_reduce_one_asset_leg() {
     let mut book = open_book();
@@ -509,22 +467,20 @@ fn v16_program_issue_449_batch_cannot_multi_reduce_one_asset_leg() {
             eprintln!("#449 duplicate-asset batch rejected: {:?}", e.err);
             assert_eq!(before, after);
         }
-        Ok(_) => {
-            // if a duplicate-asset batch were accepted it must still respect < 1 per leg-touch
-            assert!(after[0].0 - before[0].0 < 2 * ADL_ONE as i128);
-            eprintln!(
-                "#449 duplicate-asset batch accepted; growth {}",
-                after[0].0 - before[0].0
-            );
-        }
+        Ok(_) => panic!("a batch naming one asset twice was accepted: {before:?} -> {after:?}"),
     }
     book.reset_epochs();
+    let long_before = book.eff(long);
     let ix = book.batch_ix(reducer, long, 1);
     let tx = book.tx(&[ix]);
     book.env
         .svm
         .send_transaction(tx)
         .expect("one-leg batch reduce");
-    let one = book.census();
-    assert!(one[0].0 - after[0].0 < ADL_ONE as i128);
+    // The one-leg batch is a single same-side reduction; `census` holds its ranges after it.
+    book.census();
+    assert!(
+        book.eff(long) < long_before,
+        "the one-leg batch reduced the long leg"
+    );
 }

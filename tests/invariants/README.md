@@ -2786,6 +2786,11 @@ No production change or invariant-status promotion. Commands, controls, and limi
 
 ## INV-051 nonunit-ADL reduction partitions (2026-09-16)
 
+> Restated on 2026-11-20 (see "INV-048/051 each side's A index is derived from its raw-basis sum (#449 fixed in the engine, 2026-11-20)"): the selector is now
+> `v16_program_nonunit_adl_reduction_partitions_follow_the_side_rule_to_a_funded_exit`. The raw basis a
+> reduction keeps comes from the engine's side rule, the owner's side returns to unit A at one remaining
+> atom, and only the passive side resets (12 side finalizations instead of 24).
+
 Owner: [cu/inv_051_canonical_adl_effective_quantity.rs](cu/inv_051_canonical_adl_effective_quantity.rs).
 `v16_program_nonunit_adl_reduction_partitions_preserve_raw_basis_and_funded_exit`
 compares aggregate, split and reversed owner reductions after the reducing
@@ -31705,7 +31710,109 @@ skips the gap charges longs at every replayed step from the mark of its last pub
 requires equal liquidations (30,090,311 against 30,093,516 units closed). It is an open design
 question, not a test defect.
 
+### INV-048/051 each side's A index is derived from its raw-basis sum (#449 fixed in the engine, 2026-11-20)
+
+Engine pin `c030aa4055b28d7380092388cb4445d5405afb52` (aeyakovenko/percolator#270). The program
+source is unchanged; its binary changes because the engine's asset record grew.
+
+**The engine change.** Each side of an asset now keeps the sum of its legs' raw basis next to its
+effective-OI counter, and the side's A index is derived from the two after every position change and
+every haircut: `ADL_ONE` when they agree, otherwise `floor(ADL_ONE * OI_eff / raw_sum)` and at least
+1. Before, a haircut scaled the previous index and a same-side reduction kept the largest raw basis
+whose own rounded-up quantity was the target, so a leg could give up less exposure than the counter
+lost, less than one raw unit each time, and the difference added up (the section below). Now the
+legs' exact exposure never exceeds the counter and is short of it by less than a tenth of a raw
+unit in every state. `INVARIANTS.md` states the rule under INV-048 and INV-051; the engine's
+`spec.md` section 5, "Side A index", is the source.
+
+**What follows from it, as seen from the program.**
+
+- A reduction on a haircut side takes exactly the requested quantity out of the side counter, and
+  the reducing leg's own rounded-up quantity can land one unit below the request (two in rare
+  cases). The difference stays with the side's other legs.
+- Another leg's rounded-up quantity can move by one unit through someone else's reduction or close.
+  When the side's index rises this way while other legs share the side, the engine advances the
+  risk epoch, so no health certificate issued before it is current (INV-054).
+- Splitting a unilateral reduction no longer changes the passive side's index at all. Splitting a
+  reduction on the haircut side itself never leaves the owner more raw basis than making it at once.
+- A haircut side whose counter meets its raw-basis sum again is back at unit A without a reset, and
+  a side that empties at unit A needs no reset.
+- The asset record grows by 32 bytes (per-asset slot 1,845 to 1,877 bytes), so a 10 MiB market
+  holds 5,585 assets instead of 5,682.
+- Every read and write of an asset record carries the two new fields, which costs compute on
+  asset-heavy paths. The 14-leg, three-feed oracle refresh goes from 949,752 to 952,002 CU. Its
+  guardrail was 950,000, 248 CU above the previous pin's own measurement, and is now 975,000; the
+  transaction limit is 1,400,000. The pinned peak of the maximum-shape short-side B budget goes
+  from 554,814 to 554,984 CU.
+
+**The reference model** (`tests/support/fuzz_model.rs`) carries its own copy of the side rule,
+`SideBook`, restated from the engine spec:
+
+- the side-OI ledger follows the rule, not the legs' rounded-up quantities: a reduction that leaves
+  the leg open takes the request itself (for a liquidation, whose size is the engine's choice, what
+  the side counter lost), and the raw basis the leg keeps must be the one `SideBook` derives;
+- a liquidation's haircut of the opposite side is the quantity the liquidated side lost;
+- the census checks each side's raw-basis sum against its legs and its A index against the two
+  totals, exactly, and holds the rounding residue in `[0, legs)`: zero at unit A, and equal to the
+  number of legs only on an exhausted side. The count of reductions is gone from the bound;
+- a batch that names one asset twice while a side of it is haircut is refused by the model with a
+  clear message (the program refuses such a batch anyway, see below).
+
+`tests/v16_cu.rs` replaces `reference_raw_basis_for_current_effective` (the old inverse) with
+`reference_raw_basis_after_reduction`, adds its closed form for a leg alone on its side and
+`reference_side_adl_index`.
+
+| Test | What it requires now |
+|---|---|
+| `v16_program_issue_449_packed_reductions_leave_no_uncovered_exposure` (INV-051; was `..._packed_harvest_growth_per_tx_is_bounded_by_reducing_ops`) | three packings filled to the packet and compute limits; after every transaction, on both sides: the engine's raw-basis sum equals the legs' sum, the A index is the derived one, exposure is never above the counter and short of it by less than `sum(raw) / ADL_ONE`, and the rounded-up surplus is in `[0, legs)` |
+| `v16_program_issue_449_batch_cannot_multi_reduce_one_asset_leg` (INV-051) | a batch that names one asset twice is rejected (`Custom(9)`); the one-leg batch reduces the leg and the same ranges hold |
+| `v16_program_nonunit_adl_reduction_partitions_follow_the_side_rule_to_a_funded_exit` (INV-051; was `..._preserve_raw_basis_and_funded_exit`) | a haircut owner alone on its side reduces in three partitions; each step keeps the raw basis the side rule derives, the side's raw-basis sum and index follow, and the leg carries exactly the counter; a split never keeps more raw basis than the aggregate; the owner's side is back at unit A at one remaining atom, so it ends Normal and only the passive side resets |
+| `v16_program_dual_adl_matched_partitions_follow_the_side_rule_to_fee_adjusted_exits` (INV-051; was `..._preserve_both_bases_and_fee_adjusted_exits`) | the same on both sides at once through all four trade transports; endpoints are identical across transports for each partition |
+| `v16_program_two_asset_nonunit_batch_clear_resize_matches_ordered_singles` (INV-051) | name kept; each side's raw-basis sum and derived index are checked after every instruction, and a side resets only if its index was below unit when its last leg left (64 resets) |
+| `v16_retained_dual_adl_reductions_bound_effective_fees_across_policy_and_routes` (INV-014) | name kept; the staged raw bases, the resized raw bases and both pairs of indices come from the side rule |
+| `v16_program_adl_maker_reduction_bounds_taker_cross_zero_and_matched_book` (INV-050) | name kept; the counters lose exactly the fill; the maker keeps the raw basis the rule derives and counts at most two units under its target; the untouched long on the same side may count one unit more and none counts less; the long index does not fall, and a rise comes with a new risk epoch |
+| `v16_program_haircut_side_reductions_follow_the_side_rule_and_every_portfolio_exits` (stateful INV-081, new) | two longs share a haircut side; one makes eight odd-sized matched reductions by the direct and the batch route, the other one owner reduction, then two more fills with both sides haircut. All 13 reductions round, the model's own copy of the side rule reproduces the raw basis the program keeps each time, the untouched long never counts less and once counts one unit more, and both exit campaigns complete |
+| `v16_program_liquidation_on_a_shared_haircut_side_follows_the_side_rule` (stateful INV-081, new) | two shorts share a haircut side; the mark doubles and a public crank liquidates part of the larger one (60,344,824 units, the engine's choice). The model reads that quantity off the side counter, requires the raw basis the leg keeps to be the one its side rule derives for it and the opposite side to lose the same, and the permissionless campaign completes |
+| `v16_program_generated_owner_rebalance_partitions_are_invariant` (stateful INV-052) | name kept, and stronger: the passive side's index and the whole canonical snapshot are equal across partitions (before: within one index unit) |
+| `v16_program_hybrid_catchup_penalties_stay_in_insurance_through_resolved_cohort_redemption` (INV-045) | name and values kept; the flat winner's wait for the other positions is now exercised by an explicit second close (the old histories reached it only because ADL residue needed an extra detach step) |
+| `v16_program_typed_matched_book_obligation_oracle_is_source_complete`, `v16_program_position_mutation_composition_is_source_complete` (INV-048) | the model's new source text is pinned; the engine proof roster has 18 entries (`contract_check_kernel_side_adl_index`, `contract_check_kernel_raw_basis_after_adl_reduction` added) |
+| the maximum-size market tests (INV-077, INV-071, INV-085) | `MAX_10M_MARKET_SLOTS` is 5,585 |
+| `v16_program_max_shape_short_b_budget_has_exact_public_progress` (INV-077) | exact CU pin 554,814 to 554,984 |
+| `v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded` (INV-077) | guardrail 950,000 to 975,000 (949,752 CU before, 952,002 now) |
+
+**Measured on the deployed program** (SHA-256 `2eb621045ed6a09081198d3a6ef5df7e952b202eea54596e93419030a815a867`), the maintainer's packed harvest, 40
+transactions per packing:
+
+| Packing | Reducing instructions per transaction | Compute units | Protocol fee per transaction | Exposure against the counter, worst over the run | Rounded-up surplus, worst (4 long legs) |
+|---|---|---|---|---|---|
+| rebalance, then trades | 9 (compute bound; was 10) | 1,242,463 | 8 atoms | never above; short by at most 0.000004 raw units | 2 |
+| trades only | 8 (packet bound) | 1,372,416 | 16 atoms | never above; short by at most 0.000004 raw units | 2 |
+| alternating rebalances | 12 (compute bound) | 1,347,694 | 0 | never above; short by at most 0.000004 raw units | 2 |
+
+One reduction fewer fits the first packing than before: once a fill raises the long index, the risk
+epoch advances and the following fills in the same transaction certify their accounts again.
+
+Before the fix the same packings gained 0.02 to 0.53 raw units of uncovered exposure per transaction
+(the table in the section below).
+
+**Control.** With the rounding in the model's `SideBook::raw_after_reduction` turned the other way (the share of
+raw basis given up rounded down, in the reducer's favour), both new stateful tests fail.
+`v16_program_haircut_side_reductions_follow_the_side_rule_and_every_portfolio_exits` stops at its
+first fill, where the model then expects the reducing long to keep 2,750,000 of raw basis and the
+program keeps 2,749,999, and
+`v16_program_liquidation_on_a_shared_haircut_side_follows_the_side_rule` stops at the liquidation of
+60,344,824 units. No earlier test can notice that change. A probe on the path counted no partial
+reduction on a haircut side in any of the 148 fuzz regressions or the 337 earlier stateful tests
+(the regressions and the sixteen ADL-named stateful tests were also run under the changed model and
+passed), which is why the two directed tests were added.
+
 ### INV-048 ADL rounding residue is typed and bounded (#449, 2026-11-19)
+
+> Superseded on 2026-11-20 by the engine fix (see "INV-048/051 each side's A index is derived from its raw-basis sum (#449 fixed in the engine, 2026-11-20)", above): the residue
+> range no longer depends on history, the count of reductions is gone from the model's bound, the
+> uncovered exposure measured below no longer arises, and
+> `v16_program_issue_449_packed_harvest_growth_per_tx_is_bounded_by_reducing_ops` is now
+> `v16_program_issue_449_packed_reductions_leave_no_uncovered_exposure`.
 
 [`stateful/inv_081_success_state_validity_over_complete_public_routes.rs`](stateful/inv_081_success_state_validity_over_complete_public_routes.rs)
 (one new selector), [`cu/inv_051_adl_residue_harvest_449.rs`](cu/inv_051_adl_residue_harvest_449.rs)

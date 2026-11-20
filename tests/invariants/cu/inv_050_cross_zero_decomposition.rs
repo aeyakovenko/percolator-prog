@@ -562,7 +562,7 @@ fn v16_program_post_adl_generated_interior_quantities_span_ratios_and_directions
 #[test]
 fn v16_program_adl_maker_reduction_bounds_taker_cross_zero_and_matched_book() {
     use support::fuzz_model::independent_health_certificate;
-    use support::reference_math::{mul_div_ceil, mul_div_floor};
+    use support::reference_math::mul_div_ceil;
 
     // A smaller unit-index taker must not flip even when the ADL maker reduces
     // and both absolute exposures shrink. The exact taker close remains live.
@@ -655,6 +655,7 @@ fn v16_program_adl_maker_reduction_bounds_taker_cross_zero_and_matched_book() {
             let mut oi = [0; 2];
             let mut counts = [0; 2];
             let mut weights = [0; 2];
+            let mut raw_sums = [0; 2];
             let positions = accounts.map(|key| {
                 let state = env.portfolio_state(key);
                 let legs: Vec<_> = state
@@ -691,11 +692,39 @@ fn v16_program_adl_maker_reduction_bounds_taker_cross_zero_and_matched_book() {
                     oi[side] += effective;
                     counts[side] += 1;
                     weights[side] += leg.loss_weight;
+                    raw_sums[side] += leg.basis_pos_q.unsigned_abs();
                     sign * effective as i128
                 })
             });
-            assert_eq!(positions.iter().sum::<i128>(), 0);
-            assert_eq!(oi, [asset.oi_eff_long_q, asset.oi_eff_short_q]);
+            // Each side's legs against that side's own totals (issue #449). The engine keeps
+            // the legs' raw-basis sum and derives the A index from it and the counter, exactly.
+            // The legs' rounded-up quantities equal the counter at unit A; on a haircut side
+            // they exceed it by less than one per leg. The two counters match each other.
+            assert_eq!(
+                raw_sums,
+                [asset.raw_basis_sum_long_q, asset.raw_basis_sum_short_q]
+            );
+            assert_eq!(asset.oi_eff_long_q, asset.oi_eff_short_q);
+            for (side, (a, side_oi)) in [
+                (asset.a_long, asset.oi_eff_long_q),
+                (asset.a_short, asset.oi_eff_short_q),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert_eq!(a, reference_side_adl_index(side_oi, raw_sums[side], a));
+                let surplus: u128 = oi[side] - side_oi;
+                assert!(
+                    if a == ADL_ONE {
+                        surplus == 0
+                    } else {
+                        surplus < u128::from(counts[side])
+                    },
+                    "side {side}: legs sum to {}, counter {side_oi}, {} legs",
+                    oi[side],
+                    counts[side]
+                );
+            }
             assert_eq!(
                 counts,
                 [asset.stored_pos_count_long, asset.stored_pos_count_short]
@@ -787,10 +816,25 @@ fn v16_program_adl_maker_reduction_bounds_taker_cross_zero_and_matched_book() {
             TRADE_CU_LIMIT,
         );
         let after = env.market_state().1;
-        let mut expected = positions_before;
-        expected[0] -= POS_SCALE as i128;
-        expected[3] = 0;
-        assert_eq!(census(&env), expected);
+        // The side rule (issue #449). The counters lose exactly the fill. The maker keeps the
+        // raw basis the rule derives, so its own rounded-up quantity lands at the target or just
+        // under it, and the rounding stays with the side's other long: that untouched leg can
+        // count one unit more. No untouched leg counts less.
+        let positions_after = census(&env);
+        let maker_target = positions_before[0] - POS_SCALE as i128;
+        assert!(
+            (maker_target - 2..=maker_target).contains(&positions_after[0]),
+            "maker {} against target {maker_target}",
+            positions_after[0]
+        );
+        assert_eq!(positions_after[3], 0);
+        for untouched in [1, 2, 4] {
+            let (was, now) = (positions_before[untouched], positions_after[untouched]);
+            assert!(
+                now.signum() == was.signum() && (0..=1).contains(&(now.abs() - was.abs())),
+                "untouched leg {untouched}: {was} -> {now}"
+            );
+        }
         assert_eq!(
             after.assets[0].oi_eff_long_q,
             asset.oi_eff_long_q - POS_SCALE
@@ -799,7 +843,13 @@ fn v16_program_adl_maker_reduction_bounds_taker_cross_zero_and_matched_book() {
             after.assets[0].oi_eff_short_q,
             asset.oi_eff_short_q - POS_SCALE
         );
-        assert_eq!(after.assets[0].a_long, asset.a_long);
+        // The reduction is rounded against the maker, so the long index does not fall. When it
+        // rises, the other long's cached certificate is retired by a new risk epoch.
+        assert!(after.assets[0].a_long >= asset.a_long);
+        assert_eq!(after.assets[0].a_short, ADL_ONE);
+        if after.assets[0].a_long > asset.a_long {
+            assert!(after.risk_epoch > before.risk_epoch);
+        }
         assert_eq!(
             [loser, other_long, other_short].map(|key| env.svm.get_account(&key)),
             untouched
@@ -829,7 +879,7 @@ fn v16_program_adl_maker_reduction_bounds_taker_cross_zero_and_matched_book() {
         assert!(!has_active_leg_for_asset(&env.portfolio_state(taker), 0));
         let remaining = active_leg_for_asset(&env.portfolio_state(maker), 0);
         let remaining_raw =
-            mul_div_floor(exit_q - POS_SCALE, maker_leg.a_basis, asset.a_long).unwrap();
+            reference_raw_basis_after_reduction(&before, maker_leg, exit_q - POS_SCALE);
         assert_eq!(remaining.side, SideV16::Long);
         assert_eq!(remaining.a_basis, maker_leg.a_basis);
         assert_eq!(remaining.basis_pos_q, remaining_raw as i128);

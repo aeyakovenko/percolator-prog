@@ -272,7 +272,7 @@ fn v16_program_queued_liquidation_recertifies_after_partitioned_opposing_adl() {
             active_leg_for_asset(&final_short, ASSET)
                 .basis_pos_q
                 .unsigned_abs(),
-            reference_raw_basis_for_current_effective(&before_liquidation, target_leg, effective_q)
+            reference_raw_basis_after_reduction(&before_liquidation, target_leg, effective_q)
         );
         let reward = fee / 2;
         let retained_fee = fee - reward;
@@ -520,7 +520,7 @@ fn run_post_adl_transfer_world(probe_before_mark: bool) -> PostAdlTransferOutcom
         reference_current_epoch_effective_abs(&before_exit, leg_before_exit);
     let exit_q = OPEN_Q / 4;
     let expected_effective_after = effective_before_exit - exit_q;
-    let expected_raw_after = reference_raw_basis_for_current_effective(
+    let expected_raw_after = reference_raw_basis_after_reduction(
         &before_exit,
         leg_before_exit,
         expected_effective_after,
@@ -677,7 +677,7 @@ fn v16_program_post_adl_transfer_rejects_phantom_value_and_preserves_owner_progr
     let exit_q = effective_q.min(raw_q / 2).max(1);
     let account_effective_before =
         reference_current_epoch_effective_abs(&before_exit, leg_before_exit);
-    let expected_raw_after = reference_raw_basis_for_current_effective(
+    let expected_raw_after = reference_raw_basis_after_reduction(
         &before_exit,
         leg_before_exit,
         account_effective_before - exit_q,
@@ -2237,7 +2237,7 @@ fn inv061_source_defines_test(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_liquidation_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "add1d0276a7346565f206c8ed8d214bd1cb904ef";
+    const ENGINE_PIN: &str = "c030aa4055b28d7380092388cb4445d5405afb52";
     const CLASSES: &[Inv061LiquidationClass] = &[
         Inv061LiquidationClass {
             class: "sole public ingress and deterministic dispatch",

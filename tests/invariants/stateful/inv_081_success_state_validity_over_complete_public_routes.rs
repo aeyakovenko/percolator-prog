@@ -210,6 +210,59 @@ fn v16_program_adl_rounding_residue_is_typed_and_every_portfolio_exits() {
     );
 }
 
+/// Issue #449, the engine's side rule in the reference model. Two longs share a side that a
+/// departing short has haircut. One reduces in odd quantities through the direct and the batch
+/// trade route, the other once as owner, and the model's own copy of the rule has to reproduce
+/// the raw basis the
+/// deployed program keeps at every step. The generated histories of this suite never round a
+/// partial reduction on a haircut side, so this directed one carries that part of the model:
+/// with the rounding of `SideBook::raw_after_reduction` turned the other way it fails at the
+/// first fill.
+#[test]
+fn v16_program_haircut_side_reductions_follow_the_side_rule_and_every_portfolio_exits() {
+    let (evidence, coverage) =
+        crate::support::fuzz_model::reproduce_haircut_side_reductions_follow_the_side_rule()
+            .expect("haircut-side reductions match the reference model and every portfolio exits");
+    println!("haircut-side reductions: {evidence:?}");
+    // Ten matched fills reduce the first long, and the last two also reduce the short that is
+    // alone on its haircut side; the owner reduction makes one more.
+    assert_eq!(evidence.reductions, 13, "{evidence:?}");
+    assert!(
+        evidence.rounded_reductions >= 10,
+        "the directed sizes must round: {evidence:?}"
+    );
+    assert!(
+        evidence.index_rises > 0 && evidence.peer_quantity_rises > 0,
+        "the untouched long must see the index and its own quantity move: {evidence:?}"
+    );
+    assert_ne!(
+        coverage.user_positions_closed, 0,
+        "the haircut legs must reach public terminal exits"
+    );
+}
+
+/// Issue #449, the same rule where the engine picks the size: a partial liquidation of one of
+/// two shorts that share a haircut side. The model reads the liquidated quantity off the side
+/// counter, requires the raw basis the leg keeps to be the one its side rule derives for that
+/// quantity, and requires the opposite side to lose exactly the same.
+#[test]
+fn v16_program_liquidation_on_a_shared_haircut_side_follows_the_side_rule() {
+    let coverage = crate::support::fuzz_model::reproduce_liquidation_on_a_shared_haircut_side()
+        .expect("a liquidation on a shared haircut side matches the reference model");
+    println!(
+        "haircut-side liquidation: steps={} liquidated={} reductions on a haircut side={} rounded={}",
+        coverage.liquidation_steps,
+        coverage.liquidated_abs_q,
+        coverage.haircut_side_reductions,
+        coverage.haircut_side_rounded_reductions
+    );
+    assert_ne!(coverage.liquidation_steps, 0);
+    assert_ne!(
+        coverage.haircut_side_reductions, 0,
+        "a liquidation must leave the leg open on the haircut side"
+    );
+}
+
 #[test]
 fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
     let scenario = Scenario {

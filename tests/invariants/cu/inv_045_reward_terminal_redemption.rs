@@ -450,7 +450,7 @@ fn v16_program_hybrid_catchup_penalties_stay_in_insurance_through_resolved_cohor
                     peak = peak.max(checked_submit(
                         &mut env,
                         &owners[actor],
-                        &[close],
+                        &[close.clone()],
                         &tracked,
                         None,
                     ));
@@ -458,6 +458,26 @@ fn v16_program_hybrid_catchup_penalties_stay_in_insurance_through_resolved_cohor
                     redemptions += 1;
                     let after_paid = custody(&env, tokens, supply);
                     let after = env.portfolio_state(portfolios[actor]);
+                    // The close detached this winner's position, and its payout waits for the
+                    // other stored positions: a second close before they detach makes no
+                    // progress and changes nothing. (The same wait is taken at the top of the
+                    // loop when a later round still finds blockers.)
+                    if percolator::active_bitmap_is_empty(active_bitmap(&after))
+                        && after.pnl.get() > 0
+                        && env.market_state().1.resolved_payout_blocker_count > 0
+                    {
+                        peak = peak.max(checked_submit(
+                            &mut env,
+                            &owners[actor],
+                            &[close],
+                            &tracked,
+                            Some((
+                                2,
+                                InstructionError::Custom(PercolatorError::EngineNonProgress as u32),
+                            )),
+                        ));
+                        waiting_rollbacks += 1;
+                    }
                     assert!(after_paid[actor] >= before_paid[actor]);
                     assert!(
                         after != before || after_paid != before_paid,

@@ -1,5 +1,9 @@
 # INV-051 dual-ADL matched reduction conformance
 
+> Restated on 2026-11-20 with the engine's side rule (wrapper issue #449). The first selector is now
+> `v16_program_dual_adl_matched_partitions_follow_the_side_rule_to_fee_adjusted_exits`; see the section
+> "INV-048/051 each side's A index is derived from its raw-basis sum (#449 fixed in the engine, 2026-11-20)" in [README.md](README.md). The text below describes the tests as first written.
+
 Base: `origin/main` at `4eb82c5ad8d43063d9f2852552d7fcafdce5ce26`.
 Local branch: `astra-ultra/matched-book-conformance-20260917`.
 Worktree: `/dev/shm/percolator-astra-ultra-matched-book-20260917`.

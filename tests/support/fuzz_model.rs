@@ -1309,6 +1309,12 @@ pub struct Coverage {
     pub user_positions_closed: u64,
     pub liquidation_steps: u64,
     pub liquidated_abs_q: u128,
+    /// Reductions that left a leg open on a side whose A index was below `ADL_ONE`: the cases
+    /// the engine's side rule decides (issue #449).
+    pub haircut_side_reductions: u64,
+    /// Of those, the ones where the share of raw basis given up did not divide evenly, so the
+    /// rounding against the reducing leg was actually taken.
+    pub haircut_side_rounded_reductions: u64,
     pub current_certificate_full_refresh_checks: u64,
     pub max_cu: u64,
 }
@@ -1374,6 +1380,8 @@ impl Default for Coverage {
             user_positions_closed: 0,
             liquidation_steps: 0,
             liquidated_abs_q: 0,
+            haircut_side_reductions: 0,
+            haircut_side_rounded_reductions: 0,
             current_certificate_full_refresh_checks: 0,
             max_cu: 0,
         }
@@ -1516,6 +1524,8 @@ impl Coverage {
         self.user_positions_closed += other.user_positions_closed;
         self.liquidation_steps += other.liquidation_steps;
         self.liquidated_abs_q += other.liquidated_abs_q;
+        self.haircut_side_reductions += other.haircut_side_reductions;
+        self.haircut_side_rounded_reductions += other.haircut_side_rounded_reductions;
         self.current_certificate_full_refresh_checks +=
             other.current_certificate_full_refresh_checks;
         self.max_cu = self.max_cu.max(other.max_cu);
@@ -3065,19 +3075,126 @@ struct MatchedBookObligationCensus {
     terminal_unmatched_effective_q: [u128; 2],
     /// Sum of the rounded-up effective quantities of a side's current-epoch legs, minus that
     /// side's effective-OI counter. Zero while the side's A index is `ADL_ONE`; otherwise typed
-    /// and bounded by `ScenarioRunner::adl_rounding_residue_bound` (issue #449).
+    /// and held inside `ScenarioRunner::adl_rounding_residue_allowed` (issue #449).
     adl_rounding_residue_q: [i128; 2],
+    /// Sum of the raw basis of a side's current-epoch legs. The engine keeps the same sum per
+    /// side and derives the side's A index from it (issue #449).
+    current_raw_q: [u128; 2],
+}
+
+/// One side of one asset under the engine's side rule (engine `spec.md` section 5, "Side A
+/// index"), restated from the spec so the deployed state is checked against an independent
+/// copy of the arithmetic.
+///
+/// A side keeps its effective open interest and the sum of its legs' raw basis. Every leg's
+/// basis index is `ADL_ONE`, and the side's A index is derived from the two totals:
+/// `ADL_ONE` when they agree, otherwise `floor(ADL_ONE * oi / raw_sum)` and at least 1. With
+/// no raw basis the index is unused and keeps its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SideBook {
+    oi_q: u128,
+    raw_sum_q: u128,
+    a: u128,
+}
+
+impl SideBook {
+    fn of(asset: &AssetStateV16, side: SideV16) -> Self {
+        match side {
+            SideV16::Long => Self {
+                oi_q: asset.oi_eff_long_q,
+                raw_sum_q: asset.raw_basis_sum_long_q,
+                a: asset.a_long,
+            },
+            SideV16::Short => Self {
+                oi_q: asset.oi_eff_short_q,
+                raw_sum_q: asset.raw_basis_sum_short_q,
+                a: asset.a_short,
+            },
+        }
+    }
+
+    /// The A index the two totals imply; `previous_a` when the side has no raw basis.
+    fn derived_a(oi_q: u128, raw_sum_q: u128, previous_a: u128) -> Result<u128, String> {
+        if raw_sum_q == 0 {
+            return Ok(previous_a);
+        }
+        if oi_q > raw_sum_q {
+            return Err(format!(
+                "effective OI {oi_q} exceeds the side's raw basis {raw_sum_q}"
+            ));
+        }
+        if oi_q == raw_sum_q {
+            return Ok(ADL_ONE);
+        }
+        Ok(super::reference_math::mul_div_floor(ADL_ONE, oi_q, raw_sum_q)?.max(1))
+    }
+
+    /// A leg's effective quantity: its exposure at the side's index, rounded up.
+    fn effective_q(&self, raw_q: u128) -> Result<u128, String> {
+        super::reference_math::mul_div_ceil(raw_q, self.a, ADL_ONE)
+    }
+
+    /// Raw basis a leg of `raw_q` keeps when it gives up `reduce_q` of its effective quantity
+    /// and stays open.
+    ///
+    /// The reduction takes `reduce_q` out of the side's effective OI. Counting a leg's share of
+    /// the side as `raw * oi / raw_sum`, the leg keeps the largest raw basis for which its share
+    /// falls by at least `reduce_q` (the rounding is the reducer's, no other leg's share falls)
+    /// and its new share is at most its new effective quantity; never less than one unit, and
+    /// never less than the side needs to carry what is left (`oi <= raw_sum`). At unit A all of
+    /// these are the leg's new effective quantity.
+    fn raw_after_reduction(&self, raw_q: u128, reduce_q: u128) -> Result<u128, String> {
+        let effective_q = self.effective_q(raw_q)?;
+        if reduce_q == 0 || reduce_q >= effective_q {
+            return Err(format!(
+                "reduction {reduce_q} is not inside the leg's effective quantity {effective_q}"
+            ));
+        }
+        if effective_q > self.oi_q || raw_q > self.raw_sum_q || self.oi_q > self.raw_sum_q {
+            return Err(format!(
+                "leg raw {raw_q} effective {effective_q} does not fit its side {self:?}"
+            ));
+        }
+        let next_effective_q = effective_q - reduce_q;
+        if self.oi_q == self.raw_sum_q {
+            if effective_q != raw_q {
+                return Err(format!(
+                    "unit-A leg has raw {raw_q} but effective {effective_q}"
+                ));
+            }
+            return Ok(next_effective_q);
+        }
+        let oi_after_q = self.oi_q - reduce_q;
+        let other_raw_q = self.raw_sum_q - raw_q;
+        let by_share_q = raw_q.saturating_sub(super::reference_math::mul_div_ceil(
+            reduce_q,
+            self.raw_sum_q,
+            self.oi_q,
+        )?);
+        let by_target_q = if oi_after_q > next_effective_q {
+            super::reference_math::mul_div_floor(
+                next_effective_q,
+                other_raw_q,
+                oi_after_q - next_effective_q,
+            )?
+        } else {
+            raw_q
+        };
+        let side_floor_q = oi_after_q.saturating_sub(other_raw_q);
+        let kept_raw_q = by_share_q.min(by_target_q).max(side_floor_q).max(1);
+        if kept_raw_q >= raw_q {
+            return Err(format!(
+                "reduction {reduce_q} would not lower the leg's raw basis {raw_q}"
+            ));
+        }
+        Ok(kept_raw_q)
+    }
 }
 
 pub struct ScenarioRunner {
     env: V16Svm,
     positions: [[i128; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
     expected_effective_oi: [[u128; 2]; ASSET_COUNT],
-    /// Per asset side: `(side epoch, reductions)`, the number of leg reductions this model has
-    /// seen on that side while its A index was below `ADL_ONE` in that epoch. Each such
-    /// reduction re-bases one leg and can add less than one raw unit to the side's rounding
-    /// residue (issue #449); a side reset starts a new epoch and a new count.
-    adl_haircut_reductions: [[(u64, u64); 2]; ASSET_COUNT],
     liveness_limit: usize,
     retained: VecDeque<RetainedTrade>,
     last_trade_rejection: Option<String>,
@@ -3124,7 +3241,6 @@ impl ScenarioRunner {
             env,
             positions: [[0; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
             expected_effective_oi: [[0; 2]; ASSET_COUNT],
-            adl_haircut_reductions: [[(0, 0); 2]; ASSET_COUNT],
             liveness_limit,
             retained: VecDeque::new(),
             last_trade_rejection: None,
@@ -3544,13 +3660,22 @@ impl ScenarioRunner {
         asset: usize,
         size_before: i128,
     ) -> Result<bool, String> {
+        self.try_rebalance_reduce(user, asset, size_before, size_before.unsigned_abs())
+    }
+
+    /// Owner RebalanceReduce of `request_q` on a position of raw size `size_before`. Returns
+    /// whether the position is gone.
+    fn try_rebalance_reduce(
+        &mut self,
+        user: usize,
+        asset: usize,
+        size_before: i128,
+        request_q: u128,
+    ) -> Result<bool, String> {
         let account_before = self.env.primary_portfolio(user);
         let (_, group_before) = self.env.primary_market_state();
         let before = self.snapshot();
-        match self
-            .env
-            .rebalance_reduce(user, asset as u16, size_before.unsigned_abs())
-        {
+        match self.env.rebalance_reduce(user, asset as u16, request_q) {
             Ok(success) => {
                 self.coverage.observe_success(None, &success);
                 self.assert_portfolio_frame(&before, &[user])?;
@@ -3585,8 +3710,7 @@ impl ScenarioRunner {
                 if reduced_effective_q == 0 {
                     return Err("successful rebalance exit made no effective progress".into());
                 }
-                let matching_reduce_q = size_before
-                    .unsigned_abs()
+                let matching_reduce_q = request_q
                     .min(old_leg.basis_pos_q.unsigned_abs())
                     .min(old_effective_q)
                     .min(group_before.assets[asset].oi_eff_long_q)
@@ -3594,21 +3718,33 @@ impl ScenarioRunner {
                 if matching_reduce_q == 0 {
                     return Err("successful rebalance exit had no matching OI capacity".into());
                 }
-                self.apply_account_oi_transition(
-                    &account_before,
-                    &account_after,
-                    &group_before,
-                    false,
-                    "owner rebalance exit",
-                )
-                .map_err(|error| {
-                    format!(
-                        "{error}; rebalance account transition raw={size_before}->{size_after}, \
-                         effective={old_effective_q}->{new_effective_q}, before_asset={:?}, \
-                         after_asset={:?}",
-                        group_before.assets[asset], group_after.assets[asset]
+                let mut known_reduction_q = [None; ASSET_COUNT];
+                known_reduction_q[asset] = Some(matching_reduce_q);
+                let removed_q = self
+                    .apply_account_oi_transition(
+                        &account_before,
+                        &account_after,
+                        &group_before,
+                        false,
+                        known_reduction_q,
+                        "owner rebalance exit",
                     )
-                })?;
+                    .map_err(|error| {
+                        format!(
+                            "{error}; rebalance account transition raw={size_before}->{size_after}, \
+                             effective={old_effective_q}->{new_effective_q}, before_asset={:?}, \
+                             after_asset={:?}",
+                            group_before.assets[asset], group_after.assets[asset]
+                        )
+                    })?;
+                if removed_q[asset] != matching_reduce_q {
+                    return Err(format!(
+                        "rebalance exit took {} out of its side where the request and the \
+                         matching capacity give {matching_reduce_q}: raw={size_before}->{size_after}, \
+                         effective={old_effective_q}->{new_effective_q}",
+                        removed_q[asset]
+                    ));
+                }
                 self.apply_unilateral_matching_oi_reduction(
                     asset,
                     if size_before > 0 {
@@ -4741,6 +4877,7 @@ impl ScenarioRunner {
             account_after,
             group_before,
             true,
+            [None; ASSET_COUNT],
             &format!("actor {actor} {route:?} terminal transition"),
         )?;
         for asset in 0..ASSET_COUNT {
@@ -5127,9 +5264,19 @@ impl ScenarioRunner {
                 }
 
                 if bilateral {
+                    // The landed close is bounded by the two legs' effective quantities and by
+                    // what each side still carries, not by the retained raw bases.
+                    let effective_before = |account: &PortfolioAccountV16| {
+                        Self::account_leg_for_asset(account, asset)?
+                            .map(|leg| Self::leg_effective_oi(&group_before, asset, leg, false))
+                            .transpose()
+                            .map(|effective_q| effective_q.unwrap_or(0))
+                    };
                     let reduced_q = close_q
-                        .min(position_a_before.unsigned_abs())
-                        .min(position_b_before.unsigned_abs());
+                        .min(effective_before(&account_a_before)?)
+                        .min(effective_before(&account_b_before)?)
+                        .min(group_before.assets[asset].oi_eff_long_q)
+                        .min(group_before.assets[asset].oi_eff_short_q);
                     if reduced_q == 0 {
                         return Err("successful bilateral force close had zero reduction".into());
                     }
@@ -5209,6 +5356,7 @@ impl ScenarioRunner {
                         &residue_after,
                         &group_before,
                         true,
+                        [None; ASSET_COUNT],
                         "permissionless abandoned-asset residue removal",
                     )?;
                     self.positions[residue_actor][asset] = residue_position_after;
@@ -5318,6 +5466,7 @@ impl ScenarioRunner {
                     &account_after,
                     &group_before,
                     true,
+                    [None; ASSET_COUNT],
                     "owner recovery-leg forfeit",
                 )?;
                 self.positions[actor][asset] = size_after;
@@ -5862,6 +6011,20 @@ impl ScenarioRunner {
                 ));
             }
         }
+        // On a haircut side the engine settles each fill against the side as the previous fill
+        // left it (issue #449), so two fills of one asset are not their sum. This model replays
+        // one fill per asset, which is all its generators and scenarios send.
+        for (index, &(asset, _)) in legs.iter().enumerate() {
+            let engine_asset = &group_before.assets[asset];
+            if legs[..index].iter().any(|&(earlier, _)| earlier == asset)
+                && (engine_asset.a_long != ADL_ONE || engine_asset.a_short != ADL_ONE)
+            {
+                return Err(format!(
+                    "matched trade repeats asset {asset} while one of its sides is haircut; the \
+                     reference model replays one fill per asset"
+                ));
+            }
+        }
         self.reconcile_account_position_changes(
             taker,
             taker_before,
@@ -6236,77 +6399,33 @@ impl ScenarioRunner {
         }
     }
 
-    /// One leg on `leg.side` of `asset` was reduced or closed. If the side's A index was below
-    /// the leg's basis at that moment, the engine removed the leg's rounded-up quantity from the
-    /// side counter while the leg gave up less than that in exact exposure: the difference, less
-    /// than one raw unit, joins the side's rounding residue (issue #449). A side reset starts a
-    /// new epoch, and with it a new count.
-    fn note_adl_haircut_reduction(
-        &mut self,
-        group_before: &MarketGroupV16,
-        asset: usize,
-        leg: PortfolioLegV16,
-    ) {
-        let engine_asset = &group_before.assets[asset];
-        let (current_a, epoch) = match leg.side {
-            SideV16::Long => (engine_asset.a_long, engine_asset.epoch_long),
-            SideV16::Short => (engine_asset.a_short, engine_asset.epoch_short),
-        };
-        if leg.epoch_snap != epoch || current_a >= leg.a_basis {
-            return;
-        }
-        let entry = &mut self.adl_haircut_reductions[asset][Self::side_index(leg.side)];
-        if entry.0 != epoch {
-            *entry = (epoch, 0);
-        }
-        entry.1 = entry.1.saturating_add(1);
-    }
-
-    /// Exclusive bound on the magnitude of a haircut side's rounding residue (issue #449):
-    /// the number of legs that still carry quantity, plus the reductions counted on that side in
-    /// its current epoch.
+    /// Whether a side's ADL rounding residue is one the engine's side rule allows (issue #449).
     ///
-    /// Write `x_i = raw_i * A / a_basis` for a leg's exact exposure, `e_i = ceil(x_i)` for the
-    /// quantity the engine works with, and `O` for the side counter. A haircut multiplies every
-    /// `x_i` by at most `O'/O`, so it cannot lift `sum(x_i)` above `O`. A reduction by `q` takes
-    /// `q` from `O` and from `e_i`, and re-bases the leg so that `x_i` sits just under the new
-    /// `e_i`; a close takes `e_i` from `O` and `x_i` from the sum. Either moves `sum(x_i) - O` by
-    /// less than one unit in each direction, and nothing else moves it up. With
-    /// `sum(e_i) - sum(x_i)` in `[0, legs)`, the residue `sum(e_i) - O` stays inside
-    /// `(-reductions, legs + reductions)`. The index floor of a haircut lowers `sum(x_i)` by a
-    /// further `sum(raw_i) / a_basis` each time, far below one unit at this world's sizes. The
-    /// census checks the symmetric envelope `|residue| < legs + reductions` named in the issue.
-    fn adl_rounding_residue_bound(
-        &self,
-        asset: usize,
-        side: usize,
-        side_epoch: u64,
+    /// The residue is the sum of the side's rounded-up leg quantities minus the side counter.
+    /// The engine derives a side's A index from its two totals after every change (engine
+    /// `spec.md` section 5, "Side A index"), so the legs' exact exposure
+    /// `raw_sum * A / ADL_ONE` never exceeds the counter and is short of it by less than
+    /// `raw_sum / ADL_ONE`, under a tenth of a unit. Rounding each of `legs` quantities up adds
+    /// at least nothing and less than `legs` in total, so the residue is in `[0, legs)`, and it
+    /// is exactly zero at unit A, where every quantity is its raw basis. A side whose counter is
+    /// zero while legs remain is exhausted: its index is the smallest one and each leg rounds up
+    /// to one unit it does not own, so there the residue is `legs`.
+    fn adl_rounding_residue_allowed(
+        residue_q: i128,
         legs: u64,
-    ) -> u128 {
-        let (epoch, reductions) = self.adl_haircut_reductions[asset][side];
-        u128::from(legs)
-            + if epoch == side_epoch {
-                u128::from(reductions)
-            } else {
-                0
-            }
-    }
-
-    /// Legs of the primary actors that carry quantity on one side of `asset` right now.
-    fn side_leg_count(&self, asset: usize, side: SideV16) -> u64 {
-        (0..PRIMARY_ACTOR_COUNT)
-            .map(|actor| {
-                decoded_legs(&self.env.primary_portfolio(actor))
-                    .into_iter()
-                    .filter(|leg| {
-                        leg.active
-                            && leg.asset_index as usize == asset
-                            && leg.side == side
-                            && leg.basis_pos_q != 0
-                    })
-                    .count() as u64
-            })
-            .sum()
+        side_oi_q: u128,
+        side_a: u128,
+    ) -> bool {
+        let Ok(residue_q) = u128::try_from(residue_q) else {
+            return false;
+        };
+        if side_a == ADL_ONE {
+            residue_q == 0
+        } else if side_oi_q == 0 {
+            residue_q == u128::from(legs)
+        } else {
+            residue_q < u128::from(legs)
+        }
     }
 
     fn replace_expected_oi(
@@ -6334,164 +6453,242 @@ impl ScenarioRunner {
         Ok(())
     }
 
+    /// Apply one account's leg changes to the independent side-OI ledger and return, per asset,
+    /// the effective quantity the change took out of the old leg's side.
+    ///
+    /// The ledger follows the engine's side rule (engine `spec.md` section 5, "Side A index"),
+    /// not the legs' own rounded-up quantities:
+    /// - a new leg or a growth is admitted only at unit A and adds its raw basis;
+    /// - a leg that leaves (cleared, flipped, or kept only as a pending loss obligation) takes
+    ///   its whole effective quantity, or nothing when its side is already exhausted;
+    /// - a leg that is reduced and stays open takes the reduction itself. `known_reduction_q`
+    ///   names it when the caller knows what was asked for; otherwise it is the raw difference
+    ///   at unit A and what the side counter lost on a haircut side. In every case the raw basis
+    ///   the leg keeps has to be the one `SideBook` derives for that reduction.
     fn apply_account_oi_transition(
         &mut self,
         account_before: &PortfolioAccountV16,
         account_after: &PortfolioAccountV16,
         group_before: &MarketGroupV16,
         allow_internal_exhausted_reset: bool,
+        known_reduction_q: [Option<u128>; ASSET_COUNT],
         context: &str,
-    ) -> Result<(), String> {
+    ) -> Result<[u128; ASSET_COUNT], String> {
         let (_, group_after) = self.env.primary_market_state();
+        let mut removed_q = [0u128; ASSET_COUNT];
         for asset in 0..ASSET_COUNT {
             let old_leg = Self::account_leg_for_asset(account_before, asset)?;
             let new_leg = Self::account_leg_for_asset(account_after, asset)?;
             match (old_leg, new_leg) {
                 (None, None) => {}
                 (None, Some(new_leg)) => {
-                    let new_effective_q =
-                        Self::leg_effective_oi(&group_after, asset, new_leg, false)?;
-                    self.replace_expected_oi(asset, new_leg.side, 0, new_effective_q, context)?;
+                    self.add_opened_leg_oi(&group_after, asset, new_leg, context)?;
                 }
                 (Some(old_leg), None) => {
-                    if !Self::leg_oi_was_removed_by_reset(
+                    removed_q[asset] = self.remove_departed_leg_oi(
+                        group_before,
+                        asset,
+                        old_leg,
+                        allow_internal_exhausted_reset,
+                        context,
+                    )?;
+                }
+                (Some(old_leg), Some(new_leg)) if old_leg.side == new_leg.side => {
+                    let old_raw_q = old_leg.basis_pos_q.unsigned_abs();
+                    let new_raw_q = new_leg.basis_pos_q.unsigned_abs();
+                    if old_raw_q == new_raw_q {
+                        continue;
+                    }
+                    if Self::leg_oi_was_removed_by_reset(
                         group_before,
                         asset,
                         old_leg,
                         allow_internal_exhausted_reset,
                     ) {
-                        let old_effective_q = Self::leg_effective_oi(
-                            group_before,
-                            asset,
-                            old_leg,
-                            allow_internal_exhausted_reset,
-                        )?;
-                        let side_index = Self::side_index(old_leg.side);
-                        if old_effective_q > self.expected_effective_oi[asset][side_index] {
-                            return Err(format!(
-                                "{context} account clear exceeds the independent {:?} OI ledger for asset {asset}: \
-                                 raw={}, effective={old_effective_q}, ledger={}, before_asset={:?}, after_asset={:?}",
-                                old_leg.side,
-                                old_leg.basis_pos_q,
-                                self.expected_effective_oi[asset][side_index],
-                                group_before.assets[asset],
-                                group_after.assets[asset],
-                            ));
-                        }
-                        self.replace_expected_oi(asset, old_leg.side, old_effective_q, 0, context)?;
-                        self.note_adl_haircut_reduction(group_before, asset, old_leg);
-                    }
-                }
-                (Some(old_leg), Some(new_leg)) if old_leg.side == new_leg.side => {
-                    let already_removed = Self::leg_oi_was_removed_by_reset(
-                        group_before,
-                        asset,
-                        old_leg,
-                        allow_internal_exhausted_reset,
-                    );
-                    if already_removed && old_leg.basis_pos_q != new_leg.basis_pos_q {
                         return Err(format!(
                             "{context} resized prior-reset asset {asset} from {} to {}",
                             old_leg.basis_pos_q, new_leg.basis_pos_q
                         ));
                     }
-                    if !already_removed && old_leg.basis_pos_q != new_leg.basis_pos_q {
-                        let old_effective_q = Self::leg_effective_oi(
+                    if new_raw_q == 0 {
+                        // The leg gave up its whole position and stays only as a pending loss
+                        // obligation.
+                        removed_q[asset] = self.remove_departed_leg_oi(
                             group_before,
                             asset,
                             old_leg,
                             allow_internal_exhausted_reset,
+                            context,
                         )?;
-                        let new_effective_q =
-                            Self::leg_effective_oi(&group_after, asset, new_leg, false)?;
-                        let side_index = Self::side_index(old_leg.side);
-                        let ledger_before = self.expected_effective_oi[asset][side_index];
-                        let deployed_before = match old_leg.side {
-                            SideV16::Long => group_before.assets[asset].oi_eff_long_q,
-                            SideV16::Short => group_before.assets[asset].oi_eff_short_q,
-                        };
-                        let deployed_after = match old_leg.side {
-                            SideV16::Long => group_after.assets[asset].oi_eff_long_q,
-                            SideV16::Short => group_after.assets[asset].oi_eff_short_q,
-                        };
-                        // The leg's rounded-up quantity can exceed everything its side still
-                        // carries, by as much as the side's typed rounding residue (issue #449).
-                        let residue_bound = self.adl_rounding_residue_bound(
+                    } else if new_raw_q > old_raw_q {
+                        self.add_grown_leg_oi(group_before, asset, old_leg, new_raw_q, context)?;
+                    } else {
+                        removed_q[asset] = self.remove_reduced_leg_oi(
+                            group_before,
+                            &group_after,
                             asset,
-                            side_index,
-                            old_leg.epoch_snap,
-                            self.side_leg_count(asset, old_leg.side),
-                        );
-                        let exhausted_rounding_residue = old_effective_q
-                            .checked_sub(ledger_before)
-                            .is_some_and(|overshoot| overshoot != 0 && overshoot < residue_bound)
-                            && deployed_before == ledger_before
-                            && deployed_after == 0
-                            && new_effective_q == 0
-                            && new_leg.basis_pos_q != 0
-                            && Self::leg_oi_was_removed_by_reset(
-                                &group_after,
-                                asset,
-                                new_leg,
-                                false,
-                            );
-                        if old_effective_q > ledger_before && !exhausted_rounding_residue {
-                            return Err(format!(
-                                "{context} account resize exceeds the independent {:?} OI ledger for asset {asset}: \
-                                 raw={}->{}, effective={old_effective_q}->{new_effective_q}, ledger={ledger_before}, \
-                                 before_asset={:?}, after_asset={:?}",
-                                old_leg.side,
-                                old_leg.basis_pos_q,
-                                new_leg.basis_pos_q,
-                                group_before.assets[asset],
-                                group_after.assets[asset],
-                            ));
-                        }
-                        if exhausted_rounding_residue {
-                            self.replace_expected_oi(
-                                asset,
-                                old_leg.side,
-                                ledger_before,
-                                0,
-                                context,
-                            )?;
-                        } else {
-                            self.replace_expected_oi(
-                                asset,
-                                old_leg.side,
-                                old_effective_q,
-                                new_effective_q,
-                                context,
-                            )?;
-                        }
-                        if new_leg.basis_pos_q.unsigned_abs() < old_leg.basis_pos_q.unsigned_abs() {
-                            self.note_adl_haircut_reduction(group_before, asset, old_leg);
-                        }
+                            old_leg,
+                            new_raw_q,
+                            known_reduction_q[asset],
+                            context,
+                        )?;
                     }
                 }
                 (Some(old_leg), Some(new_leg)) => {
-                    if !Self::leg_oi_was_removed_by_reset(
+                    removed_q[asset] = self.remove_departed_leg_oi(
                         group_before,
                         asset,
                         old_leg,
                         allow_internal_exhausted_reset,
-                    ) {
-                        let old_effective_q = Self::leg_effective_oi(
-                            group_before,
-                            asset,
-                            old_leg,
-                            allow_internal_exhausted_reset,
-                        )?;
-                        self.replace_expected_oi(asset, old_leg.side, old_effective_q, 0, context)?;
-                        self.note_adl_haircut_reduction(group_before, asset, old_leg);
-                    }
-                    let new_effective_q =
-                        Self::leg_effective_oi(&group_after, asset, new_leg, false)?;
-                    self.replace_expected_oi(asset, new_leg.side, 0, new_effective_q, context)?;
+                        context,
+                    )?;
+                    self.add_opened_leg_oi(&group_after, asset, new_leg, context)?;
                 }
             }
         }
-        Ok(())
+        Ok(removed_q)
+    }
+
+    /// A new leg joined a side. The engine admits it only at unit A, where its raw basis is its
+    /// effective quantity.
+    fn add_opened_leg_oi(
+        &mut self,
+        group_after: &MarketGroupV16,
+        asset: usize,
+        new_leg: PortfolioLegV16,
+        context: &str,
+    ) -> Result<(), String> {
+        let raw_q = new_leg.basis_pos_q.unsigned_abs();
+        let effective_q = Self::leg_effective_oi(group_after, asset, new_leg, false)?;
+        if new_leg.a_basis != ADL_ONE || effective_q != raw_q {
+            return Err(format!(
+                "{context} opened asset {asset} {:?} away from unit A: raw={raw_q}, \
+                 effective={effective_q}, basis A={}, after_asset={:?}",
+                new_leg.side, new_leg.a_basis, group_after.assets[asset]
+            ));
+        }
+        self.replace_expected_oi(asset, new_leg.side, 0, raw_q, context)
+    }
+
+    /// A leg grew on its own side. The engine admits growth only while both sides of the asset
+    /// are at unit A, where raw basis and effective quantity move together.
+    fn add_grown_leg_oi(
+        &mut self,
+        group_before: &MarketGroupV16,
+        asset: usize,
+        old_leg: PortfolioLegV16,
+        new_raw_q: u128,
+        context: &str,
+    ) -> Result<(), String> {
+        let engine_asset = &group_before.assets[asset];
+        let old_raw_q = old_leg.basis_pos_q.unsigned_abs();
+        if engine_asset.a_long != ADL_ONE
+            || engine_asset.a_short != ADL_ONE
+            || old_leg.a_basis != ADL_ONE
+        {
+            return Err(format!(
+                "{context} grew asset {asset} {:?} from {old_raw_q} to {new_raw_q} away from unit \
+                 A: before_asset={engine_asset:?}",
+                old_leg.side
+            ));
+        }
+        self.replace_expected_oi(asset, old_leg.side, old_raw_q, new_raw_q, context)
+    }
+
+    /// A leg left its side: cleared, flipped away, or kept only as a pending loss obligation. It
+    /// takes its whole effective quantity out of the side. On an exhausted side (no effective OI
+    /// left) the remaining legs own nothing and take nothing.
+    fn remove_departed_leg_oi(
+        &mut self,
+        group_before: &MarketGroupV16,
+        asset: usize,
+        old_leg: PortfolioLegV16,
+        allow_internal_exhausted_reset: bool,
+        context: &str,
+    ) -> Result<u128, String> {
+        if Self::leg_oi_was_removed_by_reset(
+            group_before,
+            asset,
+            old_leg,
+            allow_internal_exhausted_reset,
+        ) {
+            return Ok(0);
+        }
+        if SideBook::of(&group_before.assets[asset], old_leg.side).oi_q == 0 {
+            return Ok(0);
+        }
+        let effective_q =
+            Self::leg_effective_oi(group_before, asset, old_leg, allow_internal_exhausted_reset)?;
+        let ledger_q = self.expected_effective_oi[asset][Self::side_index(old_leg.side)];
+        if effective_q > ledger_q {
+            return Err(format!(
+                "{context} account clear exceeds the independent {:?} OI ledger for asset {asset}: \
+                 raw={}, effective={effective_q}, ledger={ledger_q}, before_asset={:?}",
+                old_leg.side, old_leg.basis_pos_q, group_before.assets[asset],
+            ));
+        }
+        self.replace_expected_oi(asset, old_leg.side, effective_q, 0, context)?;
+        Ok(effective_q)
+    }
+
+    /// A leg was reduced on its own side and stays open. The side loses the reduction itself,
+    /// and the raw basis the leg keeps is the one the side rule derives for it (`SideBook`).
+    fn remove_reduced_leg_oi(
+        &mut self,
+        group_before: &MarketGroupV16,
+        group_after: &MarketGroupV16,
+        asset: usize,
+        old_leg: PortfolioLegV16,
+        new_raw_q: u128,
+        known_reduction_q: Option<u128>,
+        context: &str,
+    ) -> Result<u128, String> {
+        let book = SideBook::of(&group_before.assets[asset], old_leg.side);
+        let old_raw_q = old_leg.basis_pos_q.unsigned_abs();
+        let reduce_q = match known_reduction_q {
+            Some(reduce_q) => reduce_q,
+            // At unit A the raw basis is the effective quantity.
+            None if book.a == ADL_ONE => old_raw_q - new_raw_q,
+            // On a haircut side the size is the engine's choice (a liquidation). Nothing else
+            // moves this side's counter in the same instruction, so the counter names it.
+            None => book
+                .oi_q
+                .checked_sub(SideBook::of(&group_after.assets[asset], old_leg.side).oi_q)
+                .ok_or_else(|| {
+                    format!(
+                        "{context} reduced asset {asset} {:?} while its side counter grew: \
+                         before_asset={:?}, after_asset={:?}",
+                        old_leg.side, group_before.assets[asset], group_after.assets[asset]
+                    )
+                })?,
+        };
+        let kept_raw_q = book
+            .raw_after_reduction(old_raw_q, reduce_q)
+            .map_err(|error| {
+                format!(
+                    "{context} asset {asset} {:?} reduction by {reduce_q} has no side-rule \
+                     outcome: {error}; raw={old_raw_q}->{new_raw_q}, before_asset={:?},                      after_asset={:?}",
+                    old_leg.side, group_before.assets[asset], group_after.assets[asset]
+                )
+            })?;
+        if kept_raw_q != new_raw_q {
+            return Err(format!(
+                "{context} asset {asset} {:?} reduction by {reduce_q} kept raw basis \
+                 {new_raw_q} where the side rule keeps {kept_raw_q}: raw before={old_raw_q},                  before_asset={:?}, after_asset={:?}",
+                old_leg.side, group_before.assets[asset], group_after.assets[asset]
+            ));
+        }
+        if book.a != ADL_ONE {
+            self.coverage.haircut_side_reductions += 1;
+            let rounded = reduce_q
+                .checked_mul(book.raw_sum_q)
+                .ok_or("haircut-side reduction coverage overflow")?
+                % book.oi_q
+                != 0;
+            self.coverage.haircut_side_rounded_reductions += u64::from(rounded);
+        }
+        self.replace_expected_oi(asset, old_leg.side, reduce_q, 0, context)?;
+        Ok(reduce_q)
     }
 
     fn apply_unilateral_matching_oi_reduction(
@@ -6530,6 +6727,7 @@ impl ScenarioRunner {
         let (_, group_after) = self.env.primary_market_state();
         let observed = observed_positions(&account_after)?;
         let mut unilateral_reductions = Vec::new();
+        let mut known_reduction_q = [None; ASSET_COUNT];
         for (asset, new) in observed.into_iter().enumerate() {
             let old = before_positions[asset];
             let expected = expected_deltas[asset];
@@ -6548,7 +6746,39 @@ impl ScenarioRunner {
             let prior_reset_cleanup =
                 Self::prior_reset_cleanup_eligible(account_before, group_before, asset)
                     && new_effective == expected;
-            if new_effective == ordinary_post && !prior_reset_cleanup {
+            // A requested reduction that leaves the leg open on a haircut side is settled by the
+            // side rule (issue #449): the side gives up exactly the request, the leg keeps the
+            // raw basis `SideBook` derives, and its own rounded-up quantity can land below the
+            // target. Everywhere else the leg's effective quantity moves by the request itself.
+            let haircut_reduction = old_leg.filter(|leg| {
+                expected != 0
+                    && old_effective != 0
+                    && (expected > 0) != (old_effective > 0)
+                    && expected.unsigned_abs() < old_effective.unsigned_abs()
+                    && SideBook::of(&group_before.assets[asset], leg.side).a != ADL_ONE
+            });
+            let ordinary = match haircut_reduction {
+                Some(leg) => {
+                    let kept_raw_q = SideBook::of(&group_before.assets[asset], leg.side)
+                        .raw_after_reduction(
+                            leg.basis_pos_q.unsigned_abs(),
+                            expected.unsigned_abs(),
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "{context} actor {actor} asset {asset} reduction by {} has no \
+                                 side-rule outcome: {error}",
+                                expected.unsigned_abs()
+                            )
+                        })?;
+                    new.signum() == old.signum() && new.unsigned_abs() == kept_raw_q
+                }
+                None => new_effective == ordinary_post,
+            };
+            if ordinary && !prior_reset_cleanup {
+                if haircut_reduction.is_some() {
+                    known_reduction_q[asset] = Some(expected.unsigned_abs());
+                }
                 self.positions[actor][asset] = new;
                 continue;
             }
@@ -6569,13 +6799,6 @@ impl ScenarioRunner {
             }
             self.positions[actor][asset] = new;
             if !prior_reset_cleanup {
-                let reduced = old_effective
-                    .unsigned_abs()
-                    .checked_sub(new_effective.unsigned_abs())
-                    .ok_or("liquidation increased effective position")?;
-                if reduced == 0 {
-                    return Err("liquidation changed raw basis without effective progress".into());
-                }
                 unilateral_reductions.push((
                     asset,
                     if old > 0 {
@@ -6583,26 +6806,32 @@ impl ScenarioRunner {
                     } else {
                         SideV16::Short
                     },
-                    reduced,
                 ));
                 self.coverage.liquidation_steps += 1;
-                self.coverage.liquidated_abs_q = self
-                    .coverage
-                    .liquidated_abs_q
-                    .checked_add(reduced)
-                    .ok_or("liquidation coverage overflow")?;
             } else {
                 self.coverage.user_positions_closed += u64::from(new == 0);
             }
         }
-        self.apply_account_oi_transition(
+        let removed_q = self.apply_account_oi_transition(
             account_before,
             &account_after,
             group_before,
             false,
+            known_reduction_q,
             context,
         )?;
-        for (asset, closed_side, reduce_q) in unilateral_reductions {
+        // A liquidation is unilateral: what it took out of the liquidated side, the engine takes
+        // out of the opposite side as a haircut.
+        for (asset, closed_side) in unilateral_reductions {
+            let reduce_q = removed_q[asset];
+            if reduce_q == 0 {
+                return Err("liquidation changed raw basis without effective progress".into());
+            }
+            self.coverage.liquidated_abs_q = self
+                .coverage
+                .liquidated_abs_q
+                .checked_add(reduce_q)
+                .ok_or("liquidation coverage overflow")?;
             self.apply_unilateral_matching_oi_reduction(asset, closed_side, reduce_q, context)?;
         }
         Ok(())
@@ -7393,6 +7622,17 @@ impl ScenarioRunner {
                         .ok_or("matched-book reset-residue overflow")?;
                     continue;
                 }
+                // Positions open and grow only at unit A, so every current-epoch leg is based
+                // at `ADL_ONE` and a side's raw basis measures its exposure directly (#449).
+                if raw_q != 0 && leg.a_basis != ADL_ONE {
+                    return Err(format!(
+                        "matched-book actor {actor} asset {asset} leg is based at A {} instead of ADL_ONE",
+                        leg.a_basis
+                    ));
+                }
+                census[asset].current_raw_q[side] = census[asset].current_raw_q[side]
+                    .checked_add(raw_q)
+                    .ok_or("matched-book raw-basis overflow")?;
                 let effective_q = Self::leg_effective_oi(group, asset, leg, false)?;
                 let adl_residue_q = raw_q.checked_sub(effective_q).ok_or_else(|| {
                     format!(
@@ -7452,37 +7692,49 @@ impl ScenarioRunner {
                 engine_asset.explicit_unallocated_loss_long,
                 engine_asset.explicit_unallocated_loss_short,
             ];
-            // Each side's legs against that side's own counter. They agree exactly while the
-            // side's A index is `ADL_ONE`. Below it every leg is rounded up on its own, so the
-            // sum is typed as ADL rounding residue and held inside its bound (issue #449).
+            // Each side's legs against that side's own totals (issue #449). The engine keeps
+            // the sum of the legs' raw basis and derives the A index from it and the counter,
+            // so both are checked exactly. The legs' rounded-up quantities agree with the
+            // counter at unit A; below it their sum is typed as ADL rounding residue and held
+            // inside the range the side rule allows.
             let deployed_oi = [engine_asset.oi_eff_long_q, engine_asset.oi_eff_short_q];
-            let side_a = [engine_asset.a_long, engine_asset.a_short];
-            let side_epoch = [engine_asset.epoch_long, engine_asset.epoch_short];
-            for side in 0..2 {
+            for (side, book) in [
+                SideBook::of(&engine_asset, SideV16::Long),
+                SideBook::of(&engine_asset, SideV16::Short),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if book.raw_sum_q != entry.current_raw_q[side] {
+                    return Err(format!(
+                        "asset {asset} side {side} keeps raw basis sum {} where its legs hold {}",
+                        book.raw_sum_q, entry.current_raw_q[side]
+                    ));
+                }
+                let derived_a = SideBook::derived_a(book.oi_q, book.raw_sum_q, book.a)
+                    .map_err(|error| format!("asset {asset} side {side}: {error}"))?;
+                if book.a != derived_a {
+                    return Err(format!(
+                        "asset {asset} side {side} has A {} where its totals {book:?} give {derived_a}",
+                        book.a
+                    ));
+                }
                 let residue = i128::try_from(entry.effective_q[side])
                     .ok()
-                    .zip(i128::try_from(deployed_oi[side]).ok())
+                    .zip(i128::try_from(book.oi_q).ok())
                     .and_then(|(legs_q, counter_q)| legs_q.checked_sub(counter_q))
                     .ok_or("matched-book rounding residue overflow")?;
-                let bound = if side_a[side] == ADL_ONE {
-                    0
-                } else {
-                    self.adl_rounding_residue_bound(
-                        asset,
-                        side,
-                        side_epoch[side],
-                        effective_legs[asset][side],
-                    )
-                };
-                if residue != 0 && residue.unsigned_abs() >= bound {
+                if !Self::adl_rounding_residue_allowed(
+                    residue,
+                    effective_legs[asset][side],
+                    book.oi_q,
+                    book.a,
+                ) {
                     return Err(format!(
                         "asset {asset} side {side} has unclassified effective exposure imbalance: \
                          legs sum to {}, the side counter is {}, A is {}, and the ADL rounding \
-                         residue {residue} is outside its bound {bound} ({} legs)",
-                        entry.effective_q[side],
-                        deployed_oi[side],
-                        side_a[side],
-                        effective_legs[asset][side],
+                         residue {residue} is outside what {} legs allow",
+                        entry.effective_q[side], book.oi_q, book.a, effective_legs[asset][side],
                     ));
                 }
                 entry.adl_rounding_residue_q[side] = residue;
@@ -8169,6 +8421,272 @@ pub fn run_scenario(scenario: &Scenario) -> Result<Coverage, String> {
     progress_runner.coverage.merge(liquidation_coverage);
     progress_runner.coverage.assert_pull_request_non_vacuity()?;
     Ok(progress_runner.coverage)
+}
+
+/// What `reproduce_haircut_side_reductions_follow_the_side_rule` observed while one of two longs
+/// on a haircut side reduced and the other did nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HaircutSideReductionEvidence {
+    /// Reductions that left a leg open on a side below unit A (model coverage counter).
+    pub reductions: u64,
+    /// Of those, the ones whose share of raw basis did not divide evenly.
+    pub rounded_reductions: u64,
+    /// Matched fills after which the long side's A index was higher than before.
+    pub index_rises: u64,
+    /// Matched fills after which the untouched long counted one unit more.
+    pub peer_quantity_rises: u64,
+    /// Matched fills that left the reducing long more than the requested quantity lower.
+    pub reducer_below_request: u64,
+}
+
+/// Build the world of `reproduce_haircut_side_reductions_follow_the_side_rule`: two longs
+/// against two shorts on asset 0 with sizes that share no convenient ratio, one short leaving
+/// unilaterally (the long side is then haircut and two legs share it), then odd-sized
+/// reductions by the first long through the direct and the batch trade route and by the second
+/// long as owner.
+fn haircut_side_reduction_world() -> Result<(ScenarioRunner, HaircutSideReductionEvidence), String>
+{
+    const ASSET: usize = 0;
+    const REDUCER: usize = 0;
+    const PEER: usize = 1;
+    const LEAVING_SHORT: usize = 2;
+    const SHORT: usize = 3;
+    let scenario = Scenario {
+        seed: [0x49; 32],
+        config: SmallMarketConfig::default(),
+        actions: Vec::new(),
+    };
+    let mut runner = ScenarioRunner::new_unprefixed(&scenario)?;
+    let reducer_q = 3 * POS_SCALE as i128 + 7;
+    let peer_q = 2 * POS_SCALE as i128 + 3;
+    runner.execute_trade(
+        TradeRoute::NoCpi,
+        REDUCER,
+        LEAVING_SHORT,
+        vec![(ASSET, reducer_q)],
+        0,
+        0,
+        true,
+    )?;
+    runner.execute_trade(
+        TradeRoute::NoCpi,
+        PEER,
+        SHORT,
+        vec![(ASSET, peer_q)],
+        0,
+        0,
+        true,
+    )?;
+    runner.assert_global_invariants()?;
+    if !runner.try_rebalance_exit(LEAVING_SHORT, ASSET, -reducer_q)? {
+        return Err(format!(
+            "the leaving short kept a position; rejection={:?}",
+            runner.last_trade_rejection
+        ));
+    }
+    runner.coverage.rebalance_reductions += 1;
+    runner.assert_global_invariants()?;
+    let staged = runner.env.primary_market_state().1.assets[ASSET];
+    if staged.a_long >= ADL_ONE || staged.a_short != ADL_ONE || staged.stored_pos_count_long != 2 {
+        return Err(format!(
+            "the long side is not a haircut side shared by two legs: {staged:?}"
+        ));
+    }
+
+    let effective = |runner: &ScenarioRunner, actor: usize| -> Result<u128, String> {
+        let (_, group) = runner.env.primary_market_state();
+        ScenarioRunner::account_leg_for_asset(&runner.env.primary_portfolio(actor), ASSET)?
+            .map(|leg| ScenarioRunner::leg_effective_oi(&group, ASSET, leg, false))
+            .transpose()
+            .map(|quantity| quantity.unwrap_or(0))
+    };
+    let mut evidence = HaircutSideReductionEvidence::default();
+    let mut matched_fill = |runner: &mut ScenarioRunner,
+                            evidence: &mut HaircutSideReductionEvidence,
+                            route: TradeRoute,
+                            quantity: i128|
+     -> Result<(), String> {
+        let index_before = runner.env.primary_market_state().1.assets[ASSET].a_long;
+        let reducer_before = effective(runner, REDUCER)?;
+        let peer_before = effective(runner, PEER)?;
+        runner.execute_trade(route, REDUCER, SHORT, vec![(ASSET, -quantity)], 0, 0, true)?;
+        runner.assert_global_invariants()?;
+        let index_after = runner.env.primary_market_state().1.assets[ASSET].a_long;
+        let reducer_after = effective(runner, REDUCER)?;
+        let peer_after = effective(runner, PEER)?;
+        let fell = reducer_before
+            .checked_sub(reducer_after)
+            .ok_or("the reducing long grew")?;
+        if fell < quantity.unsigned_abs() || fell > quantity.unsigned_abs() + 2 {
+            return Err(format!(
+                "{route:?}: the reducing long fell by {fell} for a request of {quantity}"
+            ));
+        }
+        if peer_after < peer_before || peer_after > peer_before + 1 {
+            return Err(format!(
+                "{route:?}: the untouched long moved from {peer_before} to {peer_after}"
+            ));
+        }
+        if index_after < index_before {
+            return Err(format!(
+                "{route:?}: the long index fell from {index_before} to {index_after}"
+            ));
+        }
+        evidence.index_rises += u64::from(index_after > index_before);
+        evidence.peer_quantity_rises += u64::from(peer_after > peer_before);
+        evidence.reducer_below_request += u64::from(fell > quantity.unsigned_abs());
+        Ok(())
+    };
+    // The direct route and the batch route. The matcher routes reach the same engine
+    // transition and are covered on haircut sides by the INV-051 partition tests.
+    for step in 0..8 {
+        let route = if step % 2 == 0 {
+            TradeRoute::NoCpi
+        } else {
+            TradeRoute::BatchNoCpi
+        };
+        matched_fill(
+            &mut runner,
+            &mut evidence,
+            route,
+            100_003 + 20 * step as i128,
+        )?;
+    }
+    // The second long reduces as owner by an odd quantity. Its own leg is re-based by the side
+    // rule, and the short side is haircut by the same quantity.
+    let peer_size = runner.positions[PEER][ASSET];
+    if runner.try_rebalance_reduce(PEER, ASSET, peer_size, 77_777)? {
+        return Err("the owner reduction closed the second long".into());
+    }
+    runner.coverage.rebalance_reductions += 1;
+    runner.assert_global_invariants()?;
+    // Both sides are haircut now. The remaining short is alone on its side.
+    for route in [TradeRoute::NoCpi, TradeRoute::BatchNoCpi] {
+        matched_fill(&mut runner, &mut evidence, route, 55_555)?;
+    }
+    evidence.reductions = runner.coverage.haircut_side_reductions;
+    evidence.rounded_reductions = runner.coverage.haircut_side_rounded_reductions;
+    Ok((runner, evidence))
+}
+
+/// Issue #449, directed: two longs share a side that a departing short has haircut. One of them
+/// reduces in odd quantities, by matched trade through the direct and the batch route and then
+/// with both sides haircut, the other reduces once as owner. Every step runs through the shared
+/// oracles, so the
+/// model's `SideBook` has to reproduce the raw basis the deployed program keeps, the side
+/// counters and raw-basis sums stay exact, and the census holds the rounding residue in range.
+/// Both exit campaigns then complete from that state.
+pub fn reproduce_haircut_side_reductions_follow_the_side_rule(
+) -> Result<(HaircutSideReductionEvidence, Coverage), String> {
+    let (mut progress_runner, evidence) = haircut_side_reduction_world()?;
+    let (mut exit_runner, exit_evidence) = haircut_side_reduction_world()?;
+    if evidence != exit_evidence {
+        return Err(format!(
+            "the directed world is not deterministic: {evidence:?} against {exit_evidence:?}"
+        ));
+    }
+    progress_runner
+        .run_permissionless_progress_campaign()
+        .map_err(|error| format!("permissionless progress from the haircut book: {error}"))?;
+    exit_runner
+        .run_direct_user_exit_campaign()
+        .map_err(|error| format!("owner exits from the haircut book: {error}"))?;
+    let mut coverage = progress_runner.coverage;
+    coverage.merge(exit_runner.coverage);
+    Ok((evidence, coverage))
+}
+
+/// Issue #449, directed: a liquidation on a haircut side that two legs share. The size of a
+/// liquidation is the engine's choice, so the model reads it off the side counter and then
+/// requires the raw basis the liquidated leg keeps to be the one its `SideBook` derives for that
+/// size, and the opposite side to lose exactly the same quantity.
+///
+/// Two shorts (the first large, the second small) face two longs. The small short's counterparty
+/// leaves unilaterally, which haircuts the short side while both shorts stay. The mark then
+/// doubles and public cranks liquidate the large short. Returns the model's coverage, with
+/// `liquidation_steps` and `haircut_side_reductions` counting what was observed.
+pub fn reproduce_liquidation_on_a_shared_haircut_side() -> Result<Coverage, String> {
+    const ASSET: usize = 0;
+    const LIQUIDATED: usize = 0;
+    const PEER: usize = 1;
+    const LEAVING_LONG: usize = 2;
+    let scenario = Scenario {
+        seed: [0x4a; 32],
+        config: SmallMarketConfig {
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 0,
+            maintenance_fee_per_slot: 0,
+        },
+        actions: vec![],
+    };
+    let mut runner = ScenarioRunner::new_unprefixed(&scenario)?;
+    let large_q = 80 * POS_SCALE as i128;
+    let small_q = 7 * POS_SCALE as i128 + 3;
+    runner.execute_trade(
+        TradeRoute::NoCpi,
+        LIQUIDATED,
+        EXIT_MAKER_INDEX,
+        vec![(ASSET, -large_q)],
+        0,
+        0,
+        true,
+    )?;
+    runner.execute_trade(
+        TradeRoute::NoCpi,
+        PEER,
+        LEAVING_LONG,
+        vec![(ASSET, -small_q)],
+        0,
+        0,
+        true,
+    )?;
+    runner.assert_global_invariants()?;
+    if !runner.try_rebalance_exit(LEAVING_LONG, ASSET, small_q)? {
+        return Err(format!(
+            "the leaving long kept a position; rejection={:?}",
+            runner.last_trade_rejection
+        ));
+    }
+    runner.coverage.rebalance_reductions += 1;
+    runner.assert_global_invariants()?;
+    let staged = runner.env.primary_market_state().1.assets[ASSET];
+    if staged.a_short >= ADL_ONE || staged.a_long != ADL_ONE || staged.stored_pos_count_short != 2 {
+        return Err(format!(
+            "the short side is not a haircut side shared by two legs: {staged:?}"
+        ));
+    }
+
+    let mark_slot = runner.env.current_slot() + 1;
+    runner.env.warp_to_slot(mark_slot);
+    let adverse_mark = super::v16_svm::INITIAL_PRICE
+        .checked_mul(2)
+        .ok_or("liquidation mark overflow")?;
+    let before_mark = runner.snapshot();
+    let mark = runner
+        .env
+        .push_auth_mark(ASSET as u16, mark_slot, adverse_mark)
+        .map_err(|error| format!("adverse mark rejected: {error}"))?;
+    runner.coverage.mark_updates += 1;
+    runner.coverage.observe_success(None, &mark);
+    runner.assert_no_token_side_effects(&before_mark)?;
+    let reductions_before = runner.coverage.haircut_side_reductions;
+    runner.drain_actor(LIQUIDATED, runner.liveness_limit)?;
+    runner.assert_global_invariants()?;
+    if runner.coverage.liquidation_steps == 0 {
+        return Err("the adverse mark reached no public liquidation step".into());
+    }
+    if runner.coverage.haircut_side_reductions == reductions_before {
+        return Err(format!(
+            "no liquidation left the leg open on the haircut side: {} liquidation steps, \
+             remaining raw position {}",
+            runner.coverage.liquidation_steps, runner.positions[LIQUIDATED][ASSET]
+        ));
+    }
+    runner
+        .run_permissionless_progress_campaign()
+        .map_err(|error| format!("permissionless progress after the liquidation: {error}"))?;
+    Ok(runner.coverage)
 }
 
 /// Run the first `actions` actions of `scenario` through every shared oracle and report each

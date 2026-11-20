@@ -867,18 +867,34 @@ obligation class. In normal live state, effective long and short OI match.
 
 The two OI equations hold exactly on a side whose A index is `ADL_ONE`. On a haircut side each
 leg's effective quantity is rounded up on its own (INV-051), so the legs do not sum to the side
-counter exactly. The difference is typed as **ADL rounding residue** and is bounded: its magnitude
-is less than the number of legs that carry quantity on that side, plus the number of reductions,
-closes and haircuts applied to that side since its A index left `ADL_ONE`. In exact terms a haircut
-never lifts a side's exposure above its counter and, through the floor of the A index, lowers it by
-less than a tenth of a raw unit; each reduction or close moves the two apart by less than one raw
-unit. A side reset returns the A index to `ADL_ONE` and the residue to zero.
+counter exactly. The difference is typed as **ADL rounding residue**, and its range does not depend
+on history: it is at least zero and less than the number of legs that carry quantity on that side
+(equal to that number only on an exhausted side, below).
 
-Known limit (wrapper issue #449): that bound grows with the number of reductions. A party that
-holds legs on a haircut side can therefore build up exposure the counters do not carry, less than
-one raw unit per reduction, until the side resets. A bound that does not depend on history needs
-the engine to keep each side's sum of raw basis and derive the A index from it; the engine does not
-do that today.
+That range rests on the engine's side rule (wrapper issue #449). The engine keeps, per side, the
+sum of its legs' raw basis next to the side counter and derives the side's A index from the two
+after every position change and every haircut: `ADL_ONE` when they agree, otherwise
+`floor(ADL_ONE * OI_eff / raw_sum)`, and at least 1. Every current-epoch leg is based at `ADL_ONE`,
+because positions open and grow only while both sides are at unit A. A side's exact exposure
+`raw_sum * A / ADL_ONE` therefore never exceeds its counter and is short of it by less than
+`raw_sum / ADL_ONE`, under a tenth of a raw unit, in every state.
+
+- A same-side reduction on a haircut side takes exactly the requested quantity out of the counter
+  and is rounded against the reducing leg. The leg keeps the largest raw basis for which its share
+  of the side fell by at least the request and is no more than its new quantity. Its own effective
+  quantity can end one unit below the request (two in rare cases), and no other leg's share
+  falls, except by less than one raw unit when the reducing leg is held at its last raw unit.
+- The side's index can rise through such a reduction, and another leg's effective quantity with
+  it, by one unit and without any action of its owner. A rise while other legs share the side
+  advances the risk epoch, so no health certificate issued before it is current (INV-054). The
+  certificate of the account that reduced is built from the quantity its leg holds afterwards
+  (INV-053). A falling index needs no new epoch: earlier certificates only got more conservative.
+- A leg that leaves takes its whole effective quantity, which is never more than the counter while
+  the counter is nonzero. A side's only leg carries exactly the counter.
+- A side whose counter reaches zero while legs remain is exhausted: its index is 1, its legs own
+  nothing, and the residue equals the number of those legs until the side resets.
+- A side whose counter meets its raw-basis sum again is back at unit A without a reset. A side
+  reset returns the A index to `ADL_ONE` and the residue to zero.
 
 Every difference between raw user basis and effective OI must be uniquely typed as an ADL haircut,
 ADL rounding residue, pending-loss obligation, B obligation, close residual, or Recovery obligation
@@ -889,10 +905,12 @@ exposure and as a protocol residual.
 **Required tests.** Recompute the logical aggregate from all portfolios in the bounded test universe
 after trade, liquidation, rebalance, reset, resolved close, and recovery, and compare it with the
 maintained O(1) counters: each side's legs against that side's own counter, exactly on an unhaircut
-side and inside the rounding-residue bound on a haircut side. Independently classify every non-user
+side and inside the rounding-residue range on a haircut side; each side's raw-basis sum and derived
+A index, exactly. Replay every same-side reduction on a haircut side through an independent copy of
+the side rule and compare the raw basis the leg keeps. Independently classify every non-user
 balancing delta into one disjoint protocol-obligation kind and prove each kind has a public writer,
-a bounded progress route, and an exact terminal sink. Pin the per-reduction growth of the rounding
-residue on the deployed program.
+a bounded progress route, and an exact terminal sink. Pin the exposure and residue ranges on the
+deployed program under packed same-side reductions.
 **Verification:** P, F, M
 
 ### INV-049 - Canonical single net leg per asset generation
@@ -922,10 +940,12 @@ OI, through all trade routes.
 
 **Statement.** Transfer, resize, rebalance, liquidation, clear, resolved close, recovery, and
 retirement all use one canonical effective-quantity function derived from raw basis, `a_basis`, side
-epoch, and conservative rounding. No route subtracts raw quantity from an effective-OI counter.
+epoch, and conservative rounding. No route subtracts raw quantity from an effective-OI counter. A
+same-side reduction asks for an effective quantity; on a haircut side the raw basis the leg keeps
+is the one the side rule of INV-048 derives, on every route.
 
 **Required tests.** Compare every route against the same pure reference function after partial ADL
-and side reset.
+and side reset, including the raw basis kept by a reduction on a haircut side.
 **Verification:** P, F, M
 
 ### INV-052 - Split/merge invariance
