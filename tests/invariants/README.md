@@ -31710,6 +31710,59 @@ skips the gap charges longs at every replayed step from the mark of its last pub
 requires equal liquidations (30,090,311 against 30,093,516 units closed). It is an open design
 question, not a test defect.
 
+### INV-081 the market header is checked before every crank and RebalanceReduce commits (2026-11-20)
+
+Program source change, engine pin unchanged (`c030aa4055b28d7380092388cb4445d5405afb52`).
+
+**What was open.** The engine validates the market header (`validate_shape`) at the end of most
+public transitions. Its refresh, B-chunk, pending-close and rebalance transitions do it only in
+audit builds. The program repeated the check after a `PermissionlessCrank` only when the position
+vector had changed, and not at all after `RebalanceReduce` (the helper's flag switched the header
+check off together with the portfolio audit, which a maximum-shape exit cannot afford). A crank
+that refreshed an account, or a RebalanceReduce, therefore committed a header nothing had checked.
+No state is known in which the engine leaves a header that fails a check: an engine copy that
+validates after every such transition and stops on a failure went through the engine suites, 2.3
+million random public-action sequences, and this program's stateful, regression and compute
+suites without stopping. But had there been one, every later instruction that validates would
+have failed.
+
+**What changed** (`src/v16_program.rs`, three places):
+
+- The crank handler validates the header before it commits, whether or not a position changed.
+- `with_one_portfolio_view` validates the header for every caller. Its `wrapper_post_validate`
+  flag now gates only the portfolio audit. RebalanceReduce passes `false` as before and so gets
+  the header check without the audit.
+- The crank handler commits after the engine returned `NonProgress` (it does so when it accrued
+  the market in the same instruction) only if the engine moved no fee into insurance and no
+  position. The engine's crank is not atomic: it returns `NonProgress` after a completed refresh
+  when a liquidation finds nothing to do, and that state is kept as before. No path is known on
+  which it returns `NonProgress` after taking a fee or moving a position; if one existed, the
+  program would have committed a liquidation step the engine had rejected, and credited its fee
+  to a domain budget as an ordinary retained fee.
+
+**Test.** `v16_program_crank_and_rebalance_reduce_cannot_commit_a_header_that_fails_a_shape_check`
+(`tests/invariants/cu/inv_081_commit_time_header_check.rs`). It raises one header total that only
+the shape check reads by one unit in the market account (a harness input; nothing in the engine
+does this) and requires a crank and a RebalanceReduce to fail with `EngineInvalidConfig` and roll
+back exactly; on the market as public instructions left it both succeed and the crank leaves the
+position vector alone. Control: on the previous program (SHA-256
+`2eb621045ed6a09081198d3a6ef5df7e952b202eea54596e93419030a815a867`) the test fails at its first
+step, because the crank commits the fixture. The guard on the commit after `NonProgress` has no
+test of its own: no public history reaches the state it refuses.
+
+**Cost** (program SHA-256 `235fa77d8efe2e799b9d353fc7ee325f8997712490f0240081e1d29becc3ba76`): about 1,295 CU on
+every crank and every RebalanceReduce.
+
+- Refresh crank of a flat account: 45,816 to 47,111 CU.
+- The 14-leg, three-feed oracle refresh: 952,002 to 953,297 CU (guardrail 975,000).
+- RebalanceReduce on the highest asset of a 10 MiB market: 111,482 to 112,779 CU.
+- `v16_program_max_shape_short_b_budget_has_exact_public_progress`: exact pin 554,984 to 556,277.
+- The packed harvest of the #449 guard test: nine operations with five rebalances 1,242,463 to
+  1,248,948 CU; eight trades unchanged at 1,372,416 (a trade ends in the engine's own check);
+  twelve rebalances 1,347,694 to 1,363,258. The operation counts per transaction are unchanged.
+- The 14-leg atomic refresh-and-exit transaction of INV-073 contains two cranks and still fits
+  the 1,400,000 limit.
+
 ### INV-048/051 each side's A index is derived from its raw-basis sum (#449 fixed in the engine, 2026-11-20)
 
 Engine pin `c030aa4055b28d7380092388cb4445d5405afb52` (aeyakovenko/percolator#270). The program
@@ -31743,7 +31796,8 @@ unit in every state. `INVARIANTS.md` states the rule under INV-048 and INV-051; 
   asset-heavy paths. The 14-leg, three-feed oracle refresh goes from 949,752 to 952,002 CU. Its
   guardrail was 950,000, 248 CU above the previous pin's own measurement, and is now 975,000; the
   transaction limit is 1,400,000. The pinned peak of the maximum-shape short-side B budget goes
-  from 554,814 to 554,984 CU.
+  from 554,814 to 554,984 CU. (Both figures moved again with the commit-time header check; see the
+section above, dated the same day.)
 
 **The reference model** (`tests/support/fuzz_model.rs`) carries its own copy of the side rule,
 `SideBook`, restated from the engine spec:

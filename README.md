@@ -445,6 +445,7 @@ This section describes intent and operational ordering, not argument-by-argument
   - carries no liquidation size or fee input; the engine derives both from certified account state and market config
   - candidate accounts are untrusted hints, not a liveness precondition; honest keepers should include the worst known stale/bankrupt/liquidatable accounts, but the engine also makes cursored progress
   - may perform bounded catchup/recovery, liquidation, touch-only settlement, round-robin lifecycle progress, and empty-account reclaim
+  - the market header is validated before every crank commits, also when no position changed; if the engine reports no progress after the wrapper accrued the market, the accrual is committed only when the engine moved no fee and no position
   - liquidation rewards are optional: when `liquidation_cranker_fee_share_bps > 0`, a keeper may append its writable Percolator portfolio account as the final account in the instruction. Oracle accounts remain immediately after the target portfolio account; the reward portfolio, if present, is last. If no reward portfolio is supplied, the full retained liquidation penalty stays in insurance.
 - **SyncMaintenanceFee** (tag 48)
   - permissionless per-portfolio maintenance-fee realization for the supplied portfolio account
@@ -524,6 +525,8 @@ This section describes intent and operational ordering, not argument-by-argument
     against the wrapper-authenticated effective price vector
   - `position_epoch` advances after every successful trade, liquidation, recovery force-close,
     rebalance, or recovery forfeit; refresh-only cranks and rejected instructions do not advance it
+  - the market header is validated before the instruction commits (the portfolio audit is not
+    repeated here; a maximum-shape exit cannot afford it)
 - **ClaimResolvedPayoutTopup** (tag 46)
   - permissionless resolved-payout top-up claim; pays only the stored owner receipt token account
   - unsigned, it pays the primary mint; the owner's signature selects the secondary mint

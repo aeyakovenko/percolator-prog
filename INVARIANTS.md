@@ -1323,6 +1323,14 @@ Ok(S, instruction) = S'
 
 The proof covers the wrapper plus engine composition, not only leaf kernels.
 
+**Runtime backstop for the market header.** The engine validates the market header at the end of
+most public transitions. Its refresh, B-chunk, pending-close and rebalance transitions do so only
+in audit builds, so the program validates the header itself before a `PermissionlessCrank` or a
+`RebalanceReduce` commits, whether or not a position changed. A header that fails a check
+therefore aborts the instruction that produced it instead of being committed. When the engine's
+crank returns `NonProgress` after the program accrued the market in the same instruction, the
+program commits only if the engine moved no fee into insurance and no position.
+
 **Required tests.** Assert the full invariant suite after every successful fuzz step and prove
 high-risk composite routes directly or through a proven-equivalent pure transition.
 **Verification:** P, F, I

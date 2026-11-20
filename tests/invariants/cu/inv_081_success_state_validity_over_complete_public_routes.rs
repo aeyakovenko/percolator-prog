@@ -37,6 +37,9 @@ use crate::support::fuzz_model::{
 #[path = "inv_081_fee_resolution_atomicity.rs"]
 mod fee_resolution_atomicity;
 
+#[path = "inv_081_commit_time_header_check.rs"]
+mod commit_time_header_check;
+
 #[derive(Clone, Copy)]
 struct Inv081CompositionOwner {
     layer: &'static str,

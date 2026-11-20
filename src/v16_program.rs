@@ -14489,7 +14489,17 @@ pub mod processor {
                     }
                 }
                 Ok(result) => Some(result),
-                Err(V16Error::NonProgress) if market_accrual_performed => None,
+                Err(V16Error::NonProgress) if market_accrual_performed => {
+                    // The engine's crank is not atomic: it can return NonProgress after a completed
+                    // refresh (a liquidation that found nothing to do). That state is kept. A state
+                    // in which the engine took a fee or moved a position before giving up is not.
+                    if group.header.insurance.get() != insurance_before
+                        || positions_before != portfolio_position_vector_view(&portfolio)
+                    {
+                        return Err(PercolatorError::EngineNonProgress.into());
+                    }
+                    None
+                }
                 Err(V16Error::NonProgress) => {
                     return Err(PercolatorError::EngineNonProgress.into());
                 }
@@ -14600,8 +14610,12 @@ pub mod processor {
                 selected_fee_asset,
                 retained_for_domains,
             )?;
+            // The engine's refresh, B-chunk and pending-close steps validate the market shape only
+            // in audit builds, so a crank that leaves the position vector alone would otherwise
+            // commit a header that nothing has checked. A header that fails here aborts this
+            // instruction instead of every later one.
+            group.validate_shape().map_err(map_v16_error)?;
             if position_changed {
-                group.validate_shape().map_err(map_v16_error)?;
                 drop(portfolio);
                 state::bump_portfolio_position_epoch(&mut portfolio_data)?;
             }
@@ -15200,8 +15214,11 @@ pub mod processor {
             expect_portfolio_view_owner(&portfolio, owner.key)?;
         }
         f(&mut group, &mut portfolio, &cfg).map_err(map_v16_error)?;
+        // The market header checks are a fixed number of comparisons and run for every caller.
+        // `wrapper_post_validate` gates only the portfolio audit, which is what a max-shape exit
+        // cannot afford.
+        group.validate_shape().map_err(map_v16_error)?;
         if wrapper_post_validate {
-            group.validate_shape().map_err(map_v16_error)?;
             portfolio
                 .validate_with_market(&group.as_view())
                 .map_err(map_v16_error)?;
