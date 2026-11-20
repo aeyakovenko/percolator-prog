@@ -31725,6 +31725,71 @@ guardrail 975,000). With reports finer than six decimals on all 42 legs it would
 more. The exact pin of `v16_program_max_shape_short_b_budget_has_exact_public_progress` is
 unchanged at 556,277.
 
+### INV-031 a provider loss is recorded once: the provider-protection floor (#382, 2026-11-20)
+
+**Pin.** Engine `dca48d20` (aeyakovenko/percolator#271). Program SHA-256
+`abc3786189a5d9fb5eb948038ef36c11e9c8172d593aaaa19dfed2aa4d017f41`.
+
+**The defect class.** A backing provider's protection is the principal that neither a claim on its
+domain nor an unrepaid consumption has taken: `min(principal, fresh backing - exact claims)`. A
+winner cranked before its loser has its gain fronted by the provider, so protection falls; the
+loser's crank refills it; the next winner's claim spends the refill. No counter moves while a loss
+is only a claim on the backing (`spent_backing_num`, `provider_receivable_num` and the ledger's
+`cumulative_loss_atoms` and `cumulative_recovery_atoms` stay at zero through the whole history
+below), and after the refill the market's current state shows nothing. A program that keeps
+depositor shares over one provider position reads the market only when one of its users acts, so
+the same history charged the loss once or twice depending on when somebody read.
+
+**The engine change.** For every source domain and every generation of its asset the engine keeps
+the lowest protection the domain has had, moved only by the provider's own top-ups and principal
+withdrawals. It is brought up to date once per mutable view of the market, from the state the
+earlier views left, so a gain settled in the same instruction as the loss that pays it is not a
+low; a reader takes the lower of the stored value and the current protection. Accounting only.
+Which domains a view has done is kept in the view and not in the market: two histories that differ
+only in how the same settlements are split over instructions leave the same market bytes unless a
+provider's protection was lower between two of them (the equivalent-route tests of INV-047 compare
+those bytes, and a first design with a stored counter failed one of them).
+The same engine pin also lets `CanonicalizeSpentBackingHistory` succeed when the asset's other
+domain holds a backing bucket that lapsed unused; before, that asset could be neither cleared,
+retired nor restarted until its backing authority topped up one atom there and withdrew it.
+
+**The program.** `state::read_provider_protection(market_data, domain)` returns the generation, the
+provider principal, the current protection and the floor. No instruction changes, none takes an
+extra account, and none is gated on the floor.
+
+**Layout.** The per-asset slot grows from 1,877 to 1,909 bytes (two floors of 16 bytes); the market
+header is unchanged. A 10 MiB market holds 5,492 assets instead of 5,585; `MAX_10M_MARKET_SLOTS`,
+the maximum-size market tests (INV-077, INV-085) and the README follow.
+
+**Stack.** The engine's mutable market view is 128 bytes larger: it remembers, for the 64 assets
+the source rosters of two portfolios can name, which floors it has brought up to date. A view
+lives in the stack frame of the handler that opens it, and with the larger view the frame of
+`handle_permissionless_crank_zero_copy`, the fullest in the program, would exceed its 4,096 bytes
+by 8. Its view is now built on the heap by `state::market_view_mut_boxed_with_fee_carry` (one
+allocation of 152 bytes per crank); every other handler keeps its view on the stack. The program
+builds with no stack diagnostic.
+
+**Tests.**
+
+| Test | What it requires |
+|---|---|
+| `v16_program_provider_protection_floor_records_a_refilled_loss_once` (`cu/inv_031_provider_protection_floor.rs`) | provider principal 16; a winner cranked first, 16 -> 14; one loser cranked, 14 -> 15; a second winner, 15 -> 14; the other losers, 16 again. The floor reads 14 from the first step on. The same history with `SyncBackingDomainLedger` at the low, after the refill, after every step or never gives the same floors, and the ledger records no loss and no recovery in any of them |
+| `v16_program_provider_protection_floor_moves_with_the_providers_own_flows` | with a loss of 2 on record: a top-up of 10 raises principal and floor by 10; a withdrawal of 5 lowers both by 5; principal less floor is 2 throughout; the provider leaves with its whole principal and the floor ends at zero |
+| `v16_program_provider_protection_floor_ignores_a_gain_settled_with_its_loss` | a closing trade settles a winner and its loser in one instruction: the floor is unchanged. The same kind of gain cranked on its own before its losers is recorded |
+| `v16_program_reused_asset_keeps_expired_residue_out_of_new_provider_principal` (`cu/inv_069_...`, three assertions added) | the floor is the old provider's 307 before its backing lapses, zero after the slot is retired, and exactly the new provider's 401 in the new generation |
+| every history of the stateful targets (`V16Svm::land_retained`) | after every successful transaction, for every backing domain of the markets it names: the floor is the floor before, plus what the provider topped up, less what it withdrew, capped by the protection the transaction left; `floor <= protection <= principal`. With several program instructions in one transaction the floor may only be lower than that |
+| `v16_program_provider_floor_check_sees_a_recorded_low_and_its_refill` (`stateful/inv_031_...`) | the check above is not vacuous: a scripted history makes it see one floor fall and a refill above the recorded low |
+
+**Compute.** The exact pin of `v16_program_max_shape_short_b_budget_has_exact_public_progress`
+moves from 556,277 to 556,384, and the 14-asset, three-feed refresh from 955,887 to 956,747 CU
+(guardrail 975,000).
+
+**Pin guards.** The composition tests that are bound to the exact engine revision carry the new
+one (35 places in 27 files). The engine change between the two pins adds the floor and its view
+memory, lets a spent-backing history be cleared beside a lapsed unused bucket, and changes no
+other transition: against the previous pin, 3,000 solvent wind-downs, 8,000 drained insolvent
+histories and 2,400,000 call results of random Live histories are identical (engine PR).
+
 ### INV-073 the keeper hand-off guardrail no longer depends on the keys a run draws (2026-11-20)
 
 Tests only. `v16_program_absent_provider_keeper_handoff_needs_no_prior_ledger_or_sync_signature`

@@ -350,6 +350,22 @@ fn v16_program_reused_asset_keeps_expired_residue_out_of_new_provider_principal(
         }
     };
     stock(&env, OLD, false, false);
+    // Provider protection and its floor (INV-031, #382): `(generation, principal,
+    // protection, floor)` of the domain, in atoms.
+    let provider_protection = |env: &V16CuEnv| {
+        let market = env.svm.get_account(&env.market).unwrap();
+        let read = state::read_provider_protection(&market.data, DOMAIN).unwrap();
+        (
+            read.market_id,
+            read.principal_num / BOUND_SCALE,
+            read.protection_num / BOUND_SCALE,
+            read.floor_num / BOUND_SCALE,
+        )
+    };
+    assert_eq!(
+        provider_protection(&env),
+        (old_id, OLD.into(), OLD.into(), OLD.into())
+    );
     env.svm.warp_to_slot(EXPIRY);
     assert_eq!(env.svm.get_account(&env.market), Some(market_before));
     check_cu(env.update_asset_lifecycle_as_admin_with_cu(
@@ -379,6 +395,8 @@ fn v16_program_reused_asset_keeps_expired_residue_out_of_new_provider_principal(
         }
     };
     assert_retired(&env, old_id);
+    // The lapsed principal was forfeited: nothing is protected and the floor is gone.
+    assert_eq!(provider_protection(&env), (old_id, 0, 0, 0));
     check_cu(env.activate_asset_with_authorities(
         1,
         EXPIRY + 1,
@@ -423,6 +441,12 @@ fn v16_program_reused_asset_keeps_expired_residue_out_of_new_provider_principal(
     assert_eq!(
         env.market_state().1.source_backing_buckets[DOMAIN].market_id,
         new_id
+    );
+    // A new generation starts its floor again: the new provider's funding is
+    // protected in full, and nothing of the old generation's 307 is in it.
+    assert_eq!(
+        provider_protection(&env),
+        (new_id, NEW.into(), NEW.into(), NEW.into())
     );
 
     let withdrawal = |amount| Instruction {
@@ -484,6 +508,9 @@ fn v16_program_reused_asset_keeps_expired_residue_out_of_new_provider_principal(
     stock(&env, NEW, true, false);
     check_cu(send_raw_tx(&mut env.svm, &env.payer, payable, &[&provider]).unwrap());
     stock(&env, 0, true, true);
+    // The provider took its whole funding out: the floor went with it, as a
+    // withdrawal and not as a loss.
+    assert_eq!(provider_protection(&env), (new_id, 0, 0, 0));
     check_cu(env.update_asset_lifecycle_as_admin_with_cu(
         processor::ASSET_ACTION_RETIRE,
         1,
@@ -1143,7 +1170,7 @@ struct Inv069TerminalBlockerClass {
 
 #[test]
 fn v16_program_terminal_blocker_census_composes_engine_retirement_before_wrapper_cleanup() {
-    const ENGINE_PIN: &str = "c030aa4055b28d7380092388cb4445d5405afb52";
+    const ENGINE_PIN: &str = "dca48d20ef3bc653c11c723e483924ee8ab05549";
     const CLASSES: &[Inv069TerminalBlockerClass] = &[
         Inv069TerminalBlockerClass {
             class: "live OI, stored legs, stale cohorts, side modes, and prior epochs",

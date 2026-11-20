@@ -587,6 +587,35 @@ pub struct V16Svm {
     token_accounts: Vec<Pubkey>,
     tx_sequence: u64,
     public_trace: Option<PublicTraceCapture>,
+    /// What the provider-protection floor check after every transaction has seen.
+    pub provider_floor_stats: ProviderFloorStats,
+}
+
+/// Counts of the provider-protection floor check that `land_retained` makes after every
+/// successful transaction (percolator-prog#382).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProviderFloorStats {
+    /// Domains compared across a transaction, with their asset in the same generation.
+    pub domains_checked: u64,
+    /// Of those, domains that had provider principal after the transaction.
+    pub with_principal: u64,
+    /// Transactions that left a floor below the provider's principal.
+    pub below_principal: u64,
+    /// Transactions that lowered a floor beyond what the provider withdrew.
+    pub lowered: u64,
+    /// Transactions that left protection above a floor that is below principal: a refill.
+    pub refilled: u64,
+    /// Domains whose asset changed generation in the transaction.
+    pub generation_changes: u64,
+}
+
+/// One market's backing domains before a transaction, and what the provider itself does in it.
+struct ProviderFloorExpectation {
+    market: Pubkey,
+    before: Vec<state::ProviderProtectionV16>,
+    /// `(domain, amount_num, top_up)` in instruction order.
+    flows: Vec<(usize, u128, bool)>,
+    program_instructions: usize,
 }
 
 impl V16Svm {
@@ -806,6 +835,7 @@ impl V16Svm {
             token_accounts,
             tx_sequence: 0,
             public_trace: None,
+            provider_floor_stats: ProviderFloorStats::default(),
         };
         out.initialize_world(config);
         out
@@ -5193,9 +5223,151 @@ impl V16Svm {
         }
     }
 
+    /// Every backing domain of the markets a transaction names, read before it lands, with the
+    /// provider top-ups and principal withdrawals the transaction itself carries.
+    fn provider_floor_expectations(&self, tx: &Transaction) -> Vec<ProviderFloorExpectation> {
+        let message = &tx.message;
+        let mut expectations = Vec::new();
+        for market in [self.market, self.foreign_market] {
+            if !message.account_keys.contains(&market) {
+                continue;
+            }
+            let Some(account) = self.svm.get_account(&market) else {
+                continue;
+            };
+            let Ok((_, _, assets, _)) = state::read_market_config_mode_and_capacity(&account.data)
+            else {
+                continue;
+            };
+            let before = (0..assets * 2)
+                .map(|domain| {
+                    state::read_provider_protection(&account.data, domain)
+                        .expect("a market's backing domains read")
+                })
+                .collect();
+            let mut flows = Vec::new();
+            let mut program_instructions = 0;
+            for compiled in &message.instructions {
+                if message.account_keys[compiled.program_id_index as usize] != self.program_id {
+                    continue;
+                }
+                program_instructions += 1;
+                // Both instructions take the market as their second account.
+                let on_this_market = compiled
+                    .accounts
+                    .get(1)
+                    .is_some_and(|index| message.account_keys[*index as usize] == market);
+                match ProgInstruction::decode(&compiled.data) {
+                    Ok(ProgInstruction::TopUpBackingBucket { domain, amount, .. })
+                        if on_this_market =>
+                    {
+                        flows.push((
+                            usize::from(domain),
+                            amount.saturating_mul(percolator::BOUND_SCALE),
+                            true,
+                        ));
+                    }
+                    Ok(ProgInstruction::WithdrawBackingBucket { domain, amount, .. })
+                        if on_this_market =>
+                    {
+                        flows.push((
+                            usize::from(domain),
+                            amount.saturating_mul(percolator::BOUND_SCALE),
+                            false,
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            expectations.push(ProviderFloorExpectation {
+                market,
+                before,
+                flows,
+                program_instructions,
+            });
+        }
+        expectations
+    }
+
+    /// The provider-protection floor after a successful transaction (percolator-prog#382): for
+    /// every backing domain it is the floor before, plus what the provider topped up, less what
+    /// it withdrew, and no higher than the protection the transaction left. Nothing else moves
+    /// it, whatever the transaction was and whichever accounts it named. A transaction of
+    /// several program instructions may also have recorded a low between two of them, so there
+    /// the floor may only be lower than that.
+    fn assert_provider_floors(&mut self, expectations: Vec<ProviderFloorExpectation>) {
+        for expectation in expectations {
+            let Some(account) = self.svm.get_account(&expectation.market) else {
+                continue;
+            };
+            if state::read_market_config_mode_and_capacity(&account.data).is_err() {
+                continue;
+            }
+            let mut below_principal = false;
+            let mut lowered = false;
+            let mut refilled = false;
+            for (domain, before) in expectation.before.iter().enumerate() {
+                let Ok(after) = state::read_provider_protection(&account.data, domain) else {
+                    continue;
+                };
+                assert!(
+                    after.floor_num <= after.protection_num
+                        && after.protection_num <= after.principal_num,
+                    "domain {domain}: floor <= protection <= principal: {after:?}"
+                );
+                if after.market_id != before.market_id {
+                    self.provider_floor_stats.generation_changes += 1;
+                    continue;
+                }
+                let mut shifted = before.floor_num;
+                for (flow_domain, amount_num, top_up) in &expectation.flows {
+                    if *flow_domain == domain {
+                        shifted = if *top_up {
+                            shifted.saturating_add(*amount_num)
+                        } else {
+                            shifted.saturating_sub(*amount_num)
+                        };
+                    }
+                }
+                let expected = shifted.min(after.protection_num);
+                if expectation.program_instructions == 1 {
+                    assert_eq!(
+                        after.floor_num, expected,
+                        "domain {domain}: the floor is the floor before ({}), shifted by the \
+                         provider's own flows ({shifted}), capped by the protection left ({}); \
+                         before {before:?}, after {after:?}",
+                        before.floor_num, after.protection_num
+                    );
+                } else {
+                    assert!(
+                        after.floor_num <= expected,
+                        "domain {domain}: floor {} above {expected}; before {before:?}, after \
+                         {after:?}",
+                        after.floor_num
+                    );
+                }
+                self.provider_floor_stats.domains_checked += 1;
+                if after.principal_num != 0 {
+                    self.provider_floor_stats.with_principal += 1;
+                }
+                below_principal |= after.floor_num < after.principal_num;
+                lowered |= after.floor_num < shifted;
+                refilled |= after.floor_num < after.principal_num
+                    && after.protection_num > after.floor_num;
+            }
+            self.provider_floor_stats.below_principal += u64::from(below_principal);
+            self.provider_floor_stats.lowered += u64::from(lowered);
+            self.provider_floor_stats.refilled += u64::from(refilled);
+        }
+    }
+
     pub fn land_retained(&mut self, tx: Transaction) -> Result<TxSuccess, String> {
         let pending_trace = self.prepare_public_trace_step(&tx);
+        let provider_floors = self.provider_floor_expectations(&tx);
         let result = self.svm.send_transaction(tx);
+        if result.is_ok() {
+            self.assert_provider_floors(provider_floors);
+        }
         let compute_units = result.as_ref().ok().map(|meta| meta.compute_units_consumed);
         self.complete_public_trace_step(pending_trace, compute_units);
         result

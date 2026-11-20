@@ -24,6 +24,9 @@ mod provider_exit_principal;
 #[path = "inv_031_live_exit_loss_stale_gate.rs"]
 mod live_exit_loss_stale_gate;
 
+#[path = "inv_031_provider_protection_floor.rs"]
+mod provider_protection_floor;
+
 fn inv031_source_defines_test(source: &str, function: &str) -> bool {
     let expected = format!("fn {function}");
     let mut test_attribute = false;

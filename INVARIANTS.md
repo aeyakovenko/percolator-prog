@@ -624,8 +624,25 @@ embedded state and every invalid persisted formula/ledger relation reject before
 instances, risk increases, payouts, or residual cures at once. Each atom has exactly one canonical
 lifecycle state.
 
+**A provider loss is recorded once (#382).** A backing provider's protection is the principal that
+neither a claim on its domain nor an unrepaid consumption has taken: `min(principal, fresh backing -
+exact claims)`, floored at zero. For every backing domain and every generation of its asset the
+market keeps the lowest protection the domain has had, moved only by the provider's own top-ups and
+principal withdrawals. A loss that the domain's losers later refill stays recorded. Spending that
+refill again down to the recorded low records nothing, so the same loss is never charged twice. A
+top-up raises the floor by the top-up, a principal withdrawal lowers it by the withdrawal and is not
+a loss, forfeited principal is a loss, and a restarted asset starts again from zero. The floor is
+taken between the engine's mutable views of the market, which include every instruction boundary: a
+gain settled in the same instruction as the loss that pays it is not a low. Every instruction that
+changes a domain's source credit or backing keeps the floor current, with no extra account, and
+`state::read_provider_protection` reads it. It is accounting only: no instruction is gated on it,
+it selects no recipient and no amount, and it moves no value.
+
 **Required tests.** Attempt duplicate lien creation, cross-domain reservation, retry after partial
-consumption, and concurrent route use.
+consumption, and concurrent route use. For the provider floor: lower protection through public
+source claims, refill it before anything reads it, and spend the refill; read before and after the
+refill; top up and withdraw; restart the asset; and check the floor after every public instruction
+of generated histories.
 **Verification:** P, F, I
 
 ### INV-032 - Exact counterparty-lien lifecycle

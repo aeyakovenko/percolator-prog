@@ -1769,6 +1769,25 @@ pub mod state {
         Ok((config, group, MaintenanceFeeSplitCarry(carry)))
     }
 
+    /// `market_view_mut_with_fee_carry` with the view on the heap. The permissionless crank is
+    /// the one handler whose stack frame has no room for the view (an SBF frame is 4,096
+    /// bytes): the view carries the engine's per-view memory of provider-protection floors,
+    /// two bytes for each of the 64 assets two portfolios can name.
+    #[inline(never)]
+    pub fn market_view_mut_boxed_with_fee_carry(
+        data: &mut [u8],
+    ) -> Result<
+        (
+            WrapperConfigV16,
+            alloc::boxed::Box<MarketViewMutV16<'_>>,
+            MaintenanceFeeSplitCarry<'_>,
+        ),
+        ProgramError,
+    > {
+        let (config, group, carry) = market_view_mut_with_fee_carry(data)?;
+        Ok((config, alloc::boxed::Box::new(group), carry))
+    }
+
     #[inline]
     pub fn market_account_len_for_capacity(capacity: usize) -> Result<usize, ProgramError> {
         let dynamic_len = MarketGroupV16HeaderAccount::dynamic_market_group_account_len::<
@@ -1971,6 +1990,63 @@ pub mod state {
             0
         };
         Ok((current_market_id, header.next_market_id.get()))
+    }
+
+    /// What the engine records about one backing domain's provider, read from the market
+    /// account's bytes. Amounts are `BOUND_SCALE`-scaled.
+    ///
+    /// `protection_num` is the provider principal that neither a claim on the domain nor an
+    /// unrepaid consumption has taken. `floor_num` is the lowest protection the domain has had
+    /// in this generation of its asset, moved only by the provider's own top-ups and principal
+    /// withdrawals: a loss that the domain's losers later refill stays recorded, and spending
+    /// that refill again down to the floor records nothing. A program that keeps depositor
+    /// shares over one provider position therefore charges every loss exactly once whenever it
+    /// reads: its books expect `floor + top-ups - withdrawals` since the last read, and what is
+    /// missing is the loss since then. `market_id` changes when the asset is restarted, which
+    /// starts the floor again from zero.
+    ///
+    /// Accounting only: no instruction is gated on these values, and no instruction needs an
+    /// extra account to keep them. Every instruction that changes a domain's source credit or
+    /// backing keeps them current.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ProviderProtectionV16 {
+        pub market_id: u64,
+        pub principal_num: u128,
+        pub protection_num: u128,
+        pub floor_num: u128,
+    }
+
+    pub fn read_provider_protection(
+        data: &[u8],
+        domain: usize,
+    ) -> Result<ProviderProtectionV16, ProgramError> {
+        check_header(data, KIND_MARKET)?;
+        validate_market_dynamic_len(data)?;
+        let asset_index = domain / 2;
+        if asset_index >= market_header(data)?.config.max_market_slots.get() as usize {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let slot = asset_slot_wire(data, asset_index)?;
+        let (side, principal_num) = if domain % 2 == 0 {
+            (
+                percolator::SideV16::Long,
+                slot.provider_principal_long_num.get(),
+            )
+        } else {
+            (
+                percolator::SideV16::Short,
+                slot.provider_principal_short_num.get(),
+            )
+        };
+        // The stored floor is brought up to date at the domain's next write. Until then the
+        // engine's reader returns the lower of it and the current protection.
+        let (protection_num, floor_num) = slot.provider_protection_and_floor_num(side);
+        Ok(ProviderProtectionV16 {
+            market_id: slot.asset.market_id.get(),
+            principal_num,
+            protection_num,
+            floor_num,
+        })
     }
 
     pub fn write_asset_oracle_profile(
@@ -14419,7 +14495,7 @@ pub mod processor {
         let cfg_after;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (mut cfg, mut group, mut fee_carry) = state::market_view_mut_with_fee_carry(&mut market_data)?;
+            let (mut cfg, mut group, mut fee_carry) = state::market_view_mut_boxed_with_fee_carry(&mut market_data)?;
             let summary = {
                 let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
                 let mut portfolio = state::portfolio_view_mut_for_market_slots(

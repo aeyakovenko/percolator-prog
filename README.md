@@ -38,12 +38,12 @@ The economic and governance model for a permissionless multi-asset market. Statu
 ### Market = one slab of N assets
 - A **market is one account ("slab") holding an array of N assets**: `engine header + [Asset<T>]`
   slice, resizable by the program. The engine operates **one market at a time**. **✅**
-- A **10 MiB slab fits 5,585 assets** with the current layout (per-asset slot is 1877 B; 5,586 would exceed Solana's 10 MiB account cap), and
+- A **10 MiB slab fits 5,492 assets** with the current layout (per-asset slot is 1909 B; 5,493 would exceed Solana's 10 MiB account cap), and
   per-trader CU stays bounded **independent of N** (a trader pays only for the assets they actually
   touch, not all N). **✅** — no 64-asset cap (`v16_attack_market_exceeds_64_assets_position_holds_any_14_legs`),
-  and a real BPF trade on asset **index 5584 of a 5,585-asset / near-10 MiB market is under the tx CU limit** — flat
+  and a real BPF trade on asset **index 5491 of a 5,492-asset / near-10 MiB market is under the tx CU limit** — flat
   vs. small-N, proving O(1)-in-N (`v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu`). The same
-  regression also exercises high public domain indices above 11,000, proving backing/insurance management
+  regression also exercises high public domain indices above 10,900, proving backing/insurance management
   is not capped at one-byte domain ids. The portfolio's
   source-domains are a **fixed sparse array** in the pinned engine, so the position account and
   per-instruction CU are O(1) in N — bounded only by the per-position asset cap. A current 14-leg
@@ -129,6 +129,25 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   unavailable-principal delta, so the trader-side cap is the actual crystallized residual loss that
   backing absorbed; it is not notional, mark-to-market paper PnL, or caller-supplied data. **✅**
   (`v16_bpf_accounting_ledger_tags_are_bounded_and_update_state`.)
+- **A provider's protection floor is kept in the market, per domain.** The ledger counters above move
+  when backing is consumed or impaired. A provider is also exposed while a gain is only a claim on its
+  domain: a winner cranked before its loser has its gain fronted by the provider until the loser is
+  cranked. That lowers the provider's protection (the principal that neither a claim nor an unrepaid
+  consumption has taken), the loser's payment refills it, and a later claim spends the refill, with no
+  counter moving and nothing left in the current state to show for it. The engine therefore keeps, for
+  every backing domain and every generation of its asset, the lowest protection the domain has had,
+  moved only by the provider's own top-ups and principal withdrawals: a refilled loss stays recorded,
+  spending the refill down to that low records nothing, a top-up is protected in full, a principal
+  withdrawal is not a loss, forfeited principal is, and a restarted asset starts again from zero.
+  `state::read_provider_protection(market_data, domain)` returns the generation, the principal, the
+  current protection and the floor. Every instruction that changes a domain's source credit or backing
+  keeps it current and none takes an extra account for it. It is accounting only: no instruction is
+  gated on it and it moves no value. A program that keeps depositor shares over one provider position
+  charges every loss exactly once, whenever it reads (#382). **✅**
+  (`v16_program_provider_protection_floor_records_a_refilled_loss_once`,
+  `v16_program_provider_protection_floor_moves_with_the_providers_own_flows`,
+  `v16_program_provider_protection_floor_ignores_a_gain_settled_with_its_loss`, and the check after
+  every transaction of the stateful fuzz environment.)
 - **Account-level residual rewards are capped by real principal, not leverage.** Each portfolio header
   carries fixed monotonic scalars:
   `residual_crystallized_loss_atoms_total`, `residual_spent_principal_atoms_total`, and

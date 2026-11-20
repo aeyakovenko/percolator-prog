@@ -1985,3 +1985,98 @@ proptest! {
         prop_assert!(progressing_or_bounded);
     }
 }
+
+/// INV-031, a provider loss is recorded once (#382). `V16Svm::land_retained` checks the
+/// provider-protection floor of every backing domain after every successful transaction of
+/// this target: it must be the floor before, plus what the provider topped up, less what it
+/// withdrew, and no higher than the protection the transaction left. That makes every history
+/// of the target, generated or scripted, a test of the floor through the public trade, crank,
+/// recovery, resolution and reset routes, with no account added to any of them.
+///
+/// This history makes sure the check has something to see. A provider backs the short-loss
+/// domain, the mark rises, and the winner is cranked before its loser: protection and floor
+/// fall by the gain. The loser's crank refills protection and leaves the floor. A second
+/// move the other way, cranked loser first, changes neither. The counters of the check must
+/// have seen a floor fall and a refill above a recorded low.
+#[test]
+fn v16_program_provider_floor_check_sees_a_recorded_low_and_its_refill() {
+    const PRICE: u64 = 1_000;
+    const MOVE: u64 = 5;
+    const PRINCIPAL: u128 = 1_000;
+    const DOMAIN: usize = 1;
+    let mut env = V16Svm::new(
+        [0x82; 32],
+        MarketConfig {
+            initial_price: PRICE,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [1_000_000; 5],
+            actor_token_balances: [2_000_000; 5],
+            ..MarketConfig::default()
+        },
+    );
+    let read = |env: &V16Svm| {
+        let market = env.svm.get_account(&env.market).expect("market account");
+        let read = percolator_prog::state::read_provider_protection(&market.data, DOMAIN)
+            .expect("market reads");
+        (
+            read.principal_num / percolator::BOUND_SCALE,
+            read.protection_num / percolator::BOUND_SCALE,
+            read.floor_num / percolator::BOUND_SCALE,
+        )
+    };
+    let hint = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 0,
+        }]
+    };
+    env.configure_auth_mark(false, 0, 1, PRICE).unwrap();
+    env.top_up_backing_bucket(DOMAIN as u16, PRINCIPAL, 100)
+        .unwrap();
+    // Actor 0 is long one unit against actor 1.
+    env.trade_no_cpi(0, 1, 0, percolator::POS_SCALE as i128, PRICE, 0)
+        .unwrap();
+    assert_eq!(read(&env), (PRINCIPAL, PRINCIPAL, PRINCIPAL));
+    let quiet = env.provider_floor_stats;
+    assert!(quiet.domains_checked != 0 && quiet.with_principal != 0);
+    assert_eq!((quiet.lowered, quiet.refilled, quiet.below_principal), (0, 0, 0));
+
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, PRICE + MOVE).unwrap();
+    env.crank(0, 2, hint()).unwrap();
+    assert_eq!(
+        read(&env),
+        (
+            PRINCIPAL,
+            PRINCIPAL - u128::from(MOVE),
+            PRINCIPAL - u128::from(MOVE)
+        ),
+        "the winner's gain is fronted by the provider"
+    );
+    let lowered = env.provider_floor_stats;
+    assert_eq!(lowered.lowered, 1);
+    assert_eq!(lowered.refilled, 0);
+
+    env.crank(1, 2, hint()).unwrap();
+    assert_eq!(
+        read(&env),
+        (PRINCIPAL, PRINCIPAL, PRINCIPAL - u128::from(MOVE)),
+        "the loser's payment refills protection and not the floor"
+    );
+    let refilled = env.provider_floor_stats;
+    assert_eq!(refilled.lowered, 1);
+    assert!(refilled.refilled >= 1);
+
+    // Back down, loser first: the long pays into the other domain, and this domain's claim is
+    // burned. Nothing here goes below the recorded low.
+    env.warp_to_slot(3);
+    env.push_auth_mark(0, 3, PRICE).unwrap();
+    env.crank(0, 3, hint()).unwrap();
+    env.crank(1, 3, hint()).unwrap();
+    let (principal, protection, floor) = read(&env);
+    assert_eq!((principal, floor), (PRINCIPAL, PRINCIPAL - u128::from(MOVE)));
+    assert!(protection >= floor);
+    assert_eq!(env.provider_floor_stats.lowered, 1);
+    assert!(env.provider_floor_stats.below_principal >= 3);
+}

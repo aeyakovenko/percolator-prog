@@ -928,6 +928,12 @@ fn v16_program_truncating_arithmetic_surface_has_a_semantic_owner() {
             evidence: "v16_program_floor_scaled_ratio_of_u64_products_matches_bigint",
         },
         RoundingOwner {
+            function: "read_provider_protection",
+            operations: 2,
+            class: "STRUCTURAL",
+            evidence: "INV-031",
+        },
+        RoundingOwner {
             function: "trade_fee_budgeted_amounts_with_mark_externality_view",
             operations: 1,
             class: "EXACT_PARTITION",

@@ -35,7 +35,7 @@
 //! eight source domains before crossing all 42 authenticated feed references. Both a 13+1 split and
 //! the all-at-once schedule remain bounded; repeated complete-tail calls consume prior source work,
 //! reach a strict liquidation at no more than 1.201M CU, and then restore current health.
-//! Finally, a fully public maximum-market construction appends all 5,585 configured assets after
+//! Finally, a fully public maximum-market construction appends all 5,492 configured assets after
 //! both funded portfolios already hold fourteen legs and twenty-eight source records. Thirty
 //! bounded automatic cranks refresh both accounts, unilateral reduction lands below 1.179M CU,
 //! and ResetPending cleanup plus every remaining owner exit completes without state injection.
@@ -7414,8 +7414,8 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
 // we CONSTRUCT the market state directly: start from a known-good 1-asset market, make asset 0
 // active+flat via ConfigureAuthMark, grow the on-chain account to the current maximal capacity,
 // then via the host mirror set max_market_slots and clone asset 0's active state into a high
-// traded index (index 5833). All intermediate slots stay canonical DISABLED slots (validate_shape accepts them).
-// A real BPF TradeNoCpi on index 5833 then opens a balanced position; its CU is compared to a
+// traded index (index 5491). All intermediate slots stay canonical DISABLED slots (validate_shape accepts them).
+// A real BPF TradeNoCpi on index 5491 then opens a balanced position; its CU is compared to a
 // small-N trade to prove per-trade compute does NOT scale with the thousands-of-assets count.
 //
 // Mechanism notes worth recording (verified against the pinned engine + wrapper):
@@ -7431,7 +7431,7 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
 fn v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu() {
     const N: usize = MAX_10M_MARKET_SLOTS;
     const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
-    const TRADED: usize = N - 1; // 5833 — a HIGH index, proving the trade isn't special to asset 0.
+    const TRADED: usize = N - 1; // 5491 — a HIGH index, proving the trade isn't special to asset 0.
     const PRICE: u64 = 100;
     const TRADE_SLOT: u64 = 10;
 
@@ -7533,7 +7533,7 @@ fn v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu() {
         "on-chain market account is the near-10 MiB buffer"
     );
 
-    // 5) The high asset's public domain APIs must work too. Its long/short domains are >11,000,
+    // 5) The high asset's public domain APIs must work too. Its long/short domains are >10,900,
     // which catches accidental u8 domain truncation while proving backing/insurance management is not
     // capped at the first 128 assets.
     let high_long_domain = (2 * TRADED) as u16;
