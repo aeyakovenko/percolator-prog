@@ -930,6 +930,8 @@ The current Kani suite is in `kani/v16_kani.rs`. It proves wrapper ABI and local
 ### Engine properties
 Engine-specific invariants (conservation, warmup, liquidation properties, etc.) live in the `percolator` crate's verification suite. The program relies on engine correctness but does not restate it.
 
+What is proved about the engine and about this program's instructions, with which tool and for which revision, and how to run or reproduce each proof, is recorded in the engine repository: the section "Proof Status And How To Reproduce It" of its [`README.md`](https://github.com/aeyakovenko/percolator#proof-status-and-how-to-reproduce-it), and its `proofs/` directory (the ledger with one row per piece, the roadmap, the specifications, and the task texts and statements of the machine-checked proofs). The ledger has one row for each instruction of this program; none of them is proved yet.
+
 ### Test suite
 The code and test harnesses are the source of truth for counts and exact CU numbers. The active suites are:
 
