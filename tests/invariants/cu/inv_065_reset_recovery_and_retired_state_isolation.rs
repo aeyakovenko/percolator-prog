@@ -602,7 +602,7 @@ fn inv065_braced_body_after<'a>(source: &'a str, marker: &str) -> &'a str {
 
 #[test]
 fn v16_program_lifecycle_isolation_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "cb78f1f08ae0ca22c609a90b0c00fd7aeb2cb8cf";
+    const ENGINE_PIN: &str = "80f8f0b494e84f191c5a10463b9e10fc19156af4";
     const CLASSES: &[Inv065LifecycleClass] = &[
         Inv065LifecycleClass {
             class: "complete public state admission",

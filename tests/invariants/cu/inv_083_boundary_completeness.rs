@@ -1846,6 +1846,11 @@ fn v16_attack_init_market_rejects_grief_config_without_burning_market_account() 
         ),
         invalid_case!("zero public B chunk", public_b_chunk_atoms, 0),
         invalid_case!(
+            "public B chunk above the largest vault",
+            public_b_chunk_atoms,
+            percolator::MAX_VAULT_TVL + 1
+        ),
+        invalid_case!(
             "maintenance fee above protocol cap",
             maintenance_fee_per_slot,
             percolator::MAX_PROTOCOL_FEE_ABS + 1

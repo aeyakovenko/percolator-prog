@@ -2106,7 +2106,7 @@ fn inv058_function_body<'a>(production: &'a str, function: &str) -> &'a str {
 
 #[test]
 fn v16_program_side_oi_cap_witness_roster_is_source_complete() {
-    const ENGINE_PIN: &str = "cb78f1f08ae0ca22c609a90b0c00fd7aeb2cb8cf";
+    const ENGINE_PIN: &str = "80f8f0b494e84f191c5a10463b9e10fc19156af4";
     const WITNESSES: &[(&str, &str)] = &[
         (
             "inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs",

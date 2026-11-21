@@ -41,8 +41,8 @@ const MULTI_ASSET_OPEN_TRADE_CU_LIMIT: u64 = 750_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 const MAX_10M_MARKET_SLOTS: usize = 5_492;
 const CERTIFIED_ENGINE_GIT_SOURCE: &str =
-    "git+https://github.com/aeyakovenko/percolator?rev=cb78f1f08ae0ca22c609a90b0c00fd7aeb2cb8cf#\
-     cb78f1f08ae0ca22c609a90b0c00fd7aeb2cb8cf";
+    "git+https://github.com/aeyakovenko/percolator?rev=80f8f0b494e84f191c5a10463b9e10fc19156af4#\
+     80f8f0b494e84f191c5a10463b9e10fc19156af4";
 
 fn assert_certified_engine_pin(context: &str) {
     assert!(
