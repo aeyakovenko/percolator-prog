@@ -31871,6 +31871,32 @@ compute pin: `v16_program_max_shape_short_b_budget_has_exact_public_progress` mo
 556,386 CU (`cu/inv_077_short_side_b_budget.rs`). The composition tests bound to the exact engine
 revision carry the new one (35 places in 27 files).
 
+### Engine logic moved into proved kernels, batches 3 to 9, and a bound on the public B chunk (2026-11-21)
+
+Engine pin `80f8f0b4`. Batches 3 to 9 move more of the engine's arithmetic out of its methods into
+pure kernels, each with a Kani contract check: the residual, the equity without positive credit,
+the haircut equity, a gain applied against a loss, the capital-backed loss reservation, the
+resolved-loss backing capacity, the terminal provider refill, the split of a loss at capacity, the
+burn of an account's source claim, the source-lien delta, one B-settlement step, the stranded
+loser backing owed to a twin, the size of one bankruptcy-residual booking step, and the
+accrual's price-move cap, funding amount and K/F index update. Contracts were added to the
+accrual price step, to the open-interest addition of a new position and to the liquidation
+deficit from its parts. None of this changes behaviour: the engine's suites pass and its
+differential oracles are byte-identical to the previous pin.
+
+One change of behaviour, in the engine's config admission: a `public_b_chunk_atoms` above
+`MAX_VAULT_TVL` is now refused when a market is created (INV-073). Until now the only requirement
+was a nonzero value, and from 340,282,366,920,938,463 atoms on every B-settlement step of an
+account with a loss weight fails with an arithmetic overflow (the condition is exact, proved for
+all inputs), so a market created with such a chunk froze every position on a side after a social
+loss on it. `cu/inv_083_boundary_completeness.rs` now also refuses that case at InitMarket without
+burning the market account; the suite's markets use `MAX_VAULT_TVL`, which stays valid.
+
+Compute: every test of this suite passes unchanged except one exact compute pin:
+`v16_program_max_shape_short_b_budget_has_exact_public_progress` moves from 556,386 to 556,414 CU
+(`cu/inv_077_short_side_b_budget.rs`). The composition tests bound to the exact engine revision carry the new one
+(35 places in 27 files).
+
 ### INV-036/045 no keeper reward during Hybrid catch-up: five tests restated (2026-11-19)
 
 The program's rule stays (commit `01ec6161`, 2026-09-16): a liquidation penalty is reclaimable only
