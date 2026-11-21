@@ -31859,6 +31859,18 @@ guardrail of 325,000 (it was never measured while the test was red). As in
 `inv_073_recovery_claim_liability_exit.rs`, the funded histories get a test-local bound of
 340,000; every transaction is still asserted within it, and the unfunded histories keep 325,000.
 
+### Engine logic moved into proved kernels, batches 1 and 2 (2026-11-21)
+
+Engine pin `cb78f1f0`. The engine's arithmetic for the trade fee, a loss paid from capital, the
+initial-margin lien need, the liquidation deficit, the incremental certificate, the residual reward
+credit, the positive-PnL totals, the negative-PnL account count and the start of a bankrupt-close
+ledger moved out of the methods into ten pure kernels, each proved for all inputs by a Kani
+contract check. No behaviour changes: the engine's suites pass and its differential oracles are
+byte-identical to the previous pin. Every test of this suite passes unchanged except one exact
+compute pin: `v16_program_max_shape_short_b_budget_has_exact_public_progress` moves from 556,384 to
+556,386 CU (`cu/inv_077_short_side_b_budget.rs`). The composition tests bound to the exact engine
+revision carry the new one (35 places in 27 files).
+
 ### INV-036/045 no keeper reward during Hybrid catch-up: five tests restated (2026-11-19)
 
 The program's rule stays (commit `01ec6161`, 2026-09-16): a liquidation penalty is reclaimable only
