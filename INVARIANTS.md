@@ -857,12 +857,31 @@ use of soft credit without a lien, and assert token and encumbrance proofs remai
 
 ### INV-045 - No free mark movement
 
-**Statement.** Every accepted mark update, including raw target 0, 1, and MAX, stays inside the
-elapsed-time movement envelope from the prior nonzero mark. No CPI/no-CPI, single/batch,
-self-controlled, zero-fee, zero-size, or zero-price route bypasses the cap.
+**Statement.** While the asset has effective open interest on either side, every accepted mark
+update, including raw target 0, 1, and MAX, stays inside the elapsed-time movement envelope from
+the prior nonzero mark. A price that a trade reports is clamped to that envelope before it is
+accepted, whatever the open interest. No CPI/no-CPI, single/batch, self-controlled, zero-fee,
+zero-size, or zero-price route bypasses the cap.
 
 ```text
-mark_after in movement_envelope(mark_before, elapsed_slots, configured_cap)
+OI_eff_long > 0 or OI_eff_short > 0  =>
+    mark_after in movement_envelope(mark_before, elapsed_slots, configured_cap)
+```
+
+**Scope: an asset with no effective open interest.** While `OI_eff_long == OI_eff_short == 0`, an
+accepted update may move the mark to its accepted target in one step. The envelope bounds what a
+bad price can do to open positions; with no effective open interest it would protect no position,
+and the next position would open at a stale mark. Such an update accrues no funding (funding needs
+effective open interest on both sides), and its mark-to-market reaches only legs that own no
+effective open interest: the residue of a side whose effective open interest was consumed before
+the side could reset (engine issue #132). Such a side has `A_side == 1`, so its legs carry at most
+`raw_basis_sum_side / ADL_ONE` quantity units in all, a tenth of one raw unit, and its K index
+moves by `A_side` times the price change, as any capped path to the same price would move it.
+
+```text
+OI_eff_long == 0 and OI_eff_short == 0  =>
+    the update accrues no funding
+    and every side with raw_basis_sum_side > 0 has A_side == 1
 ```
 
 **Scope: funding is not independent of report cadence.** The envelope bounds the mark. It does not

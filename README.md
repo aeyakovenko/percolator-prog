@@ -751,7 +751,7 @@ When those conditions hold, `h_min = 0` gives users fast withdrawals or positive
 
 ### Clamp and target/effective lag
 
-The wrapper authenticates a raw oracle target, but the engine does not have to jump to that target in one instruction. The effective engine price moves toward the raw target by at most the configured per-slot price cap.
+The wrapper authenticates a raw oracle target, but the engine does not have to jump to that target in one instruction. While the asset has effective open interest on either side, the effective engine price moves toward the raw target by at most the configured per-slot price cap. With none, the effective price moves to the target in one step; INV-045 states what such a move may change.
 
 If the raw target outruns the cap, the market enters target/effective lag or loss-stale catchup. That state is **h-max-effective**, but it is not automatically a durable `bankruptcy_hmax_lock_active`.
 
