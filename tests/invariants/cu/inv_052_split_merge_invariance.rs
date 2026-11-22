@@ -1532,7 +1532,7 @@ fn inv052_source_defines_test(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_split_merge_operation_family_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "08e8f7f08b8b74139201c73119619141e407b198";
+    const ENGINE_PIN: &str = "4e77481b51a4283f598761a3f111d3bfde06ba9a";
     const CLASSES: &[Inv052PartitionClass] = &[
         Inv052PartitionClass {
             class: "trade withdrawal and owner-reduction partitions",

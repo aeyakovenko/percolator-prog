@@ -31961,6 +31961,19 @@ goes from 556,414 to 556,197 CU (`cu/inv_077_short_side_b_budget.rs`); a call no
 The composition tests bound to the exact engine revision carry the new one (35 places in 27 files),
 and `cu/inv_023_*` checks INV-083's field count of 243.
 
+### The accrual's price check proved for every price, batch 13 (2026-11-22)
+
+Engine pin `4e77481b`. Each of the engine's two accrual entry points, `accrue_asset_to_not_atomic`
+and `accrue_asset_path_to_not_atomic`, now ends its read-only prologue (the market is Live, the
+config decodes, and the asset index, the price and the funding rate or path pass their guard) by
+calling the rest of the accrual as a function of its own, marked `#[inline(always)]`. Nothing else
+changes: the engine's suites pass and its differential oracles are byte-identical to the previous
+pin. The split lets three new Kani proofs stand in for that rest: every price of 0 or above the
+oracle maximum is refused before any write, on a live market and with an arbitrary market header,
+and every price inside the range gets through (INV-045, clause C0). Every test of this suite passes
+unchanged; the composition tests bound to the exact engine revision carry the new one (35 places in
+27 files).
+
 ### INV-036/045 no keeper reward during Hybrid catch-up: five tests restated (2026-11-19)
 
 The program's rule stays (commit `01ec6161`, 2026-09-16): a liquidation penalty is reclaimable only
