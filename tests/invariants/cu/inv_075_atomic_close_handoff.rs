@@ -5,11 +5,19 @@ use super::*;
 use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 
-const SIZE_Q: u128 = POS_SCALE / 50;
-const DEPOSITS: [u64; 4] = [10, 10, 2, 2];
-const SUPPLY: u64 = 24;
-const GROSS_LOSS: u128 = SIZE_Q * (300 - 100) / POS_SCALE;
-const RESIDUAL: u128 = GROSS_LOSS - 2;
+// Each loser's unpaid loss exceeds the public B chunk (the constant PUBLIC_B_CHUNK_ATOMS =
+// MAX_VAULT_TVL), so a close books one chunk per step and the first close is still open when the
+// second starts: full-margin shorts of 17,000,000 units at 1e8 and a mark that doubles three times.
+// (Until 2026-11-22 the market chose a chunk of one atom and each loser owed two atoms.)
+const OPEN_PRICE: u64 = 100_000_000;
+const MARKS: [(u64, u64); 3] = [(1, 200_000_000), (2, 400_000_000), (3, 800_000_000)];
+const SIZE_Q: u128 = 17_000_000 * POS_SCALE;
+const MARGIN: u64 = 1_700_000_000_000_000; // the full margin of each side
+const DEPOSITS: [u64; 4] = [MARGIN; 4];
+const SUPPLY: u64 = 4 * MARGIN;
+const GROSS_LOSS: u128 = SIZE_Q * (800_000_000 - OPEN_PRICE as u128) / POS_SCALE;
+const RESIDUAL: u128 = GROSS_LOSS - MARGIN as u128;
+const CHUNK: u128 = percolator::PUBLIC_B_CHUNK_ATOMS;
 
 fn snapshot(env: &V16CuEnv, keys: &[Pubkey]) -> Vec<(Pubkey, Option<Account>)> {
     keys.iter()
@@ -45,11 +53,10 @@ fn v16_program_atomic_close_handoff_rolls_back_stale_continuation() {
         V16CuMarketParams {
             max_portfolio_assets: 1,
             max_bankrupt_close_lifetime_slots: 2,
-            public_b_chunk_atoms: 1,
             ..V16CuMarketParams::default()
         },
     );
-    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_auth_mark_with_cu(0, OPEN_PRICE);
     env.configure_permissionless_resolve_with_cu(100, 5);
     let admin = env.admin.insecure_clone();
     let owners: [Keypair; 4] = std::array::from_fn(|_| Keypair::new());
@@ -133,12 +140,12 @@ fn v16_program_atomic_close_handoff_rolls_back_stale_continuation() {
             &owners[winner + 2],
             portfolios[winner + 2],
             SIZE_Q as i128,
-            100,
+            OPEN_PRICE,
             0,
         );
         assert_cu_within("close handoff public position", cu, TRADE_CU_LIMIT);
     }
-    for (slot, mark) in [(2, 200), (3, 300)] {
+    for (slot, mark) in MARKS {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_with_cu(slot, mark);
         for winner in &portfolios[..2] {
@@ -319,7 +326,7 @@ fn v16_program_atomic_close_handoff_rolls_back_stale_continuation() {
     let start_first = forfeit(&env, 2);
     let cu = send_raw_tx(&mut env.svm, &env.payer, start_first, &[&owners[2]]).unwrap();
     assert_cu_within("close handoff first owner", cu, CUSTODY_CU_LIMIT);
-    census(&env, [1, 0]);
+    census(&env, [CHUNK, 0]);
     let first_close = close_progress(&env.portfolio_state(portfolios[2]));
     let epochs = portfolios.map(|key| env.portfolio_position_epoch(key));
     let finish_first = crank(&env, 2);
@@ -390,7 +397,7 @@ fn v16_program_atomic_close_handoff_rolls_back_stale_continuation() {
             CRANK_CU_LIMIT + 2 * CUSTODY_CU_LIMIT,
         );
         peak_cu = peak_cu.max(failure.meta.compute_units_consumed);
-        census(&env, [1, 0]);
+        census(&env, [CHUNK, 0]);
         assert_eq!(
             close_progress(&env.portfolio_state(portfolios[2])),
             first_close
@@ -421,7 +428,7 @@ fn v16_program_atomic_close_handoff_rolls_back_stale_continuation() {
         fee,
         &[env.market, portfolios[2], portfolios[3]],
     );
-    census(&env, [2, 1]);
+    census(&env, [RESIDUAL, CHUNK]);
     let first_final = close_progress(&env.portfolio_state(portfolios[2]));
     let second_close = close_progress(&env.portfolio_state(portfolios[3]));
     assert_eq!(
@@ -453,7 +460,7 @@ fn v16_program_atomic_close_handoff_rolls_back_stale_continuation() {
     );
     peak_cu = peak_cu.max(finalization.compute_units_consumed);
     assert_frame(&env, before, fee, &[env.market, portfolios[3]]);
-    census(&env, [2, 2]);
+    census(&env, [RESIDUAL, RESIDUAL]);
     assert_eq!(
         close_progress(&env.portfolio_state(portfolios[2])),
         first_final
@@ -466,5 +473,5 @@ fn v16_program_atomic_close_handoff_rolls_back_stale_continuation() {
         portfolios.map(|key| env.portfolio_position_epoch(key)),
         [epochs[0], epochs[1], epochs[2], epochs[3] + 1]
     );
-    println!("INV-075/076 atomic handoff: 2 exact rollbacks, 4 loss atoms booked once, 0 residual/barriers, 24 SPL atoms, peak {peak_cu} CU");
+    println!("INV-075/076 atomic handoff: 2 exact rollbacks, both residuals booked once, 0 residual/barriers, peak {peak_cu} CU");
 }

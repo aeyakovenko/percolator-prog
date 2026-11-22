@@ -55,6 +55,9 @@ struct Inv071PublicCloseBOverlap {
     close_before: CloseProgressLedgerV16,
     shutdown_slot: u64,
     solvent_peer: (Pubkey, Pubkey),
+    deposits: u64,
+    peer_capital: u128,
+    peer_payout: u64,
 }
 
 struct Inv071PublicBAdverseOverlap {
@@ -171,21 +174,137 @@ fn inv071_public_b_adverse_overlap() -> Inv071PublicBAdverseOverlap {
     }
 }
 
+// A pending close next to an independent B obligation on the same account. The target wins a small
+// asset-1 bankruptcy (booked in one step, which leaves the target's asset-1 leg B-stale; its owner
+// settles one atom of it) and then loses a large asset-0 bankruptcy: a full-margin short of
+// 17,000,000 units at 1e8 whose mark doubles four times, so its unpaid loss (2.38e16) exceeds two
+// public B chunks (PUBLIC_B_CHUNK_ATOMS): the forfeit books one and the close stays pending after the
+// next continuation too. (Until 2026-11-22 the market chose a one-atom chunk and the shared asset-1
+// close fixture supplied both.)
 fn inv071_public_close_b_overlap() -> Inv071PublicCloseBOverlap {
-    let Inv071PublicBAdverseOverlap {
-        mut env,
-        target_owner,
-        target,
-        target_b,
-        b_before,
-        now_slot: shutdown_slot,
-        solvent_peer,
-        ..
-    } = inv071_public_b_adverse_overlap();
+    const ASSET0_OPEN_PRICE: u64 = 100_000_000;
+    const ASSET0_Q: u128 = 17_000_000 * POS_SCALE;
+    const TARGET_CAPITAL: u128 = 1_700_000_000_000_010;
+    const WINNER_CAPITAL: u128 = 1_800_000_000_000_000;
+    const PEER_CAPITAL: u128 = 2_000_000_000;
+    const ASSET1_LOSER_CAPITAL: u128 = 2;
+    const ASSET0_MARKS: [u64; 4] = [200_000_000, 400_000_000, 800_000_000, 1_600_000_000];
 
-    // Freeze and forfeit the adverse leg to turn the lower-priority live-risk
-    // work into a durable close ledger without touching the independent B leg.
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        max_bankrupt_close_lifetime_slots: 2,
+        ..V16CuMarketParams::default()
+    });
     let admin = Keypair::from_bytes(&env.admin.to_bytes()).expect("copy market authority");
+    env.configure_auth_mark_with_cu(0, ASSET0_OPEN_PRICE);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_for_asset_with_authority(1, &admin, 0, 100);
+
+    let winner_owner = Keypair::new();
+    let peer_owner = Keypair::new();
+    let target_owner = Keypair::new();
+    let asset1_loser_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let peer = env.create_portfolio(&peer_owner);
+    let target = env.create_portfolio(&target_owner);
+    let asset1_loser = env.create_portfolio(&asset1_loser_owner);
+    env.deposit(&winner_owner, winner, WINNER_CAPITAL);
+    env.deposit(&peer_owner, peer, PEER_CAPITAL);
+    env.deposit(&target_owner, target, TARGET_CAPITAL);
+    env.deposit(&asset1_loser_owner, asset1_loser, ASSET1_LOSER_CAPITAL);
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &peer_owner,
+        peer,
+        POS_SCALE as i128,
+        ASSET0_OPEN_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &target_owner,
+        target,
+        ASSET0_Q as i128,
+        ASSET0_OPEN_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &target_owner,
+        target,
+        &asset1_loser_owner,
+        asset1_loser,
+        (POS_SCALE / 50) as i128,
+        100,
+        0,
+    );
+
+    // The small asset-1 bankruptcy: booked whole, so the target's leg is B-stale.
+    for (slot, mark) in [(1u64, 200u64), (2, 300)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_with_authority(1, &admin, slot, mark);
+        env.crank(
+            target,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(1),
+            },
+        );
+    }
+    env.crank(
+        asset1_loser,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(1),
+        },
+    );
+    env.svm.warp_to_slot(3);
+    env.try_shutdown_asset_with_authority(&admin, 1, 3)
+        .expect("market authority shuts down asset 1");
+    env.forfeit_recovery_leg_with_cu(&asset1_loser_owner, asset1_loser, 1, 1);
+    let target_b = env.market_state().1.assets[1].b_long_num;
+    assert!(target_b > active_leg_for_asset(&env.portfolio_state(target), 1).b_snap);
+    env.forfeit_recovery_leg_with_cu(&target_owner, target, 1, 1);
+    let b_before = active_leg_for_asset(&env.portfolio_state(target), 1);
+    assert!(b_before.b_stale && b_before.b_snap < target_b);
+
+    // The large asset-0 bankruptcy of the target.
+    for (step, mark) in ASSET0_MARKS.into_iter().enumerate() {
+        let slot = 4 + step as u64;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(0, slot, mark);
+        env.crank(
+            winner,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    // The target stays uncranked (a crank would settle its B first); its forfeit marks the asset-0
+    // leg at the shutdown price.
+    let shutdown_slot = 8;
+    env.svm.warp_to_slot(shutdown_slot);
+    // Catch the asset up and refresh the winner, so that only the target's side is left stale (a
+    // stale account on the winner's side would hold the target's resolved legs; see
+    // `resolved_side_can_still_be_charged`).
+    for _ in 0..4 {
+        env.crank(
+            winner,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: shutdown_slot,
+                observations: crank_observations(0),
+            },
+        );
+        if env.market_state().1.assets[0].stale_account_count_long == 0 {
+            break;
+        }
+    }
+    assert_eq!(env.market_state().1.assets[0].stale_account_count_long, 0);
     env.try_shutdown_asset_with_authority(&admin, 0, shutdown_slot)
         .expect("market authority shuts down asset 0");
     env.forfeit_recovery_leg_with_cu(&target_owner, target, 0, 1);
@@ -193,7 +312,9 @@ fn inv071_public_close_b_overlap() -> Inv071PublicCloseBOverlap {
     let overlap = env.portfolio_state(target);
     let close_before = close_progress(&overlap);
     assert!(inv071_close_pending(close_before));
+    assert_eq!(close_before.asset_index, 0);
     assert_eq!(active_leg_for_asset(&overlap, 1), b_before);
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
 
     Inv071PublicCloseBOverlap {
         env,
@@ -203,7 +324,14 @@ fn inv071_public_close_b_overlap() -> Inv071PublicCloseBOverlap {
         b_before,
         close_before,
         shutdown_slot,
-        solvent_peer,
+        solvent_peer: (peer_owner.pubkey(), peer),
+        deposits: u64::try_from(
+            WINNER_CAPITAL + PEER_CAPITAL + TARGET_CAPITAL + ASSET1_LOSER_CAPITAL,
+        )
+        .unwrap(),
+        peer_capital: PEER_CAPITAL,
+        // the peer's one-unit short opened at 1e8 and froze at 1.6e9
+        peer_payout: u64::try_from(PEER_CAPITAL - 1_500_000_000).unwrap(),
     }
 }
 
@@ -1015,6 +1143,9 @@ fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_prog
         b_before,
         close_before,
         solvent_peer: (peer_owner, peer),
+        deposits,
+        peer_capital,
+        peer_payout,
         ..
     } = inv071_public_close_b_overlap();
 
@@ -1027,9 +1158,9 @@ fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_prog
         peer_destination,
     ];
     let initial_vault = env.token_amount(env.vault);
-    assert_eq!(initial_vault, 2 + 10 + 1_000 + 1_000, "public deposits");
+    assert_eq!(initial_vault, deposits, "public deposits");
     assert!(!resolved_portfolio_is_terminal(&env, target));
-    assert_eq!(env.portfolio_state(peer).capital.get(), 1_000);
+    assert_eq!(env.portfolio_state(peer).capital.get(), peer_capital);
 
     let expired_slot = close_before
         .max_close_slot
@@ -1268,15 +1399,21 @@ fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_prog
             expected_b.b_rem = 0;
             expected_b.b_stale = false;
             assert_eq!(active_leg_for_asset(&account_after, 1), expected_b);
-            let mut expected_close = close_progress(&account_before);
-            expected_close.b_loss_booked += 1;
-            expected_close.residual_remaining -= 1;
+            // The same step books up to one public B chunk of the target's own close: the B loss atom
+            // is charged and the booking relieves the debt, without custody movement.
+            let close_before_step = close_progress(&account_before);
+            let booked =
+                close_progress(&account_after).b_loss_booked - close_before_step.b_loss_booked;
+            assert!(booked > 0 && booked <= percolator::PUBLIC_B_CHUNK_ATOMS);
+            let mut expected_close = close_before_step;
+            expected_close.b_loss_booked += booked;
+            expected_close.residual_remaining -= booked;
             assert_eq!(close_progress(&account_after), expected_close);
             assert_eq!(account_after.capital, account_before.capital);
             assert_eq!(
                 account_after.pnl.get(),
-                account_before.pnl.get(),
-                "one B loss atom and one close-booked atom offset without custody movement"
+                account_before.pnl.get() - 1 + booked as i128,
+                "the B loss atom and the close booking move only the account's PnL"
             );
         }
         progress_steps += 1;
@@ -1307,8 +1444,8 @@ fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_prog
         }
     );
 
-    // The peer's public one-unit short opened at 100 and froze at 400, with
-    // zero fees/funding. Its 1,000 deposited atoms therefore leave exactly 700.
+    // The peer's public one-unit short opened at 1e8 and froze at 1.6e9, with zero fees/funding, so
+    // it is paid its deposit less 1.5e9.
     let peer_accounts = vec![
         AccountMeta::new_readonly(peer_owner, false),
         AccountMeta::new(env.market, false),
@@ -1340,11 +1477,17 @@ fn v16_program_public_expired_close_preempts_b_stale_and_preserves_terminal_prog
     max_cu = max_cu.max(peer_cu);
     assert!(inv071_resolved_continuation_rank(&env, peer, target_b) < peer_rank);
     assert!(resolved_portfolio_is_terminal(&env, peer));
-    assert_eq!(env.token_amount(peer_destination), 700);
-    assert_eq!(env.token_amount(env.vault), initial_vault - 700);
-    assert_eq!(env.market_state().1.vault, u128::from(initial_vault - 700));
-    assert_eq!(env.market_state().1.c_tot, peer_c_tot - 1_000);
-    for (key, amount) in [(env.vault, initial_vault - 700), (peer_destination, 700)] {
+    assert_eq!(env.token_amount(peer_destination), peer_payout);
+    assert_eq!(env.token_amount(env.vault), initial_vault - peer_payout);
+    assert_eq!(
+        env.market_state().1.vault,
+        u128::from(initial_vault - peer_payout)
+    );
+    assert_eq!(env.market_state().1.c_tot, peer_c_tot - peer_capital);
+    for (key, amount) in [
+        (env.vault, initial_vault - peer_payout),
+        (peer_destination, peer_payout),
+    ] {
         let mut expected = before_peer
             .iter()
             .find(|(candidate, _)| *candidate == key)
@@ -1904,7 +2047,6 @@ fn v16_program_b_budget_lock_prerequisite_rejects_post_adl_basis_reissue() {
         liquidation_fee_cap: 0,
         max_price_move_bps_per_slot: 100,
         max_accrual_dt_slots: 1,
-        public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
         ..V16CuMarketParams::default()
     });
     env.configure_auth_mark_with_cu(0, INITIAL_PRICE);
@@ -1999,12 +2141,21 @@ fn v16_program_b_budget_lock_prerequisite_rejects_post_adl_basis_reissue() {
 
 #[test]
 fn v16_program_bankruptcy_escalation_matrix_commits_recovery_and_resolves() {
-    const OPEN_PRICE: u64 = 1_000_000;
-    const ADVERSE_PRICE: u64 = 1_070_000;
+    // A liquidation whose bankrupt residual exceeds one public B chunk (the constant
+    // PUBLIC_B_CHUNK_ATOMS = MAX_VAULT_TVL) cannot progress and commits Recovery. At the production
+    // risk profile the mark moves at most 24 bps a slot, so the short is left uncranked while the
+    // mark climbs 25% to its target (the long's cranks accrue the asset; the target is reached by
+    // slot 105 and the mark then holds) and is then cranked: first certified liquidatable, then met
+    // with an unpaid loss of 1.06e16. (Until 2026-11-22 the market chose a one-atom chunk and any
+    // residual above one atom escalated.)
+    const OPEN_PRICE: u64 = 1_000_000_000;
+    const ADVERSE_PRICE: u64 = 1_250_000_000;
+    const SIZE_Q: u128 = 53_000_000 * POS_SCALE;
+    const LONG_CAPITAL: u128 = 3_000_000_000_000_000;
+    const CLIMB_SLOTS: u64 = 110;
 
-    for short_capital in [55_000u128, 56_000] {
+    for short_capital in [2_650_000_000_000_000u128, 2_700_000_000_000_000] {
         let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
-            public_b_chunk_atoms: 1,
             max_bankrupt_close_lifetime_slots: 1,
             ..production_risk_params()
         });
@@ -2015,7 +2166,7 @@ fn v16_program_bankruptcy_escalation_matrix_commits_recovery_and_resolves() {
         let short_owner = Keypair::new();
         let long = env.create_portfolio(&long_owner);
         let short = env.create_portfolio(&short_owner);
-        env.deposit(&long_owner, long, 100_000_000);
+        env.deposit(&long_owner, long, LONG_CAPITAL);
         env.deposit(&short_owner, short, short_capital);
         env.trade_asset_with_cu(
             0,
@@ -2023,13 +2174,24 @@ fn v16_program_bankruptcy_escalation_matrix_commits_recovery_and_resolves() {
             long,
             &short_owner,
             short,
-            POS_SCALE as i128,
+            SIZE_Q as i128,
             OPEN_PRICE,
             0,
         );
+        for slot in 1..=CLIMB_SLOTS {
+            env.svm.warp_to_slot(slot);
+            let _ = env.push_auth_mark_with_cu(slot, ADVERSE_PRICE);
+            env.crank(
+                long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+        }
 
         let mut recovery_transition = None;
-        for slot in 1..=40u64 {
+        for slot in CLIMB_SLOTS + 1..=CLIMB_SLOTS + 40 {
             env.svm.warp_to_slot(slot);
             let _ = env.push_auth_mark_with_cu(slot, ADVERSE_PRICE);
             let market_before = env.svm.get_account(&env.market).unwrap();
@@ -2705,7 +2867,6 @@ fn v16_attack_auto_crank_prioritizes_b_stale_over_liquidation_reward_tail() {
     const LIQ_SLOT: u64 = 2;
 
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
-        public_b_chunk_atoms: 1,
         ..V16CuMarketParams::default()
     });
     env.top_up_insurance(1_000_000);
@@ -3477,7 +3638,7 @@ fn inv071_source_defines_kani_proof(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "80f8f0b494e84f191c5a10463b9e10fc19156af4";
+    const ENGINE_PIN: &str = "08e8f7f08b8b74139201c73119619141e407b198";
     const CLASSES: &[Inv071ProgressClass] = &[
         Inv071ProgressClass {
             class: "summary fidelity selector totality and wrapper dispatch",

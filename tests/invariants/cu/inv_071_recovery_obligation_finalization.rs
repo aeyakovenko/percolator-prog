@@ -13,7 +13,6 @@ fn public_world() -> (V16CuEnv, Vec<Actor>) {
     let params = V16CuMarketParams {
         max_portfolio_assets: 2,
         max_bankrupt_close_lifetime_slots: 2,
-        public_b_chunk_atoms: 1,
         ..V16CuMarketParams::default()
     };
     let mut svm = LiteSVM::new();
@@ -86,7 +85,14 @@ fn public_world() -> (V16CuEnv, Vec<Actor>) {
         portfolios: Vec::new(),
     };
     let mut actors = Vec::new();
-    for amount in [1_000u64, 1_000, 10, 2] {
+    // Actor 3 is the asset-1 debtor, actor 2 its counterparty: sized so that the debtor's unpaid loss
+    // exceeds the public B chunk (PUBLIC_B_CHUNK_ATOMS), see released_obligation_world.
+    for amount in [
+        1_000u64,
+        1_000,
+        3_400_000_000_000_000,
+        1_700_000_000_000_000,
+    ] {
         let owner = Keypair::new();
         env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
         let portfolio = Keypair::new();
@@ -143,9 +149,8 @@ fn public_world() -> (V16CuEnv, Vec<Actor>) {
             token,
         });
     }
-    for asset in 0..2 {
-        env.configure_auth_mark_for_asset_as_admin(asset, 0, 100);
-    }
+    env.configure_auth_mark_for_asset_as_admin(0, 0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 0, DEBTOR_OPEN_PRICE);
     env.configure_permissionless_resolve_with_cu(100, 5);
     (env, actors)
 }
@@ -194,6 +199,17 @@ fn assert_market(env: &V16CuEnv, before: &Account, expected: &MarketGroupV16) {
     assert_eq!(env.svm.get_account(&env.market).unwrap(), bytes);
 }
 
+// The asset-1 bankruptcy of released_obligation_world: the debtor shorts 17,000,000 units at full
+// margin and the mark doubles three times, so its unpaid loss is 1.02e16, above the public B chunk
+// (the constant PUBLIC_B_CHUNK_ATOMS = MAX_VAULT_TVL). The forfeit books one chunk and leaves
+// DEBTOR_PENDING_RESIDUAL pending. (Until 2026-11-22 the market chose a chunk of one atom and the
+// debtor lost a few atoms.)
+const DEBTOR_OPEN_PRICE: u64 = 100_000_000;
+const DEBTOR_Q: u128 = 17_000_000 * POS_SCALE;
+const DEBTOR_PENDING_RESIDUAL: u128 = 200_000_000_000_000;
+// What the four actors deposited (1,000, 1,000 and the two asset-1 accounts).
+const WORLD_DEPOSITS: u128 = 5_100_000_000_002_000;
+
 fn released_obligation_world(direction: i128) -> (V16CuEnv, Vec<Actor>) {
     let (mut env, actors) = public_world();
     let target = actors[0].portfolio;
@@ -215,11 +231,11 @@ fn released_obligation_world(direction: i128) -> (V16CuEnv, Vec<Actor>) {
         actors[2].portfolio,
         &actors[3].owner,
         debtor,
-        (POS_SCALE / 50) as i128,
-        100,
+        DEBTOR_Q as i128,
+        DEBTOR_OPEN_PRICE,
         0,
     );
-    for (slot, price) in [(1, 200), (2, 300)] {
+    for (slot, price) in [(1, 200_000_000), (2, 400_000_000), (3, 800_000_000)] {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_for_asset_as_admin(1, slot, price);
         env.crank(
@@ -233,14 +249,14 @@ fn released_obligation_world(direction: i128) -> (V16CuEnv, Vec<Actor>) {
     env.crank(
         debtor,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 2,
+            now_slot: 3,
             observations: crank_observations(1),
         },
     );
-    env.svm.warp_to_slot(3);
+    env.svm.warp_to_slot(4);
     let admin = Keypair::from_bytes(&env.admin.to_bytes()).unwrap();
     for asset in [0, 1] {
-        env.try_shutdown_asset_with_authority(&admin, asset, 3)
+        env.try_shutdown_asset_with_authority(&admin, asset, 4)
             .unwrap();
     }
     // At unchanged price, the first exit retains only loss weight until its peer exits.
@@ -255,7 +271,7 @@ fn released_obligation_world(direction: i128) -> (V16CuEnv, Vec<Actor>) {
     env.forfeit_recovery_leg_with_cu(&actors[3].owner, debtor, 1, 1);
     let close = close_progress(&env.portfolio_state(debtor));
     assert!(inv071_close_pending(close));
-    assert_eq!(close.residual_remaining, 1);
+    assert_eq!(close.residual_remaining, DEBTOR_PENDING_RESIDUAL);
     assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
     assert_eq!(rank(&env, target), (2, 1, 1_000));
 
@@ -436,10 +452,13 @@ fn v16_program_recovery_releases_obligation_before_exact_finalization_and_payout
         expected.loss_stale_active = false;
         assert_market(&env, &market_before, &expected);
         inv071_assert_continuation_frame(&env, &before, &[env.market]);
-        assert_eq!(env.token_amount(env.vault), 2_012);
-        assert_eq!(expected.vault, 2_012);
+        assert_eq!(u128::from(env.token_amount(env.vault)), WORLD_DEPOSITS);
+        assert_eq!(expected.vault, WORLD_DEPOSITS);
         let mint = env.svm.get_account(&env.mint).unwrap();
-        assert_eq!(Mint::unpack(&mint.data).unwrap().supply, 2_012);
+        assert_eq!(
+            u128::from(Mint::unpack(&mint.data).unwrap().supply),
+            WORLD_DEPOSITS
+        );
         for actor in &actors {
             assert_eq!(env.token_amount(actor.token), 0);
         }
@@ -499,13 +518,16 @@ fn v16_program_recovery_releases_obligation_before_exact_finalization_and_payout
         assert!(rank(&env, target) < rank_before);
         assert!(resolved_portfolio_is_terminal(&env, target));
         assert_eq!(env.market_state().1.c_tot, capital_before - 1_000);
-        assert_eq!(env.market_state().1.vault, 1_012);
+        assert_eq!(env.market_state().1.vault, WORLD_DEPOSITS - 1_000);
         inv071_assert_continuation_frame(
             &env,
             &before,
             &[env.market, target, env.vault, actors[0].token],
         );
-        for (key, amount) in [(env.vault, 1_012), (actors[0].token, 1_000)] {
+        for (key, amount) in [
+            (env.vault, (WORLD_DEPOSITS - 1_000) as u64),
+            (actors[0].token, 1_000),
+        ] {
             let mut expected = before
                 .iter()
                 .find(|(k, _)| *k == key)

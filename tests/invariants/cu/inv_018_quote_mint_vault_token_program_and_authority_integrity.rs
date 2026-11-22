@@ -2150,7 +2150,6 @@ fn v16_attack_close_slab_rejects_foreign_primary_vault() {
             max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
             max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
             max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
             maintenance_fee_per_slot: p.maintenance_fee_per_slot,
         },
         vec![

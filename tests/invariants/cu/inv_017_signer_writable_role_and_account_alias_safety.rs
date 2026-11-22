@@ -5524,7 +5524,6 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
             max_account_b_settlement_chunks: params.max_account_b_settlement_chunks,
             max_bankrupt_close_chunks: params.max_bankrupt_close_chunks,
             max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: params.public_b_chunk_atoms,
             maintenance_fee_per_slot: params.maintenance_fee_per_slot,
         },
         vec![

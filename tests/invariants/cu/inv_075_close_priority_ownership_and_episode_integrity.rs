@@ -118,7 +118,6 @@ fn inv075_settle_resolved_to_fixed_point(
 fn inv075_competing_public_closes_fixture() -> Inv075CompetingCloseFixture {
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
         max_bankrupt_close_lifetime_slots: 2,
-        public_b_chunk_atoms: 1,
         ..V16CuMarketParams::default()
     });
     env.configure_auth_mark_with_cu(0, 100);
@@ -145,18 +144,21 @@ fn inv075_competing_public_closes_fixture() -> Inv075CompetingCloseFixture {
 
     let creator = Keypair::new();
     let creator_key = creator.pubkey();
+    // Both closes are sized like the shared asset-1 close fixture, so that each unpaid loss exceeds the
+    // public B chunk; each winner posts exactly its full margin, which keeps the four accounts inside
+    // the largest vault.
     env.activate_permissionless_asset_with_fee(
         &creator,
         1,
-        1,
-        100,
+        0,
+        ASSET1_CLOSE_OPEN_PRICE,
         creator_key,
         creator_key,
         creator_key,
         creator_key,
         1,
     );
-    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+    env.configure_auth_mark_for_asset_with_authority(1, &creator, 0, ASSET1_CLOSE_OPEN_PRICE);
 
     let mut winner_owners = Vec::new();
     let mut winners = Vec::new();
@@ -167,16 +169,16 @@ fn inv075_competing_public_closes_fixture() -> Inv075CompetingCloseFixture {
         let loss_owner = Keypair::new();
         let winner = env.create_portfolio(&winner_owner);
         let loss = env.create_portfolio(&loss_owner);
-        env.deposit(&winner_owner, winner, 10);
-        env.deposit(&loss_owner, loss, 2);
+        env.deposit(&winner_owner, winner, ASSET1_CLOSE_LOSS_CAPITAL);
+        env.deposit(&loss_owner, loss, ASSET1_CLOSE_LOSS_CAPITAL);
         env.trade_asset_with_cu(
             1,
             &winner_owner,
             winner,
             &loss_owner,
             loss,
-            (POS_SCALE / 50) as i128,
-            100,
+            ASSET1_CLOSE_Q as i128,
+            ASSET1_CLOSE_OPEN_PRICE,
             0,
         );
         winner_owners.push(winner_owner);
@@ -185,7 +187,8 @@ fn inv075_competing_public_closes_fixture() -> Inv075CompetingCloseFixture {
         losses.push(loss);
     }
 
-    for (slot, mark) in [(2u64, 200u64), (3, 300)] {
+    for (step, mark) in ASSET1_CLOSE_MARKS.into_iter().enumerate() {
+        let slot = 1 + step as u64;
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_for_asset_with_authority(1, &creator, slot, mark);
         for &winner in &winners {
@@ -902,7 +905,7 @@ fn inv075_source_defines_test(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_exclusive_close_ownership_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "80f8f0b494e84f191c5a10463b9e10fc19156af4";
+    const ENGINE_PIN: &str = "08e8f7f08b8b74139201c73119619141e407b198";
     const CLASSES: &[Inv075CloseClass] = &[
         Inv075CloseClass {
             class: "exclusive domain and account acquisition",

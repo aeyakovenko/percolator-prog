@@ -45,7 +45,7 @@ fn v16_program_resolved_close_order_preserves_pending_obligation_attribution() {
             live_counterparty,
             live_peer_owner,
             live_peer,
-        } = public_asset1_bankrupt_close_fixture_before_close_with_b_chunk_atoms(1);
+        } = public_asset1_bankrupt_close_fixture_before_close();
 
         let forfeit_cu = env.forfeit_recovery_leg_with_cu(
             &asset1_counterparty_owner,
@@ -488,7 +488,7 @@ fn inv076_source_defines_test(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_close_finalization_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "80f8f0b494e84f191c5a10463b9e10fc19156af4";
+    const ENGINE_PIN: &str = "08e8f7f08b8b74139201c73119619141e407b198";
     const CLASSES: &[Inv076CloseClass] = &[
         Inv076CloseClass {
             class: "close creation identity exclusion and exit barrier",

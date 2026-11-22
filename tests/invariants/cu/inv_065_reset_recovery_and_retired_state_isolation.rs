@@ -19,7 +19,6 @@ pub(super) fn public_empty_long_reset_pending_fixture() -> PublicEmptyLongResetP
         initial_price: 1,
         max_trading_fee_bps: 10,
         max_bankrupt_close_lifetime_slots: 1,
-        public_b_chunk_atoms: 1,
         maintenance_fee_per_slot: 20_000,
         ..V16CuMarketParams::default()
     });
@@ -602,7 +601,7 @@ fn inv065_braced_body_after<'a>(source: &'a str, marker: &str) -> &'a str {
 
 #[test]
 fn v16_program_lifecycle_isolation_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "80f8f0b494e84f191c5a10463b9e10fc19156af4";
+    const ENGINE_PIN: &str = "08e8f7f08b8b74139201c73119619141e407b198";
     const CLASSES: &[Inv065LifecycleClass] = &[
         Inv065LifecycleClass {
             class: "complete public state admission",

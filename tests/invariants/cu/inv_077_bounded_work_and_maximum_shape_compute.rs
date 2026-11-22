@@ -6059,11 +6059,11 @@ fn v16_attack_public_14_leg_28_source_collateral_deposit_stays_bounded() {
     );
 }
 
-// must make bounded progress, and must not force more than public_b_chunk_atoms through in one tx.
+// Permissionless B settlement must make bounded progress and must not force more than
+// PUBLIC_B_CHUNK_ATOMS through in one tx.
 #[test]
 fn v16_program_permissionless_settle_b_is_bounded_and_live() {
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
-        public_b_chunk_atoms: 1,
         ..V16CuMarketParams::default()
     });
     let long_owner = Keypair::new();
@@ -6168,7 +6168,6 @@ fn v16_program_public_full_shape_b_backlog_has_bounded_settlement() {
     assert_certified_engine_pin("public full-shape B backlog");
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
         max_portfolio_assets: ASSETS,
-        public_b_chunk_atoms: 1,
         ..V16CuMarketParams::default()
     });
     env.configure_permissionless_resolve_with_cu(100, 5);
@@ -6294,22 +6293,11 @@ fn v16_program_public_full_shape_b_backlog_has_bounded_settlement() {
     for (asset, (loss_owner, loss)) in counterparties.iter().enumerate() {
         env.try_shutdown_asset_with_authority(&admin, asset as u16, 6)
             .expect("public shutdown before side-local residual disposition");
+        // Each two-atom residual is below the public B chunk (the constant PUBLIC_B_CHUNK_ATOMS), so
+        // the forfeit books it at once. (Until 2026-11-22 the market chose a one-atom chunk and a
+        // public continuation booked the second atom.)
         let cu = env.forfeit_recovery_leg_with_cu(loss_owner, *loss, asset as u16, 1);
-        assert_cu_within("all-leg B public first booking", cu, LIMIT);
-        assert_eq!(
-            close_progress(&env.portfolio_state(*loss)).residual_remaining,
-            1
-        );
-        let cu = env
-            .crank_if_actionable(
-                *loss,
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: 6,
-                    observations: vec![],
-                },
-            )
-            .expect("public close continuation must book the second loss atom");
-        assert_cu_within("all-leg B public second booking", cu, LIMIT);
+        assert_cu_within("all-leg B public booking", cu, LIMIT);
         assert_eq!(
             close_progress(&env.portfolio_state(*loss)).residual_remaining,
             0
@@ -6320,7 +6308,6 @@ fn v16_program_public_full_shape_b_backlog_has_bounded_settlement() {
     let group_before = env.market_state().1;
     assert_eq!(group_before.mode, MarketModeV16::Live);
     assert_eq!(group_before.config.max_portfolio_assets, ASSETS);
-    assert_eq!(group_before.config.public_b_chunk_atoms, 1);
     assert_eq!(
         env.portfolio_state(peer).capital.get(),
         CAPITAL - u128::from(ASSETS)
@@ -6386,6 +6373,7 @@ fn v16_program_public_full_shape_b_backlog_has_bounded_settlement() {
     let mut calls = 0;
     let mut max_cu = 0;
     assert_ne!(env.payer.pubkey(), owner.pubkey());
+    // A public call settles one leg's whole two-atom B loss (below the public B chunk).
     while rank(&env) != 0 && calls < 2 * usize::from(ASSETS) {
         let old_rank = rank(&env);
         let old = env.portfolio_state(target);
@@ -6404,7 +6392,7 @@ fn v16_program_public_full_shape_b_backlog_has_bounded_settlement() {
         assert_eq!(active_bitmap(&after), active_bitmap(&before));
         assert_eq!(after.capital, before.capital);
         assert_eq!(source_count(&after), source_count(&before));
-        assert_eq!(old.pnl.get() - after.pnl.get(), 1);
+        assert_eq!(old.pnl.get() - after.pnl.get(), 2);
         let mut changed_asset = None;
         for asset in 0..ASSETS {
             let old_leg = active_leg_for_asset(&old, usize::from(asset));
@@ -6423,7 +6411,7 @@ fn v16_program_public_full_shape_b_backlog_has_bounded_settlement() {
                 .checked_mul(delta)
                 .and_then(|value| value.checked_add(old_leg.b_rem))
                 .unwrap();
-            assert_eq!(settled_num / percolator::SOCIAL_LOSS_DEN, 1);
+            assert_eq!(settled_num / percolator::SOCIAL_LOSS_DEN, 2);
             assert_eq!(new_leg.b_rem, settled_num % percolator::SOCIAL_LOSS_DEN);
             assert_eq!(
                 new_leg.b_stale,
@@ -6451,12 +6439,12 @@ fn v16_program_public_full_shape_b_backlog_has_bounded_settlement() {
                     old_source
                         .source_claim_bound_num
                         .get()
-                        .checked_sub(BOUND_SCALE)
+                        .checked_sub(2 * BOUND_SCALE)
                         .unwrap(),
                 );
                 assert_eq!(
                     *new_source, expected,
-                    "exactly one source-claim atom is consumed"
+                    "exactly the leg's two source-claim atoms are consumed"
                 );
             }
         }
@@ -6479,7 +6467,7 @@ fn v16_program_public_full_shape_b_backlog_has_bounded_settlement() {
         max_cu = max_cu.max(cu);
     }
     assert_eq!(rank(&env), 0, "all fourteen B obligations must terminate");
-    assert_eq!(calls, 2 * usize::from(ASSETS));
+    assert_eq!(calls, usize::from(ASSETS));
     let after = env.portfolio_state(target);
     assert_eq!(after.pnl.get(), 3 * i128::from(ASSETS));
     assert_eq!(after.capital.get(), CAPITAL);

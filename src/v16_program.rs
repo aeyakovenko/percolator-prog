@@ -3158,7 +3158,6 @@ pub mod ix {
             max_account_b_settlement_chunks: u64,
             max_bankrupt_close_chunks: u64,
             max_bankrupt_close_lifetime_slots: u64,
-            public_b_chunk_atoms: u128,
             maintenance_fee_per_slot: u128,
         },
         InitPortfolio,
@@ -3658,7 +3657,6 @@ pub mod ix {
                 max_account_b_settlement_chunks: read_u64(rest)?,
                 max_bankrupt_close_chunks: read_u64(rest)?,
                 max_bankrupt_close_lifetime_slots: read_u64(rest)?,
-                public_b_chunk_atoms: read_u128(rest)?,
                 maintenance_fee_per_slot: read_u128(rest)?,
             })
         }
@@ -4034,7 +4032,6 @@ pub mod ix {
                     max_account_b_settlement_chunks,
                     max_bankrupt_close_chunks,
                     max_bankrupt_close_lifetime_slots,
-                    public_b_chunk_atoms,
                     maintenance_fee_per_slot,
                 } => {
                     out.push(0);
@@ -4058,7 +4055,6 @@ pub mod ix {
                     push_u64(&mut out, max_account_b_settlement_chunks);
                     push_u64(&mut out, max_bankrupt_close_chunks);
                     push_u64(&mut out, max_bankrupt_close_lifetime_slots);
-                    push_u128(&mut out, public_b_chunk_atoms);
                     push_u128(&mut out, maintenance_fee_per_slot);
                 }
                 Self::InitPortfolio => out.push(1),
@@ -7536,7 +7532,6 @@ pub mod processor {
                 max_account_b_settlement_chunks,
                 max_bankrupt_close_chunks,
                 max_bankrupt_close_lifetime_slots,
-                public_b_chunk_atoms,
                 maintenance_fee_per_slot,
             } => handle_init_market(
                 program_id,
@@ -7561,7 +7556,6 @@ pub mod processor {
                 max_account_b_settlement_chunks,
                 max_bankrupt_close_chunks,
                 max_bankrupt_close_lifetime_slots,
-                public_b_chunk_atoms,
                 maintenance_fee_per_slot,
             ),
             Instruction::InitPortfolio => handle_init_portfolio(program_id, accounts),
@@ -8206,7 +8200,6 @@ pub mod processor {
         max_account_b_settlement_chunks: u64,
         max_bankrupt_close_chunks: u64,
         max_bankrupt_close_lifetime_slots: u64,
-        public_b_chunk_atoms: u128,
         maintenance_fee_per_slot: u128,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
@@ -8240,7 +8233,6 @@ pub mod processor {
         cfg.max_account_b_settlement_chunks = max_account_b_settlement_chunks;
         cfg.max_bankrupt_close_chunks = max_bankrupt_close_chunks;
         cfg.max_bankrupt_close_lifetime_slots = max_bankrupt_close_lifetime_slots;
-        cfg.public_b_chunk_atoms = public_b_chunk_atoms;
         if initial_price == 0 || initial_price > percolator::MAX_ORACLE_PRICE {
             return Err(PercolatorError::EngineInvalidConfig.into());
         }

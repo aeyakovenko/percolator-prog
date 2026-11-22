@@ -9360,7 +9360,7 @@ fn create_public_cancellable_close_via_route_and_side(
     route: TradeRoute,
     winner_side: SideV16,
 ) -> Result<(), String> {
-    let close = drive_public_close_candidate_via_route_and_side(
+    create_public_cancellable_close_sized(
         runner,
         winner,
         loser,
@@ -9368,6 +9368,30 @@ fn create_public_cancellable_close_via_route_and_side(
         cranker,
         route,
         winner_side,
+        &PublicBCloseScale::SMALL,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_public_cancellable_close_sized(
+    runner: &mut ScenarioRunner,
+    winner: u8,
+    loser: u8,
+    asset: u8,
+    cranker: u8,
+    route: TradeRoute,
+    winner_side: SideV16,
+    scale: &PublicBCloseScale,
+) -> Result<(), String> {
+    let close = drive_public_close_candidate_sized(
+        runner,
+        winner,
+        loser,
+        asset,
+        cranker,
+        route,
+        winner_side,
+        scale,
     )?;
     if !close.active
         || close.finalized
@@ -9398,13 +9422,34 @@ fn drive_public_close_candidate_via_route_and_side(
     route: TradeRoute,
     winner_side: SideV16,
 ) -> Result<CloseProgressLedgerV16, String> {
+    drive_public_close_candidate_sized(
+        runner,
+        winner,
+        loser,
+        asset,
+        cranker,
+        route,
+        winner_side,
+        &PublicBCloseScale::SMALL,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_public_close_candidate_sized(
+    runner: &mut ScenarioRunner,
+    winner: u8,
+    loser: u8,
+    asset: u8,
+    cranker: u8,
+    route: TradeRoute,
+    winner_side: SideV16,
+    scale: &PublicBCloseScale,
+) -> Result<CloseProgressLedgerV16, String> {
     let asset_index = asset as usize;
     let winner_index = winner as usize;
     let loser_index = loser as usize;
-    let open_abs_q = (POS_SCALE as i128)
-        .checked_mul(3)
-        .and_then(|value| value.checked_div(4))
-        .ok_or("INV-076 close fixture quantity overflow")?;
+    let open_abs_q =
+        i128::try_from(scale.close_abs_q).map_err(|_| "INV-076 close fixture quantity overflow")?;
     let open_q = match winner_side {
         SideV16::Long => open_abs_q,
         SideV16::Short => open_abs_q
@@ -9412,8 +9457,8 @@ fn drive_public_close_candidate_via_route_and_side(
             .ok_or("INV-076 close fixture quantity negation overflow")?,
     };
     let adverse_move_bps = match winner_side {
-        SideV16::Long => 500,
-        SideV16::Short => -500,
+        SideV16::Long => scale.adverse_move_bps,
+        SideV16::Short => -scale.adverse_move_bps,
     };
     if !runner
         .execute_trade(
@@ -9431,7 +9476,7 @@ fn drive_public_close_candidate_via_route_and_side(
             "INV-076 {route:?} close-fixture opening trade did not land"
         ));
     }
-    for _ in 0..20 {
+    for _ in 0..scale.marks {
         runner.run_safety_prefix(&[Action::PushMark {
             asset,
             dt: 1,
@@ -18885,21 +18930,59 @@ pub fn run_bounded_recovery_reference_frontier() -> Result<BoundedRecoveryFronti
     })
 }
 
+/// Sizes of the public B close seed. `SMALL` is the shared seed. A test that needs the close to
+/// book in more than one public B step (a residual above `PUBLIC_B_CHUNK_ATOMS`) uses a larger
+/// close pair at a higher price (`public_b_close_seed_sized`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublicBCloseScale {
+    pub initial_price: u64,
+    /// Size of the close pair's opening trade.
+    pub close_abs_q: u128,
+    /// Adverse mark move per slot against the loser, and the number of such marks.
+    pub adverse_move_bps: i16,
+    pub marks: usize,
+    pub actor_deposits: [u128; PRIMARY_ACTOR_COUNT],
+    pub actor_token_balances: [u64; PRIMARY_ACTOR_COUNT],
+}
+
+impl PublicBCloseScale {
+    pub const SMALL: Self = Self {
+        initial_price: INITIAL_PRICE,
+        close_abs_q: POS_SCALE * 3 / 4,
+        adverse_move_bps: 500,
+        marks: 20,
+        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 161_600, 2_000_000, 1_000_000, 1],
+    };
+}
+
 /// Public active close before its first B booking, with an independently funded live cohort.
 /// Actors 0/1 own the close; actor 2 is on `winner_side` and actor 3 is its matched peer.
 /// Construction uses the existing public close runner and its per-transition global checks.
-pub fn public_b_close_seed(
+pub fn public_b_close_seed(winner_side: SideV16, cohort_q: u128) -> Result<V16Svm, String> {
+    Ok(build_public_b_close_seed(winner_side, cohort_q)?.env)
+}
+
+/// The same seed with the sizes of `scale`.
+pub fn public_b_close_seed_sized(
     winner_side: SideV16,
     cohort_q: u128,
-    public_b_chunk_atoms: u128,
+    scale: &PublicBCloseScale,
 ) -> Result<V16Svm, String> {
-    Ok(build_public_b_close_seed(winner_side, cohort_q, public_b_chunk_atoms)?.env)
+    Ok(build_public_b_close_seed_sized(winner_side, cohort_q, scale)?.env)
 }
 
 fn build_public_b_close_seed(
     winner_side: SideV16,
     cohort_q: u128,
-    public_b_chunk_atoms: u128,
+) -> Result<ScenarioRunner, String> {
+    build_public_b_close_seed_sized(winner_side, cohort_q, &PublicBCloseScale::SMALL)
+}
+
+fn build_public_b_close_seed_sized(
+    winner_side: SideV16,
+    cohort_q: u128,
+    scale: &PublicBCloseScale,
 ) -> Result<ScenarioRunner, String> {
     const CLOSE_WINNER: usize = 0;
     const CLOSE_LOSER: usize = 1;
@@ -18908,6 +18991,7 @@ fn build_public_b_close_seed(
     const ASSET: usize = 0;
 
     let config = MarketConfig {
+        initial_price: scale.initial_price,
         max_price_move_bps_per_slot: 500,
         max_accrual_dt_slots: 1,
         max_abs_funding_e9_per_slot: 0,
@@ -18915,9 +18999,8 @@ fn build_public_b_close_seed(
         maintenance_fee_per_slot: 0,
         maintenance_margin_bps: 1_000,
         initial_margin_bps: 1_000,
-        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
-        actor_token_balances: [1_000_000, 161_600, 2_000_000, 1_000_000, 1],
-        public_b_chunk_atoms,
+        actor_deposits: scale.actor_deposits,
+        actor_token_balances: scale.actor_token_balances,
         ..MarketConfig::default()
     };
     let seed_byte = match winner_side {
@@ -18944,7 +19027,7 @@ fn build_public_b_close_seed(
             "INV-086 {winner_side:?} B seed independent cohort trade did not land"
         ));
     }
-    create_public_cancellable_close_via_route_and_side(
+    create_public_cancellable_close_sized(
         &mut runner,
         CLOSE_WINNER as u8,
         CLOSE_LOSER as u8,
@@ -18952,6 +19035,7 @@ fn build_public_b_close_seed(
         EXIT_MAKER_INDEX as u8,
         TradeRoute::NoCpi,
         winner_side,
+        scale,
     )?;
 
     Ok(runner)
@@ -18961,8 +19045,7 @@ fn build_bounded_b_reference_seed(winner_side: SideV16) -> Result<(ScenarioRunne
     const CLOSE_LOSER: usize = 1;
     const B_OWNER: usize = 2;
     const ASSET: usize = 0;
-    let mut runner =
-        build_public_b_close_seed(winner_side, POS_SCALE / 2, percolator::MAX_VAULT_TVL)?;
+    let mut runner = build_public_b_close_seed(winner_side, POS_SCALE / 2)?;
 
     for step in 0..32 {
         let close = runner

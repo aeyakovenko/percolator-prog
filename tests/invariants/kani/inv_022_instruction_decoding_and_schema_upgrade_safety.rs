@@ -37,10 +37,9 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
     let max_account_b_settlement_chunks: u64 = kani::any();
     let max_bankrupt_close_chunks: u64 = kani::any();
     let max_bankrupt_close_lifetime_slots: u64 = kani::any();
-    let public_b_chunk_atoms: u128 = kani::any();
     let maintenance_fee_per_slot: u128 = kani::any();
 
-    let mut data = [0u8; 218];
+    let mut data = [0u8; 202];
     data[0..2].copy_from_slice(&max_portfolio_assets.to_le_bytes());
     data[2..10].copy_from_slice(&h_min.to_le_bytes());
     data[10..18].copy_from_slice(&h_max.to_le_bytes());
@@ -61,8 +60,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
     data[162..170].copy_from_slice(&max_account_b_settlement_chunks.to_le_bytes());
     data[170..178].copy_from_slice(&max_bankrupt_close_chunks.to_le_bytes());
     data[178..186].copy_from_slice(&max_bankrupt_close_lifetime_slots.to_le_bytes());
-    data[186..202].copy_from_slice(&public_b_chunk_atoms.to_le_bytes());
-    data[202..218].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
+    data[186..202].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
 
     match Instruction::decode_body_for_proof(0, &data).unwrap() {
         Instruction::InitMarket {
@@ -86,7 +84,6 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
             max_account_b_settlement_chunks: got_b_chunks,
             max_bankrupt_close_chunks: got_bankrupt_chunks,
             max_bankrupt_close_lifetime_slots: got_bankrupt_lifetime,
-            public_b_chunk_atoms: got_public_b,
             maintenance_fee_per_slot: got_maintenance_fee,
         } => {
             assert_eq!(got_max_assets, max_portfolio_assets);
@@ -109,16 +106,15 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
             assert_eq!(got_b_chunks, max_account_b_settlement_chunks);
             assert_eq!(got_bankrupt_chunks, max_bankrupt_close_chunks);
             assert_eq!(got_bankrupt_lifetime, max_bankrupt_close_lifetime_slots);
-            assert_eq!(got_public_b, public_b_chunk_atoms);
             assert_eq!(got_maintenance_fee, maintenance_fee_per_slot);
         }
         _ => unreachable!(),
     }
 
     let extra: u8 = kani::any();
-    let mut trailing = [0u8; 219];
-    trailing[..218].copy_from_slice(&data);
-    trailing[218] = extra;
+    let mut trailing = [0u8; 203];
+    trailing[..202].copy_from_slice(&data);
+    trailing[202] = extra;
     assert!(Instruction::decode_body_for_proof(0, &trailing).is_err());
 }
 

@@ -139,7 +139,7 @@ fn v16_program_deposit_preserves_flat_pending_obligation_and_close_partition() {
     const DEPOSIT: u64 = 7;
 
     for side in [SideV16::Long, SideV16::Short] {
-        let mut env = public_b_close_seed(side, POS_SCALE / 2, 1)
+        let mut env = public_b_close_seed(side, POS_SCALE / 2)
             .expect("public active close with a retained counterparty obligation");
         env.begin_public_trace();
 

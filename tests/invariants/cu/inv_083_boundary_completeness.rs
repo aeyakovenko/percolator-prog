@@ -589,7 +589,7 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
 
     const HEADER: &str = "type\tfields\tclassification\tevidence";
     // 238 named public fields plus the three unit-variant no-data subjects.
-    const EXPECTED_FIELD_COUNT: usize = 244;
+    const EXPECTED_FIELD_COUNT: usize = 243;
     const EXPECTED_TYPE_COUNT: usize = 53;
 
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -679,7 +679,7 @@ fn v16_program_every_public_input_field_has_a_boundary_profile_and_executable_wi
         "every boundary profile must own at least one current public input field"
     );
     let expected_profile_counts = BTreeMap::from([
-        ("amount", 25),
+        ("amount", 24),
         ("authenticated-time", 12),
         ("basis-points", 21),
         ("bitmask", 1),
@@ -1843,12 +1843,6 @@ fn v16_attack_init_market_rejects_grief_config_without_burning_market_account() 
             "zero bankrupt close lifetime",
             max_bankrupt_close_lifetime_slots,
             0
-        ),
-        invalid_case!("zero public B chunk", public_b_chunk_atoms, 0),
-        invalid_case!(
-            "public B chunk above the largest vault",
-            public_b_chunk_atoms,
-            percolator::MAX_VAULT_TVL + 1
         ),
         invalid_case!(
             "maintenance fee above protocol cap",

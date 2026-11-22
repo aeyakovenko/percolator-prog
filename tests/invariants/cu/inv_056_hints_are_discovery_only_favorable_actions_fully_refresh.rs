@@ -980,8 +980,9 @@ fn v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded() {
         ..
     } = fixture;
 
-    // The fixture's owner forfeit books the first loss atom. A permissionless
-    // close continuation books the second, entirely through public routes.
+    // The fixture's owner forfeit books the first public B chunk of the close
+    // (PUBLIC_B_CHUNK_ATOMS). A permissionless close continuation books the rest,
+    // entirely through public routes.
     let close_before = close_progress(&env.portfolio_state(loss));
     assert!(close_before.active && close_before.residual_remaining > 0);
     env.svm.expire_blockhash();
@@ -998,7 +999,7 @@ fn v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded() {
             ],
             &[],
         )
-        .expect("public close continuation must book the second B loss atom");
+        .expect("public close continuation must book the rest of the B loss");
     assert_cu_within("INV-056 public B booking", booking_cu, CRANK_CU_LIMIT);
     let target_b = env.market_state().1.assets[1].b_long_num;
     let before_discovery = active_leg_for_asset(&env.portfolio_state(asset1_counterparty), 1);
@@ -1010,7 +1011,8 @@ fn v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded() {
     assert!(!before_discovery.b_stale);
 
     // The owner route discovers the committed gap and may consume only one
-    // loss atom. Exactly one atom therefore remains for permissionless SettleB.
+    // loss atom. The rest remains for permissionless SettleB, which settles at
+    // most one public B chunk per call.
     let discovery_cu =
         env.forfeit_recovery_leg_with_cu(&asset1_counterparty_owner, asset1_counterparty, 1, 1);
     assert_cu_within("INV-056 public B discovery", discovery_cu, CUSTODY_CU_LIMIT);
@@ -1109,11 +1111,41 @@ fn v16_program_public_b_stale_atom_budget_is_hint_independent_and_bounded() {
         settle_cu,
         CRANK_CU_LIMIT,
     );
+    let first = active_leg_for_asset(&env.portfolio_state(asset1_counterparty), 1);
+    assert!(
+        first.b_snap > discovered.b_snap && first.b_snap < target_b && first.b_stale,
+        "one SettleB call settles one public B chunk of the account's share of the close"
+    );
+
+    env.svm.expire_blockhash();
+    let settle_rest_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                }],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(asset1_counterparty, false),
+                AccountMeta::new_readonly(settle_b_oracle, false),
+            ],
+            &[],
+        )
+        .expect("the next SettleB call must compose with the same oracle tail");
+    assert_cu_within(
+        "INV-056 external-tail plus public SettleB, second chunk",
+        settle_rest_cu,
+        CRANK_CU_LIMIT,
+    );
     let settled_account = env.portfolio_state(asset1_counterparty);
     let settled = active_leg_for_asset(&settled_account, 1);
     assert_eq!(
         settled.b_snap, target_b,
-        "the second atom must settle in one call"
+        "the rest of the account's share settles in the second call"
     );
     assert!(!settled.b_stale);
     assert_eq!(settled_account.b_stale_state, 0);

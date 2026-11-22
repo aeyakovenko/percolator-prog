@@ -30793,9 +30793,11 @@ also complete over all four deployed trade transports: an aggregate fill is comp
 two-slot partition and a same-slot one-quantum dust prefix. Each moving segment pays the independent
 externality-notional ceiling, exact lock rollback precedes bounded cohort catch-up, and the zero-move
 prefix consumes no fee or movement capacity. A second public-route product now holds one bankruptcy
-residual fixed while changing `public_b_chunk_atoms` from the full residual to one atom. Every
-booking and account settlement reconstructs its carried remainder independently, and both schedules
-converge to exactly the same user value, asset state, close ledger, and SPL custody. The remaining
+residual fixed while changing the B budget of the owner forfeits from one public B chunk to a
+quarter of one (until 2026-11-22 it changed the market's `public_b_chunk_atoms` from the full
+residual to one atom, see "The public B chunk becomes a constant"). Every booking and account
+settlement reconstructs its carried remainder independently, and both schedules converge to exactly
+the same user value, asset state, close ledger, and SPL custody. The remaining
 ratio-change cell is now closed by composing INV-052's existing resolved-claim, source-lien,
 expiry, and backed-claim split matrices with a new nonintegral 3,333-bps backing-fee product. That
 product crosses direct and matcher-CPI execution, both source-domain orders, and one versus two
@@ -31890,12 +31892,74 @@ was a nonzero value, and from 340,282,366,920,938,463 atoms on every B-settlemen
 account with a loss weight fails with an arithmetic overflow (the condition is exact, proved for
 all inputs), so a market created with such a chunk froze every position on a side after a social
 loss on it. `cu/inv_083_boundary_completeness.rs` now also refuses that case at InitMarket without
-burning the market account; the suite's markets use `MAX_VAULT_TVL`, which stays valid.
+burning the market account; the suite's markets use `MAX_VAULT_TVL`, which stays valid. (Superseded
+on 2026-11-22: the chunk is no longer a setting, see the next section.)
 
 Compute: every test of this suite passes unchanged except one exact compute pin:
 `v16_program_max_shape_short_b_budget_has_exact_public_progress` moves from 556,386 to 556,414 CU
 (`cu/inv_077_short_side_b_budget.rs`). The composition tests bound to the exact engine revision carry the new one
 (35 places in 27 files).
+
+### The public B chunk becomes a constant, batch 12 (2026-11-22)
+
+Engine pin `08e8f7f0`. The public B chunk is no longer a market setting. `InitMarket` drops its
+`public_b_chunk_atoms` field (16 bytes), and the engine books a bankruptcy residual, and settles an
+account's B loss, in steps of at most the constant `PUBLIC_B_CHUNK_ATOMS`, which equals
+`MAX_VAULT_TVL` (1e16 atoms). An `InitMarket` in the old format is refused, because the decoder
+rejects trailing bytes. This replaces the admission rule of the previous section: there is no chunk
+left to choose. A bankrupt residual is now booked in one step unless it exceeds 1e16 atoms or the B
+index's headroom, and a liquidation whose residual exceeds the chunk declares Recovery. The engine
+also restates one function contract, the funding floor of the K/F index update, which the
+arithmetic prover showed cannot be checked as written at `funding_num = ±i128::MAX`; the code it
+describes is unchanged.
+
+Tests that chose a chunk of one atom, or another small chunk, so that a close would book or settle
+over several calls now reach the same shapes at full scale, with a residual above 1e16:
+
+- `v16_cu.rs`: the shared asset-1 bankrupt close is a short of 17,000,000 units opened at 1e8 with
+  1.7e15 of capital against 3.4e15, after which the mark doubles three times (unpaid loss 1.02e16).
+  The tests built on it or sized like it follow it, in `cu/inv_021`, `inv_023`, `inv_038`,
+  `inv_039`, `inv_055`, `inv_056`, `inv_071`, `inv_072`, `inv_073`, `inv_074`, `inv_075` and
+  `inv_076`.
+- `cu/inv_071_crank_progress.rs`: the escalation matrix uses a 1.06e16 loss at production margins,
+  and the close/B overlap uses an asset-0 short whose mark doubles four times (residual 2.38e16).
+- With their own sizes: `cu/inv_071_recovery_obligation_finalization.rs`,
+  `cu/inv_057_funded_owner_routes.rs`, the partial close of `cu/inv_073_no_permanent_user_lock.rs`
+  (five marks of 4.8% at production parameters), the `cu/inv_075_*` handoff and competing closes,
+  and the auxiliary close of `cu/inv_039_pending_loss_obligation_durability.rs`. `cu/inv_056_*`
+  takes a second SettleB call.
+- `stateful/inv_038_rounding_and_ratio_conservation.rs`: the B-carry history (a close pair of
+  2.68e13 q at a price of 1e9, residual 1.4e16, two bookings) and the first close of the
+  fresh-booking history (residual 1.23e16, two bookings), sized through `PublicBCloseScale` in
+  `support/fuzz_model.rs`. The shared seed is unchanged.
+- `cu/inv_083_boundary_completeness.rs` and `kani/inv_022_*`: the `InitMarket` field count and wire
+  layout without the field. The case that refused a zero chunk went with the field.
+
+What no longer fits, or no longer exists, is narrowed. Each change is listed with its reason:
+
+| Test | Was | Now | Why |
+|---|---|---|---|
+| `v16_program_max_shape_short_b_budget_has_exact_public_progress` | each of the 14 legs settled in a full and a partial 4-atom chunk | one call settles each leg's 6 atoms | a partial leg needs a B loss above 1e16 on each of the 14 legs, 1.4e17 in all |
+| `v16_program_public_full_shape_b_backlog_has_bounded_settlement` | a forfeit booked one atom of each leg's residual and a continuation the second | the forfeit books each two-atom residual at once | the same: 14 residuals above 1e16 |
+| `cu/inv_023_*` budget prefix | a prefix of one atom | a prefix of the close's pending residual | the compared frames count calls; with a 1e16 chunk a one-atom prefix adds a call, the pending residual does not |
+| `v16_program_social_loss_aggregate_and_chunked_routes_converge_exactly` | a one-atom budget chunked both the booking and the settlement | a quarter-chunk budget chunks the settlement; both routes book in the same calls | booking takes no caller budget: it moves one public chunk per step |
+| `v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbrance_attribution`, second close | its first booking left a residual for a continuation | it books in full when it activates; the test checks that booking through the side reset that follows | the booking lands on one owner (the only weight left), so a continuation needs more than 1e16 of that owner's gain, out of a cohort whose counterparty's loss is the same close; the best fit found takes 9.94e15 of the 1e16 vault cap |
+| engine `two_bankruptcies_settle_in_every_close_order`, chunked variant | also ran with a 1,000,000-atom chunk | dropped | a chunked close there needs one account's unpaid loss above 1e16 while the account with the same position stays solvent: more capital than a vault holds |
+| engine `v16_fuzz_public_live_view_actions_preserve_conservation_under_svm_rollback` | a close could stay partly booked across the fuzz's other actions | closes book in one step | a partly booked close needs a residual above 1e16, out of reach of its 1,000-atom accounts; the full-scale tests above cover it |
+| engine differential oracles | each driver drew a random chunk one time in four | the draw is discarded | the chunk is a constant; with the draw discarded on both sides and the field cut from the hashed header, all four oracles match the previous engine byte for byte |
+
+The engine's leveraged #132 tests (`tests/resolved_close_ledger_locks.rs`) now assert the maker's
+exact payout instead of a fitted tolerance. Resolved close converts the maker's source-backed gain
+at the domain's credit rate, which is floored to 1 / `CREDIT_RATE_SCALE`. That can leave up to
+`claim / CREDIT_RATE_SCALE + 1` atoms of the loser's backing in the domain (2,688 and 3,955 atoms in
+those tests), so the first payout is short by exactly that amount. Once the backing bucket lapses, a
+permissionless crank of the maker that observes the asset expires it, and the maker's next close
+pays the leftover as a top-up. The maker ends paid whole and the vault empty.
+
+Compute: one exact compute pin moves. `v16_program_max_shape_short_b_budget_has_exact_public_progress`
+goes from 556,414 to 556,197 CU (`cu/inv_077_short_side_b_budget.rs`); a call now settles a whole leg.
+The composition tests bound to the exact engine revision carry the new one (35 places in 27 files),
+and `cu/inv_023_*` checks INV-083's field count of 243.
 
 ### INV-036/045 no keeper reward during Hybrid catch-up: five tests restated (2026-11-19)
 

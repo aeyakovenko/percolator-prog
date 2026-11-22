@@ -702,7 +702,6 @@ fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
             max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
             max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
             max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
             maintenance_fee_per_slot: p.maintenance_fee_per_slot,
         },
         vec![
@@ -1225,7 +1224,6 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
             max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
             max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
             max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
             maintenance_fee_per_slot: p.maintenance_fee_per_slot,
         },
         vec![
@@ -1718,7 +1716,6 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
             max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
             max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
             max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
             maintenance_fee_per_slot: p.maintenance_fee_per_slot,
         },
         vec![
@@ -2006,7 +2003,6 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
             max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
             max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
             max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
             maintenance_fee_per_slot: p.maintenance_fee_per_slot,
         },
         vec![
@@ -2442,7 +2438,6 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
             max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
             max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
             max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
             maintenance_fee_per_slot: p.maintenance_fee_per_slot,
         },
         vec![
@@ -3926,7 +3921,6 @@ fn v16_attack_close_resolved_rejects_cross_market_portfolio_payout() {
             max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
             max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
             max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
             maintenance_fee_per_slot: p.maintenance_fee_per_slot,
         },
         vec![
@@ -4226,7 +4220,6 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
             max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
             max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
             max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
             maintenance_fee_per_slot: p.maintenance_fee_per_slot,
         },
         vec![
@@ -5132,7 +5125,6 @@ fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
             max_account_b_settlement_chunks: p.max_account_b_settlement_chunks,
             max_bankrupt_close_chunks: p.max_bankrupt_close_chunks,
             max_bankrupt_close_lifetime_slots: p.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: p.public_b_chunk_atoms,
             maintenance_fee_per_slot: p.maintenance_fee_per_slot,
         },
         vec![

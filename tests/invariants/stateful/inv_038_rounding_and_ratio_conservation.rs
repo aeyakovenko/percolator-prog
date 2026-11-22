@@ -72,6 +72,7 @@ mod mixed_residue;
 use crate::support::{
     fuzz_model::{
         assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
+        PublicBCloseScale,
     },
     v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, TX_CU_LIMIT},
 };
@@ -382,7 +383,7 @@ impl PublicBHistoryObserver {
                 booked,
                 old_close
                     .residual_remaining
-                    .min(before.group.config.public_b_chunk_atoms)
+                    .min(percolator::PUBLIC_B_CHUNK_ATOMS)
             );
             let (weight, index, carry, _, _) = before.side(loss_side);
             let (new_weight, new_index, new_carry, _, _) = after.side(loss_side);
@@ -477,16 +478,49 @@ impl PublicBHistoryObserver {
     }
 }
 
+/// Close pair of the B-carry history, sized so that its close books in two public B steps: its
+/// residual (about 1.4e16) exceeds `PUBLIC_B_CHUNK_ATOMS`. The pair opens 2.68e13 q at a price of
+/// 1e9 with 12% margin on each side; the K cohort (actors 2 and 3) keeps its quantity and its
+/// principal scales with the price. The vault stays under 6.5e15.
+const B_CARRY_PRINCIPAL: u128 = 1_000_000_000;
+const B_CARRY_CLOSE_CAPITAL: u128 = 3_200_000_000_000_000;
+const B_CARRY_SCALE: PublicBCloseScale = PublicBCloseScale {
+    initial_price: 1_000_000_000,
+    close_abs_q: 26_800_000_000_017,
+    adverse_move_bps: 500,
+    marks: 20,
+    actor_deposits: [
+        B_CARRY_CLOSE_CAPITAL,
+        B_CARRY_CLOSE_CAPITAL,
+        B_CARRY_PRINCIPAL,
+        B_CARRY_PRINCIPAL,
+        1,
+    ],
+    actor_token_balances: [
+        B_CARRY_CLOSE_CAPITAL as u64,
+        B_CARRY_CLOSE_CAPITAL as u64,
+        2 * B_CARRY_PRINCIPAL as u64,
+        B_CARRY_PRINCIPAL as u64,
+        1,
+    ],
+};
+
 fn verify_pre_b_mark_origin(
     snapshot: &BHistorySnapshot,
     cohort_q: u128,
     settled: [bool; 2],
+    scale: &PublicBCloseScale,
 ) -> Result<[u128; 2], String> {
-    const PRINCIPAL: u128 = 1_000_000;
-    // public_b_close_seed(Short) submits twenty authenticated -500 bps marks,
-    // with no cohort resize, ADL or funding before this checkpoint.
-    let mark = (0..20).fold(INITIAL_PRICE, |price, _| price * 9_500 / 10_000);
-    let price_delta = u128::from(INITIAL_PRICE - mark);
+    let principal = scale.actor_deposits[2];
+    assert_eq!(
+        scale.actor_deposits[3], principal,
+        "both cohort owners fund the same principal"
+    );
+    // public_b_close_seed_sized(Short) submits `scale.marks` authenticated adverse marks of
+    // `scale.adverse_move_bps`, with no cohort resize, ADL or funding before this checkpoint.
+    let keep_bps = 10_000 - u64::try_from(scale.adverse_move_bps).unwrap();
+    let mark = (0..scale.marks).fold(scale.initial_price, |price, _| price * keep_bps / 10_000);
+    let price_delta = u128::from(scale.initial_price - mark);
     let exact_num = i128::try_from(
         cohort_q
             .checked_mul(price_delta)
@@ -522,13 +556,13 @@ fn verify_pre_b_mark_origin(
         let leg = snapshot.leg(actor).ok_or("K origin lost its cohort leg")?;
         let sign = if actor == 2 { 1 } else { -1 };
         let expected_capital = if actor == 3 && settled[index] {
-            PRINCIPAL
+            principal
                 .checked_sub(gain + 1)
                 .ok_or("K loss exceeds principal")?
         } else {
-            PRINCIPAL
+            principal
         };
-        let allocated_num = (b_account_value(account) - PRINCIPAL as i128) * POS_SCALE as i128;
+        let allocated_num = (b_account_value(account) - principal as i128) * POS_SCALE as i128;
         let pending_num = if settled[index] { 0 } else { sign * exact_num };
         let residue = if settled[index] { residues[index] } else { 0 };
         if account.capital.get() != expected_capital
@@ -551,18 +585,18 @@ fn verify_pre_b_mark_origin(
 
 #[test]
 fn v16_program_b_carry_survives_admitted_owner_weight_changes() {
-    use crate::support::fuzz_model::public_b_close_seed;
+    use crate::support::fuzz_model::public_b_close_seed_sized;
     use percolator::SideV16;
 
     let side = SideV16::Short;
-    let chunk = 250_007;
+    let scale = &B_CARRY_SCALE;
     let order = [3, 2, 0];
     let cohort_q = POS_SCALE / 2 + 3;
-    let mut env = public_b_close_seed(side, cohort_q, chunk).unwrap();
+    let mut env = public_b_close_seed_sized(side, cohort_q, scale).unwrap();
     env.begin_public_trace();
     let mut settled = [false; 2];
     let residues =
-        verify_pre_b_mark_origin(&BHistorySnapshot::read(&env), cohort_q, settled).unwrap();
+        verify_pre_b_mark_origin(&BHistorySnapshot::read(&env), cohort_q, settled, scale).unwrap();
     assert_eq!(residues.iter().sum::<u128>(), POS_SCALE);
     let keys = std::iter::once(env.market)
         .chain(env.actors.iter().map(|actor| actor.portfolio))
@@ -597,7 +631,7 @@ fn v16_program_b_carry_survives_admitted_owner_weight_changes() {
             }
             let after = BHistorySnapshot::read(&env);
             assert_eq!(
-                verify_pre_b_mark_origin(&after, cohort_q, settled).unwrap(),
+                verify_pre_b_mark_origin(&after, cohort_q, settled, scale).unwrap(),
                 residues
             );
             assert_eq!(env.all_token_account_data(), tokens);
@@ -635,15 +669,15 @@ fn v16_program_b_carry_survives_admitted_owner_weight_changes() {
     let checkpoint = BHistorySnapshot::read(&env);
     let mut wrong = checkpoint.clone();
     wrong.accounts[3].capital = percolator::V16PodU128::new(wrong.accounts[3].capital.get() + 1);
-    assert!(verify_pre_b_mark_origin(&wrong, cohort_q, settled).is_err());
+    assert!(verify_pre_b_mark_origin(&wrong, cohort_q, settled, scale).is_err());
     let mut wrong = checkpoint.clone();
     wrong.accounts[2].capital = percolator::V16PodU128::new(wrong.accounts[2].capital.get() + 1);
     wrong.accounts[2].pnl = percolator::V16PodI128::new(wrong.accounts[2].pnl.get() - 1);
-    assert!(verify_pre_b_mark_origin(&wrong, cohort_q, settled).is_err());
+    assert!(verify_pre_b_mark_origin(&wrong, cohort_q, settled, scale).is_err());
     let mut wrong = checkpoint;
     wrong.accounts[2].pnl = percolator::V16PodI128::new(wrong.accounts[2].pnl.get() + 1);
     wrong.accounts[3].pnl = percolator::V16PodI128::new(wrong.accounts[3].pnl.get() - 1);
-    assert!(verify_pre_b_mark_origin(&wrong, cohort_q, settled).is_err());
+    assert!(verify_pre_b_mark_origin(&wrong, cohort_q, settled, scale).is_err());
     eprintln!(
         "INV-038 pre-B K: steps=4, rejected=2, residue_nums={residues:?}, denominator={POS_SCALE}"
     );
@@ -734,7 +768,7 @@ fn v16_program_b_carry_survives_admitted_owner_weight_changes() {
     wrong.accounts[2].pnl = percolator::V16PodI128::new(wrong.accounts[2].pnl.get() + 1);
     wrong.accounts[0].pnl = percolator::V16PodI128::new(wrong.accounts[0].pnl.get() - 1);
     assert!(observer.verify(&wrong).is_err());
-    eprintln!("INV-038 {side:?} chunk={chunk} order={order:?}: steps={}, rejected={}, bookings={}, settlements={}, health={}", observer.steps, observer.rejected, observer.bookings, observer.settlements, observer.health_checks);
+    eprintln!("INV-038 {side:?} chunk={} order={order:?}: steps={}, rejected={}, bookings={}, settlements={}, health={}", percolator::PUBLIC_B_CHUNK_ATOMS, observer.steps, observer.rejected, observer.bookings, observer.settlements, observer.health_checks);
     assert!(observer.bookings > 1 && observer.settlements > 0 && observer.health_checks > 0);
     assert!(observer.rejected > 0);
     let trace = env.finish_public_trace();
@@ -800,13 +834,37 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
     const INSURANCE_DOMAIN: usize = 1;
     const COHORT_Q: i128 = POS_SCALE as i128 / 2 + 3;
     const COHORT_REDUCTION_Q: u128 = POS_SCALE / 7;
-    const CLOSE_Q: i128 = 3 * POS_SCALE as i128 / 4;
-    const B_CHUNK: u128 = 100_003;
     const INSURANCE_ATOMS: u128 = 17;
+    // The first close must book in more than one public B step, so its pair opens 1.85e13 q at
+    // a price of 1e9 with about 10.8% margin and the mark falls 29 times by 5%: its residual is
+    // about 1.23e16, above PUBLIC_B_CHUNK_ATOMS. The second close's booking lands on the cohort
+    // owner alone (the only weight left on the side), so it keeps the original small sizes and
+    // books in full when it activates: a second close that also left a residual after its first
+    // booking would need more than 1e16 of the cohort owner's gain, out of a cohort whose
+    // counterparty's loss is that same close, and does not fit under MAX_VAULT_TVL. (After a 5%
+    // step that is not a whole price the clamped mark sits one above the target and catches up on
+    // the next step; after 29 steps it is on the target.)
+    const OPEN_PRICE: u64 = 1_000_000_000;
+    const LOSS_MARKS: usize = 29;
+    const FIRST_CLOSE_Q: i128 = 18_500_000_000_011;
+    const SECOND_CLOSE_Q: i128 = 3 * POS_SCALE as i128 / 4;
+    const FIRST_CLOSE_CAPITAL: u128 = 2_000_000_000_000_000;
+    const COHORT_CAPITAL: u128 = 1_000_000_000;
+    const SHARED_LOSER_CAPITAL: u128 = 870_000_000;
+    const SECOND_WINNER_CAPITAL: u128 = 1_000_000_000;
+    const B_CHUNK: u128 = percolator::PUBLIC_B_CHUNK_ATOMS;
 
+    let deposits = [
+        FIRST_CLOSE_CAPITAL,
+        FIRST_CLOSE_CAPITAL,
+        COHORT_CAPITAL,
+        SHARED_LOSER_CAPITAL,
+        SECOND_WINNER_CAPITAL,
+    ];
     let mut env = V16Svm::new(
         [0x39; 32],
         MarketConfig {
+            initial_price: OPEN_PRICE,
             max_price_move_bps_per_slot: 500,
             max_accrual_dt_slots: 1,
             max_abs_funding_e9_per_slot: 0,
@@ -814,9 +872,8 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
             maintenance_fee_per_slot: 0,
             maintenance_margin_bps: 1_000,
             initial_margin_bps: 1_000,
-            actor_deposits: [1_000_000, 161_600, 1_000_000, 700_000, 1_000_000],
-            actor_token_balances: [1_000_000, 161_600, 1_000_000, 700_000, 1_000_000],
-            public_b_chunk_atoms: B_CHUNK,
+            actor_deposits: deposits,
+            actor_token_balances: deposits.map(|amount| amount as u64),
             ..MarketConfig::default()
         },
     );
@@ -831,7 +888,7 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
         SHARED_LOSER,
         LOSS_ASSET,
         -COHORT_Q,
-        INITIAL_PRICE,
+        OPEN_PRICE,
         0,
     )
     .expect("independent B cohort opens publicly");
@@ -848,15 +905,18 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
     );
     assert_inv038_attribution_censuses("INV-038 independent cohort admission", &env);
 
-    for (winner, loser) in [(FIRST_WINNER, FIRST_LOSER), (SECOND_WINNER, SHARED_LOSER)] {
+    for (winner, loser, close_q) in [
+        (FIRST_WINNER, FIRST_LOSER, FIRST_CLOSE_Q),
+        (SECOND_WINNER, SHARED_LOSER, SECOND_CLOSE_Q),
+    ] {
         execute_trade_route(
             &mut env,
             TradeRoute::NoCpi,
             winner,
             loser,
             LOSS_ASSET,
-            -CLOSE_Q,
-            INITIAL_PRICE,
+            -close_q,
+            OPEN_PRICE,
             0,
         )
         .unwrap_or_else(|error| panic!("close pair {winner}/{loser} admission: {error}"));
@@ -866,8 +926,8 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
         );
     }
 
-    let mut loss_mark = INITIAL_PRICE;
-    for step in 0..20 {
+    let mut loss_mark = OPEN_PRICE;
+    for step in 0..LOSS_MARKS {
         let slot = env.current_slot() + 1;
         loss_mark = loss_mark * 9_500 / 10_000;
         env.warp_to_slot(slot);
@@ -895,7 +955,7 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
         FIRST_WINNER,
         FIRST_LOSER,
         LOSS_ASSET,
-        CLOSE_Q,
+        FIRST_CLOSE_Q,
         loss_mark,
         0,
     )
@@ -992,7 +1052,7 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
         SECOND_WINNER,
         SHARED_LOSER,
         LOSS_ASSET,
-        CLOSE_Q,
+        SECOND_CLOSE_Q,
         loss_mark,
         0,
     )
@@ -1041,8 +1101,9 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
         .close_progress
         .try_to_runtime()
         .unwrap();
+    // Below the public B chunk, the activation books the whole residual left after insurance.
     assert!(
-        second_origin.active && !second_origin.finalized && second_origin.residual_remaining > 0
+        second_origin.active && second_origin.finalized && second_origin.residual_remaining == 0
     );
     assert_eq!(second_origin.domain_side, SideV16::Short);
     assert_eq!(
@@ -1056,7 +1117,11 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
         (0, 0, INSURANCE_ATOMS, 0, 0)
     );
     let freshly_booked = second_origin.b_loss_booked;
-    assert_eq!(freshly_booked, B_CHUNK);
+    assert_eq!(
+        freshly_booked,
+        second_origin.gross_loss_at_close_start - INSURANCE_ATOMS
+    );
+    assert!(freshly_booked > 0 && freshly_booked < B_CHUNK);
     assert_eq!(
         second_origin.gross_loss_at_close_start,
         second_origin.insurance_spent
@@ -1083,11 +1148,18 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
         before_fresh_booking.leg(COHORT_OWNER).unwrap().loss_weight
     );
     assert_eq!(post_weight, expected_weight);
-    assert_eq!(
-        after_fresh_booking.side(b_side(SideV16::Short)).0,
-        post_weight
-    );
     assert!(post_weight < before_reduction.side(b_side(SideV16::Short)).0);
+    // Booking in full takes the asset's last long position out, so both sides reset in the same
+    // step: the closed epoch's short index keeps the booking, and the booking's carry is
+    // normalized into the side's dust and explicit loss (kernel_normalize_social_loss_carry).
+    let after_asset = after_fresh_booking.group.assets[LOSS_ASSET as usize];
+    assert_eq!(
+        (after_asset.mode_long, after_asset.mode_short),
+        (
+            percolator::SideModeV16::ResetPending,
+            percolator::SideModeV16::ResetPending
+        )
+    );
     let (expected_index_delta, expected_remainder) =
         crate::support::reference_math::mul_div_floor_with_remainder(
             freshly_booked,
@@ -1098,16 +1170,30 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
     let before_side = before_fresh_booking.side(b_side(SideV16::Short));
     let after_side = after_fresh_booking.side(b_side(SideV16::Short));
     assert_eq!(
-        after_side.1 - before_side.1,
+        after_asset.b_epoch_start_short_num - before_side.1,
         expected_index_delta + (expected_remainder + before_side.2) / post_weight
     );
-    assert_eq!(
-        after_side.2,
-        (expected_remainder + before_side.2) % post_weight
-    );
+    let carry = (expected_remainder + before_side.2) % post_weight;
     assert!(
-        after_side.2 > 0,
+        carry > 0,
         "fresh booking must retain a nonzero market carry"
+    );
+    let total = carry + before_side.3;
+    let crossed = total >= percolator::SOCIAL_LOSS_DEN;
+    assert_eq!(
+        after_side,
+        (
+            0,
+            0,
+            0,
+            if crossed {
+                total - percolator::SOCIAL_LOSS_DEN
+            } else {
+                total
+            },
+            before_side.4 + u128::from(crossed),
+        ),
+        "the reset normalizes the booking's carry"
     );
 
     let mut second_observer = PublicBHistoryObserver::new(&env, SHARED_LOSER);
@@ -1115,9 +1201,10 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
         second_observer.step(&mut env, COHORT_OWNER, None),
         "cohort owner settles the fresh booking"
     );
-    assert!(
-        second_observer.step(&mut env, SHARED_LOSER, None),
-        "second close books its remaining residual"
+    second_observer.step(&mut env, SHARED_LOSER, None);
+    assert_eq!(
+        second_observer.bookings, 0,
+        "the second close has nothing left to book"
     );
     let second_final = env
         .primary_portfolio(SHARED_LOSER)
@@ -1145,7 +1232,7 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
     trace.validate_public_execution().unwrap();
     assert_eq!(trace.out_of_band_economic_mutations, 0);
     assert!(first_observer.bookings > 1);
-    assert!(second_observer.bookings > 0 && second_observer.settlements > 0);
+    assert!(second_observer.bookings == 0 && second_observer.settlements > 0);
     eprintln!(
         "INV-038 attributed rebooking: public_steps={}, rejected={}, activation_steps={activation_steps}, first_bookings={}, second_bookings={}, second_settlements={}",
         trace.steps.len(),

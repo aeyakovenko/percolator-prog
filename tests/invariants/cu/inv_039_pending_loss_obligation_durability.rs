@@ -1014,16 +1014,20 @@ fn run_recovery_resolved_pending_obligation_order(
     const TARGET_ASSET: u16 = 1;
     const AUXILIARY_ASSET: u16 = 0;
     const SIZE_Q: u128 = POS_SCALE / 50;
+    // The auxiliary close only has to stay open until it expires: its debtor's unpaid loss exceeds
+    // the public B chunk (PUBLIC_B_CHUNK_ATOMS), sized like the shared asset-1 close fixture.
+    // (Until 2026-11-22 the market chose a chunk of one atom and the auxiliary debtor owed two.)
+    const AUX_OPEN_PRICE: u64 = ASSET1_CLOSE_OPEN_PRICE;
+    const AUX_SIZE_Q: u128 = ASSET1_CLOSE_Q;
 
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
         max_bankrupt_close_lifetime_slots: 2,
-        public_b_chunk_atoms: 1,
         ..V16CuMarketParams::default()
     });
     env.configure_permissionless_resolve_with_cu(100, 1);
     env.svm.warp_to_slot(1);
     env.activate_asset(TARGET_ASSET, 1, OPEN_PRICE);
-    env.configure_auth_mark_for_asset_as_admin(AUXILIARY_ASSET, 1, OPEN_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(AUXILIARY_ASSET, 1, AUX_OPEN_PRICE);
     env.configure_auth_mark_for_asset_as_admin(TARGET_ASSET, 1, OPEN_PRICE);
 
     let attacker_owner = Keypair::new();
@@ -1040,8 +1044,16 @@ fn run_recovery_resolved_pending_obligation_order(
         (&attacker_owner, attacker, 10u128),
         (&victim_owner, victim, 10),
         (&debtor_owner, debtor, 4),
-        (&auxiliary_winner_owner, auxiliary_winner, 10),
-        (&auxiliary_debtor_owner, auxiliary_debtor, 2),
+        (
+            &auxiliary_winner_owner,
+            auxiliary_winner,
+            ASSET1_CLOSE_COUNTERPARTY_CAPITAL,
+        ),
+        (
+            &auxiliary_debtor_owner,
+            auxiliary_debtor,
+            ASSET1_CLOSE_LOSS_CAPITAL,
+        ),
     ] {
         env.deposit(owner, portfolio, amount);
     }
@@ -1072,22 +1084,28 @@ fn run_recovery_resolved_pending_obligation_order(
         auxiliary_winner,
         &auxiliary_debtor_owner,
         auxiliary_debtor,
-        SIZE_Q as i128,
-        OPEN_PRICE,
+        AUX_SIZE_Q as i128,
+        AUX_OPEN_PRICE,
         0,
     );
 
-    for (slot, mark) in [(2u64, 200u64), (3, 300)] {
+    for (slot, mark, auxiliary_mark) in [
+        (2u64, Some(200u64), ASSET1_CLOSE_MARKS[0]),
+        (3, Some(300), ASSET1_CLOSE_MARKS[1]),
+        (4, None, ASSET1_CLOSE_MARKS[2]),
+    ] {
         env.svm.warp_to_slot(slot);
-        env.push_auth_mark_for_asset_as_admin(TARGET_ASSET, slot, mark);
-        env.crank(
-            attacker,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: slot,
-                observations: crank_observations(TARGET_ASSET),
-            },
-        );
-        env.push_auth_mark_for_asset_as_admin(AUXILIARY_ASSET, slot, mark);
+        if let Some(mark) = mark {
+            env.push_auth_mark_for_asset_as_admin(TARGET_ASSET, slot, mark);
+            env.crank(
+                attacker,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(TARGET_ASSET),
+                },
+            );
+        }
+        env.push_auth_mark_for_asset_as_admin(AUXILIARY_ASSET, slot, auxiliary_mark);
         env.crank(
             auxiliary_winner,
             ProgInstruction::PermissionlessCrank {
@@ -1095,23 +1113,24 @@ fn run_recovery_resolved_pending_obligation_order(
                 observations: crank_observations(AUXILIARY_ASSET),
             },
         );
+        if slot == 3 {
+            env.crank(
+                debtor,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 3,
+                    observations: crank_observations(TARGET_ASSET),
+                },
+            );
+        }
     }
-    env.crank(
-        debtor,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 3,
-            observations: crank_observations(TARGET_ASSET),
-        },
-    );
     env.crank(
         auxiliary_debtor,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 3,
+            now_slot: 4,
             observations: crank_observations(AUXILIARY_ASSET),
         },
     );
 
-    env.svm.warp_to_slot(4);
     env.update_asset_lifecycle_as_admin_with_cu(
         processor::ASSET_ACTION_SHUTDOWN,
         TARGET_ASSET,
@@ -1337,7 +1356,7 @@ fn v16_attack_recovery_resolved_cannot_clear_unreleased_loss_weight_before_debto
         attacker_payout: 12,
         victim_payout: 12,
         debtor_payout: 0,
-        auxiliary_winner_payout: 12,
+        auxiliary_winner_payout: ASSET1_CLOSE_COUNTERPARTY_CAPITAL + ASSET1_CLOSE_LOSS_CAPITAL,
         auxiliary_debtor_payout: 0,
         pending_long_before_debtor: 1,
         weight_long_before_debtor: 2 * (POS_SCALE / 50),

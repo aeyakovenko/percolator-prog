@@ -522,9 +522,15 @@ fn v16_program_recovery_b_budget_changes_work_partition_not_economic_truth() {
         ..
     } = public_asset1_bankrupt_close_fixture();
 
-    // The fixture's first owner forfeit creates a live close residual. This public
-    // continuation books the second loss atom and makes the counterparty's leg
-    // genuinely B-stale before the caller budget is varied.
+    // The fixture's first owner forfeit books one public B chunk and leaves a live close
+    // residual. This public continuation books the rest and makes the counterparty's leg
+    // genuinely B-stale (a 1.02e16-atom share) before the caller budget is varied. A forfeit
+    // settles at most min(budget, PUBLIC_B_CHUNK_ATOMS) per call: the unbounded schedule settles
+    // one chunk and then the rest, a prefix capped at the close's pending residual settles that
+    // much and then one chunk. Both take two calls (epoch counters count calls), in different
+    // partitions. (Until 2026-11-22 the market chose a chunk of one atom and the prefix was one atom.)
+    let prefix_budget = close_progress(&env.portfolio_state(loss)).residual_remaining;
+    assert!(prefix_budget > 0 && prefix_budget < percolator::PUBLIC_B_CHUNK_ATOMS);
     env.svm.expire_blockhash();
     let booking_cu = env
         .send(
@@ -539,7 +545,7 @@ fn v16_program_recovery_b_budget_changes_work_partition_not_economic_truth() {
             ],
             &[],
         )
-        .expect("public close continuation books the second loss atom");
+        .expect("public close continuation books the rest of the residual");
     assert_cu_within("INV-023 B-budget setup", booking_cu, CRANK_CU_LIMIT);
     let target_b = env.market_state().1.assets[1].b_long_num;
 
@@ -562,7 +568,7 @@ fn v16_program_recovery_b_budget_changes_work_partition_not_economic_truth() {
         .set_account(asset1_counterparty, counterparty_before)
         .unwrap();
     env.svm.set_account(env.vault, vault_before).unwrap();
-    let one_atom_prefix = inv023_forfeit_budget_frame(
+    let capped_prefix = inv023_forfeit_budget_frame(
         &mut env,
         loss,
         &asset1_counterparty_owner,
@@ -570,10 +576,10 @@ fn v16_program_recovery_b_budget_changes_work_partition_not_economic_truth() {
         live_counterparty,
         live_peer,
         target_b,
-        &[1, u128::MAX],
+        &[prefix_budget, u128::MAX],
     );
     assert_eq!(
-        one_atom_prefix, unbounded_prefix,
+        capped_prefix, unbounded_prefix,
         "B-loss atom budget may cap bounded work but must not choose the canonical chunk or change value, attribution, OI, unrelated accounts, or custody"
     );
 }
@@ -756,13 +762,13 @@ fn v16_program_alternate_entrypoints_cannot_select_internal_safety_lanes() {
     }
     assert_eq!(role_variants, production_variants);
 
-    // INV-083 owns the 244 field-or-no-data boundary matrix. Source-lock the composition edge so
+    // INV-083 owns the 243 field-or-no-data boundary matrix. Source-lock the composition edge so
     // its closure cannot silently disappear while INV-023 continues to claim it.
     assert!(inv023_source_contains_test(
         BOUNDARY_TESTS,
         "v16_program_every_public_input_field_has_a_boundary_profile_and_executable_witness",
     ));
-    assert!(BOUNDARY_TESTS.contains("const EXPECTED_FIELD_COUNT: usize = 244;"));
+    assert!(BOUNDARY_TESTS.contains("const EXPECTED_FIELD_COUNT: usize = 243;"));
     assert!(BOUNDARY_TESTS.contains("const EXPECTED_TYPE_COUNT: usize = 53;"));
 
     let dispatcher = inv023_dispatcher_source(PRODUCTION);

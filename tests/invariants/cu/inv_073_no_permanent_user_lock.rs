@@ -2202,7 +2202,6 @@ fn run_recovery_forfeit_order(winner_first: bool) -> RecoveryForfeitOrderOutcome
 
     let mut params = production_risk_params();
     params.max_portfolio_assets = 2;
-    params.public_b_chunk_atoms = 8_000;
     let mut env = V16CuEnv::new_with_init_params(params);
     env.configure_permissionless_resolve_with_cu(100, 5);
     env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
@@ -2509,7 +2508,6 @@ fn v16_program_permissionless_asset_expired_close_matrix_discovers_global_recove
         let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
             max_portfolio_assets: 1,
             max_bankrupt_close_lifetime_slots: 2,
-            public_b_chunk_atoms: 1,
             ..V16CuMarketParams::default()
         });
         env.configure_auth_mark_with_cu(0, 100);
@@ -2535,36 +2533,43 @@ fn v16_program_permissionless_asset_expired_close_matrix_discovers_global_recove
 
         let creator = Keypair::new();
         let creator_key = creator.pubkey();
+        // Sized like the shared asset-1 close fixture: the short's unpaid loss exceeds the public
+        // B chunk, so the forfeit leaves a close pending.
         env.activate_permissionless_asset_with_fee(
             &creator,
             1,
-            1,
-            100,
+            0,
+            ASSET1_CLOSE_OPEN_PRICE,
             creator_key,
             creator_key,
             creator_key,
             creator_key,
             1,
         );
-        env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+        env.configure_auth_mark_for_asset_with_authority(1, &creator, 0, ASSET1_CLOSE_OPEN_PRICE);
         let attack_long_owner = Keypair::new();
         let attack_short_owner = Keypair::new();
         let attack_long = env.create_portfolio(&attack_long_owner);
         let attack_short = env.create_portfolio(&attack_short_owner);
-        env.deposit(&attack_long_owner, attack_long, 10);
-        env.deposit(&attack_short_owner, attack_short, 2);
+        env.deposit(
+            &attack_long_owner,
+            attack_long,
+            ASSET1_CLOSE_COUNTERPARTY_CAPITAL,
+        );
+        env.deposit(&attack_short_owner, attack_short, ASSET1_CLOSE_LOSS_CAPITAL);
         env.trade_asset_with_cu(
             1,
             &attack_long_owner,
             attack_long,
             &attack_short_owner,
             attack_short,
-            (POS_SCALE / 50) as i128,
-            100,
+            ASSET1_CLOSE_Q as i128,
+            ASSET1_CLOSE_OPEN_PRICE,
             0,
         );
 
-        for (slot, mark) in [(2u64, 200u64), (3, 300)] {
+        for (step, mark) in ASSET1_CLOSE_MARKS.into_iter().enumerate() {
+            let slot = 1 + step as u64;
             env.svm.warp_to_slot(slot);
             env.push_auth_mark_for_asset_with_authority(1, &creator, slot, mark);
             env.crank(
@@ -3087,15 +3092,30 @@ fn v16_program_recovery_residue_matrix_clears_abandoned_owner_residue() {
     }
 }
 
+const PARTIAL_OPEN_PRICE: u64 = 1_000_000_000;
+const PARTIAL_Q: u128 = 80_000_000 * POS_SCALE;
+const PARTIAL_LOSER_CAPITAL: u128 = 4_000_000_000_000_000; // 5% of the 8e16 notional
+const PARTIAL_WINNER_CAPITAL: u128 = 4_500_000_000_000_000;
+const PARTIAL_MARKS: [(u64, u64); 5] = [
+    (20, 952_000_000),
+    (40, 906_304_000),
+    (60, 862_801_408),
+    (80, 821_386_941),
+    (100, 781_960_368),
+];
+
 #[test]
 fn v16_program_expired_partial_close_matrix_resolves_and_preserves_idle_exit() {
     for idle_capital in [100u128, 101] {
         let mut params = production_risk_params();
         params.max_bankrupt_close_lifetime_slots = 1;
-        params.public_b_chunk_atoms = 8_000;
         let mut env = V16CuEnv::new_with_init_params(params);
         env.configure_permissionless_resolve_with_cu(100, 5);
-        env.configure_auth_mark_with_cu(0, 1_000_000);
+        // A partial close needs an unpaid loss above the public B chunk (PUBLIC_B_CHUNK_ATOMS =
+        // MAX_VAULT_TVL): the loser is long 80,000,000 units at 1e9 on 5% margin and the mark falls
+        // 4.8% (the 20-slot cap) five times, so it owes 1.34e16, one chunk is booked and the rest is
+        // left. (Until 2026-11-22 the market chose an 8,000-atom chunk and the loss was 8,424.)
+        env.configure_auth_mark_with_cu(0, PARTIAL_OPEN_PRICE);
 
         let loss_owner = Keypair::new();
         let counterparty_owner = Keypair::new();
@@ -3103,8 +3123,8 @@ fn v16_program_expired_partial_close_matrix_resolves_and_preserves_idle_exit() {
         let loss = env.create_portfolio(&loss_owner);
         let counterparty = env.create_portfolio(&counterparty_owner);
         let idle = env.create_portfolio(&idle_owner);
-        env.deposit(&loss_owner, loss, 51_000);
-        env.deposit(&counterparty_owner, counterparty, 100_000);
+        env.deposit(&loss_owner, loss, PARTIAL_LOSER_CAPITAL);
+        env.deposit(&counterparty_owner, counterparty, PARTIAL_WINNER_CAPITAL);
         env.deposit(&idle_owner, idle, idle_capital);
         env.trade_asset_with_cu(
             0,
@@ -3112,12 +3132,12 @@ fn v16_program_expired_partial_close_matrix_resolves_and_preserves_idle_exit() {
             loss,
             &counterparty_owner,
             counterparty,
-            POS_SCALE as i128,
-            1_000_000,
+            PARTIAL_Q as i128,
+            PARTIAL_OPEN_PRICE,
             0,
         );
 
-        for (slot, mark) in [(20u64, 952_000u64), (25, 940_000), (30, 940_576)] {
+        for (slot, mark) in PARTIAL_MARKS {
             env.svm.warp_to_slot(slot);
             env.push_auth_mark_with_cu(slot, mark);
             env.crank(
@@ -3131,7 +3151,7 @@ fn v16_program_expired_partial_close_matrix_resolves_and_preserves_idle_exit() {
         env.update_asset_lifecycle_as_admin_with_cu(
             percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
             0,
-            30,
+            100,
             0,
         );
 
@@ -6855,7 +6875,7 @@ fn inv073_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str
 
 #[test]
 fn v16_program_terminal_disposition_and_administrative_retirement_are_source_complete() {
-    const ENGINE_PIN: &str = "80f8f0b494e84f191c5a10463b9e10fc19156af4";
+    const ENGINE_PIN: &str = "08e8f7f08b8b74139201c73119619141e407b198";
     const PHASES: &[Inv073TerminalPhase] = &[
         Inv073TerminalPhase {
             rank_lane: "economic-work",

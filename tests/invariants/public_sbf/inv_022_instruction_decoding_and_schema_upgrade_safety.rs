@@ -64,7 +64,6 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             max_account_b_settlement_chunks: 1,
             max_bankrupt_close_chunks: 1,
             max_bankrupt_close_lifetime_slots: 10,
-            public_b_chunk_atoms: 1,
             maintenance_fee_per_slot: 0,
         },
         ProgInstruction::InitPortfolio,

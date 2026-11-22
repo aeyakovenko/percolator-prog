@@ -175,8 +175,10 @@ fn v16_program_social_loss_booking_and_settlement_preserve_exact_remainders() {
         "bounded settlement cannot consume beyond the committed B target"
     );
 
-    // The next owner-signed recovery step consumes the final committed B delta. Auto-crank dispatch
-    // is intentionally one action per call, so a later call detaches the now-current recovery leg.
+    // The next owner-signed recovery steps consume the rest of the committed B delta, at most one
+    // public B chunk (PUBLIC_B_CHUNK_ATOMS) per call; the counterparty's share of the close is
+    // 1.02e16, so that takes two calls. Auto-crank dispatch is intentionally one action per call,
+    // so a later call detaches the now-current recovery leg.
     let remaining_delta_b = target_b
         .checked_sub(after_leg.b_snap)
         .expect("settled leg cannot pass the committed B target");
@@ -193,17 +195,23 @@ fn v16_program_social_loss_booking_and_settlement_preserve_exact_remainders() {
     let final_leg_remainder = final_settlement_numerator % percolator::SOCIAL_LOSS_DEN;
     assert!(final_settlement_loss > 0);
 
-    let final_settlement_cu = env.forfeit_recovery_leg_with_cu(
-        &asset1_counterparty_owner,
-        asset1_counterparty,
-        ASSET as u16,
-        1,
-    );
-    assert_cu_within(
-        "INV-038 exact final account B settlement partition",
-        final_settlement_cu,
-        CUSTODY_CU_LIMIT,
-    );
+    for _ in 0..4 {
+        let leg = active_leg_for_asset(&env.portfolio_state(asset1_counterparty), ASSET);
+        if leg.b_snap == target_b && !leg.b_stale {
+            break;
+        }
+        let final_settlement_cu = env.forfeit_recovery_leg_with_cu(
+            &asset1_counterparty_owner,
+            asset1_counterparty,
+            ASSET as u16,
+            percolator::PUBLIC_B_CHUNK_ATOMS,
+        );
+        assert_cu_within(
+            "INV-038 exact final account B settlement partition",
+            final_settlement_cu,
+            CUSTODY_CU_LIMIT,
+        );
+    }
     let current_account = env.portfolio_state(asset1_counterparty);
     let current_leg = active_leg_for_asset(&current_account, ASSET);
     assert_eq!(current_leg.b_snap, target_b);
@@ -216,7 +224,15 @@ fn v16_program_social_loss_booking_and_settlement_preserve_exact_remainders() {
         "the terminal combined forfeit must persist the exact final B quotient/remainder"
     );
     assert_eq!(current_leg.basis_pos_q, 0);
-    assert_eq!(current_account.pnl.get(), 0);
+    // The forfeits debit exactly the settled B loss and move nothing else. (At this scale the
+    // winner's remaining positive PnL, its gain minus its share of the close, is still PnL after the
+    // forfeits; with the old few-atom fixture it was zero.)
+    assert_eq!(
+        current_account.capital.get() as i128 + current_account.pnl.get(),
+        before_account.capital.get() as i128 + before_account.pnl.get()
+            - (settled_atoms + final_settlement_loss) as i128,
+        "the forfeits must move the account's value by exactly the settled B loss"
+    );
 
     // The opposite bankrupt episode owns the domain barrier until its close ledger finalizes and
     // its owner forfeits the remaining Recovery basis. Releasing the surviving obligation before
@@ -448,7 +464,7 @@ fn inv038_assert_social_loss_booking_partition(
     booked
 }
 
-fn run_social_loss_partition_schedule(public_b_chunk_atoms: u128) -> SocialLossPartitionOutcome {
+fn run_social_loss_partition_schedule(b_delta_budget: u128) -> SocialLossPartitionOutcome {
     const ASSET: usize = 1;
     const MAX_STEPS: usize = 16;
 
@@ -459,13 +475,13 @@ fn run_social_loss_partition_schedule(public_b_chunk_atoms: u128) -> SocialLossP
         asset1_counterparty_owner,
         asset1_counterparty,
         ..
-    } = public_asset1_bankrupt_close_fixture_before_close_with_b_chunk_atoms(public_b_chunk_atoms);
+    } = public_asset1_bankrupt_close_fixture_before_close();
 
     let before_start_close = close_progress(&env.portfolio_state(loss));
     let before_start_asset = env.market_state().1.assets[ASSET];
     assert!(!before_start_close.active);
     let start_cu =
-        env.forfeit_recovery_leg_with_cu(&loss_owner, loss, ASSET as u16, public_b_chunk_atoms);
+        env.forfeit_recovery_leg_with_cu(&loss_owner, loss, ASSET as u16, b_delta_budget);
     assert_cu_within(
         "INV-038 partitioned close start",
         start_cu,
@@ -546,7 +562,7 @@ fn run_social_loss_partition_schedule(public_b_chunk_atoms: u128) -> SocialLossP
             &asset1_counterparty_owner,
             asset1_counterparty,
             ASSET as u16,
-            public_b_chunk_atoms,
+            b_delta_budget,
         );
         assert_cu_within(
             "INV-038 partitioned account B settlement",
@@ -577,7 +593,7 @@ fn run_social_loss_partition_schedule(public_b_chunk_atoms: u128) -> SocialLossP
             .expect("INV-038 account B snapshot must be monotonic");
         assert!(
             delta_b > 0 && settled > 0,
-            "INV-038 settlement step {step} cap={public_b_chunk_atoms}: delta_b={delta_b}, settled={settled}, before={}/{}, after={}/{}, target={target_b}, before_snap={}, detached={}",
+            "INV-038 settlement step {step} cap={b_delta_budget}: delta_b={delta_b}, settled={settled}, before={}/{}, after={}/{}, target={target_b}, before_snap={}, detached={}",
             before_account.capital.get(),
             before_account.pnl.get(),
             after_account.capital.get(),
@@ -623,8 +639,7 @@ fn run_social_loss_partition_schedule(public_b_chunk_atoms: u128) -> SocialLossP
     }
     assert!(close_progress(&env.portfolio_state(loss)).finalized);
     if has_active_leg_for_asset(&env.portfolio_state(loss), ASSET) {
-        let cu =
-            env.forfeit_recovery_leg_with_cu(&loss_owner, loss, ASSET as u16, public_b_chunk_atoms);
+        let cu = env.forfeit_recovery_leg_with_cu(&loss_owner, loss, ASSET as u16, b_delta_budget);
         assert_cu_within("INV-038 bankrupt owner cleanup", cu, CUSTODY_CU_LIMIT);
         max_compute_units = max_compute_units.max(cu);
         cleanup_calls += 1;
@@ -688,16 +703,20 @@ fn run_social_loss_partition_schedule(public_b_chunk_atoms: u128) -> SocialLossP
 
 #[test]
 fn v16_program_social_loss_aggregate_and_chunked_routes_converge_exactly() {
-    let aggregate = run_social_loss_partition_schedule(percolator::MAX_VAULT_TVL);
-    let chunked = run_social_loss_partition_schedule(1);
+    // An owner forfeit settles at most min(budget, PUBLIC_B_CHUNK_ATOMS) of the account's B loss per
+    // call. The counterparty's share of the fixture's close is 1.02e16, so a one-chunk budget takes
+    // two calls and a quarter-chunk budget five. Booking the residual takes no budget (one public B
+    // chunk per step), so both routes book it in the same calls. (Until 2026-11-22 the market chose a
+    // chunk of one atom, and a budget of one atom chunked both the booking and the settlement.)
+    let aggregate = run_social_loss_partition_schedule(percolator::PUBLIC_B_CHUNK_ATOMS);
+    let chunked = run_social_loss_partition_schedule(percolator::PUBLIC_B_CHUNK_ATOMS / 4);
 
     assert_eq!(aggregate.initial_residual, chunked.initial_residual);
     assert_eq!(aggregate.booked_atoms, chunked.booked_atoms);
     assert_eq!(aggregate.settled_atoms, chunked.settled_atoms);
     assert_eq!(aggregate.frame, chunked.frame);
-    assert_eq!(aggregate.booking_calls, 1);
-    assert!(chunked.booking_calls > aggregate.booking_calls);
-    assert_eq!(aggregate.settlement_calls, 1);
+    assert_eq!(aggregate.booking_calls, chunked.booking_calls);
+    assert_eq!(aggregate.settlement_calls, 2);
     assert!(chunked.settlement_calls > aggregate.settlement_calls);
     assert!(aggregate.cleanup_calls > 0 && chunked.cleanup_calls > 0);
     assert!(aggregate.max_compute_units < support::v16_svm::TX_CU_LIMIT);

@@ -1,5 +1,7 @@
-//! INV-077: public short-side B settlement at both portfolio caps, with full and
-//! final partial multi-atom chunks. Construction uses only wrapper transitions.
+//! INV-077: public short-side B settlement at both portfolio caps, one public call per leg.
+//! Each leg's B loss (6 atoms) is below the public B chunk, the constant PUBLIC_B_CHUNK_ATOMS, so a
+//! call settles a whole leg. (Until 2026-11-22 the market chose a 4-atom chunk, and each leg took a
+//! full and a final partial chunk.) Construction uses only wrapper transitions.
 
 use super::*;
 
@@ -23,7 +25,6 @@ fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
         maintenance_margin_bps: 1_000,
         initial_margin_bps: 1_000,
         max_price_move_bps_per_slot: 500,
-        public_b_chunk_atoms: BUDGET,
         ..V16CuMarketParams::default()
     });
     env.configure_permissionless_resolve_with_cu(100, 5);
@@ -156,17 +157,7 @@ fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
         env.try_shutdown_asset_with_authority(&admin, asset as u16, SETTLE_SLOT)
             .expect("public source-local shutdown");
         env.forfeit_recovery_leg_with_cu(loss_owner, *loss, asset as u16, BUDGET);
-        assert_eq!(
-            close_progress(&env.portfolio_state(*loss)).residual_remaining,
-            2
-        );
-        env.crank(
-            *loss,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: SETTLE_SLOT,
-                observations: vec![],
-            },
-        );
+        // The whole residual is below the public B chunk, so the forfeit books it at once.
         assert_eq!(
             close_progress(&env.portfolio_state(*loss)).residual_remaining,
             0
@@ -177,7 +168,6 @@ fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
     let group_before = env.market_state().1;
     assert_eq!(group_before.mode, MarketModeV16::Live);
     assert_eq!(group_before.config.max_portfolio_assets, ASSETS);
-    assert_eq!(group_before.config.public_b_chunk_atoms, BUDGET);
     assert_eq!(
         percolator::active_bitmap_count_ones(active_bitmap(&initial)),
         u32::from(ASSETS)
@@ -232,8 +222,8 @@ fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
         .collect();
     assert_ne!(env.payer.pubkey(), owner.pubkey());
     let mut max_cu = 0;
-    let mut chunk_counts = [0; 2];
-    for call in 0..2 * ASSETS {
+    let mut whole_legs = 0;
+    for call in 0..ASSETS {
         let old = env.portfolio_state(target);
         let pending = remaining(&old);
         let rank: u128 = pending.iter().sum();
@@ -262,15 +252,12 @@ fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
             .collect();
         assert_eq!(changed.len(), 1, "exactly one B leg per public call");
         let asset = changed[0];
-        let charged = pending[asset].min(BUDGET);
-        assert_eq!(next_pending[asset], pending[asset] - charged);
+        let charged = pending[asset];
+        assert_eq!(charged, LOSS_PER_LEG, "one public call settles a whole leg");
+        assert_eq!(next_pending[asset], 0);
         assert_eq!(next_pending.iter().sum::<u128>(), rank - charged);
         assert_eq!(old.pnl.get() - after.pnl.get(), charged as i128);
-        match charged {
-            4 => chunk_counts[0] += 1,
-            2 => chunk_counts[1] += 1,
-            _ => panic!("unexpected B chunk {charged}"),
-        }
+        whole_legs += 1;
         for index in 0..usize::from(ASSETS) {
             let old_leg = active_leg_for_asset(&old, index);
             let new_leg = active_leg_for_asset(&after, index);
@@ -285,12 +272,6 @@ fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
                     .unwrap();
                 assert_eq!(settled_num / percolator::SOCIAL_LOSS_DEN, charged);
                 assert_eq!(new_leg.b_rem, settled_num % percolator::SOCIAL_LOSS_DEN);
-                if charged == BUDGET {
-                    assert!(
-                        new_leg.b_rem > 0,
-                        "the full chunk must exercise fractional B carry"
-                    );
-                }
                 assert_eq!(new_leg.b_stale, next_pending[index] > 0);
                 expected.b_snap = new_leg.b_snap;
                 expected.b_rem = new_leg.b_rem;
@@ -340,17 +321,17 @@ fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
     }
     let settled = env.portfolio_state(target);
     assert_eq!(remaining(&settled), vec![0; usize::from(ASSETS)]);
-    assert_eq!(chunk_counts, [ASSETS; 2]);
+    assert_eq!(whole_legs, ASSETS);
     assert_eq!(settled.pnl.get(), 3 * i128::from(ASSETS));
     assert_eq!(settled.capital.get(), CAPITAL);
     assert_eq!(settled.b_stale_state, 0);
     assert_eq!(env.market_state().1.b_stale_account_count, 0);
     assert_eq!(
-        max_cu, 556_414,
+        max_cu, 556_197,
         "remeasure the documented default-feature SBF peak on a new pin"
     );
     println!(
-        "INV-077 short B: legs={ASSETS}, sources={SOURCES}, budget={BUDGET}, rank={}->0, chunks={chunk_counts:?}, calls={}, peak_cu={max_cu}",
-        LOSS_PER_LEG * u128::from(ASSETS), 2 * ASSETS
+        "INV-077 short B: legs={ASSETS}, sources={SOURCES}, rank={}->0, calls={whole_legs}, peak_cu={max_cu}",
+        LOSS_PER_LEG * u128::from(ASSETS)
     );
 }

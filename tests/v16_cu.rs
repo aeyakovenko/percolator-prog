@@ -41,8 +41,8 @@ const MULTI_ASSET_OPEN_TRADE_CU_LIMIT: u64 = 750_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 const MAX_10M_MARKET_SLOTS: usize = 5_492;
 const CERTIFIED_ENGINE_GIT_SOURCE: &str =
-    "git+https://github.com/aeyakovenko/percolator?rev=80f8f0b494e84f191c5a10463b9e10fc19156af4#\
-     80f8f0b494e84f191c5a10463b9e10fc19156af4";
+    "git+https://github.com/aeyakovenko/percolator?rev=08e8f7f08b8b74139201c73119619141e407b198#\
+     08e8f7f08b8b74139201c73119619141e407b198";
 
 fn assert_certified_engine_pin(context: &str) {
     assert!(
@@ -181,20 +181,30 @@ fn public_released_pnl_fixture() -> PublicReleasedPnlFixture {
     }
 }
 
+// The asset-1 bankrupt close of the fixtures below. A bankrupt residual is booked in steps of at most
+// the public B chunk, the constant PUBLIC_B_CHUNK_ATOMS (= MAX_VAULT_TVL), so the loss is sized to
+// exceed it: the loss account shorts 17,000,000 units at full margin and the mark doubles three
+// times, so its unpaid loss is 1.02e16; the forfeit books one chunk and leaves 2e14 pending, and the
+// close stays active. (Until 2026-11-22 a market could choose a chunk of one atom and the fixture
+// used a loss of a few atoms.) Asset 1 opens at slot 0 so that the close starts at slot 4 as before;
+// with the external oracle on asset 0 the clock is already at slot 1, so there the close starts at 5.
+const ASSET1_CLOSE_OPEN_PRICE: u64 = 100_000_000;
+const ASSET1_CLOSE_Q: u128 = 17_000_000 * POS_SCALE;
+const ASSET1_CLOSE_LOSS_CAPITAL: u128 = 1_700_000_000_000_000; // the full margin of the short
+const ASSET1_CLOSE_COUNTERPARTY_CAPITAL: u128 = 3_400_000_000_000_000;
+const ASSET1_CLOSE_MARKS: [u64; 3] = [200_000_000, 400_000_000, 800_000_000];
+
 fn public_asset1_bankrupt_close_fixture() -> PublicActiveCloseFixture {
-    public_asset1_bankrupt_close_fixture_impl(None, None, 1, true).0
+    public_asset1_bankrupt_close_fixture_impl(None, None, true).0
 }
 
-fn public_asset1_bankrupt_close_fixture_before_close_with_b_chunk_atoms(
-    public_b_chunk_atoms: u128,
-) -> PublicActiveCloseFixture {
-    public_asset1_bankrupt_close_fixture_impl(None, None, public_b_chunk_atoms, false).0
+fn public_asset1_bankrupt_close_fixture_before_close() -> PublicActiveCloseFixture {
+    public_asset1_bankrupt_close_fixture_impl(None, None, false).0
 }
 
 fn public_asset1_bankrupt_close_fixture_with_asset0_external_oracle(
 ) -> (PublicActiveCloseFixture, Pubkey) {
-    let (fixture, oracle) =
-        public_asset1_bankrupt_close_fixture_impl(Some([0x58; 32]), None, 1, true);
+    let (fixture, oracle) = public_asset1_bankrupt_close_fixture_impl(Some([0x58; 32]), None, true);
     (
         fixture,
         oracle.expect("external-oracle fixture must return its feed account"),
@@ -203,13 +213,12 @@ fn public_asset1_bankrupt_close_fixture_with_asset0_external_oracle(
 
 fn public_asset1_bankrupt_close_fixture_with_counterparty_asset0_short() -> PublicActiveCloseFixture
 {
-    public_asset1_bankrupt_close_fixture_impl(None, Some(POS_SCALE / 20), 1, true).0
+    public_asset1_bankrupt_close_fixture_impl(None, Some(POS_SCALE / 20), true).0
 }
 
 fn public_asset1_bankrupt_close_fixture_impl(
     asset0_external_feed: Option<[u8; 32]>,
     counterparty_asset0_short_q: Option<u128>,
-    public_b_chunk_atoms: u128,
     start_close: bool,
 ) -> (PublicActiveCloseFixture, Option<Pubkey>) {
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
@@ -219,7 +228,6 @@ fn public_asset1_bankrupt_close_fixture_impl(
             1
         },
         max_bankrupt_close_lifetime_slots: 2,
-        public_b_chunk_atoms,
         ..V16CuMarketParams::default()
     });
     let asset0_oracle = if let Some(feed) = asset0_external_feed {
@@ -270,12 +278,13 @@ fn public_asset1_bankrupt_close_fixture_impl(
         Keypair::new()
     };
     let creator_key = creator.pubkey();
+    let open_slot = u64::from(asset0_oracle.is_some());
     if counterparty_asset0_short_q.is_none() {
         env.activate_permissionless_asset_with_fee(
             &creator,
             1,
-            1,
-            100,
+            open_slot,
+            ASSET1_CLOSE_OPEN_PRICE,
             creator_key,
             creator_key,
             creator_key,
@@ -283,22 +292,31 @@ fn public_asset1_bankrupt_close_fixture_impl(
             1,
         );
     }
-    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+    env.configure_auth_mark_for_asset_with_authority(
+        1,
+        &creator,
+        open_slot,
+        ASSET1_CLOSE_OPEN_PRICE,
+    );
 
     let loss_owner = Keypair::new();
     let counterparty_owner = Keypair::new();
     let loss = env.create_portfolio(&loss_owner);
     let counterparty = env.create_portfolio(&counterparty_owner);
-    env.deposit(&loss_owner, loss, 2);
-    env.deposit(&counterparty_owner, counterparty, 10);
+    env.deposit(&loss_owner, loss, ASSET1_CLOSE_LOSS_CAPITAL);
+    env.deposit(
+        &counterparty_owner,
+        counterparty,
+        ASSET1_CLOSE_COUNTERPARTY_CAPITAL,
+    );
     env.trade_asset_with_cu(
         1,
         &counterparty_owner,
         counterparty,
         &loss_owner,
         loss,
-        (POS_SCALE / 50) as i128,
-        100,
+        ASSET1_CLOSE_Q as i128,
+        ASSET1_CLOSE_OPEN_PRICE,
         0,
     );
     if let Some(size_q) = counterparty_asset0_short_q {
@@ -314,7 +332,8 @@ fn public_asset1_bankrupt_close_fixture_impl(
         );
     }
 
-    for (slot, mark) in [(2u64, 200u64), (3, 300)] {
+    for (step, mark) in ASSET1_CLOSE_MARKS.into_iter().enumerate() {
+        let slot = open_slot + 1 + step as u64;
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_for_asset_with_authority(1, &creator, slot, mark);
         env.crank(
@@ -328,13 +347,13 @@ fn public_asset1_bankrupt_close_fixture_impl(
     env.crank(
         loss,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 3,
+            now_slot: open_slot + 3,
             observations: crank_observations(1),
         },
     );
 
-    env.svm.warp_to_slot(4);
-    env.try_shutdown_asset_with_authority(&creator, 1, 4)
+    env.svm.warp_to_slot(open_slot + 4);
+    env.try_shutdown_asset_with_authority(&creator, 1, open_slot + 4)
         .expect("permissionless creator shuts down only its own asset");
     if start_close {
         env.forfeit_recovery_leg_with_cu(&loss_owner, loss, 1, 1);
@@ -1064,7 +1083,6 @@ struct V16CuMarketParams {
     max_account_b_settlement_chunks: u64,
     max_bankrupt_close_chunks: u64,
     max_bankrupt_close_lifetime_slots: u64,
-    public_b_chunk_atoms: u128,
     maintenance_fee_per_slot: u128,
 }
 
@@ -1091,7 +1109,6 @@ impl Default for V16CuMarketParams {
             max_account_b_settlement_chunks: 1,
             max_bankrupt_close_chunks: 1,
             max_bankrupt_close_lifetime_slots: 100,
-            public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
             maintenance_fee_per_slot: 0,
         }
     }
@@ -1119,7 +1136,6 @@ fn init_host_market_data_for_serializer_probe() -> Vec<u8> {
     engine_config.max_account_b_settlement_chunks = params.max_account_b_settlement_chunks;
     engine_config.max_bankrupt_close_chunks = params.max_bankrupt_close_chunks;
     engine_config.max_bankrupt_close_lifetime_slots = params.max_bankrupt_close_lifetime_slots;
-    engine_config.public_b_chunk_atoms = params.public_b_chunk_atoms;
 
     let mut wrapper = state::WrapperConfigV16::default();
     wrapper.marketauth = [1u8; 32];
@@ -1168,7 +1184,6 @@ fn init_market_instruction(params: &V16CuMarketParams) -> ProgInstruction {
         max_account_b_settlement_chunks: params.max_account_b_settlement_chunks,
         max_bankrupt_close_chunks: params.max_bankrupt_close_chunks,
         max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots,
-        public_b_chunk_atoms: params.public_b_chunk_atoms,
         maintenance_fee_per_slot: params.maintenance_fee_per_slot,
     }
 }
@@ -1302,7 +1317,6 @@ impl V16CuEnv {
                 max_account_b_settlement_chunks: params.max_account_b_settlement_chunks,
                 max_bankrupt_close_chunks: params.max_bankrupt_close_chunks,
                 max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots,
-                public_b_chunk_atoms: params.public_b_chunk_atoms,
                 maintenance_fee_per_slot: params.maintenance_fee_per_slot,
             },
             vec![
@@ -5663,7 +5677,6 @@ fn init_independent_market_same_mint(
             max_account_b_settlement_chunks: params.max_account_b_settlement_chunks,
             max_bankrupt_close_chunks: params.max_bankrupt_close_chunks,
             max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots,
-            public_b_chunk_atoms: params.public_b_chunk_atoms,
             maintenance_fee_per_slot: params.maintenance_fee_per_slot,
         },
         vec![

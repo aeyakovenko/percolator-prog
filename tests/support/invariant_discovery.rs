@@ -6328,7 +6328,6 @@ fn discover_recovery_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeD
             max_price_move_bps_per_slot: 10_000,
             max_accrual_dt_slots: 1,
             max_bankrupt_close_lifetime_slots: 1,
-            public_b_chunk_atoms: 1,
             actor_deposits: [
                 VICTIM_CAPITAL,
                 FIRST_LOSER_CAPITAL,

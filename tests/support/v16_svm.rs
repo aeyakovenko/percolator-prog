@@ -104,7 +104,6 @@ pub struct MarketConfig {
     pub max_abs_funding_e9_per_slot: u64,
     pub min_funding_lifetime_slots: u64,
     pub max_bankrupt_close_lifetime_slots: u64,
-    pub public_b_chunk_atoms: u128,
     pub maintenance_fee_per_slot: u128,
     pub actor_deposits: [u128; PRIMARY_ACTOR_COUNT],
     pub actor_token_balances: [u64; PRIMARY_ACTOR_COUNT],
@@ -128,7 +127,6 @@ impl Default for MarketConfig {
             max_abs_funding_e9_per_slot: 0,
             min_funding_lifetime_slots: 4,
             max_bankrupt_close_lifetime_slots: 100,
-            public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
             maintenance_fee_per_slot: 0,
             actor_deposits: [
                 USER_DEPOSIT,
@@ -986,7 +984,6 @@ impl V16Svm {
                 max_account_b_settlement_chunks: 1,
                 max_bankrupt_close_chunks: 1,
                 max_bankrupt_close_lifetime_slots: config.max_bankrupt_close_lifetime_slots,
-                public_b_chunk_atoms: config.public_b_chunk_atoms,
                 maintenance_fee_per_slot: config.maintenance_fee_per_slot,
             },
             vec![
@@ -1704,7 +1701,6 @@ impl V16Svm {
                 max_account_b_settlement_chunks: 1,
                 max_bankrupt_close_chunks: 1,
                 max_bankrupt_close_lifetime_slots: config.max_bankrupt_close_lifetime_slots,
-                public_b_chunk_atoms: config.public_b_chunk_atoms,
                 maintenance_fee_per_slot: config.maintenance_fee_per_slot,
             },
             vec![

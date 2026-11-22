@@ -20,13 +20,12 @@ struct FundedOwners {
 }
 
 impl FundedOwners {
-    fn new(capital: &[u128], close_chunk: u128) -> Self {
+    fn new(capital: &[u128]) -> Self {
         let mut env = inv018_public_spl_market_with_params(
             0,
             V16CuMarketParams {
                 max_portfolio_assets: 2,
                 max_bankrupt_close_lifetime_slots: 2,
-                public_b_chunk_atoms: close_chunk,
                 ..V16CuMarketParams::default()
             },
         );
@@ -120,7 +119,7 @@ impl FundedOwners {
     }
 
     fn paired(asset: u16, sign: i128) -> Self {
-        let mut funded = Self::new(&[PRINCIPAL, PRINCIPAL, IDLE_PRINCIPAL], 1_000);
+        let mut funded = Self::new(&[PRINCIPAL, PRINCIPAL, IDLE_PRINCIPAL]);
         funded.open(0, 1, asset, sign * OPEN_Q as i128);
         funded.open(0, 1, 1 - asset, -sign * POS_SCALE as i128);
         assert_eq!(funded.quantity(0, asset), OPEN_Q);
@@ -129,6 +128,10 @@ impl FundedOwners {
     }
 
     fn open(&mut self, first: usize, second: usize, asset: u16, size: i128) {
+        self.open_at(first, second, asset, size, 100);
+    }
+
+    fn open_at(&mut self, first: usize, second: usize, asset: u16, size: i128, price: u64) {
         let cu = self.env.trade_asset_with_cu(
             asset,
             &self.owners[first],
@@ -136,7 +139,7 @@ impl FundedOwners {
             &self.owners[second],
             self.portfolios[second],
             size,
-            100,
+            price,
             0,
         );
         assert_cu_within("INV-057 funded open", cu, MULTI_ASSET_OPEN_TRADE_CU_LIMIT);
@@ -537,22 +540,38 @@ fn v16_program_funded_resolved_owner_reduction_inside_owner_window() {
     }
 }
 
+// Owner 0's asset-1 bankruptcy: a full-margin short of 17,000,000 units at 1e8 whose mark doubles
+// three times, so the unpaid loss (1.02e16) exceeds the public B chunk (PUBLIC_B_CHUNK_ATOMS) and the
+// forfeit leaves a close pending. (Until 2026-11-22 the market chose a chunk of one atom and owner 0
+// lost a few atoms.)
+const CLOSE_OPEN_PRICE: u64 = 100_000_000;
+const CLOSE_Q: u128 = 17_000_000 * POS_SCALE;
+const CLOSE_LOSER_CAPITAL: u128 = 1_700_000_000_000_000;
+const CLOSE_WINNER_CAPITAL: u128 = 3_400_000_000_000_000;
+
 #[test]
 fn v16_program_funded_active_and_expired_close_keep_owner_terminal_route() {
     for expired in [false, true] {
-        let rights = [0, PRINCIPAL, IDLE_PRINCIPAL, PRINCIPAL];
-        let mut f = FundedOwners::new(&[2, PRINCIPAL, IDLE_PRINCIPAL, PRINCIPAL], 1);
+        let rights = [0, CLOSE_WINNER_CAPITAL, IDLE_PRINCIPAL, PRINCIPAL];
+        let mut f = FundedOwners::new(&[
+            CLOSE_LOSER_CAPITAL,
+            CLOSE_WINNER_CAPITAL,
+            IDLE_PRINCIPAL,
+            PRINCIPAL,
+        ]);
+        f.env
+            .configure_auth_mark_for_asset_as_admin(1, 1, CLOSE_OPEN_PRICE);
         f.open(1, 3, 0, POS_SCALE as i128);
-        f.open(1, 0, 1, (POS_SCALE / 50) as i128);
-        for (slot, mark) in [(2, 200), (3, 300)] {
+        f.open_at(1, 0, 1, CLOSE_Q as i128, CLOSE_OPEN_PRICE);
+        for (slot, mark) in [(2, 200_000_000), (3, 400_000_000), (4, 800_000_000)] {
             f.env.svm.warp_to_slot(slot);
             f.env.push_auth_mark_for_asset_as_admin(1, slot, mark);
             f.crank(1, crank_observations_for_assets(&[1, 0]));
         }
         f.crank(0, crank_observations(1));
-        f.env.svm.warp_to_slot(4);
+        f.env.svm.warp_to_slot(5);
         f.env
-            .update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 1, 4, 0);
+            .update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 1, 5, 0);
         f.forfeit(0, 1, 1);
         let ledger = close_progress(&f.account(0));
         assert!(ledger.active && !ledger.finalized && ledger.residual_remaining > 0);
