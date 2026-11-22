@@ -857,15 +857,18 @@ use of soft credit without a lien, and assert token and encumbrance proofs remai
 
 ### INV-045 - No free mark movement
 
-**Statement.** While the asset has effective open interest on either side, every accepted mark
-update, including raw target 0, 1, and MAX, stays inside the elapsed-time movement envelope from
-the prior nonzero mark. A price that a trade reports is clamped to that envelope before it is
-accepted, whatever the open interest. No CPI/no-CPI, single/batch, self-controlled, zero-fee,
-zero-size, or zero-price route bypasses the cap.
+**Statement.** While the asset has effective open interest on either side, the mark moves toward
+its target by at most `anchor × cap` per elapsed slot, where the anchor is the mark when the current
+target took effect. A reported trade price is clamped by the same per-slot cap from the program's
+price average (`mark_ewma_e6`), whatever the open interest. A raw target of 0 or above MAX is
+refused. No CPI/no-CPI, single/batch, self-controlled, zero-fee, zero-size, or zero-price route
+bypasses the cap.
 
 ```text
 OI_eff_long > 0 or OI_eff_short > 0  =>
-    mark_after in movement_envelope(mark_before, elapsed_slots, configured_cap)
+    |mark_after - mark_before| * 10_000 <= anchor * configured_cap * elapsed_slots + carried_remainder
+    where anchor = the mark when the current target took effect
+      and carried_remainder < 10_000 (under one price unit of rounding, carried between steps)
 ```
 
 **Scope: an asset with no effective open interest.** While `OI_eff_long == OI_eff_short == 0`, an

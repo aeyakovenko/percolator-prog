@@ -9476,12 +9476,24 @@ fn drive_public_close_candidate_sized(
             "INV-076 {route:?} close-fixture opening trade did not land"
         ));
     }
-    for _ in 0..scale.marks {
-        runner.run_safety_prefix(&[Action::PushMark {
-            asset,
-            dt: 1,
-            move_bps: adverse_move_bps,
-        }])?;
+    for mark_step in 0..=scale.marks {
+        if mark_step < scale.marks {
+            runner.run_safety_prefix(&[Action::PushMark {
+                asset,
+                dt: 1,
+                move_bps: adverse_move_bps,
+            }])?;
+        } else {
+            // A changed target restarts the price-cap anchor at the mark (INV-045), so marks
+            // pushed exactly at the per-slot cap can leave the mark a few units of rounding short
+            // of the last one. One more slot of accrual toward the unchanged target lets it arrive.
+            let state = runner.env.primary_market_state().1.assets[asset_index];
+            if state.raw_oracle_target_price == state.effective_price {
+                break;
+            }
+            let next_slot = runner.env.current_slot() + 1;
+            runner.env.warp_to_slot(next_slot);
+        }
         if runner.env.primary_market_state().1.bankruptcy_hlock_active {
             runner
                 .env

@@ -31974,6 +31974,47 @@ and every price inside the range gets through (INV-045, clause C0). Every test o
 unchanged; the composition tests bound to the exact engine revision carry the new one (35 places in
 27 files).
 
+### INV-045: a changed target restarts the price-cap anchor, batch 15 (2026-11-22)
+
+Engine pin `71076137`. While the asset has effective open interest, the engine's path accrual moves
+the effective price toward its target by at most `anchor × cap` per slot, the anchor being the mark
+when the current target took effect. It restarted the anchor when a crank brought a new target, but
+not when the target had been staged first (`set_asset_raw_oracle_target(s)_not_atomic`). This
+program stages targets after a trade that moves an EWMA or hybrid mark, in the oracle authority's
+`PushAuthMark` (the reported price, unclamped), and before a crank's single-segment accrual. The
+next crank then kept the anchor of an earlier target, so after a long walk a reversal could move the
+mark by `anchor / mark` times the cap in one slot.
+
+Measured on the previous pin: the authority walked a mark from 1,000,000 to 13,600 over 411 slots at
+24 bps per slot. It then pushed a target equal to the mark, which unlocks risk-increasing trades
+(they are refused while target and mark differ), and a new short opened there with 15% capital. The
+authority pushed the reversal and a crank ran in the same slot: the mark moved 17.6% (73 times the
+cap), and the short's capital + PnL + unsettled K went from 2,000 to -400. The engine now restarts
+the anchor when a staged target changes, so that slot moves the mark by at most the cap of the mark
+at the push. `v16_attack_authority_reversal_after_a_long_walk_moves_within_the_cap_of_the_mark`
+checks this, and it fails on the previous pin.
+
+INV-045's statement in `INVARIANTS.md` says what the engine enforces: the envelope is measured from
+the anchor, and a reported trade price is clamped from the program's price average
+(`mark_ewma_e6`), not from the engine's mark.
+
+Tests changed with it:
+
+- The INV-045 target-arrival, generated-route and reversal models restart the anchor at a changed
+  target. They encoded the previous rule on purpose: staging kept the anchor until arrival, so who
+  staged when did not change the path. They fail on the previous pin.
+- Setups that push marks exactly at the per-slot cap give the mark one more slot of accrual to reach
+  the last target: the INV-039 close/reopen setup, the shared public B close seed, and INV-038's loss
+  marks. With the anchor restarted at each push and the carry reset, floor rounding left the mark
+  about ten units short after twenty pushes; the previous anchor caught up. The INV-039 force-close
+  wait now counts from the resolution slot.
+- The winner of the INV-073 deep-insolvency wind-down also cranks with each asset's backing hint,
+  and once more past the resolved backing deadline (engine #219). On the new path its haircut
+  receipt waits on backing until then: an unhinted crank is NonProgress, and the hinted crank
+  past the deadline releases the bucket.
+
+The composition tests bound to the exact engine revision carry the new one (35 places in 27 files).
+
 ### The program's own arithmetic is checked in the deployed build (2026-11-22)
 
 Program manifest only; the engine pin stays `4e77481b`. Until now the manifest had no release

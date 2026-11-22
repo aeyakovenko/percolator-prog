@@ -6637,23 +6637,46 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         let market_before = env.svm.get_account(&env.market).unwrap();
         let portfolio_before = env.svm.get_account(&cp).unwrap();
         let destination_before = env.svm.get_account(&winner_dest).unwrap();
-        env.svm.expire_blockhash();
-        let result = env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: u64::MAX,
-                observations: vec![],
-            },
-            vec![
-                AccountMeta::new_readonly(cp_owner.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(cp, false),
-                AccountMeta::new(winner_dest, false),
-                AccountMeta::new(env.vault, false),
-                AccountMeta::new_readonly(env.vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ],
-            &[&cp_owner],
-        );
+        // A resolved crank may carry one discovery-only backing hint. A winner's haircut receipt
+        // stays open while backing can still expire into it (engine #219: every bucket expires by
+        // resolved_slot + H); then the unhinted crank is NonProgress, and past that deadline the
+        // crank hinted with the bucket's asset releases it. Try no hint, then each asset, and
+        // once more past the deadline.
+        let mut result = Err(String::new());
+        let deadline = resolved_backing_deadline(&env.market_state().1);
+        for (observations, wait) in [
+            (vec![], false),
+            (crank_observations(0), false),
+            (crank_observations(1), false),
+            (vec![], true),
+            (crank_observations(0), true),
+            (crank_observations(1), true),
+        ] {
+            if wait {
+                env.svm.warp_to_slot(deadline + 1);
+            }
+            env.svm.expire_blockhash();
+            result = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: u64::MAX,
+                    observations,
+                },
+                vec![
+                    AccountMeta::new_readonly(cp_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(cp, false),
+                    AccountMeta::new(winner_dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&cp_owner],
+            );
+            match &result {
+                Err(error) if is_engine_non_progress_error(error) => continue,
+                _ => break,
+            }
+        }
         let cu = result.unwrap_or_else(|error| {
             let active_assets: Vec<_> = before
                 .legs
@@ -6875,7 +6898,7 @@ fn inv073_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str
 
 #[test]
 fn v16_program_terminal_disposition_and_administrative_retirement_are_source_complete() {
-    const ENGINE_PIN: &str = "4e77481b51a4283f598761a3f111d3bfde06ba9a";
+    const ENGINE_PIN: &str = "710761371c75b85bfe8209986fc16a87d68fdbd0";
     const PHASES: &[Inv073TerminalPhase] = &[
         Inv073TerminalPhase {
             rank_lane: "economic-work",

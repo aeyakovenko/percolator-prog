@@ -77,6 +77,8 @@ impl Book {
         if target != self.target[asset] {
             self.start[asset] = self.economics.price[asset];
             self.since[asset] = self.slot;
+            // A changed target restarts the price-cap anchor at the current mark (INV-045).
+            self.anchor[asset] = self.economics.price[asset];
             self.episode_anchor[asset] = self.anchor[asset];
             self.economics.carry[asset] = 0;
             self.target[asset] = target;

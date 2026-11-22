@@ -82,7 +82,9 @@ impl Ledger {
 
     fn carry(&self) -> [u64; 2] {
         [0, 1]
-            .map(|asset| ANCHORS[asset] * CAP_BPS * (self.slot - self.episode_slot[asset]) % 10_000)
+            .map(|asset| {
+                self.episode_price[asset] * CAP_BPS * (self.slot - self.episode_slot[asset]) % 10_000
+            })
     }
 
     fn publish(&mut self, asset: usize, target: i128) {
@@ -106,7 +108,9 @@ impl Ledger {
         for now in self.slot + 1..=slot {
             for asset in 0..2 {
                 let distance = self.target(asset) - i128::from(self.episode_price[asset]);
-                let movement = ANCHORS[asset] * CAP_BPS * (now - self.episode_slot[asset]) / 10_000;
+                // The price-cap anchor is the mark when the episode's target was published (INV-045).
+                let movement =
+                    self.episode_price[asset] * CAP_BPS * (now - self.episode_slot[asset]) / 10_000;
                 assert!(
                     i128::from(movement) < distance.abs(),
                     "no target arrival in this ledger"
@@ -197,7 +201,7 @@ impl Ledger {
                 (a.slot_last, a.effective_price),
                 (self.slot, self.price[asset])
             );
-            assert_eq!(a.fund_px_last, ANCHORS[asset]);
+            assert_eq!(a.fund_px_last, self.episode_price[asset]);
             assert_eq!(a.raw_oracle_target_price as i128, self.target(asset));
             let profile = profiles[asset];
             assert_eq!(

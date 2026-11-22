@@ -945,6 +945,23 @@ fn v16_program_fresh_b_booking_after_weight_change_preserves_value_and_encumbran
         .unwrap_or_else(|error| panic!("loss mark application {step}: {error}"));
         assert_inv038_attribution_censuses(&format!("INV-038 loss mark application {step}"), &env);
     }
+    // A changed target restarts the price-cap anchor at the mark (INV-045), so marks pushed
+    // exactly at the per-slot cap can leave the mark a few units of rounding short of the last
+    // one. One more slot of accrual toward the unchanged target lets it arrive.
+    if env.primary_market_state().1.assets[LOSS_ASSET as usize].effective_price != loss_mark {
+        let slot = env.current_slot() + 1;
+        env.warp_to_slot(slot);
+        env.crank(
+            FIRST_WINNER,
+            slot,
+            vec![CrankObservationHint {
+                asset_index: LOSS_ASSET,
+                oracle_accounts: 0,
+            }],
+        )
+        .unwrap_or_else(|error| panic!("loss mark arrival: {error}"));
+        assert_inv038_attribution_censuses("INV-038 loss mark arrival", &env);
+    }
     assert_eq!(
         env.primary_market_state().1.assets[LOSS_ASSET as usize].effective_price,
         loss_mark

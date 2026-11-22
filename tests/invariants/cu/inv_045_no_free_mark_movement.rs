@@ -984,6 +984,31 @@ fn inv045_reversal_checkpoint(
     lots: i128,
     profit: i128,
 ) -> (u64, u16, [i128; 2]) {
+    inv045_reversal_checkpoint_from_anchor(
+        env,
+        portfolios,
+        slot,
+        100,
+        start_price,
+        target,
+        numerator,
+        lots,
+        profit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inv045_reversal_checkpoint_from_anchor(
+    env: &V16CuEnv,
+    portfolios: [Pubkey; 2],
+    slot: u64,
+    anchor: u64,
+    start_price: u64,
+    target: u64,
+    numerator: u64,
+    lots: i128,
+    profit: i128,
+) -> (u64, u16, [i128; 2]) {
     let group = env.market_state().1;
     let asset = group.assets[0];
     let profile =
@@ -992,8 +1017,9 @@ fn inv045_reversal_checkpoint(
     let direction = (target as i128 - start_price as i128).signum();
     let price = (start_price as i128 + direction * (numerator / 10_000) as i128) as u64;
     assert_eq!(asset.slot_last, slot);
-    // Authenticated target staging retains the original cap anchor until arrival.
-    assert_eq!(asset.fund_px_last, 100);
+    // A changed authenticated target restarts the price-cap anchor at the mark (INV-045); until
+    // then the anchor is the mark when the target in force took effect.
+    assert_eq!(asset.fund_px_last, anchor);
     assert_eq!(asset.raw_oracle_target_price, target);
     assert_eq!(asset.effective_price, price);
     assert_eq!(
@@ -1316,10 +1342,11 @@ fn v16_program_fractional_target_reversal_commutes_with_neutral_reduction() {
                         lots -= 1;
                     }
                     let published = publish || !trade_first;
-                    inv045_reversal_checkpoint(
+                    inv045_reversal_checkpoint_from_anchor(
                         &env,
                         portfolios,
                         6,
+                        if published { reversal_price } else { 100 },
                         if published { reversal_price } else { 100 },
                         if published { new_target } else { old_target },
                         if published { 0 } else { 14_400 },
@@ -1330,7 +1357,8 @@ fn v16_program_fractional_target_reversal_commutes_with_neutral_reduction() {
                 let slots: &[u64] = if split { &[7, 8, 9, 10, 11] } else { &[11] };
                 for &slot in slots {
                     env.svm.warp_to_slot(slot);
-                    let numerator = 100 * 24 * (slot - 6);
+                    // The reversal restarted the anchor at the mark it was published at.
+                    let numerator = reversal_price * 24 * (slot - 6);
                     let profit = direction * (7 - 6 * (numerator / 10_000) as i128);
                     for actor in owner_order {
                         let cu = env.crank_if_actionable(
@@ -1341,10 +1369,11 @@ fn v16_program_fractional_target_reversal_commutes_with_neutral_reduction() {
                             },
                         );
                         max_cu = max_cu.max(cu.unwrap_or(0));
-                        inv045_reversal_checkpoint(
+                        inv045_reversal_checkpoint_from_anchor(
                             &env,
                             portfolios,
                             slot,
+                            reversal_price,
                             reversal_price,
                             new_target,
                             numerator,
@@ -1353,18 +1382,19 @@ fn v16_program_fractional_target_reversal_commutes_with_neutral_reduction() {
                         );
                     }
                 }
-                let endpoint = inv045_reversal_checkpoint(
+                let endpoint = inv045_reversal_checkpoint_from_anchor(
                     &env,
                     portfolios,
                     11,
                     reversal_price,
+                    reversal_price,
                     new_target,
-                    100 * 24 * 5,
+                    reversal_price * 24 * 5,
                     6,
                     direction,
                 );
                 assert_eq!(endpoint.0, 100);
-                assert_eq!(endpoint.1, 2_000);
+                assert_eq!(u64::from(endpoint.1), reversal_price * 24 * 5 % 10_000);
                 assert_eq!(tokens.map(|token| env.token_amount(token)), [0, 0]);
                 if let Some(expected) = baseline {
                     assert_eq!(
@@ -1379,6 +1409,163 @@ fn v16_program_fractional_target_reversal_commutes_with_neutral_reduction() {
     }
     assert_cu_within("fractional target reversal", max_cu, 1_400_000);
     eprintln!("INV-045 fractional target reversal: 8 histories, 8 exact suffix rollbacks, peak {max_cu} CU");
+}
+
+fn inv045_reversal_actor(env: &mut V16CuEnv, owner: &Keypair, principal: u64) -> Pubkey {
+    env.svm.airdrop(&owner.pubkey(), 1_000_000_000).unwrap();
+    let portfolio = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &portfolio,
+        env.portfolio_account_len,
+        env.program_id,
+    );
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio.pubkey(), false),
+        ],
+        &[owner],
+    )
+    .unwrap();
+    env.portfolios.push(portfolio.pubkey());
+    let token = create_ata_for_test(&mut env.svm, &env.payer, owner.pubkey(), env.mint);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        spl_token::instruction::mint_to(
+            &spl_token::ID,
+            &env.mint,
+            &token,
+            &env.admin.pubkey(),
+            &[],
+            principal,
+        )
+        .unwrap(),
+        &[&env.admin],
+    )
+    .unwrap();
+    env.send(
+        env.deposit_ix(portfolio.pubkey(), principal as u128),
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio.pubkey(), false),
+            AccountMeta::new(token, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[owner],
+    )
+    .unwrap();
+    portfolio.pubkey()
+}
+
+/// Capital + PnL + unsettled K of a short leg on asset 0.
+fn inv045_short_value(env: &V16CuEnv, portfolio: Pubkey) -> i128 {
+    let asset = env.market_state().1.assets[0];
+    let account = env.portfolio_state(portfolio);
+    let leg = active_leg_for_asset(&account, 0);
+    let unsettled = leg.basis_pos_q.abs() * (asset.k_short - leg.k_snap);
+    account.capital.get() as i128
+        + account.pnl.get()
+        + unsettled / (POS_SCALE as i128 * ADL_ONE as i128)
+}
+
+// The oracle authority walks an exposed auth-mark asset from 1,000,000 toward 10,000 (cap 24 bps
+// per slot) for 411 slots, with the price-cap anchor at 1,000,000 throughout. It then pushes a
+// target equal to the mark (a risk-increasing trade is refused while they differ), a new account
+// opens a one-lot short at that mark with 2,000 of capital (about 15% of its notional; 10% initial
+// margin), and in the next slot the authority pushes 1,000,000 and a crank runs in the same slot,
+// as one transaction can carry both. A changed target restarts the anchor at the mark, so that slot
+// moves the mark by at most the cap of the mark at the push and the short keeps its capital less
+// that move. With the walk's anchor kept, the slot moved the mark 2,400 (17.6% of it, 73 times the
+// cap) and took the short to -400.
+#[test]
+fn v16_attack_authority_reversal_after_a_long_walk_moves_within_the_cap_of_the_mark() {
+    use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+
+    let p0: u64 = 1_000_000;
+    let far: u64 = 10_000;
+    let cap_bps: u64 = 24;
+    let mut env = inv018_public_spl_market_with_params(
+        6,
+        V16CuMarketParams {
+            initial_price: p0,
+            max_price_move_bps_per_slot: cap_bps,
+            max_accrual_dt_slots: 6,
+            min_funding_lifetime_slots: 6,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 1_000,
+            ..V16CuMarketParams::default()
+        },
+    );
+    env.svm.warp_to_slot(0);
+    env.configure_auth_mark_with_cu(0, p0);
+    let owners = [Keypair::new(), Keypair::new(), Keypair::new()];
+    let long = inv045_reversal_actor(&mut env, &owners[0], 1_000_000_000_000);
+    let other = inv045_reversal_actor(&mut env, &owners[1], 1_000_000_000_000);
+    env.trade_with_cu(&owners[0], long, &owners[1], other, POS_SCALE as i128, p0, 0);
+    env.push_auth_mark_with_cu(0, far);
+    let step = p0 * cap_bps / 10_000;
+    let mut slot = 0u64;
+    while env.market_state().1.assets[0].effective_price > far + 2 * step {
+        slot += 1;
+        assert!(slot < 1_000, "the walk reaches the far target");
+        env.svm.warp_to_slot(slot);
+        for portfolio in [long, other] {
+            env.crank_if_actionable(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+    }
+    let walked = env.market_state().1.assets[0];
+    let mark = walked.effective_price;
+    assert_eq!(walked.fund_px_last, p0, "one target, one anchor for the whole walk");
+    assert!(p0 / mark > 70, "the walk ends far below its anchor");
+
+    env.push_auth_mark_with_cu(slot, mark);
+    let unlocked = env.market_state().1.assets[0];
+    assert_eq!(
+        (unlocked.raw_oracle_target_price, unlocked.effective_price),
+        (mark, mark)
+    );
+    assert_eq!(
+        unlocked.fund_px_last, mark,
+        "a changed target restarts the price-cap anchor at the mark"
+    );
+    let short = inv045_reversal_actor(&mut env, &owners[2], 2_000);
+    env.trade_with_cu(&owners[0], long, &owners[2], short, POS_SCALE as i128, mark, 0);
+    assert_eq!(inv045_short_value(&env, short), 2_000);
+
+    slot += 1;
+    env.svm.warp_to_slot(slot);
+    env.push_auth_mark_with_cu(slot, p0);
+    assert_eq!(env.market_state().1.assets[0].fund_px_last, mark);
+    env.crank_if_actionable(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: crank_observations(0),
+        },
+    );
+    let reversed = env.market_state().1.assets[0];
+    assert_eq!(reversed.slot_last, slot);
+    let moved = reversed.effective_price - mark;
+    assert!(moved > 0, "the mark moves toward the pushed target");
+    assert!(
+        moved * 10_000 <= mark * cap_bps + 9_999,
+        "one slot moves the mark by at most the cap of the mark at the push: {mark} -> {}",
+        reversed.effective_price
+    );
+    assert_eq!(inv045_short_value(&env, short), 2_000 - moved as i128);
 }
 
 #[test]
@@ -3278,7 +3465,7 @@ fn inv045_function_body<'a>(production: &'a str, function: &str) -> &'a str {
 
 #[test]
 fn v16_program_mark_writer_and_trade_exit_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "4e77481b51a4283f598761a3f111d3bfde06ba9a";
+    const ENGINE_PIN: &str = "710761371c75b85bfe8209986fc16a87d68fdbd0";
     const CLASSES: &[Inv045MarkClass] = &[
         Inv045MarkClass {
             class: "full-width mark and fee arithmetic",

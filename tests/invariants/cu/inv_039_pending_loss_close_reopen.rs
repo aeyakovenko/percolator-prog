@@ -60,11 +60,33 @@ fn enter_pending_bankruptcy(
     );
     assert_cu_within("INV-039 close/reopen initial trade", cu, TRADE_CU_LIMIT);
     let mut mark = 1_000_000u64;
+    let mut last_slot = 0u64;
     for (index, next_mark) in marks.into_iter().enumerate() {
         let slot = index as u64 + 1;
+        last_slot = slot;
         mark = next_mark;
         world.env.svm.warp_to_slot(slot);
         world.env.push_auth_mark_for_asset_as_admin(1, slot, mark);
+        let cu = world.env.crank(
+            world.actors[4].portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(1),
+            },
+        );
+        *peak_crank_cu = (*peak_crank_cu).max(cu);
+        assert_cu_within(
+            "INV-039 close/reopen authenticated accrual",
+            cu,
+            CRANK_CU_LIMIT,
+        );
+    }
+    // A changed target restarts the price-cap anchor at the mark (INV-045), so targets pushed
+    // exactly at the per-slot cap can leave the mark a few units of rounding short of the last
+    // one. One more slot of accrual toward the unchanged target lets it arrive.
+    if world.env.market_state().1.assets[1].effective_price != mark {
+        let slot = last_slot + 1;
+        world.env.svm.warp_to_slot(slot);
         let cu = world.env.crank(
             world.actors[4].portfolio,
             ProgInstruction::PermissionlessCrank {
@@ -465,7 +487,10 @@ fn v16_program_pending_loss_survives_debtor_recreation_and_bystander_payout() {
             ATTRIBUTION_DEPOSITS[4],
         ];
         world.env.resolve();
-        world.env.svm.warp_to_slot(25);
+        // Past the five-slot force-close delay (slot 25 when the setup resolves at slot 20; one
+        // slot later when the mark needed a slot to reach its last target).
+        let resolved_slot = world.env.market_state().1.resolved_slot;
+        world.env.svm.warp_to_slot(resolved_slot + 5);
         for _ in 0..8 {
             for actor in [2, 1, 0, 3, 4] {
                 if resolved_portfolio_is_terminal(&world.env, world.actors[actor].portfolio) {
