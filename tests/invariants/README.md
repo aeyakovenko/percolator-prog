@@ -31974,6 +31974,25 @@ and every price inside the range gets through (INV-045, clause C0). Every test o
 unchanged; the composition tests bound to the exact engine revision carry the new one (35 places in
 27 files).
 
+### The program's own arithmetic is checked in the deployed build (2026-11-22)
+
+Program manifest only; the engine pin stays `4e77481b`. Until now the manifest had no release
+profile. Cargo applies only the root manifest's profiles (the engine's own `overflow-checks = true`
+counts only when the engine is built alone), so the deployed build had overflow checks off in every
+crate, and plain arithmetic in the program and in the engine wrapped instead of aborting. The
+release profile now turns the checks on for the program's own code: an overflow aborts the
+transaction. The engine and the other dependencies stay unchecked (`[profile.release.package."*"]`).
+With the engine checked as well, the 14-leg atomic exit
+(`v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`, INV-073) exceeds the 1.4M CU
+limit and five CU guardrails are exceeded by 0.2 to 0.5%. The engine's plain arithmetic is listed in
+its proof ledger as no-overflow proof obligations. Code the tests run on the host does not change:
+the test profile always had overflow checks on in every crate. A full run of this suite with every
+crate checked hit no overflow; its seven failures were all compute.
+
+Compute: one exact compute pin moves. `v16_program_max_shape_short_b_budget_has_exact_public_progress`
+goes from 556,197 to 556,220 CU (`cu/inv_077_short_side_b_budget.rs`). Every other test passes
+unchanged.
+
 ### INV-036/045 no keeper reward during Hybrid catch-up: five tests restated (2026-11-19)
 
 The program's rule stays (commit `01ec6161`, 2026-09-16): a liquidation penalty is reclaimable only

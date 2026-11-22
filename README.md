@@ -1095,6 +1095,9 @@ market reclaim (`CloseSlab`) requires a live market authority.
 # Requires platform-tools v1.52 or newer; review any stack-frame diagnostics
 # before treating this artifact as deployable.
 cargo build-sbf --tools-version v1.52
+# The release profile in Cargo.toml checks the program's own arithmetic (an
+# overflow aborts the transaction) and leaves the engine and the other
+# dependencies unchecked, for compute; the comment there says why.
 
 # Only the default build above is supported. `--no-default-features` (no Anchor v2
 # entrypoint) is not tested: it uses more compute and hits heap access violations on

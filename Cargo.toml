@@ -86,3 +86,15 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(target_os, values("solana"))',
     'cfg(feature, values("custom-heap", "custom-panic", "idl-build"))',
 ] }
+
+# Deployed (release) build. Cargo applies only this manifest's profiles, so without
+# these lines every crate, the engine included, is built without overflow checks and
+# plain arithmetic wraps. The program's own arithmetic is checked: an overflow aborts
+# the transaction. The engine and the other dependencies stay unchecked: with the
+# engine checked too, the 14-leg atomic exit (INV-073) exceeds the 1.4M CU limit. The
+# engine's proof ledger lists its plain arithmetic as no-overflow proof obligations.
+[profile.release]
+overflow-checks = true
+
+[profile.release.package."*"]
+overflow-checks = false
