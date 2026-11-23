@@ -32212,6 +32212,43 @@ harness `every_insurance_withdraw_route_shares_one_budget` accordingly. Existing
 unchanged (`v16_program_live_and_resolved_insurance_withdrawals_share_one_finite_budget`; AUDIT-064
 already describes this budget model).
 
+### INV-046 second read: one owner for a soft-stale hybrid's target, and Recovery reductions stay open (2026-11-23)
+
+Program only; the engine pin stays `71076137`. An independent second read of INV-046's restated
+statement, on program `609e557b`, found two program defects. Both are fixed as the owner decided,
+each with a regression test that fails on the previous program.
+
+- **Finding 1 (high): who wrote last chose a soft-stale hybrid's target.** The soft-stale window
+  counts slots since the feed last published a newer reading. Past it, while the last reading was
+  still within `max_staleness_secs`, the crank re-staged the feed price and any trade staged the
+  trade average. Each switch bumped `oracle_epoch` and moved the target-lag penalty, which enters
+  the initial and maintenance requirements, from one side to the other, so a trader could pick the
+  target with a one-unit trade and liquidate the side it chose in the same transaction. Measured on
+  `609e557b` (feed 1,100,000, window 3 slots, reading 6-7 s old): a crank staged 1,100,000, a
+  one-unit reducing trade 1,010,080 (the average), the next crank 1,100,000 again, at oracle epochs
+  6, 7 and 9. The owner's rule: past the window the trade average owns the target until the feed
+  publishes a newer reading, so the crank no longer stages a reading it has already observed
+  (`hybrid_target_for_crank_view`). `v16_attack_soft_stale_hybrid_target_does_not_depend_on_the_writer`
+  checks that a crank, a trade and the next crank stage the same target, the average, and that a
+  newer reading restores the feed price and restarts the window.
+- **Finding 4: Recovery reductions lapsed before the force close.** Shutdown freezes the asset's
+  `last_good_oracle_slot`, so from shutdown + `permissionless_resolve_stale_slots` on, a reducing
+  trade on a non-base Recovery asset was refused (`OracleStale`). Until the force close the owner
+  could only forfeit the leg, giving up its junior value, or wait. The owner chose to keep the
+  reductions open: the trade routes' staleness gate (`trade_resolve_matured_at_slot`) ignores a
+  Recovery asset's own timer, and market-wide staleness still stops every trade (a Recovery base
+  asset makes the whole market stale, and it then exits through permissionless resolution).
+  `v16_program_recovery_reduction_stays_open_after_the_stale_window`: shutdown at slot 2, a stale
+  window of 100 slots, force close at slot 1,002; at slot 103 a risk increase is refused and the
+  reduction lands.
+- The INV-088 liveness read census locks the bodies of the two new predicates and their callers,
+  the four trade routes. `INVARIANTS.md` gains a scope paragraph under INV-046, and `README.md`
+  describes both rules.
+- The read's other findings correct the statement, which is kept with the proof ledger: the move a
+  collected fee supports is twice what clause C3 said; catch-up takes `ceil(dt / min(window, 32))`
+  crank calls per exposed asset; clause C4's justification and the reducing trade's preconditions
+  were incomplete; BatchTradeCpi's fee cap was missing from the list of refusals.
+
 ### The program's own arithmetic is checked in the deployed build (2026-11-22)
 
 Program manifest only; the engine pin stays `4e77481b`. Until now the manifest had no release

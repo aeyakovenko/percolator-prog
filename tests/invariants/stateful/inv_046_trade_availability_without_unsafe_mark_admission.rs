@@ -671,3 +671,72 @@ fn v16_program_trade_driven_recovery_reduction_ignores_the_print_on_every_route(
         }
     }
 }
+
+// INV-046 second read, finding 4 (2026-11-23; the owner's decision: keep the reductions open): a
+// reducing trade on a non-base Recovery asset after shutdown + `permissionless_resolve_stale_slots`,
+// while the force close is still in the future and the market as a whole is fresh. The asset's own
+// frozen oracle no longer refuses it; a risk increase is still refused (the engine admits risk only
+// on an Active asset). (A Recovery base asset makes the whole market stale instead, and the market
+// can then be resolved.)
+#[test]
+fn v16_program_recovery_reduction_stays_open_after_the_stale_window() {
+    const ASSET: u16 = 1;
+    const SHUTDOWN_SLOT: u64 = 2;
+    const STALE_SLOTS: u64 = 100;
+    const FORCE_CLOSE_DELAY: u64 = 1_000;
+    let config = MarketConfig::default();
+    let price = config.initial_price;
+    let mut env = V16Svm::new([0x5a; 32], config);
+    env.configure_ewma_mark(0, 1, price, 1, 0)
+        .expect("configure the base EWMA mark");
+    env.configure_ewma_mark(ASSET, 1, price, 1, 0)
+        .expect("configure the second asset's EWMA mark");
+    env.trade_no_cpi(0, 1, ASSET, POS_SCALE as i128, price, 0)
+        .expect("open the pair on the second asset");
+    env.configure_permissionless_resolve(STALE_SLOTS, FORCE_CLOSE_DELAY)
+        .expect("configure Recovery");
+    env.warp_to_slot(SHUTDOWN_SLOT);
+    env.shutdown_asset(ASSET, SHUTDOWN_SLOT)
+        .expect("enter Recovery");
+    let exit_slot = SHUTDOWN_SLOT + STALE_SLOTS + 1;
+    env.warp_to_slot(exit_slot);
+    env.push_ewma_mark(0, exit_slot, price)
+        .expect("keep the base mark, and so the market, fresh");
+    assert_eq!(
+        env.primary_market_state().0.last_good_oracle_slot,
+        exit_slot
+    );
+    let increase = execute_trade_route(
+        &mut env,
+        TradeRoute::NoCpi,
+        0,
+        1,
+        ASSET,
+        POS_SCALE as i128,
+        price,
+        0,
+    );
+    assert!(
+        increase.is_err(),
+        "a risk increase on a Recovery asset is refused"
+    );
+    let result = execute_trade_route(
+        &mut env,
+        TradeRoute::NoCpi,
+        0,
+        1,
+        ASSET,
+        -(POS_SCALE as i128),
+        price,
+        0,
+    );
+    assert!(
+        result.is_ok(),
+        "the Recovery reduction lapses after the stale window: {:?}",
+        result.err()
+    );
+    let after = env.primary_market_state().1.assets[ASSET as usize];
+    assert_eq!(after.oi_eff_long_q, 0);
+    assert_eq!(after.oi_eff_short_q, 0);
+    assert_eq!(after.lifecycle, AssetLifecycleV16::Recovery);
+}

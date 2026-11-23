@@ -214,6 +214,41 @@ const PREDICATES: &[(&str, &str)] = &[
         Ok(())
     }"#,
     ),
+    // INV-046 second read, finding 4 (2026-11-23): a Recovery asset's own frozen oracle does not
+    // refuse its reductions; market-wide staleness still refuses every trade.
+    (
+        "trade_resolve_matured_at_slot",
+        r#"{
+        if asset_lifecycle == ASSET_LIFECYCLE_RECOVERY {
+            oracle_v16::permissionless_stale_matured(cfg, now_slot)
+        } else {
+            global_or_profile_resolve_matured_at_slot(cfg, profile, now_slot)
+        }
+    }"#,
+    ),
+    (
+        "reject_trade_resolve_matured_live_view",
+        r#"{
+        let lifecycle = group
+            .markets
+            .get(asset_index)
+            .ok_or(PercolatorError::InvalidInstruction)?
+            .engine
+            .asset
+            .lifecycle;
+        if group.header.mode == 0
+            && trade_resolve_matured_at_slot(
+                cfg,
+                profile,
+                lifecycle,
+                authenticated_market_slot_or_fallback_view(group),
+            )
+        {
+            return Err(PercolatorError::OracleStale.into());
+        }
+        Ok(())
+    }"#,
+    ),
 ];
 
 // Receiver-sensitive access census, not a persisted-field or engine-transition roster.
@@ -371,13 +406,38 @@ const CALL_EDGES: &[(&str, &str, usize)] = &[
         1,
     ),
     (
+        "trade_resolve_matured_at_slot",
+        "permissionless_stale_matured(cfg, now_slot)",
+        1,
+    ),
+    (
+        "trade_resolve_matured_at_slot",
+        "global_or_profile_resolve_matured_at_slot(cfg, profile, now_slot)",
+        1,
+    ),
+    (
+        "reject_trade_resolve_matured_live_view",
+        "trade_resolve_matured_at_slot(cfg, profile, lifecycle, authenticated_market_slot_or_fallback_view(group),)",
+        1,
+    ),
+    (
         "handle_trade_cpi",
-        "global_or_profile_resolve_matured_at_slot(&cfg_pre, &oracle_profile_pre, authenticated_slot_or_fallback(current_slot_pre),)",
+        "trade_resolve_matured_at_slot(&cfg_pre, &oracle_profile_pre, lifecycle_pre, authenticated_slot_or_fallback(current_slot_pre),)",
         1,
     ),
     (
         "handle_batch_trade_cpi",
-        "global_or_profile_resolve_matured_at_slot(&cfg_pre, &oracle_profile_pre, authenticated_slot,)",
+        "trade_resolve_matured_at_slot(&cfg_pre, &oracle_profile_pre, state::read_asset_lifecycle(&market_data, asset_index as usize)?, authenticated_slot,)",
+        1,
+    ),
+    (
+        "handle_trade_nocpi_zero_copy",
+        "reject_trade_resolve_matured_live_view(&cfg, &oracle_profile, &group, asset_index_usize,)",
+        1,
+    ),
+    (
+        "handle_batch_execute_zero_copy",
+        "reject_trade_resolve_matured_live_view(&cfg, &oracle_profile, &group, asset_index)",
         1,
     ),
     (

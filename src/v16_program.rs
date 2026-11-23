@@ -1972,6 +1972,17 @@ pub mod state {
         ))
     }
 
+    /// The lifecycle byte of one asset, read from the market account's bytes.
+    pub fn read_asset_lifecycle(data: &[u8], asset_index: usize) -> Result<u8, ProgramError> {
+        check_header(data, KIND_MARKET)?;
+        validate_market_dynamic_len(data)?;
+        let header = market_header(data)?;
+        if asset_index >= header.config.max_market_slots.get() as usize {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        Ok(asset_slot_wire(data, asset_index)?.asset.lifecycle)
+    }
+
     pub fn read_asset_lifecycle_generation_preflight(
         data: &[u8],
         asset_index: usize,
@@ -6421,6 +6432,51 @@ pub mod processor {
                 && permissionless_resolve_matured_for_profile_at_slot(cfg, profile, now_slot))
     }
 
+    /// The staleness gate of a trade route. A Recovery asset trades only reductions (the engine
+    /// refuses any risk increase off an Active asset), at the price shutdown froze
+    /// (`trade_updates_mark_view`), so its own oracle's staleness cannot move the trade's price
+    /// and does not refuse it: its owners can reduce at the frozen price until the force close
+    /// (INV-046 second read, finding 4; the owner's decision of 2026-11-23). Market-wide
+    /// staleness still refuses every trade.
+    fn trade_resolve_matured_at_slot(
+        cfg: &WrapperConfigV16,
+        profile: &state::AssetOracleProfileV16,
+        asset_lifecycle: u8,
+        now_slot: u64,
+    ) -> bool {
+        if asset_lifecycle == ASSET_LIFECYCLE_RECOVERY {
+            oracle_v16::permissionless_stale_matured(cfg, now_slot)
+        } else {
+            global_or_profile_resolve_matured_at_slot(cfg, profile, now_slot)
+        }
+    }
+
+    fn reject_trade_resolve_matured_live_view(
+        cfg: &WrapperConfigV16,
+        profile: &state::AssetOracleProfileV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> ProgramResult {
+        let lifecycle = group
+            .markets
+            .get(asset_index)
+            .ok_or(PercolatorError::InvalidInstruction)?
+            .engine
+            .asset
+            .lifecycle;
+        if group.header.mode == 0
+            && trade_resolve_matured_at_slot(
+                cfg,
+                profile,
+                lifecycle,
+                authenticated_market_slot_or_fallback_view(group),
+            )
+        {
+            return Err(PercolatorError::OracleStale.into());
+        }
+        Ok(())
+    }
+
     fn reject_permissionless_resolve_matured_live_view(
         cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
@@ -8570,10 +8626,11 @@ pub mod processor {
             }
             let mut oracle_profile =
                 read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
-            reject_permissionless_resolve_matured_live_for_profile_view(
+            reject_trade_resolve_matured_live_view(
                 &cfg,
                 &oracle_profile,
                 &group,
+                asset_index_usize,
             )?;
             let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
             let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
@@ -8966,11 +9023,7 @@ pub mod processor {
                     return Err(PercolatorError::AssetGenerationMismatch.into());
                 }
                 let mut oracle_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
-                reject_permissionless_resolve_matured_live_for_profile_view(
-                    &cfg,
-                    &oracle_profile,
-                    &group,
-                )?;
+                reject_trade_resolve_matured_live_view(&cfg, &oracle_profile, &group, asset_index)?;
                 if leg.size_q == i128::MIN || leg.size_q == 0 {
                     return Err(PercolatorError::InvalidInstruction.into());
                 }
@@ -9908,14 +9961,17 @@ pub mod processor {
         if mode_pre != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        let oracle_profile_pre = read_oracle_profile_for_asset(
-            &market_ai.try_borrow_data()?,
-            &cfg_pre,
-            asset_index as usize,
-        )?;
-        let stale_matured = global_or_profile_resolve_matured_at_slot(
+        let (oracle_profile_pre, lifecycle_pre) = {
+            let market_data = market_ai.try_borrow_data()?;
+            (
+                read_oracle_profile_for_asset(&market_data, &cfg_pre, asset_index as usize)?,
+                state::read_asset_lifecycle(&market_data, asset_index as usize)?,
+            )
+        };
+        let stale_matured = trade_resolve_matured_at_slot(
             &cfg_pre,
             &oracle_profile_pre,
+            lifecycle_pre,
             authenticated_slot_or_fallback(current_slot_pre),
         );
         if stale_matured {
@@ -10333,9 +10389,10 @@ pub mod processor {
             for &asset_index in &asset_indices {
                 let oracle_profile_pre =
                     read_oracle_profile_for_asset(&market_data, &cfg_pre, asset_index as usize)?;
-                let leg_stale = global_or_profile_resolve_matured_at_slot(
+                let leg_stale = trade_resolve_matured_at_slot(
                     &cfg_pre,
                     &oracle_profile_pre,
+                    state::read_asset_lifecycle(&market_data, asset_index as usize)?,
                     authenticated_slot,
                 );
                 if leg_stale {
@@ -16279,12 +16336,21 @@ pub mod processor {
         };
         let target = match read {
             Ok((price, publish_time, advanced)) => {
-                profile.oracle_target_price_e6 = price;
-                profile.oracle_target_publish_time = publish_time;
                 if advanced {
                     profile.last_good_oracle_slot = now_slot;
                 }
-                price
+                // INV-046 (second read, finding 1; the owner's rule A of 2026-11-23): past the
+                // soft-stale window the trade average owns a hybrid's target until the feed
+                // publishes a newer reading. A reading already observed (`!advanced`) is then not
+                // staged again: the crank stages the average, as a trade does, so the target does
+                // not depend on which writer acts last. A newer reading restarts the window.
+                if oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot) {
+                    profile.mark_ewma_e6
+                } else {
+                    profile.oracle_target_price_e6 = price;
+                    profile.oracle_target_publish_time = publish_time;
+                    price
+                }
             }
             Err(e)
                 if e == ProgramError::from(PercolatorError::OracleStale)

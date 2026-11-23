@@ -927,6 +927,17 @@ and repeated same-slot calls.
 Unsafe raw prices may be ignored for discovery, safely clamped for risk/fees, or rejected only when
 necessary, while at least one bounded risk-reducing route remains available.
 
+**Scope: a hybrid past its soft-stale window, and reductions on a Recovery asset.** A hybrid asset's
+soft-stale window counts slots since its feed last published a newer reading. Past it, the trade
+average is the target for every writer, the permissionless crank as well as a trade, until the feed
+publishes a newer reading, which restores the feed price and restarts the window. A reading already
+observed is not staged again, even within `max_staleness_secs`, so no caller chooses the target by
+choosing which writer acts last. On a Recovery asset only risk-reducing trades are admitted, at the
+price shutdown froze; the asset's own staleness timer (`permissionless_resolve_stale_slots` since its
+last good reading) does not refuse them, so they remain available until the asset is force-closed.
+Market-wide staleness still stops every trade, and the market then exits through permissionless
+resolution.
+
 **Required tests.** Zero, extreme, stale, and out-of-band prices during normal, drain, reset,
 recovery, and close states.
 **Verification:** F, I, R
