@@ -860,7 +860,7 @@ A typical ops approach:
 
 ### Monitoring checklist
 At minimum, monitor:
-- insurance fund balance and live withdrawal budget/cooldown
+- insurance fund balance and live withdrawal budget
 - total open interest / LP exposure concentration
 - crank success rate + last successful crank slot
 - oracle freshness (age vs max staleness) and confidence filter failures

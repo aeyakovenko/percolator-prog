@@ -32185,6 +32185,33 @@ maintenance fee (the program runs the same fee sync before a value debit), and w
 with twenty-eight source records and pass. A failed fill rolls back. The measurements and the
 marker commands are kept with the review notes, outside this repository.
 
+### INV-064 states the program's insurance-withdrawal budget (2026-11-23)
+
+Charter only; no program change. INV-064 promised one aggregate proportional cap and one cooldown
+shared by every insurance-withdrawal route. The program has neither: their configuration fields
+(`_reserved_insurance_withdraw_max_bps`, `_reserved_insurance_withdraw_deposits_only`,
+`_reserved_insurance_withdraw_cooldown_slots`, `_reserved_last_insurance_withdraw_slot`) are
+reserved and must be zero. The owner chose to state the rule the program enforces
+(`handle_withdraw_insurance_asset`):
+
+- One budget per asset (`market_insurance_withdraw_capacity_view`): the remaining budgets of the
+  asset's two loss domains, at most the market's insurance less what is reserved for source credit
+  (`source_insurance_credit_reserved_total_atoms`), at most the vault. A withdrawal debits the long
+  domain's budget first, then the short one's (`debit_market_insurance_budget_view`), so splitting
+  cannot withdraw more than the budget.
+- In a Live market a withdrawal is refused while any loss is active, while the asset is loss-stale,
+  or while an exposed asset's target lags its mark, unless the asset was shut down empty and matured
+  (`live_domain_withdraw_health_or_shutdown_view`).
+
+What the rewording gives up: while no loss is active, an insurance operator can withdraw the whole
+unreserved budget in one instruction, where a cap and a cooldown would have spread it over time. The
+budget never includes insurance reserved for a user's source credit, and no withdrawal can land
+between a price move and the loss it causes, so the operator cannot front-run a loss; it can only
+shrink the buffer for future losses. The charter's list of whole-route regressions names the
+harness `every_insurance_withdraw_route_shares_one_budget` accordingly. Existing evidence is
+unchanged (`v16_program_live_and_resolved_insurance_withdrawals_share_one_finite_budget`; AUDIT-064
+already describes this budget model).
+
 ### The program's own arithmetic is checked in the deployed build (2026-11-22)
 
 Program manifest only; the engine pin stays `4e77481b`. Until now the manifest had no release

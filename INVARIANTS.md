@@ -1180,9 +1180,14 @@ still tagged Fresh after expiry.
 
 ### INV-064 - Insurance-withdrawal policy equivalence
 
-**Statement.** Every route reaching live insurance funds shares one enable flag, one aggregate
-proportional cap, one cooldown, one policy epoch, and one last-withdrawal update. Splitting across
-routes, assets, or domains cannot bypass the policy.
+**Statement.** Every route that withdraws insurance draws on one budget per asset: the remaining
+budgets of the asset's two loss domains, never more than the market's insurance less what is
+reserved for source credit, and never more than the vault. Each withdrawal debits that budget, so
+splitting across routes, assets, domains or instructions cannot withdraw more than it. While the
+market is Live, a withdrawal is refused while any loss is active (an account with negative PnL, the
+domain's loss barrier, threshold stress, a loss-stale market or asset, recovery) or while an exposed
+asset's target lags its mark, unless the asset has been shut down empty and matured. There is no
+proportional cap and no cooldown; their configuration fields are reserved and must be zero.
 
 **Required tests.** Interleave all insurance withdrawal variants and compare cumulative allowance
 against one canonical reference ledger.
@@ -1666,7 +1671,7 @@ considered mature:
 14. `unsafe_raw_price_cannot_block_all_owner_exit_paths`
 15. `backing_expiry_is_normalized_before_add_close_claim_and_payout`
 16. `resolved_claim_permutations_preserve_snapshot_fairness_and_stock`
-17. `every_insurance_withdraw_route_shares_one_cap_and_cooldown`
+17. `every_insurance_withdraw_route_shares_one_budget`
 18. `parasitic_zero_activity_asset_receives_no_account_level_fee`
 19. `split_liquidations_do_not_multiply_minimum_fee`
 20. `reset_pending_side_rejects_new_risk`
