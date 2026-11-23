@@ -317,6 +317,150 @@ fn v16_program_nonzero_fee_trade_routes_are_byte_exact_after_transport_normaliza
     }
 }
 
+/// One reduction after a sub-unit authority-mark gap: the trade first commits a zero-move funding
+/// segment (the price stays, funding accrues), which advances the profile's carried price-move
+/// remainder and funding-mark checkpoint.
+fn run_zero_move_funding_route(
+    seed: [u8; 32],
+    route: TradeRoute,
+) -> Result<NormalizedTradeRouteFrame, String> {
+    const PRICE: u64 = 100;
+    const MARK: u64 = 99;
+    const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+    const PRIME_SLOT: u64 = 2;
+    const TRADE_SLOT: u64 = 3;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 10_000,
+            min_funding_lifetime_slots: 1,
+            ..MarketConfig::default()
+        },
+    );
+    env.trade_no_cpi(TAKER, MAKER, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("INV-047 open the funding pair: {error}"))?;
+    env.warp_to_slot(PRIME_SLOT);
+    env.push_auth_mark(0, PRIME_SLOT, MARK)
+        .map_err(|error| format!("INV-047 publish the authority mark: {error}"))?;
+    env.crank(
+        TAKER,
+        PRIME_SLOT,
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 0,
+        }],
+    )
+    .map_err(|error| format!("INV-047 prime the funding checkpoint: {error}"))?;
+    env.warp_to_slot(TRADE_SLOT);
+    let profile = state::read_asset_oracle_profile(&env.market_data(false), 0)
+        .map_err(|error| format!("INV-047 read the oracle profile: {error:?}"))?;
+    if profile.oracle_mode != percolator_prog::constants::ORACLE_MODE_AUTH_MARK {
+        return Err(format!(
+            "INV-047 zero-move fixture needs an authority mark, got mode {}",
+            profile.oracle_mode
+        ));
+    }
+    let before = env.primary_market_state().1.assets[0];
+    let landed = execute_trade_route(&mut env, route, TAKER, MAKER, 0, -(SIZE_Q / 2), PRICE, 0)
+        .map_err(|error| format!("INV-047 {route:?} reduction failed: {error}"))?;
+    if landed.compute_units >= TX_CU_LIMIT {
+        return Err(format!(
+            "INV-047 {route:?} consumed {} CU",
+            landed.compute_units
+        ));
+    }
+    let after = env.primary_market_state().1.assets[0];
+    if after.effective_price != before.effective_price
+        || after.slot_last != TRADE_SLOT
+        || after.f_long_num == before.f_long_num
+    {
+        return Err(format!(
+            "INV-047 {route:?} did not commit exactly one zero-move funding segment: price {}->{}, \
+             slot {}->{}, f_long {}->{}",
+            before.effective_price,
+            after.effective_price,
+            before.slot_last,
+            after.slot_last,
+            before.f_long_num,
+            after.f_long_num
+        ));
+    }
+    let mut frame = normalized_trade_route_frame(&env)?;
+    // The opening bilateral fill revoked the maker's matcher; the CPI routes re-enable it first,
+    // which advances the maker portfolio's matcher sequence (transport state, not value).
+    let sequence = percolator_prog::constants::PORTFOLIO_MATCHER_SEQUENCE_OFF;
+    frame
+        .primary_portfolios
+        .get_mut(MAKER)
+        .and_then(|portfolio| {
+            portfolio.get_mut(
+                sequence..sequence + percolator_prog::constants::PORTFOLIO_MATCHER_SEQUENCE_LEN,
+            )
+        })
+        .ok_or("INV-047 maker portfolio has no matcher sequence")?
+        .fill(0);
+    Ok(frame)
+}
+
+/// INV-046 first read, finding 9 (2026-11-23). `BatchTradeNoCpi` ran a leg's zero-move funding
+/// segment and then, for an asset whose print does not move the mark (here an authority mark),
+/// skipped that leg's profile write, so the remainder and checkpoint the engine segment had used
+/// were lost while the single route persisted them. The four routes must agree byte for byte.
+#[test]
+fn v16_program_zero_move_funding_before_a_trade_persists_the_profile_on_every_route() {
+    let mut expected: Option<(TradeRoute, NormalizedTradeRouteFrame)> = None;
+    for route in ROUTES {
+        let frame = run_zero_move_funding_route([0x4a; 32], route)
+            .unwrap_or_else(|error| panic!("{error}"));
+        if let Some((expected_route, expected_frame)) = &expected {
+            if frame != *expected_frame {
+                let first_market_byte = frame
+                    .primary_market
+                    .iter()
+                    .zip(&expected_frame.primary_market)
+                    .position(|(actual, expected)| actual != expected);
+                let differing_portfolios: Vec<(usize, Option<usize>)> = frame
+                    .primary_portfolios
+                    .iter()
+                    .zip(&expected_frame.primary_portfolios)
+                    .enumerate()
+                    .filter(|(_, (actual, expected))| actual != expected)
+                    .map(|(index, (actual, expected))| {
+                        (
+                            index,
+                            actual.iter().zip(expected.iter()).position(|(a, e)| a != e),
+                        )
+                    })
+                    .collect();
+                panic!(
+                    "INV-047 {route:?} diverged from {expected_route:?} after a zero-move funding \
+                     segment (first differing primary-market byte: {first_market_byte:?}; \
+                     portfolios (index, first byte): {differing_portfolios:?}; foreign market: {}; \
+                     foreign portfolio: {}; backing ledger: {}; tokens: {}; matchers: {}; \
+                     lamports: {}; supply: {}; layout: matcher config {}, id {}, sequence {}, \
+                     expiry {})",
+                    frame.foreign_market != expected_frame.foreign_market,
+                    frame.foreign_portfolio != expected_frame.foreign_portfolio,
+                    frame.backing_ledger != expected_frame.backing_ledger,
+                    frame.token_accounts != expected_frame.token_accounts,
+                    frame.matcher_contexts != expected_frame.matcher_contexts,
+                    frame.economic_lamports != expected_frame.economic_lamports,
+                    frame.token_supply != expected_frame.token_supply,
+                    percolator_prog::constants::PORTFOLIO_MATCHER_CONFIG_OFF,
+                    percolator_prog::constants::PORTFOLIO_ID_OFF,
+                    percolator_prog::constants::PORTFOLIO_MATCHER_SEQUENCE_OFF,
+                    PORTFOLIO_MATCHER_EXPIRY_OFF,
+                );
+            }
+        } else {
+            expected = Some((route, frame));
+        }
+    }
+}
+
 #[test]
 fn v16_program_fractional_close_partitions_preserve_double_ceil_fees_and_owner_payouts() {
     use crate::support::fuzz_model::{

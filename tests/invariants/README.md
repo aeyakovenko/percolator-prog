@@ -32015,6 +32015,31 @@ Tests changed with it:
 
 The composition tests bound to the exact engine revision carry the new one (35 places in 27 files).
 
+### INV-046/047: a print on a Recovery asset is ignored, and a batch keeps every leg's oracle profile (2026-11-23)
+
+Program only; the engine pin stays `71076137`. Both come from an independent read of INV-046.
+
+- **A Recovery reduction no longer reverts on an off-mark print.** Shutdown freezes a trade-driven
+  asset's price average (`mark_ewma_e6`, for an EWMA mark or a hybrid past its soft-stale window),
+  its target and the engine target, and the engine refuses any new target for a Recovery asset. A
+  reduction whose accepted price moved the average therefore staged a changed target, and the whole
+  trade reverted (`EngineLockActive`): only a print exactly at the frozen mark could land, and a CPI
+  maker quoting off the mark never could. On a Recovery asset the trade routes now treat the print
+  as they treat an authenticated mark's: the accepted price is the engine's effective price, no
+  mark fee is quoted, and the average and target stay as shutdown left them
+  (`trade_updates_mark_view`). `v16_program_trade_driven_recovery_reduction_ignores_the_print_on_every_route`
+  closes a position through all four trade routes with a print 10% above or below the frozen mark.
+  It fails on the previous program.
+- **`BatchTradeNoCpi` writes back the oracle profile of every leg.** It runs each leg's zero-move
+  funding segment before the trade. For a leg whose print does not move the mark (an authority mark,
+  or a hybrid inside its soft-stale window) it then skipped the profile write, so the funding-mark
+  checkpoint and the carried price-move remainder the engine segment had used were lost.
+  `TradeNoCpi` always writes them. The batch now writes a leg's profile whenever it ran that leg's
+  segment itself; after a matcher CPI the segment and the write happen before the CPI, as before.
+  `v16_program_zero_move_funding_before_a_trade_persists_the_profile_on_every_route` runs one
+  reduction after a sub-unit authority-mark gap through all four routes and compares every account
+  byte for byte. It fails on the previous program at the market's asset-0 profile.
+
 ### The program's own arithmetic is checked in the deployed build (2026-11-22)
 
 Program manifest only; the engine pin stays `4e77481b`. Until now the manifest had no release

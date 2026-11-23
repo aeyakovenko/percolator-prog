@@ -212,7 +212,10 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
 - **The `marketauth` key can force-shutdown assets 0..N without rugging traders** — `ASSET_ACTION_SHUTDOWN`
   accepts either `marketauth` (global liveness) or that asset's `asset_admin` (local shutdown); any
   other signer is rejected. It moves the asset to RECOVERY with a frozen mark, and the wind-down
-  force-close is gated behind `force_close_delay_slots` so there is an **exit window**. **✅**
+  force-close is gated behind `force_close_delay_slots` so there is an **exit window**. In that
+  window a trade's reported price never moves the frozen mark, whatever the asset's oracle mode, so
+  a reduction lands at any admitted price the two sides agree on
+  (`v16_program_trade_driven_recovery_reduction_ignores_the_print_on_every_route`). **✅**
   `v16_attack_force_shutdown_timeout_lets_traders_exit_before_close` asserts shutdown → RECOVERY,
   force-close **rejects before** the delay and **succeeds after**; plus
   `v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot` and

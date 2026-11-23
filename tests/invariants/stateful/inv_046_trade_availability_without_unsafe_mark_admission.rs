@@ -578,3 +578,96 @@ fn v16_program_extreme_price_route_lifecycle_matrix_preserves_exit_or_terminal_f
     );
     assert!(max_cu < TX_CU_LIMIT, "maximum observed CU: {max_cu}");
 }
+
+/// INV-046 first read, finding 4 (2026-11-23). Shutdown freezes a trade-driven (EWMA) mark, its
+/// target and the engine target, and the engine refuses any new target for a Recovery asset. A
+/// Recovery reduction whose accepted print would move the average staged a changed target, so the
+/// whole reduction reverted: only a print exactly at the frozen mark could land, and a CPI maker
+/// quoting off the mark never could. Recovery ignores the print instead, as an authenticated mark
+/// does: every route closes the position off the mark, with no mark fee, and the frozen mark,
+/// target and engine price stay as shutdown left them.
+#[test]
+fn v16_program_trade_driven_recovery_reduction_ignores_the_print_on_every_route() {
+    const SHUTDOWN_SLOT: u64 = 1;
+    const EXIT_SLOT: u64 = 4;
+    for route in WHOLE_EXIT_ROUTES {
+        for print_below_mark in [true, false] {
+            let context = format!("{route:?}, print below the mark: {print_below_mark}");
+            let config = MarketConfig::default();
+            let price = config.initial_price;
+            // The taker sells into a maker's bid below the mark, or buys at an ask above it.
+            let taker_q = if print_below_mark {
+                POS_SCALE as i128
+            } else {
+                -(POS_SCALE as i128)
+            };
+            let print = if print_below_mark {
+                price - price / 10
+            } else {
+                price + price / 10
+            };
+            let mut env = V16Svm::new([0x4f ^ u8::from(print_below_mark); 32], config);
+            env.configure_ewma_mark(0, SHUTDOWN_SLOT, price, 1, 0)
+                .unwrap_or_else(|error| panic!("{context}: configure the EWMA mark: {error}"));
+            env.trade_no_cpi(0, 1, 0, taker_q, price, 0)
+                .unwrap_or_else(|error| panic!("{context}: open the pair: {error}"));
+            env.configure_permissionless_resolve(1_000, 100)
+                .unwrap_or_else(|error| panic!("{context}: configure Recovery: {error}"));
+            env.shutdown_asset(0, SHUTDOWN_SLOT)
+                .unwrap_or_else(|error| panic!("{context}: enter Recovery: {error}"));
+            assert_eq!(
+                env.primary_market_state().1.assets[0].lifecycle,
+                AssetLifecycleV16::Recovery,
+                "{context}"
+            );
+            if whole_exit_route_is_cpi(route) {
+                let (bid_spread, ask_spread) = if print_below_mark {
+                    (1_000, 0)
+                } else {
+                    (0, 1_000)
+                };
+                env.set_matcher_spreads(1, bid_spread, ask_spread)
+                    .unwrap_or_else(|error| panic!("{context}: quote off the mark: {error}"));
+            }
+            env.warp_to_slot(EXIT_SLOT);
+            let read_profile = |env: &V16Svm| {
+                percolator_prog::state::read_asset_oracle_profile(&env.market_data(false), 0)
+                    .unwrap_or_else(|error| panic!("{context}: read the profile: {error:?}"))
+            };
+            let profile_before = read_profile(&env);
+            let before = env.primary_market_state().1;
+            let landed = execute_trade_route(&mut env, route, 0, 1, 0, -taker_q, print, 0)
+                .unwrap_or_else(|error| {
+                    panic!("{context}: the Recovery reduction off the mark reverted: {error}")
+                });
+            assert!(landed.compute_units < TX_CU_LIMIT, "{context}");
+            let after = env.primary_market_state().1;
+            let profile_after = read_profile(&env);
+            assert_eq!(after.assets[0].oi_eff_long_q, 0, "{context}");
+            assert_eq!(after.assets[0].oi_eff_short_q, 0, "{context}");
+            assert_eq!(
+                after.assets[0].effective_price, before.assets[0].effective_price,
+                "{context}"
+            );
+            assert_eq!(
+                after.assets[0].raw_oracle_target_price, before.assets[0].raw_oracle_target_price,
+                "{context}"
+            );
+            assert_eq!(
+                profile_after.mark_ewma_e6, profile_before.mark_ewma_e6,
+                "{context}"
+            );
+            assert_eq!(
+                profile_after.mark_ewma_last_slot, profile_before.mark_ewma_last_slot,
+                "{context}"
+            );
+            assert_eq!(
+                profile_after.oracle_target_price_e6, profile_before.oracle_target_price_e6,
+                "{context}"
+            );
+            // The base fee is zero and an ignored print buys no mark movement, so no fee is paid.
+            assert_eq!(after.insurance, before.insurance, "{context}");
+            assert_eq!(after.vault, before.vault, "{context}");
+        }
+    }
+}

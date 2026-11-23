@@ -9168,28 +9168,40 @@ pub mod processor {
                         budgeted_short,
                     )?;
                 }
-                if !profile_updates_mark_from_trade_view(oracle_profile, batch_now_slot) {
-                    continue;
+                let updates_mark =
+                    trade_updates_mark_view(oracle_profile, &group, *asset_index, batch_now_slot);
+                if updates_mark {
+                    let collected_post_trade_mark = collected_fee_supported_mark_view(
+                        oracle_profile,
+                        *fee_quote,
+                        fee_a,
+                        fee_b,
+                    )?;
+                    update_hybrid_mark_after_trade_view(
+                        oracle_profile,
+                        &group,
+                        *asset_index,
+                        collected_post_trade_mark,
+                    )?;
+                    if let Some(target_update) =
+                        prepare_trade_driven_mark_target_view(oracle_profile, &group, *asset_index)?
+                    {
+                        target_updates.push(target_update);
+                    }
                 }
-                let collected_post_trade_mark =
-                    collected_fee_supported_mark_view(oracle_profile, *fee_quote, fee_a, fee_b)?;
-                update_hybrid_mark_after_trade_view(
-                    oracle_profile,
-                    &group,
-                    *asset_index,
-                    collected_post_trade_mark,
-                )?;
-                if let Some(target_update) =
-                    prepare_trade_driven_mark_target_view(oracle_profile, &group, *asset_index)?
-                {
-                    target_updates.push(target_update);
-                }
-                write_oracle_profile_to_view(&mut group, *asset_index, oracle_profile)?;
-                if *asset_index == 0 && oracle_v16::profile_is_price_managed(oracle_profile) {
-                    cfg.mark_ewma_e6 = oracle_profile.mark_ewma_e6;
-                    cfg.mark_ewma_last_slot = oracle_profile.mark_ewma_last_slot;
-                    cfg.oracle_target_price_e6 = oracle_profile.oracle_target_price_e6;
-                    cfg_dirty = true;
+                // A leg whose print does not move the mark still persists its profile when this
+                // instruction ran the leg's zero-move funding segment, as the single route always
+                // does: that segment advances the funding-mark checkpoint and the carried
+                // price-move remainder. After a matcher CPI the segment ran, and the profile was
+                // written, before the CPI.
+                if updates_mark || !account_b_matcher_synchronized {
+                    write_oracle_profile_to_view(&mut group, *asset_index, oracle_profile)?;
+                    if *asset_index == 0 && oracle_v16::profile_is_price_managed(oracle_profile) {
+                        cfg.mark_ewma_e6 = oracle_profile.mark_ewma_e6;
+                        cfg.mark_ewma_last_slot = oracle_profile.mark_ewma_last_slot;
+                        cfg.oracle_target_price_e6 = oracle_profile.oracle_target_price_e6;
+                        cfg_dirty = true;
+                    }
                 }
             }
             if remaining_fee_a != 0 || remaining_fee_b != 0 {
@@ -15921,6 +15933,25 @@ pub mod processor {
                 && oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot))
     }
 
+    /// A trade print discovers the mark only for a trade-driven profile on an asset whose mark
+    /// can still move. Shutdown freezes a Recovery asset's mark and target, and the engine refuses
+    /// any new target for it, so there the print is ignored, as for an authenticated mark, rather
+    /// than reverting the risk-reducing trade that carries it.
+    fn trade_updates_mark_view(
+        profile: &state::AssetOracleProfileV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> bool {
+        profile_updates_mark_from_trade_view(profile, now_slot)
+            && group.markets.get(asset_index).is_some_and(|market| {
+                matches!(
+                    market.engine.asset.lifecycle,
+                    ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY
+                )
+            })
+    }
+
     fn liquidation_penalty_reclaimable_from_profile_view(
         profile: &state::AssetOracleProfileV16,
         now_slot: u64,
@@ -15948,7 +15979,7 @@ pub mod processor {
             .effective_price
             .get();
         let now_slot = authenticated_market_slot_or_fallback_view(group);
-        if !profile_updates_mark_from_trade_view(profile, now_slot) {
+        if !trade_updates_mark_view(profile, group, asset_index, now_slot) {
             return Ok(effective_price);
         }
         // A same-slot trade can execute, but it cannot borrow a future slot of mark movement.
@@ -16000,9 +16031,7 @@ pub mod processor {
             });
         }
         let now_slot = authenticated_market_slot_or_fallback_view(group);
-        if oracle_v16::profile_is_hybrid(profile)
-            && !oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot)
-        {
+        if !trade_updates_mark_view(profile, group, asset_index, now_slot) {
             return Ok(HybridTradeFeeQuote {
                 fee_bps: base,
                 post_trade_mark_e6: 0,
@@ -16685,7 +16714,8 @@ pub mod processor {
         post_trade_mark_e6: u64,
     ) -> Result<(), ProgramError> {
         let now_slot = authenticated_market_slot_or_fallback_view(group);
-        let ewma_updates_from_trade = profile_updates_mark_from_trade_view(profile, now_slot);
+        let ewma_updates_from_trade =
+            trade_updates_mark_view(profile, group, asset_index, now_slot);
         if !ewma_updates_from_trade
             || asset_index >= group.header.config.max_market_slots.get() as usize
         {
@@ -16738,7 +16768,7 @@ pub mod processor {
             return Ok(None);
         }
         let now_slot = authenticated_market_slot_or_fallback_view(group);
-        if !profile_updates_mark_from_trade_view(profile, now_slot) {
+        if !trade_updates_mark_view(profile, group, asset_index, now_slot) {
             return Ok(None);
         }
         profile.oracle_target_price_e6 = profile.mark_ewma_e6;
