@@ -1755,7 +1755,18 @@ fn v16_program_funding_disabled_round_trip_mark_preserves_stale_terminal_progres
     const HIGH_MARK: u64 = 101;
     const RESOLVE_SLOT: u64 = 103;
 
-    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    // A two-slot accrual window: INV-045's catch-up rule then lets the second push land while
+    // asset 0 is still two slots behind, so the round trip stays a pair of pushes with no
+    // accrual between them. Two slots of a 50% cap stay inside the 100% maintenance envelope.
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        maintenance_margin_bps: 10_000,
+        initial_margin_bps: 10_000,
+        max_price_move_bps_per_slot: 5_000,
+        max_accrual_dt_slots: 2,
+        min_funding_lifetime_slots: 2,
+        ..V16CuMarketParams::default()
+    });
     env.configure_permissionless_resolve_with_cu(100, 1);
     env.svm.warp_to_slot(1);
     env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);

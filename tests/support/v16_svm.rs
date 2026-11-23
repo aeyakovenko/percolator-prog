@@ -2345,7 +2345,55 @@ impl V16Svm {
         )
     }
 
+    /// INV-045, catch-up after idle slots: the program refuses a changed target on an exposed asset
+    /// whose accrual is more than one window (`max_accrual_dt_slots`) behind, so an oracle authority
+    /// cranks the asset first (on chain, in the same transaction). The push helpers do that before
+    /// sending.
+    fn crank_asset_before_push(&mut self, asset_index: u16, now_slot: u64) {
+        // The program takes the slot from the Clock, not from the instruction's argument.
+        let now_slot = now_slot.min(self.svm.get_sysvar::<Clock>().slot);
+        // One crank call accrues at most one window, so an idle gap takes gap / window calls.
+        for _ in 0..4_096 {
+            let group = self.primary_market_state().1;
+            let window = group.config.max_accrual_dt_slots;
+            let asset = group.assets[asset_index as usize];
+            if group.mode != percolator::MarketModeV16::Live
+                || !matches!(
+                    asset.lifecycle,
+                    percolator::AssetLifecycleV16::Active
+                        | percolator::AssetLifecycleV16::DrainOnly
+                )
+                || (asset.oi_eff_long_q == 0 && asset.oi_eff_short_q == 0)
+                || asset.slot_last.saturating_add(window) >= now_slot
+                || self.actors.is_empty()
+            {
+                return;
+            }
+            let hint = vec![CrankObservationHint {
+                asset_index,
+                oracle_accounts: 0,
+            }];
+            if self.crank(0, now_slot, hint).is_err()
+                || self.primary_market_state().1.assets[asset_index as usize].slot_last
+                    == asset.slot_last
+            {
+                return;
+            }
+        }
+    }
+
     pub fn push_ewma_mark(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        mark: u64,
+    ) -> Result<TxSuccess, String> {
+        self.crank_asset_before_push(asset_index, now_slot);
+        self.push_ewma_mark_raw(asset_index, now_slot, mark)
+    }
+
+    /// The push alone, without the INV-045 catch-up cranks (for callers that crank first).
+    pub fn push_ewma_mark_raw(
         &mut self,
         asset_index: u16,
         now_slot: u64,
@@ -2375,6 +2423,17 @@ impl V16Svm {
     }
 
     pub fn push_auth_mark(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        mark: u64,
+    ) -> Result<TxSuccess, String> {
+        self.crank_asset_before_push(asset_index, now_slot);
+        self.push_auth_mark_raw(asset_index, now_slot, mark)
+    }
+
+    /// The push alone, without the INV-045 catch-up cranks (for callers that crank first).
+    pub fn push_auth_mark_raw(
         &mut self,
         asset_index: u16,
         now_slot: u64,
@@ -2410,6 +2469,7 @@ impl V16Svm {
         now_slot: u64,
         mark: u64,
     ) -> Result<TxSuccess, String> {
+        self.crank_asset_before_push(asset_index, now_slot);
         let observation_sequence = next_control_sequence(
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,

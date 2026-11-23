@@ -383,6 +383,31 @@ fn v16_program_pnl_rewards_and_receipts_preserve_history_wide_owner_claims() {
                         }
                         let slot = SLOTS[round + 1];
                         env.svm.warp_to_slot(slot);
+                        // INV-045's catch-up rule: the market is cranked to within one window (one
+                        // slot) of the clock, toward the mark in force, before the new mark lands.
+                        for _ in 0..5 {
+                            if env.market_state().1.assets[0].slot_last + 1 >= slot {
+                                break;
+                            }
+                            step!(
+                                "market catchup",
+                                [2],
+                                env.send(
+                                    ProgInstruction::PermissionlessCrank {
+                                        now_slot: slot,
+                                        observations: crank_observations(0)
+                                    },
+                                    vec![
+                                        AccountMeta::new(env.payer.pubkey(), true),
+                                        AccountMeta::new(env.market, false),
+                                        AccountMeta::new(portfolios[2], false)
+                                    ],
+                                    &[],
+                                )
+                                .expect("single public market catchup"),
+                                {}
+                            );
+                        }
                         step!(
                             "authenticated mark",
                             [],

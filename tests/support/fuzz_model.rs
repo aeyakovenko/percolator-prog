@@ -3969,6 +3969,7 @@ impl ScenarioRunner {
                 let asset = asset as usize % ASSET_COUNT;
                 let next_slot = self.env.current_slot() + (dt.max(1) as u64).min(4);
                 self.env.warp_to_slot(next_slot);
+                self.catch_up_asset_before_push(asset)?;
                 let old_mark = self.env.primary_profile(asset).mark_ewma_e6;
                 let move_bps = move_bps.clamp(-500, 500) as i128;
                 let numerator = (old_mark as i128)
@@ -3979,9 +3980,11 @@ impl ScenarioRunner {
                 let before = self.snapshot();
                 let result = if self.env.primary_profile(asset).oracle_mode == ORACLE_MODE_EWMA_MARK
                 {
-                    self.env.push_ewma_mark(asset as u16, next_slot, new_mark)
+                    self.env
+                        .push_ewma_mark_raw(asset as u16, next_slot, new_mark)
                 } else {
-                    self.env.push_auth_mark(asset as u16, next_slot, new_mark)
+                    self.env
+                        .push_auth_mark_raw(asset as u16, next_slot, new_mark)
                 };
                 match result {
                     Ok(success) => {
@@ -6068,6 +6071,40 @@ impl ScenarioRunner {
             ],
         };
         self.execute_crank_with_observations(actor, observations, require_progress)
+    }
+
+    /// INV-045's catch-up rule: a push that changes the target of an exposed asset whose accrual
+    /// is more than one window behind is refused. The pusher cranks the asset first. Those cranks
+    /// are public steps of their own, checked as any crank, and they land before the push's
+    /// snapshot, so a push that is still refused leaves nothing changed.
+    fn catch_up_asset_before_push(&mut self, asset: usize) -> Result<(), String> {
+        for _ in 0..4_096 {
+            let (_, group) = self.env.primary_market_state();
+            let state = group.assets[asset];
+            if group.mode != MarketModeV16::Live
+                || !matches!(
+                    state.lifecycle,
+                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+                )
+                || (state.oi_eff_long_q == 0 && state.oi_eff_short_q == 0)
+                || state
+                    .slot_last
+                    .saturating_add(group.config.max_accrual_dt_slots)
+                    >= self.env.current_slot()
+            {
+                return Ok(());
+            }
+            let observations = vec![CrankObservationHint {
+                asset_index: asset as u16,
+                oracle_accounts: self.env.primary_profile(asset).oracle_leg_count,
+            }];
+            self.execute_crank_with_observations(0, observations, false)
+                .map_err(CrankFailure::into_message)?;
+            if self.env.primary_market_state().1.assets[asset].slot_last == state.slot_last {
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 
     fn execute_crank_with_observations(
@@ -12918,12 +12955,15 @@ pub fn run_cure_portfolio_incarnation_replay_probe(
         .env
         .deposit_primary(LOSER, REPLACEMENT_CAPITAL)
         .map_err(|error| format!("fund replacement economic episode: {error}"))?;
+    // A bystander cranks, as in the first episode: the asset is kept current (INV-045's
+    // catch-up rule), so a crank on the loser's own account would settle its loss slot by slot
+    // and leave nothing for the final reduction to open a close with.
     create_public_cancellable_close(
         &mut runner,
         SECOND_WINNER as u8,
         LOSER as u8,
         1,
-        LOSER as u8,
+        EXIT_MAKER_INDEX as u8,
     )?;
 
     let before = runner.snapshot();
@@ -33211,15 +33251,29 @@ pub fn reproduce_cross_domain_b_settlement(
     env.warp_to_slot(7);
     env.push_auth_mark(1, 7, BANKRUPTCY_MARK)
         .map_err(|error| format!("PR 281 push bankruptcy mark: {error}"))?;
-    crank_adapter_steps(&mut env, 0, 7, 1, 12)
-        .map_err(|error| format!("PR 281 settle winner before B booking: {error}"))?;
+    // INV-045, catch-up after idle slots: a pushed target reaches back at most one window,
+    // so the bankruptcy mark arrives over real slots. Only the winner's account is cranked
+    // on the way; the short is not liquidated before the mark passes its bankruptcy price.
+    let mut bankruptcy_slot = 7;
+    loop {
+        crank_adapter_steps(&mut env, 0, bankruptcy_slot, 1, 12)
+            .map_err(|error| format!("PR 281 settle winner before B booking: {error}"))?;
+        if env.primary_market_state().1.assets[1].effective_price >= BANKRUPTCY_MARK {
+            break;
+        }
+        if bankruptcy_slot >= 16 {
+            return Err("PR 281 bankruptcy mark did not arrive within nine slots".into());
+        }
+        bankruptcy_slot += 1;
+        env.warp_to_slot(bankruptcy_slot);
+    }
     let observation = vec![CrankObservationHint {
         asset_index: 1,
         oracle_accounts: env.primary_profile(1).oracle_leg_count,
     }];
     let mut bankrupt_progress = false;
     for _ in 0..12 {
-        if env.crank(2, 7, observation.clone()).is_ok() {
+        if env.crank(2, bankruptcy_slot, observation.clone()).is_ok() {
             bankrupt_progress = true;
         }
         if env.primary_market_state().1.assets[1].b_long_num != 0 {
@@ -33239,7 +33293,7 @@ pub fn reproduce_cross_domain_b_settlement(
             "PR 281 pre-settlement claims lack sparse-domain discriminator: unfunded {unfunded_claim_before_num}, funded {funded_claim_before_num}"
         ));
     }
-    crank_adapter_steps(&mut env, 0, 7, 1, 8)
+    crank_adapter_steps(&mut env, 0, bankruptcy_slot, 1, 8)
         .map_err(|error| format!("PR 281 settle winner B loss: {error}"))?;
     let after_settle = env.primary_portfolio(0);
     let settled_leg = decoded_legs(&after_settle)
@@ -33319,7 +33373,7 @@ pub fn reproduce_cross_domain_b_settlement(
                         .checked_add(1)
                         .ok_or("PR 281 reduction step counter overflow")?;
                     for _ in 0..4 {
-                        if env.crank(0, 7, observation.clone()).is_err() {
+                        if env.crank(0, bankruptcy_slot, observation.clone()).is_err() {
                             break;
                         }
                     }

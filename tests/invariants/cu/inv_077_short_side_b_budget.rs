@@ -42,9 +42,18 @@ fn v16_program_max_shape_short_b_budget_has_exact_public_progress() {
     let checkpoint = env.create_portfolio(&checkpoint_owner);
 
     let checkpoint_marks = |env: &mut V16CuEnv, slot: u64, price: u64| {
+        // INV-045's catch-up rule: a mark reaches back at most one window (one slot), so each
+        // mark is published as many slots ahead of the checkpoint as its 5% steps need, and the
+        // assets are caught up to the checkpoint slot from there.
+        let mark = env.market_state().1.assets[0].effective_price;
+        let step = mark * 500 / 10_000;
+        let publish = slot - mark.abs_diff(price).div_ceil(step);
+        env.svm.warp_to_slot(publish);
+        for asset in 0..ASSETS {
+            env.push_auth_mark_for_asset_as_admin(asset, publish, price);
+        }
         env.svm.warp_to_slot(slot);
         for asset in 0..ASSETS {
-            env.push_auth_mark_for_asset_as_admin(asset, slot, price);
             for _ in 0..env.terminal_accrual_attempt_bound(asset, slot) {
                 if env.market_state().1.assets[usize::from(asset)].slot_last == slot {
                     break;

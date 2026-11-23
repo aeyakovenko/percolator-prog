@@ -6345,15 +6345,32 @@ fn v16_bpf_hybrid_split_catchup_omitted_refresh_rejects_partial_price() {
     )
     .expect("open victim long vs maker short at the opening mark");
 
-    // Idle past the bounded-catch-up horizon, then commit the full downward target via a fresh
-    // authenticated Pyth report.
-    let attack_slot = 2 + ROW461_IDLE_GAP_SLOTS;
-    set_test_clock(&mut env, attack_slot, 101 + ROW461_IDLE_GAP_SLOTS as i64);
+    // Commit the full downward target through a fresh authenticated Pyth report while the asset
+    // is current (INV-045's catch-up rule: a report reaches back at most one window), then idle
+    // past the bounded-catch-up horizon; the next report repeats the committed price.
+    set_test_clock(&mut env, 3, 102);
+    let early = env.set_pyth_price(&feed, ROW461_COMMITTED_TARGET_E6 as i64, -6, 102);
+    let early_keeper_owner = Keypair::new();
+    let early_keeper = env.create_portfolio(&early_keeper_owner);
+    env.crank_with_oracle_tail(
+        early_keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+        std::slice::from_ref(&early),
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].raw_oracle_target_price,
+        ROW461_COMMITTED_TARGET_E6
+    );
+    let attack_slot = 3 + ROW461_IDLE_GAP_SLOTS;
+    set_test_clock(&mut env, attack_slot, 102 + ROW461_IDLE_GAP_SLOTS as i64);
     let committed = env.set_pyth_price(
         &feed,
         ROW461_COMMITTED_TARGET_E6 as i64,
         -6,
-        101 + ROW461_IDLE_GAP_SLOTS as i64,
+        102 + ROW461_IDLE_GAP_SLOTS as i64,
     );
 
     // One hinted crank: it performs only the bounded catch-up and returns early, but it has already

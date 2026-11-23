@@ -939,6 +939,9 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
 
     env.svm.warp_to_slot(10);
     env.push_auth_mark_with_cu(10, 110); // asset0 up -> la gains
+
+    // INV-045 catch-up rule: the oracle authority cranks asset 1 into the window before its push.
+    env.crank_asset_before_push(1, 10);
     cfg_mark(
         &mut env,
         1,
@@ -1931,6 +1934,8 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
     // asset0 UP (la long wins), asset1 DOWN (la short wins) -> la wins both, lb loses both.
     env.svm.warp_to_slot(10);
     env.push_auth_mark_with_cu(10, 110);
+    // INV-045 catch-up rule: the oracle authority cranks asset 1 into the window before its push.
+    env.crank_asset_before_push(1, 10);
     cfg(
         &mut env,
         ProgInstruction::PushAuthMark {
@@ -2731,6 +2736,8 @@ fn v16_attack_cross_margin_netting_conserves() {
     let admin = env.admin.insecure_clone();
     env.svm.warp_to_slot(2);
     let _ = env.push_auth_mark_with_cu(2, 110);
+    // INV-045 catch-up rule: the oracle authority cranks asset 1 into the window before its push.
+    env.crank_asset_before_push(1, 2);
     env.svm.expire_blockhash();
     env.send(
         ProgInstruction::PushAuthMark {

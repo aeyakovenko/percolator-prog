@@ -14245,6 +14245,25 @@ pub mod processor {
                 observation_sequence,
             )?;
             let next_mark = kind.next_mark(&profile, mark_e6, authenticated_slot)?;
+            // INV-045, catch-up after idle slots (`asset_accrual_within_one_window_view`): a changed
+            // target on an exposed asset more than one window behind waits until a crank has
+            // accrued the older slots toward the target in force; the pusher may crank first in
+            // the same transaction.
+            if next_mark
+                != group.markets[asset_index_usize]
+                    .engine
+                    .asset
+                    .raw_oracle_target_price
+                    .get()
+                && asset_has_effective_open_interest_view(&group, asset_index_usize)
+                && !asset_accrual_within_one_window_view(
+                    &group,
+                    asset_index_usize,
+                    authenticated_slot,
+                )
+            {
+                return Err(PercolatorError::EngineStale.into());
+            }
             if next_mark != profile.mark_ewma_e6 {
                 let asset_slot = group.markets[asset_index_usize]
                     .engine
@@ -14717,7 +14736,7 @@ pub mod processor {
                             &oracle_profile,
                             &group,
                         )?;
-                        let (target, target_slot) = hybrid_target_for_crank_view(
+                        let (mut target, mut target_slot) = hybrid_target_for_crank_view(
                             &cfg,
                             &mut oracle_profile,
                             &group,
@@ -14726,6 +14745,33 @@ pub mod processor {
                             now_unix_ts,
                             observation_tail,
                         )?;
+                        // INV-045, catch-up after idle slots (`asset_accrual_within_one_window_view`):
+                        // on an exposed asset more than one window behind, a changed target waits.
+                        // This crank accrues toward the target in force; the reading stays recorded
+                        // and a later crank, at most one window behind, applies it.
+                        let staged_target = group.markets[asset_index]
+                            .engine
+                            .asset
+                            .raw_oracle_target_price
+                            .get();
+                        if staged_target != 0
+                            && target != staged_target
+                            && asset_has_effective_open_interest_view(&group, asset_index)
+                            && !asset_accrual_within_one_window_view(
+                                &group,
+                                asset_index,
+                                authenticated_now_slot,
+                            )
+                        {
+                            target = staged_target;
+                            target_slot = group.markets[asset_index]
+                                .engine
+                                .asset
+                                .slot_last
+                                .get()
+                                .saturating_add(1);
+                            oracle_profile.oracle_target_price_e6 = staged_target;
+                        }
                         let path = canonical_accrual_path_for_target_view(
                             &mut oracle_profile,
                             &group,
@@ -15931,6 +15977,40 @@ pub mod processor {
         oracle_v16::profile_is_ewma_mark(profile)
             || (oracle_v16::profile_is_hybrid(profile)
                 && oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot))
+    }
+
+    /// INV-045, catch-up after idle slots: a changed target that nobody pays for (an oracle
+    /// authority's push, or the crank's own oracle reading) may be applied to at most one window
+    /// (`max_accrual_dt_slots`) of the slots before it arrived. The engine applies a path call's
+    /// single target to every slot since the asset's last accrual, so a target that arrived after
+    /// idle slots would be applied to all of them and move an exposed mark by idle slots times the
+    /// cap within one real slot (repeated crank calls in that slot). Such a target therefore waits
+    /// until the asset's accrual is at most one window behind; the permissionless crank accrues
+    /// the older slots toward the target in force before the change. One window of movement is
+    /// what the solvency envelope sizes maintenance for (`validate_exact_solvency_envelope`). A
+    /// trade print that moves the mark pays the mark-movement fee for the whole move (INV-046)
+    /// and keeps its prospective staging (PR 380).
+    fn asset_accrual_within_one_window_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> bool {
+        let window = group.header.config.max_accrual_dt_slots.get();
+        group.markets.get(asset_index).is_some_and(|market| {
+            now_slot
+                .checked_sub(market.engine.asset.slot_last.get())
+                .map_or(true, |lag| lag <= window)
+        })
+    }
+
+    fn asset_has_effective_open_interest_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> bool {
+        group.markets.get(asset_index).is_some_and(|market| {
+            market.engine.asset.oi_eff_long_q.get() != 0
+                || market.engine.asset.oi_eff_short_q.get() != 0
+        })
     }
 
     /// A trade print discovers the mark only for a trade-driven profile on an asset whose mark

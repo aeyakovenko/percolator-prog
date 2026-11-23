@@ -896,6 +896,27 @@ renewed therefore accrue different funding, by at most `max_abs_funding_e9_per_s
 notional per slot of the gap. Without funding they are one history and agree exactly. Publication
 is permissionless, so the side that would pay can end a gap.
 
+**Scope: a price that arrives after idle slots.** Elapsed slots count from the asset's last
+accrual, and the engine applies one target to every slot since then. A target change that nobody
+pays for, an oracle authority's push or a reading or EWMA mark that the permissionless crank brings,
+is applied to at most one window (`max_accrual_dt_slots`) of the slots before it arrived. While the
+market is live and the asset has effective open interest, a push that changes the target of an
+asset whose accrual is more than one window behind is refused, and the crank holds such a reading
+back: it accrues the older slots toward the target in force, and a later crank, at most one window
+behind, applies the reading. The change therefore moves the mark by at most one window of capped
+steps in the slot it arrives, and by one capped step per slot after. A trade print that moves the
+mark (an EWMA mark, or a hybrid past its soft-stale window) is staged as before and can reach back
+over elapsed slots as far as the print clamp allows (`elapsed_slots × cap` from `mark_ewma_e6`); the
+trade pays the mark-movement fee for the whole move (INV-046).
+
+```text
+OI_eff_long > 0 or OI_eff_short > 0, market live, unpaid target change arriving at slot now:
+    now - slot_last > max_accrual_dt_slots  =>  PushAuthMark / PushEwmaMark refused (EngineStale),
+                                                and the crank accrues toward the target in force
+    otherwise                               =>  the change reaches back over now - slot_last
+                                                <= max_accrual_dt_slots slots
+```
+
 **Required tests.** Differentially compare every mark-updating route over all zero/boundary cases
 and repeated same-slot calls.
 **Verification:** P, F, I, M

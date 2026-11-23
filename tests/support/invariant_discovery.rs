@@ -10611,6 +10611,17 @@ fn run_oracle_supersession_terminal_world(
                 .checked_add(1)
                 .ok_or_else(|| "fresh EWMA terminal supersession slot overflow".to_string())?;
             env.warp_to_slot(fresh_slot);
+            // INV-045, catch-up after idle slots: a changed target lands at most one window
+            // (here one slot) ahead of the accrual frontier, so the operator cranks first.
+            env.crank(
+                LONG,
+                fresh_slot,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| format!("accrue before the fresh EWMA observation: {error}"))?;
             let fresh = env.build_retained_ewma_mark(0, retained_mark);
             ((retained, fresh), true)
         }
@@ -16732,13 +16743,33 @@ pub fn verify_composite_time_coherence(
         .crank_with_oracles(2, slot, observations(), &[fresh_a_102, fresh_b_102])
         .map_err(|error| format!("coherent composite update rejected: {error}"))?;
     let prefix_slot = env.primary_market_state().1.assets[0].slot_last;
+    // INV-045, catch-up after idle slots: the reading is applied to at most one window
+    // (20 slots) before it. Slots older than that accrue toward the target in force, which
+    // moves nothing, so the victim's certificate stays current until the reading is staged.
+    let held_back = |env: &V16Svm| -> Result<bool, String> {
+        let asset = env.primary_market_state().1.assets[0];
+        if asset.raw_oracle_target_price == control_price {
+            return Ok(false);
+        }
+        if asset.raw_oracle_target_price != COHERENT_PRICE
+            || asset.effective_price != COHERENT_PRICE
+        {
+            return Err(format!(
+                "a held-back reading must leave the target and the mark in force: raw={}, mark={}",
+                asset.raw_oracle_target_price, asset.effective_price
+            ));
+        }
+        Ok(true)
+    };
+    let mut held_back_steps = usize::from(held_back(&env)?);
     if prefix_slot <= initial_slot
         || prefix_slot >= slot
         || env.svm.get_account(&victim_key) != unrefreshed
-        || discovery_certificate_is_current(
-            &env.primary_market_state().1,
-            &env.primary_portfolio(0),
-        )?
+        || (!held_back(&env)?
+            && discovery_certificate_is_current(
+                &env.primary_market_state().1,
+                &env.primary_portfolio(0),
+            )?)
     {
         return Err("coherent prefix must make only partial market progress".into());
     }
@@ -16758,27 +16789,58 @@ pub fn verify_composite_time_coherence(
         if after_slot == slot {
             break;
         }
+        let still_held_back = held_back(&env)?;
+        held_back_steps += usize::from(still_held_back);
         if after_slot <= before_slot
             || after_slot > slot
             || env.svm.get_account(&victim_key) != before_account
-            || discovery_certificate_is_current(
-                &env.primary_market_state().1,
-                &env.primary_portfolio(0),
-            )?
+            || (!still_held_back
+                && discovery_certificate_is_current(
+                    &env.primary_market_state().1,
+                    &env.primary_portfolio(0),
+                )?)
         {
             return Err("partial refresh must advance accrual without changing the account".into());
         }
         partial_refreshes += 1;
     }
+    // The reading moved the mark only over the slots left after the held-back calls (at most
+    // one window). The feed keeps publishing the same coherent prices, one second apart, and
+    // public cranks carry the mark on at the cap; the victim is then refreshed against the
+    // latest report, in the slot it was published.
+    let mut tail_slot = slot;
+    let mut final_publish = 102i64;
+    let mut final_reports = [fresh_a_102, fresh_b_102];
+    while env.primary_market_state().1.assets[0].effective_price != control_price {
+        tail_slot = tail_slot
+            .checked_add(1)
+            .ok_or_else(|| "composite-time tail slot overflow".to_string())?;
+        if tail_slot > slot + 32 {
+            return Err("the coherent reading did not reach the mark at the cap".into());
+        }
+        final_publish += 1;
+        env.set_clock(tail_slot, final_publish);
+        final_reports = [
+            env.set_pyth_price(&feeds[0], control_a as i64, -6, 0, final_publish),
+            env.set_pyth_price(&feeds[1], FRESH_B, -6, 0, final_publish),
+        ];
+        env.crank_with_oracles(2, tail_slot, observations(), &final_reports)
+            .map_err(|error| format!("carry the coherent reading to the mark: {error}"))?;
+    }
+    if tail_slot != slot {
+        env.crank_with_oracles(0, tail_slot, observations(), &final_reports)
+            .map_err(|error| format!("refresh the victim at the arrived mark: {error}"))?;
+    }
     let current_group = env.primary_market_state().1;
     let current_profile = env.primary_profile(0);
-    let current_health_certified = current_group.assets[0].slot_last == slot
+    let current_health_certified = current_group.assets[0].slot_last == tail_slot
         && discovery_certificate_is_current(&current_group, &env.primary_portfolio(0))?
-        && current_profile.last_good_oracle_slot == slot
-        && current_profile.oracle_target_publish_time == 102
-        && current_profile.oracle_leg_publish_times == [102, 102, 0]
+        && current_profile.last_good_oracle_slot == tail_slot
+        && current_profile.oracle_target_publish_time == final_publish
+        && current_profile.oracle_leg_publish_times == [final_publish, final_publish, 0]
         && current_profile.oracle_leg_prices_e6 == [control_a, FRESH_B as u64, 0];
     if partial_refreshes == 0
+        || held_back_steps == 0
         || !current_health_certified
         || env.svm.get_account(&victim_key) == unrefreshed
     {
@@ -16838,7 +16900,7 @@ pub fn verify_composite_time_coherence(
     }
 
     let counterparty_refresh = env
-        .crank_with_oracles(1, slot, observations(), &[fresh_a_102, fresh_b_102])
+        .crank_with_oracles(1, tail_slot, observations(), &final_reports)
         .map_err(|error| format!("refresh coherent-price counterparty: {error}"))?;
     let close = env
         .trade_no_cpi(1, 0, 0, -size_q, control_price, 0)
@@ -23154,14 +23216,28 @@ pub fn discover_cross_domain_b_violation(
     env.warp_to_slot(7);
     env.push_auth_mark(1, 7, BANKRUPTCY_MARK)
         .map_err(|error| format!("publish bankruptcy mark: {error}"))?;
-    crank_asset_progress(&mut env, 0, 7, 1, 16)?;
+    // INV-045's catch-up rule: a pushed target reaches back at most one window, so the
+    // bankruptcy mark arrives over real slots. Only the winner is cranked on the way; the
+    // short is not liquidated before the mark passes its bankruptcy price.
+    let mut bankruptcy_slot = 7;
+    loop {
+        crank_asset_progress(&mut env, 0, bankruptcy_slot, 1, 16)?;
+        if env.primary_market_state().1.assets[1].effective_price >= BANKRUPTCY_MARK {
+            break;
+        }
+        if bankruptcy_slot >= 16 {
+            return Err("bankruptcy mark did not arrive within nine slots".into());
+        }
+        bankruptcy_slot += 1;
+        env.warp_to_slot(bankruptcy_slot);
+    }
     let observation = vec![CrankObservationHint {
         asset_index: 1,
         oracle_accounts: env.primary_profile(1).oracle_leg_count,
     }];
     let mut bankrupt_progress = false;
     for _ in 0..12 {
-        if env.crank(2, 7, observation.clone()).is_ok() {
+        if env.crank(2, bankruptcy_slot, observation.clone()).is_ok() {
             bankrupt_progress = true;
         }
         if env.primary_market_state().1.assets[1].b_long_num != 0 {
@@ -23179,7 +23255,7 @@ pub fn discover_cross_domain_b_violation(
     if unfunded_claim_before_num == 0 || funded_claim_before_num <= unfunded_claim_before_num {
         return Err("B-settlement claims lack domain discriminator".into());
     }
-    crank_asset_progress(&mut env, 0, 7, 1, 8)?;
+    crank_asset_progress(&mut env, 0, bankruptcy_slot, 1, 8)?;
     let after_settle = env.primary_portfolio(0);
     let settled_b_snap = after_settle
         .legs
@@ -23253,7 +23329,7 @@ pub fn discover_cross_domain_b_violation(
                         .checked_add(1)
                         .ok_or_else(|| "B reduction-step count overflow".to_string())?;
                     for _ in 0..4 {
-                        if env.crank(0, 7, observation.clone()).is_err() {
+                        if env.crank(0, bankruptcy_slot, observation.clone()).is_err() {
                             break;
                         }
                     }

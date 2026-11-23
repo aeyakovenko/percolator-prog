@@ -1568,6 +1568,283 @@ fn v16_attack_authority_reversal_after_a_long_walk_moves_within_the_cap_of_the_m
     assert_eq!(inv045_short_value(&env, short), 2_000 - moved as i128);
 }
 
+fn inv045_crank_to(env: &mut V16CuEnv, portfolio: Pubkey, slot: u64) -> usize {
+    let mut calls = 0;
+    while env.market_state().1.assets[0].slot_last < slot {
+        assert!(calls < 64, "the backlog is accrued by bounded crank calls");
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        )
+        .expect("crank");
+        calls += 1;
+    }
+    calls
+}
+
+// INV-045, catch-up after idle slots (third read, finding 3; the owner chose option (b) on
+// 2026-11-23). An auth-mark asset at 1,000,000 (cap 24 bps per slot, window 6) carries two
+// well-collateralized lots and a one-lot short with 150,000 of capital (15% of its notional; 10%
+// initial margin). Nobody cranks for 200 slots. The engine applies a path call's single target to
+// every slot since the asset's last accrual, so before this rule the authority pushed 2,000,000 and
+// 34 crank calls in that same slot moved the mark +48% and took the short to -330,000. A changed
+// target on an exposed asset now waits until the asset is accrued to within one window: the push is
+// refused, cranks accrue the older slots toward the target in force (the mark stays), the push is
+// then accepted, and that real slot moves the mark by at most one window of capped steps (the move
+// the solvency envelope sizes maintenance for), each later slot by at most one.
+#[test]
+fn v16_attack_authority_target_after_idle_slots_catches_up_at_most_one_window() {
+    use crate::inv_018_quote_mint_vault_token_program_and_authority_integrity::inv018_public_spl_market_with_params;
+
+    let p0: u64 = 1_000_000;
+    let cap_bps: u64 = 24;
+    let window: u64 = 6;
+    let idle: u64 = 200;
+    let step = p0 * cap_bps / 10_000;
+    let mut env = inv018_public_spl_market_with_params(
+        6,
+        V16CuMarketParams {
+            initial_price: p0,
+            max_price_move_bps_per_slot: cap_bps,
+            max_accrual_dt_slots: window,
+            min_funding_lifetime_slots: 6,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 1_000,
+            ..V16CuMarketParams::default()
+        },
+    );
+    env.svm.warp_to_slot(0);
+    env.configure_auth_mark_with_cu(0, p0);
+    let owners = [Keypair::new(), Keypair::new(), Keypair::new()];
+    let long = inv045_reversal_actor(&mut env, &owners[0], 1_000_000_000_000);
+    let other = inv045_reversal_actor(&mut env, &owners[1], 1_000_000_000_000);
+    env.trade_with_cu(
+        &owners[0],
+        long,
+        &owners[1],
+        other,
+        POS_SCALE as i128,
+        p0,
+        0,
+    );
+    let short = inv045_reversal_actor(&mut env, &owners[2], 150_000);
+    env.trade_with_cu(
+        &owners[0],
+        long,
+        &owners[2],
+        short,
+        POS_SCALE as i128,
+        p0,
+        0,
+    );
+    let value_before = inv045_short_value(&env, short);
+    let slot = env.market_state().1.assets[0].slot_last + idle;
+    env.svm.warp_to_slot(slot);
+
+    let sequences = env.control_sequences(0);
+    let refused = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PushAuthMark {
+            market_id: 0,
+            asset_index: 0,
+            now_slot: slot,
+            mark_e6: 2 * p0,
+            observation_sequence: next_control_sequence(sequences.oracle_observation),
+            authority_epoch: sequences.authority_epoch,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin],
+    )
+    .expect_err("a changed target waits while the asset is more than one window behind");
+    assert!(
+        refused.contains(&format!("Custom({})", PercolatorError::EngineStale as u32)),
+        "{refused}"
+    );
+    let idle_asset = env.market_state().1.assets[0];
+    assert_eq!(
+        (
+            idle_asset.raw_oracle_target_price,
+            idle_asset.effective_price
+        ),
+        (p0, p0)
+    );
+
+    assert!(inv045_crank_to(&mut env, long, slot - window) > 1);
+    let within_window = env.market_state().1.assets[0];
+    assert_eq!(
+        within_window.effective_price, p0,
+        "the older idle slots accrue toward the target in force"
+    );
+
+    env.push_auth_mark_with_cu(slot, 2 * p0);
+    assert_eq!(
+        env.market_state().1.assets[0].raw_oracle_target_price,
+        2 * p0
+    );
+    inv045_crank_to(&mut env, long, slot);
+    let push_slot = env.market_state().1.assets[0];
+    let moved = push_slot.effective_price - p0;
+    assert!(moved > 0, "the mark moves toward the pushed target");
+    assert!(
+        moved <= window * step,
+        "the push slot moves the mark by at most one window of capped steps: {p0} -> {}",
+        push_slot.effective_price
+    );
+    let mut mark = push_slot.effective_price;
+    for next in slot + 1..=slot + 2 {
+        env.svm.warp_to_slot(next);
+        inv045_crank_to(&mut env, long, next);
+        let after = env.market_state().1.assets[0];
+        let moved = after.effective_price - mark;
+        assert!(moved > 0, "the mark keeps moving toward the pushed target");
+        assert!(
+            moved <= step,
+            "a later slot moves the mark by at most one capped step: {mark} -> {}",
+            after.effective_price
+        );
+        mark = after.effective_price;
+    }
+    let value_after = inv045_short_value(&env, short);
+    assert!(
+        value_after > 0 && value_before - value_after <= ((window + 2) * step) as i128,
+        "the short loses at most one window and two steps: {value_before} -> {value_after}"
+    );
+}
+
+fn inv045_hybrid_crank(env: &mut V16CuEnv, portfolio: Pubkey, oracle: Pubkey, slot: u64) {
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new_readonly(oracle, false),
+        ],
+        &[],
+    )
+    .expect("crank with a fresh reading");
+}
+
+// INV-045, catch-up after idle slots, the crank's own reading (third read, finding 3; option (b)).
+// A hybrid asset at 1,000,000 (cap 24 bps per slot, window 20) carries an exposed pair; nobody
+// cranks for 100 slots; then the feed reports 2,000,000. The crank calls in that slot accrue the
+// older idle slots toward the target in force and apply the reading to the last window only, so
+// that real slot moves the mark by at most one window of capped steps, each later slot by at most
+// one.
+#[test]
+fn v16_attack_fresh_reading_after_idle_slots_catches_up_at_most_one_window() {
+    const P0: u64 = 1_000_000;
+    const IDLE: u64 = 100;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: P0,
+        max_abs_funding_e9_per_slot: 0,
+        ..production_risk_params()
+    });
+    let config = env.market_state().1.config;
+    let step = P0 * config.max_price_move_bps_per_slot / 10_000;
+    let window = config.max_accrual_dt_slots;
+    assert!(IDLE > 2 * window, "the idle stretch spans several windows");
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0x4a; 32];
+    let initial = env.set_pyth_price_with_conf(&feed, P0 as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0; 32], [0; 32]],
+        &[initial],
+        1,
+        100,
+        0,
+        0,
+        100,
+        0,
+    )
+    .expect("configure the hybrid asset");
+    let owners: [Keypair; 2] = std::array::from_fn(|_| Keypair::new());
+    let portfolios = owners.each_ref().map(|owner| env.create_portfolio(owner));
+    for i in 0..2 {
+        env.deposit(&owners[i], portfolios[i], 1_000_000_000);
+    }
+    env.try_trade_asset_with_cu(
+        0,
+        &owners[0],
+        portfolios[0],
+        &owners[1],
+        portfolios[1],
+        (10 * POS_SCALE) as i128,
+        P0,
+        0,
+    )
+    .expect("open an exposed pair");
+
+    let slot = env.market_state().1.assets[0].slot_last + IDLE;
+    let mut now = 100 + IDLE as i64;
+    set_test_clock(&mut env, slot, now);
+    let fresh = env.set_pyth_price_with_conf(&feed, (2 * P0) as i64, -6, 0, now);
+    let mut calls = 0;
+    while env.market_state().1.assets[0].slot_last < slot {
+        assert!(
+            calls < 16,
+            "the idle slots are accrued by bounded crank calls"
+        );
+        inv045_hybrid_crank(&mut env, portfolios[0], fresh, slot);
+        calls += 1;
+        let asset = env.market_state().1.assets[0];
+        if asset.slot_last + window < slot {
+            assert_eq!(
+                (asset.effective_price, asset.raw_oracle_target_price),
+                (P0, P0),
+                "slots older than one window accrue toward the target in force"
+            );
+        }
+    }
+    let caught_up = env.market_state().1.assets[0];
+    assert_eq!(caught_up.raw_oracle_target_price, 2 * P0);
+    let moved = caught_up.effective_price - P0;
+    assert!(moved > 0, "the reading moves the mark in its own slot");
+    assert!(
+        moved <= window * step,
+        "the reading's slot moves the mark by at most one window of capped steps: {P0} -> {}",
+        caught_up.effective_price
+    );
+
+    let mut mark = caught_up.effective_price;
+    for next in slot + 1..=slot + 2 {
+        now += 1;
+        set_test_clock(&mut env, next, now);
+        let reading = env.set_pyth_price_with_conf(&feed, (2 * P0) as i64, -6, 0, now);
+        inv045_hybrid_crank(&mut env, portfolios[0], reading, next);
+        let after = env.market_state().1.assets[0];
+        let moved = after.effective_price - mark;
+        assert!(moved > 0, "the mark keeps moving toward the reading");
+        assert!(
+            moved <= step,
+            "a later slot moves the mark by at most one capped step: {mark} -> {}",
+            after.effective_price
+        );
+        mark = after.effective_price;
+    }
+}
+
 #[test]
 fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
     const MARK: u64 = 100;

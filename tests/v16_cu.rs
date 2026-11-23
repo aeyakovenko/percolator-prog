@@ -3697,7 +3697,54 @@ impl V16CuEnv {
         .expect("configure ewma_mark mark")
     }
 
+    /// INV-045, catch-up after idle slots: the program refuses a changed target on an exposed asset
+    /// whose accrual is more than one window (`max_accrual_dt_slots`) behind, so an oracle authority
+    /// cranks the asset first (on chain, in the same transaction). The push helpers do that before
+    /// sending.
+    fn crank_asset_before_push(&mut self, asset_index: u16, now_slot: u64) {
+        // The program takes the slot from the Clock, not from the instruction's argument.
+        let now_slot = now_slot.min(self.svm.get_sysvar::<Clock>().slot);
+        // One crank call accrues at most one window, so an idle gap takes gap / window calls.
+        for _ in 0..4_096 {
+            let group = self.market_state().1;
+            let window = group.config.max_accrual_dt_slots;
+            let asset = group.assets[asset_index as usize];
+            let Some(&portfolio) = self.portfolios.first() else {
+                return;
+            };
+            if group.mode != MarketModeV16::Live
+                || !matches!(
+                    asset.lifecycle,
+                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+                )
+                || (asset.oi_eff_long_q == 0 && asset.oi_eff_short_q == 0)
+                || asset.slot_last.saturating_add(window) >= now_slot
+            {
+                return;
+            }
+            self.svm.expire_blockhash();
+            let crank = self.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations: crank_observations(asset_index),
+                },
+                vec![
+                    AccountMeta::new(self.payer.pubkey(), true),
+                    AccountMeta::new(self.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[],
+            );
+            if crank.is_err()
+                || self.market_state().1.assets[asset_index as usize].slot_last == asset.slot_last
+            {
+                return;
+            }
+        }
+    }
+
     fn push_ewma_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
+        self.crank_asset_before_push(0, now_slot);
         let sequences = self.control_sequences(0);
         let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(
@@ -3746,6 +3793,7 @@ impl V16CuEnv {
     }
 
     fn push_auth_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
+        self.crank_asset_before_push(0, now_slot);
         let sequences = self.control_sequences(0);
         let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(
@@ -3804,6 +3852,7 @@ impl V16CuEnv {
         now_slot: u64,
         mark_e6: u64,
     ) -> u64 {
+        self.crank_asset_before_push(asset_index, now_slot);
         let sequences = self.control_sequences(asset_index as usize);
         let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(
@@ -3865,6 +3914,7 @@ impl V16CuEnv {
         now_slot: u64,
         mark_e6: u64,
     ) -> u64 {
+        self.crank_asset_before_push(asset_index, now_slot);
         self.ensure_signer_account(authority.pubkey());
         let sequences = self.control_sequences(asset_index as usize);
         let observation_sequence = next_control_sequence(sequences.oracle_observation);

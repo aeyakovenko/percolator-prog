@@ -146,9 +146,12 @@ fn v16_program_adl_rounding_residue_is_typed_and_every_portfolio_exits() {
                 amount: 244,
             },
             Action::AdvanceBlockhash,
+            // Within the two-slot window (INV-045's catch-up rule). At dt 3 the push needs a
+            // catch-up crank first, and with that crank in the history this seed leaves no
+            // rounding residue on asset 1, whatever the push's price.
             Action::PushMark {
                 asset: 132,
-                dt: 3,
+                dt: 2,
                 move_bps: -62,
             },
             Action::Trade {

@@ -818,23 +818,26 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
     );
     env.svm.warp_to_slot(10);
     env.push_auth_mark_with_cu(10, 110);
-    for slot in [10u64, 11] {
-        env.svm.warp_to_slot(slot);
-        for p in [sh, lo] {
-            let _ = env.send_crank_if_actionable(
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: slot,
-                    observations: crank_observations(0),
-                },
-                vec![
-                    AccountMeta::new(env.payer.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(p, false),
-                ],
-                &[],
-            );
-        }
-    }
+    // Neither account is refreshed after the move: the market resolves with both sides' final
+    // K/F unsettled. A crank on a market still behind the clock moves the mark (one capped step
+    // reaches 110) and touches no account; the push helper's INV-045 catch-up cranks do the same.
+    env.svm.warp_to_slot(12);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 12,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(sh, false),
+        ],
+        &[],
+    )
+    .expect("market-only catch-up step");
+    let moved = env.market_state().1.assets[0];
+    assert_eq!((moved.effective_price, moved.slot_last), (110, 10));
     env.resolve();
 
     // The loser's leg cannot leave before the winner opposite it has settled.

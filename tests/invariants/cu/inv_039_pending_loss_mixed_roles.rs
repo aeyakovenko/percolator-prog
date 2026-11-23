@@ -283,7 +283,9 @@ fn prepare() -> (AttributionWorld, MixedModel) {
         let a = world.env.market_state().1.assets[pair + 1];
         assert_eq!([a.oi_eff_long_q, a.oi_eff_short_q], [POS_SCALE; 2]);
         let payer_before = world.env.svm.get_account(&payer.portfolio);
-        let slot = 20 + pair as u64;
+        // INV-045's catch-up rule: a published mark reaches back at most one window (20 slots).
+        // Both assets were last accrued at slot 0, so both moves are published at slot 20.
+        let slot = 20;
         world.env.svm.warp_to_slot(slot);
         world.env.push_auth_mark_for_asset_as_admin(
             asset,

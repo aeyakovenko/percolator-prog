@@ -1549,6 +1549,8 @@ fn v16_program_cross_margin_solvent_account_not_unfairly_liquidated() {
     // both marks up 10%: victim GAINS on asset0 (long), LOSES on asset1 (short) -> net ~flat.
     env.svm.warp_to_slot(10);
     env.push_auth_mark_with_cu(10, 110);
+    // INV-045 catch-up rule: the oracle authority cranks asset 1 into the window before its push.
+    env.crank_asset_before_push(1, 10);
     cfg(
         &mut env,
         ProgInstruction::PushAuthMark {
@@ -2096,27 +2098,34 @@ fn v16_engine_selected_deep_insolvency_close_is_full_and_conserving() {
     env.deposit(&lb, b, 1_000);
     env.trade_asset_with_cu(0, &la, a, &lb, b, (7 * POS_SCALE) as i128, 100, 0);
     // 5x move: short loss ≈ 2800 >> its 1000 capital -> deeply bankrupt (negative equity).
+    // INV-045's catch-up rule spreads the move over real slots (one capped step each); only the
+    // winner is cranked on the way, so nobody liquidates the short before it is deeply bankrupt.
     env.svm.warp_to_slot(6);
     env.push_auth_mark_with_cu(6, 500);
-    for p in [b, a] {
+    let mut slot = 6;
+    while env.market_state().1.assets[0].effective_price < 500 {
+        assert!(slot < 16, "the pushed mark arrives at the cap");
+        env.svm.warp_to_slot(slot);
         let _ = env.send_crank_if_actionable(
             ProgInstruction::PermissionlessCrank {
-                now_slot: 6,
+                now_slot: slot,
                 observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
                 AccountMeta::new(env.market, false),
-                AccountMeta::new(p, false),
+                AccountMeta::new(a, false),
             ],
             &[],
         );
+        slot += 1;
     }
+    let slot = slot - 1;
     let g_pre = env.market_state().1;
     env.crank_steps_after_market_catchup(
         b,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 6,
+            now_slot: slot,
             observations: crank_observations(0),
         },
         2,

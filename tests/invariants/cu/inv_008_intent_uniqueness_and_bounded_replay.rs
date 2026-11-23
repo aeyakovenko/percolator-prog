@@ -1826,8 +1826,13 @@ fn v16_consumed_withdrawal_cannot_spend_later_converted_pnl() {
         PRICE,
         0,
     );
+    // INV-045 catch-up rule: the target reaches back at most one window (one slot), and it is two
+    // capped steps away, so it is pushed one slot early; the push helper first cranks the asset
+    // into the window with a known portfolio.
+    env.svm.warp_to_slot(SLOT - 1);
+    env.portfolios.extend(portfolios);
+    env.push_auth_mark_with_cu(SLOT - 1, PRICE + GAIN);
     env.svm.warp_to_slot(SLOT);
-    env.push_auth_mark_with_cu(SLOT, PRICE + GAIN);
     for _ in 0..SLOT {
         if env.market_state().1.assets[0].slot_last == SLOT {
             break;

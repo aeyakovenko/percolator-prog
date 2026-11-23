@@ -52,9 +52,11 @@ fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
     let counterparty_account = env.create_portfolio(&counterparty);
     let observer = env.create_portfolio(&observer_owner);
     // Exact one-slot rescue funding (prog#458) is RESCUE_FUNDING atoms. The deposit leaves a
-    // RESCUE_FUNDING/2 pre-rescue deficit (3_115_000 left 99_300), so only the booked rescue
+    // RESCUE_FUNDING/2 pre-rescue deficit (3_115_000 left 99_000), so only the booked rescue
     // funding cures the account; the old whole-unit floor gifted 100_000 atoms instead.
-    env.deposit(&user, user_account, 3_115_000 + 99_300 - RESCUE_FUNDING / 2);
+    // (INV-045's catch-up rule: the adverse target pushed at ATTACK_SLOT no longer reaches back
+    // to the slot before it, which leaves the adverse leg 300 atoms better off than when it did.)
+    env.deposit(&user, user_account, 3_115_000 + 99_000 - RESCUE_FUNDING / 2);
     env.deposit(&counterparty, counterparty_account, 50_000_000);
     env.top_up_backing_bucket(1, 200_000, 10);
 

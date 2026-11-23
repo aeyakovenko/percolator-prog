@@ -550,6 +550,15 @@ This section describes intent and operational ordering, not argument-by-argument
   scope-local `observation_sequence`; a retained request for a retired generation rejects before
   sequence consumption or mutation.
 - The per-slot effective-price movement cap is a risk parameter set at init; there is no standalone `SetOraclePriceCap` instruction in the current ABI.
+- A changed target that nobody pays for reaches back at most one accrual window
+  (`max_accrual_dt_slots`) of the slots before it arrived (INV-045). While the market is live and the
+  asset has effective open interest, **PushAuthMark** and **PushEwmaMark** reject with `EngineStale` a
+  mark that changes the target of an asset whose accrual is more than one window behind, until a
+  crank has caught the asset up (the pusher may put that crank first in the same transaction). The
+  permissionless crank likewise holds back a changed oracle reading or EWMA mark on such an asset: it
+  accrues toward the target in force, and a later crank, at most one window behind, applies the
+  reading. A trade print that moves the mark is staged as before and pays the mark-movement fee for
+  the whole move.
 
 ### Insurance management
 - **WithdrawInsuranceAsset** (tag 57)
@@ -686,7 +695,7 @@ AuthMark is the direct authority-mark path:
 
 - **Direct mark API**: `ConfigureAuthMark { asset_index, market_id, now_slot, initial_mark_e6, observation_sequence }` and `PushAuthMark { asset_index, market_id, now_slot, mark_e6, observation_sequence }`.
 - **No EWMA configuration**: there is no halflife, mark-min-fee, feed id, confidence filter, invert flag, or unit-scale configuration in the AuthMark API.
-- **Authority boundary**: only the configured mark authority can push a new mark; public cranks can only consume the stored mark.
+- **Authority boundary**: only the configured mark authority can push a new mark; public cranks can only consume the stored mark. A push that changes the target of an exposed asset more than one accrual window behind rejects until a crank catches the asset up (INV-045).
 - **Adapter-friendly**: a separate oracle adapter PDA can verify Pyth, Chainlink, Switchboard, or custom feed policy, then sign `PushAuthMark` with the resulting mark.
 - **Trade isolation**: `TradeCpi` and `TradeNoCpi` do not rewrite the AuthMark target or charge EWMA mark-movement fees.
 

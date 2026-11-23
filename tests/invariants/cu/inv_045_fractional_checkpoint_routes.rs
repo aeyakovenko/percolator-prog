@@ -1,5 +1,8 @@
 //! Scope R: fractional owner floors across retained funding-checkpoint routes.
 //! Two activation boundaries distinguish the old funding debt from the new mark.
+//! Each checkpoint is published one slot ahead of the accrual frontier, the most
+//! INV-045's catch-up rule allows here (one window, one slot): bounded cranks first
+//! accrue the older slots toward the target in force.
 
 use super::*;
 use funding_carry_entitlement::retained_funding_retry::{reject, sign};
@@ -119,6 +122,10 @@ fn advance_one(world: &mut World, ledger: &mut Ledger, reverse: bool, rollback: 
     );
 }
 
+fn checkpoint_target(direction: i128, asset: usize) -> i128 {
+    i128::from(ANCHORS[asset]) - direction * if asset == 0 { 20 } else { -20 }
+}
+
 #[test]
 fn v16_program_fractional_checkpoint_retries_preserve_four_route_owner_residues() {
     let mut worlds = 0;
@@ -193,10 +200,21 @@ fn v16_program_fractional_checkpoint_retries_preserve_four_route_owner_residues(
                             matcher
                         });
                         ledger.check(&world);
-                        let expected_price = (i128::from(ANCHORS[0])
-                            - direction
-                                * i128::from(ANCHORS[0] * CAP_BPS * (boundary - 2) / 10_000))
-                            as u64;
+                        // The mark when the retained reduction lands: the old trajectory up to
+                        // the frontier, then the published one for three slots.
+                        let expected_price = {
+                            let mut model = Ledger::new(direction, RATE);
+                            model.advance(boundary - 1);
+                            for asset in 0..2 {
+                                model.publish_at(
+                                    asset,
+                                    checkpoint_target(direction, asset),
+                                    boundary,
+                                );
+                            }
+                            model.advance(boundary + 2);
+                            model.price[0]
+                        };
                         let ix = retained_reduction(&world, batch, matcher, expected_price);
                         let retained =
                             [0, 1, 2].map(|nonce| sign(&world, std::slice::from_ref(&ix), nonce));
@@ -219,9 +237,11 @@ fn v16_program_fractional_checkpoint_retries_preserve_four_route_owner_residues(
                         let owners = [0, 1, 3]
                             .map(|actor| world.env.svm.get_account(&world.portfolios[actor]));
                         world.env.svm.warp_to_slot(boundary);
+                        while ledger.slot + 1 < boundary {
+                            advance_one(&mut world, &mut ledger, batch, false);
+                        }
                         for asset in if batch { [1, 0] } else { [0, 1] } {
-                            let target = i128::from(ANCHORS[asset])
-                                - direction * if asset == 0 { 20 } else { -20 };
+                            let target = checkpoint_target(direction, asset);
                             let cu = world.env.push_auth_mark_for_asset_as_admin(
                                 asset as u16,
                                 boundary,
@@ -233,6 +253,9 @@ fn v16_program_fractional_checkpoint_retries_preserve_four_route_owner_residues(
                         }
                         assert_eq!(ledger.carry(), [0; 2]);
                         assert!(ledger.pending_funding.iter().all(Option::is_some));
+                        // Two slots after the checkpoint, a retained reduction still needs
+                        // more catch-up than one inline segment covers.
+                        world.env.svm.warp_to_slot(boundary + 2);
                         for attempt in 0..2 {
                             if interrupted {
                                 reject(
@@ -245,13 +268,13 @@ fn v16_program_fractional_checkpoint_retries_preserve_four_route_owner_residues(
                                 rollbacks += 1;
                             }
                             if attempt == 0 {
-                                advance_one(&mut world, &mut ledger, batch, false);
+                                // The checkpoint's activation step.
+                                advance_one(&mut world, &mut ledger, batch, interrupted);
+                                rollbacks += usize::from(interrupted);
                             }
                         }
-                        while ledger.slot < boundary {
-                            let activation = ledger.slot + 1 == boundary;
-                            advance_one(&mut world, &mut ledger, batch, interrupted && activation);
-                            rollbacks += usize::from(interrupted && activation);
+                        while ledger.slot < boundary + 2 {
+                            advance_one(&mut world, &mut ledger, batch, false);
                         }
                         assert_eq!(ledger.price[0], expected_price);
                         assert!(ledger.carry().iter().all(|carry| *carry > 0));
@@ -291,7 +314,7 @@ fn v16_program_fractional_checkpoint_retries_preserve_four_route_owner_residues(
                         ledger.resize(1, 0, 3 * SCALE / 8);
                         ledger.check(&world);
                         assert_eq!(carry_transport_exit::profiles(&world), profiles);
-                        for slot in boundary + 1..=boundary + 4 {
+                        for slot in boundary + 3..=boundary + 6 {
                             world.env.svm.warp_to_slot(slot);
                             advance_one(&mut world, &mut ledger, batch, false);
                         }

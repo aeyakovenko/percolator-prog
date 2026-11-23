@@ -2,6 +2,8 @@
 //! Same-slot replacement cancels one prospective premium; a later publication
 //! must preserve the intervening premium until its owed interval is consumed.
 //! Integral positions, AuthMark, zero fees and two pending boundaries only.
+//! Every publication lands at most one window (here one slot) ahead of the accrual
+//! frontier, as INV-045's catch-up rule requires; one further ahead is refused.
 
 use super::*;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
@@ -302,6 +304,62 @@ fn publish(
     );
 }
 
+/// INV-045, catch-up after idle slots: with the accrual frontier three slots behind
+/// the clock, a changed target would be applied to all three; it is refused and the
+/// transaction leaves no trace.
+fn refuse_publication_beyond_window(world: &mut World, matcher: Matcher, prices: [u64; 2]) {
+    let slot = world.env.svm.get_sysvar::<Clock>().slot;
+    world.trace.push(format!(
+        "clock={slot}: refuse publication {prices:?} beyond the window"
+    ));
+    world.env.svm.expire_blockhash();
+    let sequences = world.env.control_sequences(0);
+    let tx = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            ComputeBudgetInstruction::set_compute_unit_limit(CU_LIMIT),
+            Instruction {
+                program_id: world.env.program_id,
+                accounts: vec![
+                    AccountMeta::new(world.env.admin.pubkey(), true),
+                    AccountMeta::new(world.env.market, false),
+                ],
+                data: ProgInstruction::PushAuthMark {
+                    asset_index: 0,
+                    market_id: world.env.asset_market_id(0),
+                    now_slot: slot,
+                    mark_e6: prices[0],
+                    observation_sequence: next_control_sequence(sequences.oracle_observation),
+                    authority_epoch: sequences.authority_epoch,
+                }
+                .encode(),
+            },
+        ],
+        Some(&world.env.payer.pubkey()),
+        &[&world.env.payer, &world.env.admin],
+        world.env.svm.latest_blockhash(),
+    );
+    let mut before = frame(world, matcher, &tx);
+    before
+        .get_mut(&world.env.payer.pubkey())
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .lamports -= u64::from(tx.message.header.num_required_signatures)
+        * FeeStructure::default().lamports_per_signature;
+    let failed = world.env.svm.send_transaction(tx.clone()).unwrap_err();
+    assert_eq!(
+        failed.err,
+        TransactionError::InstructionError(
+            2,
+            InstructionError::Custom(PercolatorError::EngineStale as u32)
+        ),
+        "{:?}",
+        failed.meta.logs
+    );
+    assert_eq!(frame(world, matcher, &tx), before, "{:?}", world.trace);
+}
+
 fn crank(
     world: &mut World,
     journal: &mut Journal,
@@ -519,7 +577,7 @@ fn v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolv
                 }
                 assert_eq!(journal.value.carry, [4_800, 6_000]);
                 reduce(&mut world, &mut journal, matcher, history, true, rollback);
-                world.env.svm.warp_to_slot(5);
+                world.env.svm.warp_to_slot(3);
                 publish(
                     &mut world,
                     &mut journal,
@@ -538,9 +596,10 @@ fn v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolv
                     batch,
                     rollback,
                 );
+                world.env.svm.warp_to_slot(4);
                 crank(&mut world, &mut journal, matcher, batch, false);
                 assert_eq!(journal.value.carry, [2_400, 3_000]);
-                world.env.svm.warp_to_slot(7);
+                world.env.svm.warp_to_slot(5);
                 publish(
                     &mut world,
                     &mut journal,
@@ -553,10 +612,13 @@ fn v16_program_overlapping_target_replacements_preserve_carry_funding_and_resolv
                     journal.publications,
                     vec![
                         (0, targets(direction, 20)),
-                        (5, targets(direction, -20)),
-                        (7, targets(direction, 40))
+                        (3, targets(direction, -20)),
+                        (5, targets(direction, 40))
                     ]
                 );
+                world.env.svm.warp_to_slot(7);
+                refuse_publication_beyond_window(&mut world, matcher, targets(direction, 50));
+                journal.check(&world);
                 for _ in 5..=7 {
                     crank(&mut world, &mut journal, matcher, batch, rollback);
                 }

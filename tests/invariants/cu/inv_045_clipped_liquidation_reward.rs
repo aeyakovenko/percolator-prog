@@ -106,6 +106,28 @@ fn v16_program_fresh_report_rewards_only_collectible_full_close_penalty() {
             assert_eq!(staged.insurance_domain_budget_remaining_total, 0);
             assert!(discovery > nominal_fee);
 
+            // INV-045, catch-up after idle slots: a fresh report reaches back at most one
+            // window, so it is published one slot after the discovery; from the discovery
+            // slot's mark the trajectory is the one the slot-28 report used to replay.
+            set_test_clock(&mut env, 6, 1_000);
+            let early = env.set_pyth_price_with_conf(&feed, report_price as i64, -6, 0, 1_000);
+            tracked.push(early);
+            let publish_early = observe(&env, keeper, owners[4].pubkey(), Some(early), None);
+            peak_cu = peak_cu.max(submit(
+                &mut env,
+                &owners[4],
+                &[publish_early],
+                &tracked,
+                None,
+            ));
+            let published = env.market_state().1;
+            assert_eq!(published.assets[0].slot_last, 6);
+            assert_eq!(published.assets[0].raw_oracle_target_price, report_price);
+            assert_eq!(
+                published.assets[0].effective_price,
+                ENTRY - ENTRY * 24 / 10_000
+            );
+
             set_test_clock(&mut env, 28, 1_001);
             let fresh = env.set_pyth_price_with_conf(&feed, report_price as i64, -6, 0, 1_001);
             let conflicting =

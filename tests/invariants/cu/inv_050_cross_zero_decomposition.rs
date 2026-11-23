@@ -589,8 +589,23 @@ fn v16_program_adl_maker_reduction_bounds_taker_cross_zero_and_matched_book() {
         }
         env.svm.warp_to_slot(6);
         env.push_auth_mark_with_cu(6, 500);
+        // INV-045's catch-up rule spreads the 5x move over real slots (one capped step each);
+        // only a winner is cranked on the way, so the loser is still unliquidated at 500.
+        let mut slot = 6;
+        while env.market_state().1.assets[0].effective_price < 500 {
+            assert!(slot < 16, "the pushed mark arrives at the cap");
+            env.svm.warp_to_slot(slot);
+            env.crank_if_actionable(
+                other_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+            slot += 1;
+        }
         let crank = ProgInstruction::PermissionlessCrank {
-            now_slot: 6,
+            now_slot: slot - 1,
             observations: crank_observations(0),
         };
         for portfolio in [loser, maker] {

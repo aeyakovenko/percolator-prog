@@ -1,14 +1,23 @@
 //! INV-045/038/085, row425: retained reductions across pending funding catch-up.
-//! Public target replacement at Clock 5 resets carry at accrual frontier 2;
-//! bounded cranks rebuild it while the old funding checkpoint remains owed.
+//! Public target replacement at Clock 4 resets carry at accrual frontier 3, the most a
+//! replacement may lag under INV-045's catch-up rule here (one window, one slot); the same
+//! replacement at frontier 2 is refused and leaves no trace. Bounded cranks rebuild the carry
+//! while the old funding checkpoint remains owed.
 //! Pre-signed requests survive failed catch-up and successful-prefix rollback.
 
 use super::*;
 use solana_sdk::{fee::FeeStructure, instruction::InstructionError, transaction::TransactionError};
 use std::collections::BTreeMap;
 
-const CHECKPOINT: u64 = 5;
-const EXIT: u64 = 9;
+const CHECKPOINT: u64 = 4;
+/// The accrual frontier at the replacement: one slot behind, the window of this market.
+const FRONTIER: u64 = CHECKPOINT - 1;
+/// The clock while bounded cranks catch up after the replacement.
+const CATCHUP: u64 = 6;
+/// Nine slots of the replacement's trajectory. Its owner payouts are exact; at slots 9 to 11 one
+/// owner's released-PnL conversion leaves one atom unconverted (a rounding of the conversion this
+/// test does not model).
+const EXIT: u64 = 12;
 const LIMIT: u32 = 600_000;
 
 pub(in super::super) fn sign(
@@ -99,9 +108,9 @@ fn advance(ledger: &mut Ledger, direction: i128, slot: u64) {
     assert_eq!(slot, ledger.slot + 1);
     for asset in 0..2 {
         let old_sign = direction * if asset == 0 { 1 } else { -1 };
-        // The public replacement is submitted with slot_last=2. Its new target
-        // starts a fresh price trajectory, but funding changes only after slot 5.
-        let numerator = ANCHORS[asset] * CAP_BPS * (slot - 2);
+        // The public replacement is submitted with slot_last=3. Its new target
+        // starts a fresh price trajectory, but funding changes only after slot 4.
+        let numerator = ANCHORS[asset] * CAP_BPS * (slot - FRONTIER);
         let price = ANCHORS[asset] as i128 - old_sign * i128::from(numerator / 10_000);
         let funding_mark =
             ANCHORS[asset] as i128 + old_sign * if slot <= CHECKPOINT { 20 } else { -20 };
@@ -193,6 +202,7 @@ fn v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpo
     let mut peak = 0;
     let mut worlds = 0;
     let mut rejected = 0;
+    let mut refused_lagging = 0;
     for direction in [-1, 1] {
         let mut reference = None;
         for reverse in [false, true] {
@@ -282,6 +292,82 @@ fn v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpo
                 let owners_before =
                     [0, 1].map(|actor| world.env.svm.get_account(&world.portfolios[actor]));
                 world.env.svm.warp_to_slot(CHECKPOINT);
+                // INV-045, catch-up after idle slots: with the frontier two slots behind, the
+                // replacement would be applied to both; it is refused and leaves no trace.
+                world
+                    .trace
+                    .push("refuse the replacement two slots behind".into());
+                let pushes = order.map(|asset| {
+                    let sign = direction * if asset == 0 { 1 } else { -1 };
+                    let sequences = world.env.control_sequences(asset);
+                    Instruction {
+                        program_id: world.env.program_id,
+                        accounts: vec![
+                            AccountMeta::new(world.env.admin.pubkey(), true),
+                            AccountMeta::new(world.env.market, false),
+                        ],
+                        data: ProgInstruction::PushAuthMark {
+                            asset_index: asset as u16,
+                            market_id: world.env.asset_market_id(asset as u16),
+                            now_slot: CHECKPOINT,
+                            mark_e6: (ANCHORS[asset] as i128 - sign * 20) as u64,
+                            observation_sequence: next_control_sequence(
+                                sequences.oracle_observation,
+                            ),
+                            authority_epoch: sequences.authority_epoch,
+                        }
+                        .encode(),
+                    }
+                });
+                let lagging = Transaction::new_signed_with_payer(
+                    &[
+                        heap_ix(),
+                        ComputeBudgetInstruction::set_compute_unit_limit(LIMIT),
+                        pushes[0].clone(),
+                        pushes[1].clone(),
+                    ],
+                    Some(&world.env.payer.pubkey()),
+                    &[&world.env.payer, &world.env.admin],
+                    world.env.svm.latest_blockhash(),
+                );
+                reject(
+                    &mut world,
+                    &lagging,
+                    2,
+                    InstructionError::Custom(PercolatorError::EngineStale as u32),
+                );
+                refused_lagging += 1;
+                ledger.check(&world);
+                // One bounded crank accrues frontier 3 toward the target in force; a partial
+                // catch-up does not settle the supplied portfolio.
+                world
+                    .trace
+                    .push("partial public crank to the replacement frontier".into());
+                let partial = Instruction {
+                    program_id: world.env.program_id,
+                    accounts: vec![
+                        AccountMeta::new(world.env.payer.pubkey(), true),
+                        AccountMeta::new(world.env.market, false),
+                        AccountMeta::new(world.portfolios[2], false),
+                    ],
+                    data: ProgInstruction::PermissionlessCrank {
+                        now_slot: CHECKPOINT,
+                        observations: crank_observations_for_assets(&order.map(|a| a as u16)),
+                    }
+                    .encode(),
+                };
+                let supplied = world.env.svm.get_account(&world.portfolios[2]);
+                let result = world
+                    .env
+                    .svm
+                    .send_transaction(sign(&world, &[partial], 99))
+                    .expect("bounded public catch-up toward the target in force");
+                assert_eq!(world.env.svm.get_account(&world.portfolios[2]), supplied);
+                world.max_cu = world.max_cu.max(result.compute_units_consumed);
+                ledger.advance(direction, FRONTIER);
+                ledger.check(&world);
+                assert_eq!(ledger.carry, [7_200, 9_000]);
+                assert_eq!(ledger.price, ANCHORS);
                 for asset in order {
                     let sign = direction * if asset == 0 { 1 } else { -1 };
                     world.env.push_auth_mark_for_asset_as_admin(
@@ -292,6 +378,7 @@ fn v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpo
                 }
                 ledger.carry = [0; 2];
                 checkpoint(&world, &mut ledger, direction);
+                world.env.svm.warp_to_slot(CATCHUP);
                 let stale = InstructionError::Custom(PercolatorError::EngineStale as u32);
                 if attempts {
                     world
@@ -301,7 +388,7 @@ fn v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpo
                     rejected += 1;
                     checkpoint(&world, &mut ledger, direction);
                 }
-                crank(&mut world, &mut ledger, direction, reverse, 3);
+                crank(&mut world, &mut ledger, direction, reverse, CHECKPOINT);
                 assert_eq!(ledger.carry, [2_400, 3_000]);
                 if attempts {
                     world
@@ -311,7 +398,7 @@ fn v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpo
                     rejected += 1;
                     checkpoint(&world, &mut ledger, direction);
                 }
-                for slot in 4..=CHECKPOINT {
+                for slot in CHECKPOINT + 1..=CATCHUP {
                     crank(&mut world, &mut ledger, direction, reverse, slot);
                 }
                 assert_eq!(ledger.carry, [7_200, 9_000]);
@@ -364,11 +451,11 @@ fn v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpo
                     [2, 3].map(|actor| world.env.svm.get_account(&world.portfolios[actor])),
                     passive
                 );
-                for slot in CHECKPOINT + 1..=EXIT {
+                for slot in CATCHUP + 1..=EXIT {
                     world.env.svm.warp_to_slot(slot);
                     crank(&mut world, &mut ledger, direction, reverse, slot);
                 }
-                assert_eq!(ledger.carry, [6_800, 1_000]);
+                assert_eq!(ledger.carry, [1_600, 7_000]);
                 assert!(ledger.latent_checks > 0);
                 let final_profiles = carry_transport_exit::profiles(&world);
                 pay(&mut world, &mut ledger, reverse);
@@ -384,7 +471,7 @@ fn v16_program_retained_reduction_preserves_carry_across_pending_funding_checkpo
             }
         }
     }
-    assert_eq!((worlds, rejected), (8, 12));
+    assert_eq!((worlds, rejected, refused_lagging), (8, 12, 8));
     assert_cu_within(
         "retained funding-checkpoint carry and owner payout",
         peak,
