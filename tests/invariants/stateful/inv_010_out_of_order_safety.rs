@@ -33,9 +33,10 @@
 //! and both owner withdrawals then converge byte-for-byte within each transport.
 //! `v16_program_retained_bilateral_fee_terms_survive_both_policy_relaxation_orders` retains a trade and
 //! a lower base-fee policy from the same prestate on single/batch no-CPI routes. Both orders land;
-//! the trade pays its original bilaterally signed fee. Exact capital, insurance-domain, custody,
-//! position, and full owner-exit checks prove the policy reduction neither invalidates retained
-//! consent nor changes its authorized charge. Terminal economic snapshots converge within each route.
+//! the trade pays the base fee in force when it lands, within its bilaterally signed rate (INV-046
+//! finding 6), so the policy-first order pays exactly the relaxed fee. Exact capital,
+//! insurance-domain, custody, position, and full owner-exit checks prove the policy reduction neither
+//! invalidates retained consent nor charges beyond it.
 //! `v16_program_authority_handoff_and_retained_policy_obey_both_landing_orders` crosses a retained
 //! market-authority handoff with all eight market/asset-0 policy lanes at low, midpoint, and maximum
 //! valid values. Policy-first permits both authorized requests; handoff-first makes the old
@@ -1064,9 +1065,12 @@ fn v16_program_retained_bilateral_fee_terms_survive_both_policy_relaxation_order
                     live_fee_bps = LOWER_FEE_BPS;
                     policy_landed = true;
                 } else {
-                    charged = fee_atoms(SIGNED_FEE_BPS);
+                    // The trade pays the base fee in force when it lands, within the rate both
+                    // owners signed (INV-046 finding 6).
+                    charged = fee_atoms(live_fee_bps);
                     traded = true;
-                    assert!(charged > fee_atoms(LOWER_FEE_BPS));
+                    assert!(charged <= fee_atoms(SIGNED_FEE_BPS));
+                    assert_eq!(policy_landed, charged == fee_atoms(LOWER_FEE_BPS));
                 }
                 let (cfg, group) = env.primary_market_state();
                 assert_eq!(cfg.trade_fee_base_bps, live_fee_bps);
@@ -1145,14 +1149,16 @@ fn v16_program_retained_bilateral_fee_terms_survive_both_policy_relaxation_order
                 .expect("public fee-policy history");
             assert_eq!(trace.steps.len(), 5);
             assert!(trace.steps.iter().all(|step| step.succeeded));
-            let terminal = snapshot(&env);
-            if let Some(expected) = &reference {
+            // The orders differ only by the base fee in force at the trade: a relaxation that
+            // lands first lowers what the retained trade pays.
+            if let Some(trade_first_fee) = reference {
                 assert_eq!(
-                    &terminal, expected,
-                    "{route:?}: fee-policy orders must converge"
+                    trade_first_fee - total_fee,
+                    fee_atoms(SIGNED_FEE_BPS) - fee_atoms(LOWER_FEE_BPS),
+                    "{route:?}: the policy-first order pays the relaxed fee"
                 );
             } else {
-                reference = Some(terminal);
+                reference = Some(total_fee);
             }
         }
     }

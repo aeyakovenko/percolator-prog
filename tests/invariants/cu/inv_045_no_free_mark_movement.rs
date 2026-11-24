@@ -1887,7 +1887,7 @@ fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
         victim_account,
         VICTIM_Q,
         MARK,
-        0,
+        env.max_trading_fee_bps(),
     );
     let insurance_before = env.market_state().1.insurance;
     let coalition_before = [attacker_account, wash_long_account, wash_short_account]
@@ -1939,7 +1939,7 @@ fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
             wash_short_account,
             WASH_Q,
             MARK.checked_mul(slot).unwrap(),
-            0,
+            env.max_trading_fee_bps(),
         )
         .unwrap_or_else(|err| panic!("small wash trade at slot {slot} failed: {err}"));
         let mark_after_open = env.market_state().0.mark_ewma_e6;
@@ -1954,7 +1954,7 @@ fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
             wash_short_account,
             -WASH_Q,
             MARK.checked_mul(slot).unwrap(),
-            0,
+            env.max_trading_fee_bps(),
         )
         .unwrap_or_else(|err| panic!("wash exit at slot {slot} failed: {err}"));
         let (cfg_after_exit, group_after_exit) = env.market_state();
@@ -2060,7 +2060,7 @@ fn v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered() {
         victim_account,
         BASE_Q,
         MARK,
-        0,
+        env.max_trading_fee_bps(),
     );
     let insurance_before = env.market_state().1.insurance;
     let victim_capital_before = env.portfolio_state(victim_account).capital.get();
@@ -2113,7 +2113,7 @@ fn v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered() {
             wash_short_account,
             BASE_Q,
             MARK.checked_mul(slot).unwrap(),
-            0,
+            env.max_trading_fee_bps(),
         )
         .unwrap_or_else(|err| panic!("wash trade at slot {slot} failed: {err}"));
         let mark_after_open = env.market_state().0.mark_ewma_e6;
@@ -2126,7 +2126,7 @@ fn v16_attack_repeated_ewma_moves_require_catchup_and_remain_fee_covered() {
             wash_short_account,
             -BASE_Q,
             MARK.checked_mul(slot).unwrap(),
-            0,
+            env.max_trading_fee_bps(),
         )
         .unwrap_or_else(|err| panic!("wash exit at slot {slot} failed: {err}"));
         let (cfg_after_exit, group_after_exit) = env.market_state();
@@ -2251,8 +2251,18 @@ fn v16_attack_nocpi_positive_mark_min_fee_does_not_dos_or_move_ewma_for_free() {
         let insurance_before = env.market_state().1.insurance;
 
         env.svm.expire_blockhash();
+        // Both signers authorize the market's maximum rate (INV-046 finding 6: the signed rate
+        // caps base plus mark fee, so signing 0 would forbid any paid move).
         let trade = try_no_cpi_reported_price_trade_with_cu(
-            &mut env, path, &owner_a, account_a, &owner_b, account_b, SIZE_Q, HIGH_PRINT, 0,
+            &mut env,
+            path,
+            &owner_a,
+            account_a,
+            &owner_b,
+            account_b,
+            SIZE_Q,
+            HIGH_PRINT,
+            MAX_FEE_BPS,
         );
         assert!(
             trade.is_ok(),
@@ -2272,7 +2282,8 @@ fn v16_attack_nocpi_positive_mark_min_fee_does_not_dos_or_move_ewma_for_free() {
             mark_move_bps, MAX_FEE_BPS,
             "{path:?}: mark movement should bind at paid fee headroom, not at mark_min_fee"
         );
-        let trade_notional = SIZE_Q.unsigned_abs() * accepted_price as u128 / POS_SCALE;
+        // The fill is valued at the effective price, MARK (INV-046 finding 6).
+        let trade_notional = SIZE_Q.unsigned_abs() * MARK as u128 / POS_SCALE;
         let paid_move_bps = fee_paid * 10_000 / (trade_notional * 2);
         assert!(
             mark_move_bps <= paid_move_bps as u64,
@@ -2316,6 +2327,9 @@ fn v16_program_tradenocpi_fee_cannot_be_evaded_via_exec_price() {
     // fee charged (insurance delta) for the SAME mark-valued position at different declared exec_prices.
     let fee_for = |exec_price: u64| -> u128 {
         let mut env = V16CuEnv::new();
+        // INV-046 (finding 6): the trade is charged the market base fee and its signed rate is
+        // only the signers' ceiling, so the base fee is the 100 bps the trade signs.
+        env.update_trade_fee_policy_with_cu(100);
         env.configure_auth_mark_with_cu(0, 100); // mark = 100
         let oa = Keypair::new();
         let a = env.create_portfolio(&oa);
@@ -2406,7 +2420,7 @@ fn v16_program_nocpi_epsilon_reported_price_uses_dt_clamped_fee_and_ewma_price()
         );
         assert_ne!(
             epsilon.0, at_mark.0,
-            "{path:?}: non-vacuous fee assertion; the accepted below-mark print must not be billed as old mark"
+            "{path:?}: non-vacuous fee assertion; the accepted below-mark print pays a mark-movement fee on top of the base fee, both valued at the effective price (INV-046 finding 6)"
         );
         assert_ne!(
             epsilon.1, at_mark.1,
@@ -3050,7 +3064,9 @@ fn v16_program_max_shape_ewma_movement_is_paid_and_drain_only_exit_stays_bounded
     const RAW_UP: u64 = 2_000_000;
     const DEPOSIT: u128 = 25_000_000;
     const EXPECTED_MARK: u64 = 1_005_000;
-    const EXPECTED_FEE_PER_ASSET: u128 = 10_100;
+    // A 50-bps move of one unit with no prior OI: 2 x 1_000_000 x 50 / 10_000, the fill valued at
+    // the effective price MARK, not at the accepted print 1_010_000 (INV-046 finding 6).
+    const EXPECTED_FEE_PER_ASSET: u128 = 10_000;
     const EXPECTED_RELEASED_PNL_PER_ASSET: u128 = 5_000;
 
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
@@ -3074,13 +3090,15 @@ fn v16_program_max_shape_ewma_movement_is_paid_and_drain_only_exit_stays_bounded
     let vault_before = env.token_amount(env.vault);
 
     env.svm.warp_to_slot(1);
+    // Every leg signs the market's maximum rate, room for its mark fee (INV-046 finding 6).
+    let fee_bps = env.max_trading_fee_bps();
     let open_legs = (0..ASSET_COUNT)
         .map(|asset_index| BatchTradeLeg {
             asset_index,
             market_id: env.asset_market_id(asset_index),
             size_q: POS_SCALE as i128,
             exec_price: RAW_UP,
-            fee_bps: 0,
+            fee_bps,
         })
         .collect();
     env.svm.expire_blockhash();
@@ -3296,7 +3314,9 @@ const MAX_SHAPE_HYBRID_DEPOSIT: u128 = 100_000_000;
 // Hybrid becomes stale two slots after configuration. The one-slot price cap is 10_000 and EWMA
 // alpha is 2/(2 + halflife=1), so floor(10_000 * 2/3) = 6_666.
 const MAX_SHAPE_HYBRID_EXPECTED_MARK: u64 = 1_006_666;
-const MAX_SHAPE_HYBRID_FEE_PER_ASSET: u128 = 13_534;
+// A 67-bps move of one unit with no prior OI: 2 x 1_000_000 x 67 / 10_000, the fill valued at the
+// effective price, not at the accepted print (INV-046 finding 6).
+const MAX_SHAPE_HYBRID_FEE_PER_ASSET: u128 = 13_400;
 
 fn portfolio_certificate_is_current(env: &V16CuEnv, portfolio: Pubkey) -> bool {
     let group = env.market_state().1;
@@ -3383,12 +3403,15 @@ fn setup_max_shape_paid_hybrid_cpi() -> MaxShapePaidHybridFixture {
         );
 
     set_test_clock(&mut env, 3, 102);
+    // The taker signs the market's maximum rate, room for each leg's mark fee (INV-046 finding 6;
+    // the LP's matcher cap is the default 10_000).
+    let fee_bps = env.max_trading_fee_bps();
     let legs = (0..asset_count)
         .map(|asset_index| BatchTradeCpiLeg {
             asset_index,
             market_id: env.asset_market_id(asset_index),
             size_q: POS_SCALE as i128,
-            fee_bps: 0,
+            fee_bps,
             limit_price: 0,
         })
         .collect();

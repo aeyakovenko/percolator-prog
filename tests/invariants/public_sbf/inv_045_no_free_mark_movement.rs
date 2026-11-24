@@ -447,14 +447,22 @@ fn v16_program_fresh_hybrid_report_does_not_reenable_stale_trade_liquidation_rew
     let pyth = env.set_pyth_price(&feed, MARK as i64, -6, 0, 100);
     env.configure_hybrid_oracle(0, 1, 100, 0, [feed, [0; 32], [0; 32]], &[pyth], 1, 0)
         .unwrap();
-    env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, MARK, 0)
-        .unwrap();
+    env.trade_no_cpi(
+        0,
+        1,
+        0,
+        POS_SCALE as i128,
+        MARK,
+        env.primary_max_trading_fee_bps(),
+    )
+    .unwrap();
 
     let supply_before = env.token_supply_observed();
     let mint_supply_before = env.mint_supply();
     env.set_clock(3, 1_000);
     let insurance_before_move = env.primary_market_state().1.insurance;
-    env.trade_no_cpi(2, 3, 0, PROBE_Q, 999_850, 0).unwrap();
+    env.trade_no_cpi(2, 3, 0, PROBE_Q, 999_850, env.primary_max_trading_fee_bps())
+        .unwrap();
     let (profile_after_move, group_after_move) = env.primary_market_state();
     let movement_fee = group_after_move.insurance - insurance_before_move;
     assert!(movement_fee > 0);

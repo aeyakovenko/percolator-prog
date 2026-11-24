@@ -8670,18 +8670,28 @@ pub mod processor {
             // notional, and the EWMA update. The engine independently applies its canonical carried
             // cap while the staged target catches up. Modes without trade-driven mark discovery fall
             // back to the current effective mark.
-            let fee_basis_price = accepted_reported_trade_price_view(
+            let accepted_print = accepted_reported_trade_price_view(
                 &oracle_profile,
                 &group,
                 asset_index as usize,
                 exec_price,
             )?;
+            // INV-046 (second read, finding 6; the owner's choice of 2026-11-24): every route
+            // charges its fee on the engine's effective price, whose path INV-045 bounds. The
+            // accepted print still drives the average and the mark fee's move, so neither an
+            // oracle authority's average nor a matcher's print sets the notional a fee applies to.
+            let fee_basis_price = group.markets[asset_index as usize]
+                .engine
+                .asset
+                .effective_price
+                .get();
             let fee_quote = hybrid_trade_fee_quote_view(
                 &cfg,
                 &oracle_profile,
                 &group,
                 asset_index as usize,
                 size_abs,
+                accepted_print,
                 fee_basis_price,
                 fee_bps,
             )?;
@@ -9044,18 +9054,22 @@ pub mod processor {
                     )
                     .map_err(map_v16_error)?;
                 }
-                let fee_basis_price = accepted_reported_trade_price_view(
+                let accepted_print = accepted_reported_trade_price_view(
                     &oracle_profile,
                     &group,
                     asset_index,
                     leg.exec_price,
                 )?;
+                // INV-046 finding 6: the fee is charged on the effective price (see the single
+                // route); the accepted print only drives the average.
+                let fee_basis_price = group.markets[asset_index].engine.asset.effective_price.get();
                 let fee_quote = hybrid_trade_fee_quote_view(
                     &cfg,
                     &oracle_profile,
                     &group,
                     asset_index,
                     abs_size,
+                    accepted_print,
                     fee_basis_price,
                     leg.fee_bps,
                 )?;
@@ -10114,10 +10128,10 @@ pub mod processor {
             expected_market_id,
             ret.exec_size,
             ret.exec_price_e6,
-            // The LP does not sign the CPI instruction, and the matcher ABI does not carry a fee
-            // approval. Caller input is bounded above, but only the market base fee may debit the
-            // unsigned LP; mark-movement fees are still derived inside the shared trade path.
-            cfg_pre.trade_fee_base_bps,
+            // The fee ceiling (INV-046 finding 6): both sides pay the same rate, the market base
+            // plus any mark-movement fee, at most the taker's signed rate and at most the cap the
+            // unsigned LP configured for its matcher.
+            core::cmp::min(fee_bps, u64::from(lp_trade_fee_cap_bps)),
             Some(backing_fee_cap_bps),
             Some(ret.backing_fee_cap_bps()),
             true,
@@ -10583,8 +10597,9 @@ pub mod processor {
                 market_id: leg.market_id,
                 size_q: ret.exec_size,
                 exec_price: ret.exec_price_e6,
-                // As in the single CPI route, the caller's fee is not LP-authorized.
-                fee_bps: cpi_fee_bps,
+                // As in the single CPI route: the leg's fee ceiling is the smaller of the taker's
+                // signed rate and the LP's configured cap (INV-046 finding 6).
+                fee_bps: core::cmp::min(leg.fee_bps, u64::from(lp_trade_fee_cap_bps)),
             });
         }
 
@@ -14798,6 +14813,13 @@ pub mod processor {
                         // on an exposed asset more than one window behind, a changed target waits.
                         // This crank accrues toward the target in force; the reading stays recorded
                         // and a later crank, at most one window behind, applies it.
+                        // A hybrid past its soft-stale window is the exception (INV-046 second
+                        // read, finding 7; the owner's choice of 2026-11-24): its target is its trade
+                        // average for every writer (rule A), which no outside party chose at this
+                        // moment, and a trade stages it at once. Holding it back here would walk the
+                        // mark toward the retired feed price over the idle slots, so the outcome
+                        // would depend on whether a trade or a crank reached the asset first; staged
+                        // at once, both end where a regularly cranked market ends.
                         let staged_target = group.markets[asset_index]
                             .engine
                             .asset
@@ -14805,6 +14827,10 @@ pub mod processor {
                             .get();
                         if staged_target != 0
                             && target != staged_target
+                            && !oracle_v16::profile_hybrid_soft_stale_matured(
+                                &oracle_profile,
+                                authenticated_now_slot,
+                            )
                             && asset_has_effective_open_interest_view(&group, asset_index)
                             && !asset_accrual_within_one_window_view(
                                 &group,
@@ -16143,10 +16169,23 @@ pub mod processor {
         asset_index: usize,
         size_q_abs: u128,
         accepted_exec_price: u64,
-        caller_fee_bps: u64,
+        fee_basis_price: u64,
+        fee_ceiling_bps: u64,
     ) -> Result<HybridTradeFeeQuote, ProgramError> {
-        let base = core::cmp::max(caller_fee_bps, cfg.trade_fee_base_bps);
-        let max_trading_fee_bps = group.header.config.max_trading_fee_bps.get();
+        // INV-046 (second read, finding 6; the owner's choice of 2026-11-24): every route charges
+        // the market's base fee, and the base plus any mark-movement fee is at most the rate the
+        // payer authorized: the signed `fee_bps` on the no-CPI routes, the smaller of the taker's
+        // signed rate and the LP's configured cap on the CPI routes. A print whose mark fee would
+        // exceed that moves the average only as far as the fee actually collected pays for
+        // (`collected_fee_supported_mark`).
+        let base = cfg.trade_fee_base_bps;
+        let market_max_fee_bps = group.header.config.max_trading_fee_bps.get();
+        // A signed rate above the market's maximum is refused, as it always was; within it, the
+        // signed rate is the payer's ceiling and the market's maximum still binds.
+        if fee_ceiling_bps > market_max_fee_bps {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let max_trading_fee_bps = fee_ceiling_bps;
         if base > max_trading_fee_bps {
             return Err(PercolatorError::InvalidInstruction.into());
         }
@@ -16187,7 +16226,9 @@ pub mod processor {
         }
         let asset = group.markets[asset_index].engine.asset;
         let effective_price = asset.effective_price.get();
-        let trade_notional = policy_v16::trade_fee_notional_ceil(size_q_abs, accepted_exec_price)
+        // The fee notional is valued at the fee basis (the effective price, INV-046 finding 6);
+        // the accepted print below only decides how far the average moves.
+        let trade_notional = policy_v16::trade_fee_notional_ceil(size_q_abs, fee_basis_price)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         let max_side_oi_q = core::cmp::max(asset.oi_eff_long_q.get(), asset.oi_eff_short_q.get());
         // The trade rewrites the stored target. Value existing OI at the larger target/effective

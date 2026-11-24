@@ -152,8 +152,15 @@ fn v16_program_paid_cpi_mark_repricing_burns_source_liens_and_preserves_retained
                 .unwrap();
             env.top_up_backing_bucket_for_actor(PROVIDER, DOMAIN as u16, 100_000, 100)
                 .unwrap();
-            env.trade_no_cpi(0, 1, 0, OPEN_LOTS * POS_SCALE as i128, INITIAL, 0)
-                .unwrap();
+            env.trade_no_cpi(
+                0,
+                1,
+                0,
+                OPEN_LOTS * POS_SCALE as i128,
+                INITIAL,
+                env.primary_max_trading_fee_bps(),
+            )
+            .unwrap();
             env.set_clock(2, 101);
             let oracle = if hybrid {
                 Some(env.set_pyth_price(&feed, FAVORABLE as i64, -6, 0, 101))
@@ -198,7 +205,15 @@ fn v16_program_paid_cpi_mark_repricing_burns_source_liens_and_preserves_retained
             assert_public_encumbrance_census(&context, &env).unwrap();
 
             let size = TOTAL_LOTS * POS_SCALE as i128;
-            env.trade_no_cpi(2, 3, 0, 2 * size, FAVORABLE, 0).unwrap();
+            env.trade_no_cpi(
+                2,
+                3,
+                0,
+                2 * size,
+                FAVORABLE,
+                env.primary_max_trading_fee_bps(),
+            )
+            .unwrap();
             env.set_matcher_config_with_trade_fee_cap(1, 1, 0).unwrap();
             env.set_matcher_config_with_trade_fee_cap(3, 1, 10_000)
                 .unwrap();
@@ -235,7 +250,7 @@ fn v16_program_paid_cpi_mark_repricing_burns_source_liens_and_preserves_retained
             env.set_clock(5, 1_001);
             // At mark 105, the authenticated matcher's 99% bid spread quotes one atom.
             let movement = env
-                .trade_cpi(2, 3, 0, -size, 0, 1)
+                .trade_cpi(2, 3, 0, -size, env.primary_max_trading_fee_bps(), 1)
                 .unwrap_or_else(|error| panic!("{context}: paid CPI reduction: {error}"));
             peak_move_cu = peak_move_cu.max(movement.compute_units);
             let moved = env.primary_profile(0).mark_ewma_e6;
@@ -358,7 +373,8 @@ fn v16_program_paid_cpi_mark_repricing_burns_source_liens_and_preserves_retained
             if !provider_first {
                 pay_provider(&mut env, payout, fee);
             }
-            env.trade_no_cpi(2, 3, 0, -size, moved, 0).unwrap();
+            env.trade_no_cpi(2, 3, 0, -size, moved, env.primary_max_trading_fee_bps())
+                .unwrap();
             settle(&mut env, oracle);
             let flat = env.primary_market_state().1;
             assert_eq!(flat.assets[0].oi_eff_long_q, 0);

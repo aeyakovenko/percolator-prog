@@ -247,14 +247,20 @@ impl Ledger {
 #[test]
 fn v16_retained_mixed_route_fee_budgets_survive_bilateral_revocation_and_renewal() {
     let matcher = std::fs::read(auth_matcher_program_path()).unwrap();
+    // Each fill is charged the live policy within its signed rate (INV-046 finding 6): the CPI
+    // fills run under a CPI_CAP policy, the bilateral fill under a 7 bps policy although it signs
+    // DIRECT_RATE.
     let fees = [
         fee_atoms(QUANTITY, CPI_CAP),
-        fee_atoms(REDUCTION, DIRECT_RATE),
+        fee_atoms(REDUCTION, 7),
         fee_atoms(QUANTITY - REDUCTION, CPI_CAP),
     ];
-    assert_eq!(fees, [95, 100, 58]);
-    let signed_budget = fees.iter().sum::<u128>();
-    assert!(fees[1] > fee_atoms(REDUCTION, 7));
+    assert_eq!(fees, [95, 8, 58]);
+    let signed = [fees[0], fee_atoms(REDUCTION, DIRECT_RATE), fees[2]];
+    assert_eq!(signed, [95, 100, 58]);
+    let signed_budget = signed.iter().sum::<u128>();
+    let charged = fees.iter().sum::<u128>();
+    assert!(signed[1] > fees[1]);
     assert!(fee_atoms(QUANTITY - REDUCTION, 101) > fees[2]);
     let (mut worlds, mut fills, mut rollbacks, mut payouts) = (0, 0, 0, 0);
     let mut peaks = [0; 4]; // Simulation, policy/renewal, rejection, fill/payout.
@@ -436,11 +442,11 @@ fn v16_retained_mixed_route_fee_budgets_survive_bilateral_revocation_and_renewal
                     assert_eq!(w.env.control_sequences(0), expected_controls);
                     fills += 1;
                 }
-                assert_eq!(ledger.fees, signed_budget);
+                assert_eq!(ledger.fees, charged);
                 assert_eq!(ledger.size, 0);
                 for actor in 0..2 {
-                    let amount = u128::from(DEPOSITS[actor] + if actor == 0 { PREFIX } else { 0 })
-                        - signed_budget;
+                    let amount =
+                        u128::from(DEPOSITS[actor] + if actor == 0 { PREFIX } else { 0 }) - charged;
                     let tx = w.sign(
                         &[Instruction {
                             program_id: w.env.program_id,
@@ -472,8 +478,8 @@ fn v16_retained_mixed_route_fee_budgets_survive_bilateral_revocation_and_renewal
                     ledger.check(&w, signed_budget);
                     payouts += 1;
                 }
-                assert_eq!(ledger.paid, [99_863, 199_754]);
-                assert_eq!(w.env.token_amount(w.env.vault), 506);
+                assert_eq!(ledger.paid, [99_955, 199_846]);
+                assert_eq!(w.env.token_amount(w.env.vault), 322);
                 worlds += 1;
             }
         }

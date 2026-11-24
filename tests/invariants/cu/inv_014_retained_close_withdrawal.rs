@@ -1,5 +1,6 @@
 //! INV-014: retained close fees and a pre-signed withdrawal share one atomic budget.
-//! CPI uses the live policy within consent; bilateral routes charge the explicit signed rate.
+//! Every route charges the live policy within consent: the signed rate is only a ceiling (INV-046
+//! finding 6), so a bilateral close is repriced exactly like a CPI close.
 //! Repricing can invalidate the withdrawal amount without invalidating either close fee cap.
 
 use super::super::*;
@@ -262,7 +263,7 @@ fn v16_retained_close_withdrawal_reconciles_repriced_fees_across_all_trade_route
                     );
                     tx
                 };
-                let quoted_fee = fee(if cpi { OLD_BPS } else { CAP_BPS });
+                let quoted_fee = fee(OLD_BPS);
                 let quoted_withdrawal = DEPOSITS[0] - fee(OLD_BPS) - quoted_fee;
                 let instructions = [close.clone(), withdrawal(&env, 0, quoted_withdrawal)];
                 let bundle = retain(&env, &instructions, !cpi, false);
@@ -405,17 +406,12 @@ fn v16_retained_close_withdrawal_reconciles_repriced_fees_across_all_trade_route
                     assert_eq!(env.svm.get_account(&env.payer.pubkey()).unwrap(), payer);
                     result
                 };
-                let actual_fee = fee(if cpi { current_bps } else { CAP_BPS });
-                assert!(actual_fee > 0 && actual_fee <= fee(CAP_BPS));
-                if cpi {
-                    assert!(actual_fee < fee(CAP_BPS));
-                    assert_ne!(actual_fee, quoted_fee);
-                } else {
-                    assert_eq!(actual_fee, quoted_fee);
-                }
+                let actual_fee = fee(current_bps);
+                assert!(actual_fee > 0 && actual_fee < fee(CAP_BPS));
+                assert_ne!(actual_fee, quoted_fee);
                 let total_fee = fee(OLD_BPS) + actual_fee;
                 let mut paid = [0; 2];
-                if cpi && current_bps > OLD_BPS {
+                if current_bps > OLD_BPS {
                     assert!(quoted_withdrawal > DEPOSITS[0] - total_fee);
                     let before = frame(&env);
                     let failure = submit(&mut env, bundle)
@@ -438,10 +434,15 @@ fn v16_retained_close_withdrawal_reconciles_repriced_fees_across_all_trade_route
                             .count(),
                         1
                     );
-                    assert!(failure
-                        .meta
-                        .logs
-                        .contains(&format!("Program {matcher} success")));
+                    // Only a CPI close invokes the matcher; a bilateral close is repriced the same
+                    // way without one.
+                    assert_eq!(
+                        failure
+                            .meta
+                            .logs
+                            .contains(&format!("Program {matcher} success")),
+                        cpi
+                    );
                     assert_eq!(
                         frame(&env),
                         before,
@@ -458,14 +459,10 @@ fn v16_retained_close_withdrawal_reconciles_repriced_fees_across_all_trade_route
                         .expect("the retained close and fixed payout remain affordable");
                     peak_cu = peak_cu.max(success.compute_units_consumed);
                     paid[0] = quoted_withdrawal;
-                    if cpi {
-                        assert!(
-                            DEPOSITS[0] - total_fee - paid[0] > 0,
-                            "a lower live fee must leave an independently withdrawable remainder"
-                        );
-                    } else {
-                        assert_eq!(DEPOSITS[0] - total_fee, paid[0]);
-                    }
+                    assert!(
+                        DEPOSITS[0] - total_fee - paid[0] > 0,
+                        "a lower live fee must leave an independently withdrawable remainder"
+                    );
                 }
                 check(&env, true, total_fee, paid);
                 let grant = state::read_portfolio_matcher_config(
@@ -528,12 +525,12 @@ fn v16_retained_close_withdrawal_reconciles_repriced_fees_across_all_trade_route
             route_payouts[2], route_payouts[3],
             "CPI single/batch payouts"
         );
-        assert_ne!(
+        assert_eq!(
             route_payouts[0], route_payouts[2],
-            "explicit signed rate and live capped rate differ"
+            "bilateral and CPI routes charge the same live capped rate"
         );
     }
-    assert_eq!(rollbacks, 10);
+    assert_eq!(rollbacks, 12);
     assert_cu_within("retained repriced close/withdrawal", peak_cu, 325_000);
-    println!("INV-014 close/withdrawal: 8 worlds, 2 paid-close rollbacks, 8 consumed alternatives, 16 complete owner exits; peak CU={peak_cu}");
+    println!("INV-014 close/withdrawal: 8 worlds, 4 paid-close rollbacks, 8 consumed alternatives, 16 complete owner exits; peak CU={peak_cu}");
 }

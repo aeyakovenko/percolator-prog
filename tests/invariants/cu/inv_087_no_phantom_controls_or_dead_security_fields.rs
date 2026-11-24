@@ -765,7 +765,7 @@ fn v16_program_wrapper_security_control_roster_has_source_edges_and_witnesses() 
             &[
                 "cfg.trade_fee_base_bps = trade_fee_base_bps;",
                 "cfg_pre.trade_fee_base_bps > fee_bps",
-                "core::cmp::max(caller_fee_bps, cfg.trade_fee_base_bps)",
+                "let base = cfg.trade_fee_base_bps;",
             ],
             "v16_program_trade_fee_policy_is_an_enforced_public_admission_control",
         ),

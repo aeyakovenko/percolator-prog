@@ -821,6 +821,9 @@ fn v16_program_same_owner_fee_self_trade_is_negative_sum_not_profitable() {
     let short = env.create_portfolio(&owner);
     env.deposit(&owner, long, 1_000_000);
     env.deposit(&owner, short, 1_000_000);
+    // INV-046 (finding 6): a trade is charged the market base fee and the signed rate is only the
+    // signers' ceiling, so the base fee is the 100 bps the self-trade signs.
+    env.update_trade_fee_policy_with_cu(100);
 
     let initial_total_capital =
         env.portfolio_state(long).capital.get() + env.portfolio_state(short).capital.get();

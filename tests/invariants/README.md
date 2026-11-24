@@ -32381,6 +32381,80 @@ diagnostic strings of the fuzz model; one term of the fuzz model's market-lock p
 zero, is gone. The engine's two Kani proofs that set the flag lost that case (one is renamed
 `proof_v16_global_hlock_lane_selects_hmax_only_for_bankruptcy_recovery_or_candidate`).
 
+### INV-046 second read, findings 6 and 7: what a trade costs, and a quiet hybrid's switch (2026-11-24)
+
+Program only. Both findings of the second read were reproduced on `341a5e94` with tests written from
+the source, and fixed as the owner decided.
+
+- Finding 6. The fee was charged on the print's accepted price, which is the trade average at
+  `dt = 0`, and an EWMA-mark asset's oracle authority moves that average freely. Pushed toward
+  `MAX_ORACLE_PRICE`, closing one unit worth about 1,000,500 through TradeCpi took a 2,000,000-atom
+  taker's whole capital and 965,500,035 atoms from the unsigned LP. Separately, a taker who signed
+  10 bps paid about 91 bps when the matcher's print moved the average: the signed rate bounded only
+  the base fee. Now every route charges its fee on the engine's effective price, the market's base
+  fee plus any mark fee, at most the signed rate (no-CPI) or the smaller of the taker's signed rate
+  and the LP's configured matcher cap (CPI); a print whose mark fee would exceed it moves the
+  average only as far as the collected fee pays for. A no-CPI signer who signs above the base now
+  pays the base on an asset without a mark fee. Regression:
+  `v16_attack_authority_average_push_does_not_set_the_trade_fee_notional`.
+- Finding 7. On a hybrid past its soft-stale window, an exposed asset nobody had cranked for 100
+  slots: the crank held the switch to the trade average back (INV-045's catch-up rule) and walked the
+  mark toward the retired feed price over the idle slots (peak 1,100,000, end 1,047,200), while a
+  one-unit reducing trade staged the average at once (end 1,002,400, as a regularly cranked market
+  ends). The crank no longer holds that switch back; both writers end at 1,002,400. Regression:
+  `v16_attack_lagging_soft_stale_hybrid_mark_does_not_depend_on_the_first_writer`.
+
+Matcher contexts now sign their own initialization in the test helper (percolator-match requires it
+from `2b47512`; the helper works with either matcher).
+
+Owner tests rewritten for the fee rule. The owner approved rewriting the tests that sign above the
+base on a no-CPI route, or sign 0 and expect a mark fee; every rewrite keeps what the test checks.
+
+- Signing 0 used to authorize the base fee plus any mark fee up to the market's maximum. The test
+  harnesses now say that directly: `V16Svm`'s trade builders that take no fee argument sign the
+  market's maximum rate (`primary_max_trading_fee_bps`), the fuzz model gains
+  `execute_trade_route_at_max`, and `V16CuEnv::max_trading_fee_bps` reads the maximum. Every trade
+  that has to pay a mark fee signs it: paid discoveries, the after-hours fallback trades (INV-078,
+  the INV-086 seed), the PR 225/260/264/265/280/332/333/369/380 reproductions with their fuzz and
+  route-matrix versions, the discovery and accepted-mark route helpers, the staggered and
+  maximum-shape batches, and the price-cap and underfunded-exit helpers. A signed rate above the
+  market's maximum is still refused.
+- Tests that signed a rate above a zero base and checked that it was charged install it as the
+  market's base fee first (INV-014, 024, 025, 027, 036, 038, 047, 052, 058 and 062 fee tests). So
+  do two that still passed without a fee but no longer checked what they meant to: the INV-036
+  redirect test (now non-vacuous) and the INV-077 compute tests of a 14-leg batch and a trade on
+  the 5,000-asset market, which measure the fee-paying path again. In the INV-024 payout and
+  episode histories every route, CPI included, now pays the round's rate.
+  Where a later fee-free trade signs 0, the base fee returns to 0 before it. The batch fee-isolation
+  test now tells its legs apart by size (one leg five times the other) instead of by rate, since
+  both pay the one market base fee.
+- Fee models that charged a bilateral route its signed rate now charge the live policy on every
+  route: the INV-014 retained close/withdrawal (bilateral closes are repriced too: 12 rollbacks
+  instead of 10, and bilateral and CPI payouts now agree), dual ADL, mixed routes (fees
+  95 + 8 + 58), route budgets, CPI/direct histories, reserve routes, fee stock, fee bundle and
+  delegated exits; INV-027's policy return; INV-010's relaxation order, where the policy-first order
+  now pays the relaxed fee and the two orders differ by exactly that.
+- Expected fees valued at the accepted print are now valued at the effective price: the INV-045
+  discovery fixtures (`FEE_BASIS`), the staggered envelopes, the maximum-shape EWMA and Hybrid
+  batches (10,100 -> 10,000 and 13,534 -> 13,400 atoms per asset), the stale-crank rollback model,
+  the accepted-mark and repeated-step models, INV-085's host model of the quote, the INV-014
+  mark-fee atom cap and the price-cap helpers.
+- A trade's fee is valued at the effective price in force when it lands, so the PR 380 and
+  prospective-accrual worlds, whose stamp lands before or after a catch-up crank, now pay different
+  stamp fees (608 and 600 atoms): the trade-first stamp pays at the price before the catch-up. The
+  victim's payout is still order-independent. The coalition may now also gain that fee saving,
+  which insurance does not receive, bounded by the catch-up's 101 bps share of the control fee plus
+  one atom per side. The paired payout evidence (`coalition_fee_saving` and its bound, admitted only
+  by bounded-exit certification) and the PR 380 checks account for it exactly; a copy with a zero
+  bound must fail to certify whenever the saving is nonzero.
+- `assert_underfunded_ewma_exit_uses_collected_fee` needed a new premise. At the 10,000-bps maximum
+  a side's fee is now the fill's value at the effective price, which a healthy account under 100%
+  maintenance holds whenever its gain is already capital. The oracle authority now moves the
+  average up to 1,999,999 instead of down to 1: the healthy long's capital stays at its 1,000,000
+  deposit, below the fee of about 2,000,000, as in the CPI sibling.
+- Censuses: INV-087's trade-fee-floor edge points at the base-fee line; INV-077's short-side B
+  budget pin is 697,754 CU on this build (697,757 before).
+
 ### The program's own arithmetic is checked in the deployed build (2026-11-22)
 
 Program manifest only; the engine pin stays `4e77481b`. Until now the manifest had no release

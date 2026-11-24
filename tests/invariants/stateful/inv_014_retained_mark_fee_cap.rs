@@ -44,7 +44,9 @@ fn economics(size: i128) -> PriceAndFee {
     } else {
         PRICE - PRICE * SPREAD_BPS / 10_000
     };
-    let notional = (size.unsigned_abs() * u128::from(print)).div_ceil(POS_SCALE);
+    // The fill is valued at the effective price, PRICE (INV-046 finding 6); the print only decides
+    // how far the average moves and the slippage below.
+    let notional = (size.unsigned_abs() * u128::from(PRICE)).div_ceil(POS_SCALE);
     let charge = |bps: u64| (notional * u128::from(bps)).div_ceil(10_000);
     // One elapsed slot, halflife one, no minimum-fee attenuation, initially
     // empty OI. The print is exactly at the one-slot price-movement boundary.

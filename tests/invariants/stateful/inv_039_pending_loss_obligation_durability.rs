@@ -501,23 +501,45 @@ proptest! {
                 ProspectiveAccrualRoute::NoCpi | ProspectiveAccrualRoute::BatchNoCpi
             ) {
                 // Exact funding (#458): the victim payout is order-independent; the coalition
-                // can differ only by its own payer-side rounding dust that the vault retains.
+                // can differ only by its own payer-side rounding dust that the vault retains,
+                // and by the fee its stamp saves by landing before the catch-up: a fee is valued
+                // at the effective price when its trade lands (INV-046 finding 6), and the
+                // saving is insurance's, not another user's.
                 prop_assert_eq!(
                     discovery.coalition_payout_gain,
                     discovery
                         .control_vault_dust
                         .saturating_sub(discovery.reordered_vault_dust)
+                        + discovery.coalition_fee_saving
                 );
-                prop_assert!(discovery.coalition_payout_gain <= 1, "{discovery:?}");
+                prop_assert!(
+                    discovery.coalition_fee_saving
+                        <= crate::support::invariant_discovery::prospective_stamp_fee_saving_bound(
+                            discovery.control_stamp_fee
+                        ),
+                    "{discovery:?}"
+                );
+                prop_assert!(
+                    discovery.coalition_payout_gain <= 1 + discovery.coalition_fee_saving,
+                    "{discovery:?}"
+                );
                 prop_assert_eq!(
                     discovery.reordered_total_payout + discovery.reordered_vault_dust,
-                    discovery.control_total_payout + discovery.control_vault_dust
+                    discovery.control_total_payout
+                        + discovery.control_vault_dust
+                        + discovery.coalition_fee_saving
                 );
                 let mut undusted = discovery.clone();
                 undusted.terminal_evidence.vault_dust_bound = 0;
                 prop_assert_eq!(
                     undusted.certifies_terminal_ordering(),
                     discovery.control_vault_dust == 0 && discovery.reordered_vault_dust == 0
+                );
+                let mut unsaved = discovery.clone();
+                unsaved.terminal_evidence.coalition_fee_saving_bound = 0;
+                prop_assert_eq!(
+                    unsaved.certifies_terminal_ordering(),
+                    discovery.coalition_fee_saving == 0
                 );
             }
         }
@@ -596,18 +618,30 @@ proptest! {
         prop_assert!(reproduction.control_vault_dust <= bound);
         prop_assert!(reproduction.attack_vault_dust <= bound);
         if matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
-            // Exact funding (#458): only the coalition's own vault-retained rounding dust is
-            // order-dependent; the victim payout is not.
+            // Exact funding (#458): only the coalition's own vault-retained rounding dust and the
+            // fee its stamp saves by landing before the catch-up, valued at the earlier effective
+            // price (INV-046 finding 6), are order-dependent; the victim payout is not.
             prop_assert_eq!(
                 reproduction.attacker_coalition_gain,
                 reproduction
                     .control_vault_dust
                     .saturating_sub(reproduction.attack_vault_dust)
+                    + reproduction.coalition_fee_saving
             );
-            prop_assert!(reproduction.attacker_coalition_gain <= 1);
+            prop_assert!(
+                reproduction.coalition_fee_saving
+                    <= crate::support::fuzz_model::pr380_stamp_fee_saving_bound(
+                        reproduction.control_stamp_fee
+                    )
+            );
+            prop_assert!(
+                reproduction.attacker_coalition_gain <= 1 + reproduction.coalition_fee_saving
+            );
             prop_assert_eq!(
                 reproduction.attack_total_payout + reproduction.attack_vault_dust,
-                reproduction.control_total_payout + reproduction.control_vault_dust
+                reproduction.control_total_payout
+                    + reproduction.control_vault_dust
+                    + reproduction.coalition_fee_saving
             );
         }
     }

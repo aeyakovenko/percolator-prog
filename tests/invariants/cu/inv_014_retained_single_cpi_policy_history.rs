@@ -2,8 +2,9 @@
 //! A successful SPL deposit prefix must roll back when the single-CPI taker cap
 //! rejects. Restored policy preserves pre-signed alternatives; a second increase
 //! requires fresh taker consent. The LP cap remains independently permissive.
-//! A second relation compares retained CPI/current-policy and bilateral/explicit
-//! fees after nonmonotone histories and rollback of an already successful fill.
+//! A second relation compares retained CPI and bilateral fills after nonmonotone
+//! histories and rollback of an already successful fill; both routes are charged the
+//! current policy within the signed rate (INV-046 finding 6).
 //! Bounded Live/full-fill conformance, with no economic account-image injection.
 
 use super::super::*;
@@ -776,11 +777,13 @@ fn v16_retained_cpi_and_direct_policy_histories_differ_only_by_explicit_route_fe
                     [2, 1, usize::from(cpi)],
                 ));
                 retries += 1;
-                let charged_bps = if cpi { history[2] } else { SIGNED_BPS };
+                // Both routes are charged the live policy within the signed rate (INV-046
+                // finding 6); before it a bilateral fill paid its explicit signed rate.
+                let charged_bps = history[2];
                 assert!(charged_bps <= SIGNED_BPS);
                 assert!(
                     fee(history[2]) < fee(SIGNED_BPS),
-                    "route difference must be nonzero"
+                    "the live policy, not the signed ceiling, is charged"
                 );
                 if cpi {
                     w.check(size, charged_bps);

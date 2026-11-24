@@ -458,11 +458,10 @@ fn run_handoff(routes: &[(TradeRoute, TradeRoute)]) {
                     );
                     ledger.check(&env, portfolios, tokens);
                 }
-                let uses_cpi = matchers.iter().any(Option::is_some);
-                if uses_cpi {
-                    env.update_trade_fee_policy_with_cu(FEE_BPS);
-                    ledger.check(&env, portfolios, tokens);
-                }
+                // Every route charges the market base fee and the FEE_BPS the trades sign is only
+                // their ceiling (INV-046 finding 6), so the base fee is set for every route.
+                env.update_trade_fee_policy_with_cu(FEE_BPS);
+                ledger.check(&env, portfolios, tokens);
                 let reduce = trade(&env, 0, release_route, -direction * release, FEE_BPS);
                 let refill = trade(&env, 4, refill_route, direction * release, FEE_BPS);
                 let overfill = trade(&env, 4, refill_route, direction * (release + 1), FEE_BPS);
@@ -654,10 +653,9 @@ fn run_handoff(routes: &[(TradeRoute, TradeRoute)]) {
                     assert_eq!(Some(observed), packed_outcome, "{label}: decoded economics and epochs do not depend on transaction packing");
                 }
 
-                if uses_cpi {
-                    env.update_trade_fee_policy_with_cu(0);
-                    ledger.check(&env, portfolios, tokens);
-                }
+                // The fee-free flattening below signs 0, which a nonzero base fee would refuse.
+                env.update_trade_fee_policy_with_cu(0);
+                ledger.check(&env, portfolios, tokens);
                 for pair in [0, 2, 4] {
                     let size = -ledger.positions[pair];
                     let route = if pair == 0 {

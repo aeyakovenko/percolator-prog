@@ -85,8 +85,11 @@ fn v16_program_fresh_report_rewards_only_collectible_full_close_penalty() {
             let mark = ENTRY - (ENTRY - accepted) * (10_000 * 4 / 5) / 10_000;
             let move_bps = (u128::from(ENTRY - mark) * 10_000).div_ceil(u128::from(ENTRY));
             let required = (2 * 100 * u128::from(ENTRY) * move_bps).div_ceil(10_000);
-            let trade_bps = (required * 10_000).div_ceil(2 * u128::from(accepted));
-            let paid = fee(POS_SCALE, accepted, trade_bps);
+            // The discovery's fee notional is valued at the effective price, ENTRY (INV-046
+            // finding 6); the accepted print only decides the average's move. Its signers
+            // authorize the market's maximum rate, room for that mark fee.
+            let trade_bps = (required * 10_000).div_ceil(2 * u128::from(ENTRY));
+            let paid = fee(POS_SCALE, ENTRY, trade_bps);
             let discovery = 2 * paid;
             let trade_cu = env.trade_asset_with_cu(
                 0,
@@ -96,7 +99,7 @@ fn v16_program_fresh_report_rewards_only_collectible_full_close_penalty() {
                 trader_b,
                 POS_SCALE as i128,
                 900_000,
-                0,
+                env.max_trading_fee_bps(),
             );
             assert_cu_within("clipped reward paid discovery", trade_cu, TRADE_CU_LIMIT);
             let staged = env.market_state().1;

@@ -154,11 +154,11 @@ fn v16_program_hybrid_catchup_penalties_stay_in_insurance_through_resolved_cohor
                 trader_b,
                 POS_SCALE as i128,
                 900_000,
-                0,
+                env.max_trading_fee_bps(),
             ));
             let required = (2 * 100 * u128::from(ENTRY) * 77).div_ceil(10_000);
-            let bps = (required * 10_000).div_ceil(2 * u128::from(ACCEPTED_PRINT));
-            let discovery = 2 * fee(POS_SCALE, ACCEPTED_PRINT, bps);
+            let bps = (required * 10_000).div_ceil(2 * u128::from(FEE_BASIS));
+            let discovery = 2 * fee(POS_SCALE, FEE_BASIS, bps);
             assert_eq!(env.market_state().1.assets[0].effective_price, ENTRY);
             assert_eq!(env.market_state().1.assets[0].raw_oracle_target_price, MARK);
             let mut fees = 0;

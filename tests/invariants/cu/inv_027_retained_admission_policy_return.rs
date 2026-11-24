@@ -15,13 +15,10 @@ const Q: i128 = 5 * POS_SCALE as i128;
 const PART: u128 = 7;
 const LIMIT: u32 = 700_000;
 
-fn fee(route: TradeRoute, bps: u64) -> u128 {
-    let charged = if matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
-        bps
-    } else {
-        CAP
-    };
-    (500 * u128::from(charged)).div_ceil(10_000)
+/// The trade fee on the 500-atom notional. Every route charges the market's base fee policy `bps`
+/// (INV-046 finding 6); the `CAP` every trade signs is only the signers' ceiling.
+fn fee(bps: u64) -> u128 {
+    (500 * u128::from(bps)).div_ceil(10_000)
 }
 
 struct World {
@@ -465,7 +462,7 @@ fn v16_generated_retained_first_admission_survives_funded_policy_return_and_fee_
             for explicit in [false, true] {
                 for temporary in [0, 1] {
                     let cpi = matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi);
-                    let mut w = World::new(fee(route, restored_bps), restored_bps);
+                    let mut w = World::new(fee(restored_bps), restored_bps);
                     let mut book = Book::default();
                     let admin = w.env.admin.pubkey();
                     let holder = w.owners[temporary].pubkey();
@@ -586,7 +583,7 @@ fn v16_generated_retained_first_admission_survives_funded_policy_return_and_fee_
                     w.deliver(retained, None, [2, 1, usize::from(cpi)]);
                     book.maintenance[0] = FEE;
                     book.paid[0] = PART;
-                    book.trading = fee(route, restored_bps);
+                    book.trading = fee(restored_bps);
                     book.position = Q;
                     w.check(&book, true);
                     assert_eq!(
@@ -614,7 +611,7 @@ fn v16_generated_retained_first_admission_survives_funded_policy_return_and_fee_
                             usize::from(matches!(next, TradeRoute::Cpi | TradeRoute::BatchCpi)),
                         ],
                     );
-                    book.trading += fee(next, restored_bps);
+                    book.trading += fee(restored_bps);
                     book.position = 0;
                     w.check(&book, true);
                     for owner in [temporary, 1 - temporary] {

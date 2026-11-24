@@ -45,6 +45,9 @@ fn v16_program_standalone_first_admission_preserves_deferred_fee_owner_entitleme
             );
             env.svm.warp_to_slot(BIRTH[0]);
             env.configure_auth_mark_for_asset_as_admin(0, BIRTH[0], PRICE);
+            // INV-046 (finding 6): a trade is charged the market base fee and the signed rate is
+            // only the signers' ceiling, so the base fee is the rate the trades sign.
+            env.update_trade_fee_policy_with_cu(TRADE_BPS);
             let keeper_owner = Keypair::new();
             let keeper = public_portfolio(&mut env, &keeper_owner);
             let owners = [Keypair::new(), Keypair::new()];
@@ -329,6 +332,9 @@ fn v16_program_standalone_first_admission_preserves_deferred_fee_owner_entitleme
             submit(&mut env, vec![open], false, TRADE_CU_LIMIT);
             check(&env, true, true, true, [0; 2]);
 
+            // The close is fee-free in this model: the base fee returns to 0 first, since a signed
+            // 0 is refused while the base fee is above it (INV-046 finding 6).
+            env.update_trade_fee_policy_with_cu(0);
             let close = trade(&env, -direction * QUANTITY, 0);
             let bad_owner = withdrawal(&env, 0, 1, 1);
             submit(

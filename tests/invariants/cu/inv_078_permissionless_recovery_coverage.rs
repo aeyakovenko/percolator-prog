@@ -1229,7 +1229,9 @@ fn v16_program_unavailable_pyth_feed_has_bounded_terminal_fallback() {
 
     // Hybrid's public after-hours route remains available after soft staleness. A signed
     // risk-reducing trade moves the retained fallback mark beyond the last effective price,
-    // creating a real funding/settlement interval without another external observation.
+    // creating a real funding/settlement interval without another external observation. Its
+    // signers authorize the market's maximum rate, which leaves room for the mark-movement fee
+    // that pays for the move (INV-046: the signed rate caps base plus mark fee).
     set_test_clock(&mut env, OBSERVATION_SLOT + 2, 103);
     let after_hours_cu = env.trade_asset_with_cu(
         0,
@@ -1239,7 +1241,7 @@ fn v16_program_unavailable_pyth_feed_has_bounded_terminal_fallback() {
         short,
         -(POS_SCALE as i128 / 2),
         TARGET,
-        0,
+        10_000,
     );
     assert_cu_within(
         "feed-unavailable risk-reducing trade",

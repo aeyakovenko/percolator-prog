@@ -2657,7 +2657,7 @@ fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
         short_account,
         size_q as i128,
         after_hours_exec_price,
-        0,
+        env.max_trading_fee_bps(),
     );
     assert_cu_within("HybridMark after-hours open", open_cu, TRADE_CU_LIMIT);
     let (after_hours_cfg, after_hours_group) = env.market_state();
@@ -2681,7 +2681,7 @@ fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
         short_account,
         -(size_q as i128),
         after_hours_exec_price,
-        0,
+        env.max_trading_fee_bps(),
     );
     assert_cu_within("HybridMark after-hours close", close_cu, TRADE_CU_LIMIT);
     let (_, flat_group) = env.market_state();

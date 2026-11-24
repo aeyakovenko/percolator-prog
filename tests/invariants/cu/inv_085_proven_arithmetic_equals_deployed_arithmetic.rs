@@ -1496,9 +1496,11 @@ fn v16_program_public_sbf_hybrid_quote_matches_host_policy_with_live_oi() {
         CAP_BPS,
         TRADE_SLOT - cfg_before.mark_ewma_last_slot,
     );
+    // The fill is valued at the effective price (INV-046 finding 6); the accepted print only
+    // drives the EWMA candidate below.
     let trade_notional = percolator_prog::policy_v16::trade_fee_notional_ceil(
         TRADE_SIZE_Q.unsigned_abs(),
-        accepted_price,
+        asset_before.effective_price,
     )
     .expect("trade notional");
     let max_side_oi_q = asset_before.oi_eff_long_q.max(asset_before.oi_eff_short_q);
@@ -1578,6 +1580,8 @@ fn v16_program_public_sbf_hybrid_quote_matches_host_policy_with_live_oi() {
     assert!(expected_mark > MARK && expected_fee_bps > 0 && expected_fee_bps < MAX_FEE_BPS);
 
     let insurance_before = group_before.insurance;
+    // The traders sign the market's maximum rate: the ceiling `MAX_FEE_BPS` the model above uses
+    // for the base plus mark fee (INV-046 finding 6).
     env.trade_asset_with_cu(
         0,
         &trader_a,
@@ -1586,7 +1590,7 @@ fn v16_program_public_sbf_hybrid_quote_matches_host_policy_with_live_oi() {
         account_b,
         TRADE_SIZE_Q,
         RAW_PRICE,
-        0,
+        MAX_FEE_BPS,
     );
     let (cfg_after, group_after) = env.market_state();
     assert_eq!(cfg_after.mark_ewma_e6, expected_mark);

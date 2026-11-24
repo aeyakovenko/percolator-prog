@@ -325,7 +325,14 @@ fn submit_accepted_mark_trade(
 ) -> Result<TxSuccess, String> {
     let market_id = env.primary_market_state().1.assets[0].market_id;
     match route {
-        DiscoveryTradeRoute::NoCpi => env.trade_no_cpi(0, 1, 0, size_q, no_cpi_price, 0),
+        DiscoveryTradeRoute::NoCpi => env.trade_no_cpi(
+            0,
+            1,
+            0,
+            size_q,
+            no_cpi_price,
+            env.primary_max_trading_fee_bps(),
+        ),
         DiscoveryTradeRoute::BatchNoCpi => env.batch_trade_no_cpi(
             0,
             1,
@@ -334,10 +341,12 @@ fn submit_accepted_mark_trade(
                 market_id,
                 size_q,
                 exec_price: no_cpi_price,
-                fee_bps: 0,
+                fee_bps: env.primary_max_trading_fee_bps(),
             }],
         ),
-        DiscoveryTradeRoute::Cpi => env.trade_cpi(0, 1, 0, size_q, 0, 0),
+        DiscoveryTradeRoute::Cpi => {
+            env.trade_cpi(0, 1, 0, size_q, env.primary_max_trading_fee_bps(), 0)
+        }
         DiscoveryTradeRoute::BatchCpi => env.batch_trade_cpi(
             0,
             1,
@@ -345,7 +354,7 @@ fn submit_accepted_mark_trade(
                 asset_index: 0,
                 market_id,
                 size_q,
-                fee_bps: 0,
+                fee_bps: env.primary_max_trading_fee_bps(),
                 limit_price: 0,
             }],
         ),
@@ -724,9 +733,10 @@ fn run_valid_accepted_mark_route_sequence(
         .insurance
         .checked_sub(before_group.insurance)
         .ok_or_else(|| "accepted-mark fill reduced insurance".to_string())?;
+    // The fill is valued at the effective price (INV-046 finding 6), not at the accepted print.
     let trade_notional = half_size
         .unsigned_abs()
-        .checked_mul(expected_accepted as u128)
+        .checked_mul(before_group.assets[0].effective_price as u128)
         .and_then(|value| value.checked_add(POS_SCALE - 1))
         .ok_or_else(|| "accepted-mark trade notional overflow".to_string())?
         / POS_SCALE;
@@ -1320,9 +1330,10 @@ fn run_low_price_crank_order(
         .insurance
         .checked_sub(before_group.insurance)
         .ok_or_else(|| format!("{context}: movement reduced insurance"))?;
+    // The fill is valued at the effective price (INV-046 finding 6), not at the accepted print.
     let trade_notional = reduce_q
         .unsigned_abs()
-        .checked_mul(accepted as u128)
+        .checked_mul(before_group.assets[0].effective_price as u128)
         .and_then(|value| value.checked_add(POS_SCALE - 1))
         .ok_or_else(|| format!("{context}: trade notional overflow"))?
         / POS_SCALE;
@@ -1987,9 +1998,11 @@ fn v16_program_repeated_trade_driven_mark_steps_are_paid_and_exit_live() {
                         .unwrap_or_else(|| {
                             panic!("{context}/step={step_index}: insurance decreased")
                         });
+                    // The fill is valued at the effective price (INV-046 finding 6), not at
+                    // the accepted print.
                     let trade_notional = chunk_size
                         .unsigned_abs()
-                        .checked_mul(accepted as u128)
+                        .checked_mul(before_asset.effective_price as u128)
                         .and_then(|value| value.checked_add(POS_SCALE - 1))
                         .expect("repeated accepted-mark trade notional")
                         / POS_SCALE;

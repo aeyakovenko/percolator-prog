@@ -254,7 +254,8 @@ fn v16_program_retained_exits_survive_extreme_paid_mark_source_repricing() {
                         env.configure_ewma_mark(0, 1, INITIAL, 1, 0).unwrap();
                         None
                     };
-                    env.trade_no_cpi(0, 1, 0, size, INITIAL, 0).unwrap();
+                    env.trade_no_cpi(0, 1, 0, size, INITIAL, env.primary_max_trading_fee_bps())
+                        .unwrap();
                     env.set_clock(2, 101);
                     let oracle = if oracle.is_some() {
                         Some(env.set_pyth_price(&feed, favorable_target as i64, -6, 0, 101))
@@ -281,7 +282,15 @@ fn v16_program_retained_exits_survive_extreme_paid_mark_source_repricing() {
                         env.set_clock(4, 1_000);
                         settle(&mut env, oracle, &mut peak_cu);
                     }
-                    env.trade_no_cpi(2, 3, 0, 2 * size, favorable, 0).unwrap();
+                    env.trade_no_cpi(
+                        2,
+                        3,
+                        0,
+                        2 * size,
+                        favorable,
+                        env.primary_max_trading_fee_bps(),
+                    )
+                    .unwrap();
                     env.set_matcher_config_with_trade_fee_cap(1, 1, 0).unwrap();
                     env.set_matcher_spreads(1, 0, 0).unwrap();
                     let strict = retain_exit(&mut env, exit_batch, -size, favorable);
@@ -317,11 +326,11 @@ fn v16_program_retained_exits_survive_extreme_paid_mark_source_repricing() {
                                 market_id: before_group.assets[0].market_id,
                                 size_q: -size,
                                 exec_price: raw,
-                                fee_bps: 0,
+                                fee_bps: env.primary_max_trading_fee_bps(),
                             }],
                         )
                     } else {
-                        env.trade_no_cpi(2, 3, 0, -size, raw, 0)
+                        env.trade_no_cpi(2, 3, 0, -size, raw, env.primary_max_trading_fee_bps())
                     }
                     .unwrap_or_else(|error| panic!("{context}: paid extreme reduction: {error}"));
                     peak_move_cu = peak_move_cu.max(movement.compute_units);
@@ -415,7 +424,9 @@ fn v16_program_retained_exits_survive_extreme_paid_mark_source_repricing() {
                         env.primary_market_state().1.insurance,
                         moved_group.insurance
                     );
-                    let mover_exit = env.trade_no_cpi(2, 3, 0, -size, moved, 0).unwrap();
+                    let mover_exit = env
+                        .trade_no_cpi(2, 3, 0, -size, moved, env.primary_max_trading_fee_bps())
+                        .unwrap();
                     peak_cu = peak_cu.max(mover_exit.compute_units);
                     settle(&mut env, oracle, &mut peak_cu);
 

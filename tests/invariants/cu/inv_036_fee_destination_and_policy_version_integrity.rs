@@ -818,9 +818,16 @@ fn v16_attack_fee_redirect_gated_bounded_no_leak() {
     let pb = env.create_portfolio(&lb);
     env.deposit(&la, pa, 1_000_000);
     env.deposit(&lb, pb, 1_000_000);
+    // INV-046 (finding 6): a trade is charged the market base fee and the signed rate is only the
+    // signers' ceiling, so the base fee is the 100 bps the trade signs.
+    env.update_trade_fee_policy_with_cu(100);
     let (_, g0) = env.market_state();
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 100);
     let (_, g1) = env.market_state();
+    assert!(
+        g1.insurance > g0.insurance,
+        "a fee was charged (non-vacuous)"
+    );
     assert_eq!(
         g1.vault, g0.vault,
         "fee with redirect stays internal: vault unchanged (no external leak)"
@@ -876,6 +883,9 @@ fn v16_attack_fee_redirect_split_lands_correctly() {
     let (b0, b1, b2, b3) = (dom(&env, 0), dom(&env, 1), dom(&env, 2), dom(&env, 3));
     let ins0 = env.market_state().1.insurance;
     // fee'd trade on ASSET 1 (market 1) -> fees split between market 0 (domains 0,1) and market 1 (2,3).
+    // INV-046 (finding 6): a trade is charged the market base fee and the signed rate is only
+    // the signers' ceiling, so the base fee is the 100 bps the trade signs.
+    env.update_trade_fee_policy_with_cu(100);
     env.trade_asset_with_cu(1, &la, pa, &lb, pb, (10_000 * POS_SCALE) as i128, 100, 100); // notional 1M -> fee large enough for the redirect
     let (g0d, g1d, g2d, g3d) = (
         dom(&env, 0) - b0,
@@ -1057,6 +1067,9 @@ fn v16_attack_market0_fees_stay_local() {
     let (b0, b1) = (dom(&env, 0), dom(&env, 1));
     let ins0 = env.market_state().1.insurance;
     // fee'd trade on ASSET 0 (market 0) with a large notional.
+    // INV-046 (finding 6): a trade is charged the market base fee and the signed rate is only
+    // the signers' ceiling, so the base fee is the 100 bps the trade signs.
+    env.update_trade_fee_policy_with_cu(100);
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, (10_000 * POS_SCALE) as i128, 100, 100);
     let g0d = dom(&env, 0) - b0;
     let g1d = dom(&env, 1) - b1;
@@ -1114,6 +1127,9 @@ fn v16_attack_fee_redirect_full_boundary() {
     let dom = |env: &V16CuEnv, d: usize| env.market_state().1.insurance_domain_budget[d];
     let (b0, b1, b2, b3) = (dom(&env, 0), dom(&env, 1), dom(&env, 2), dom(&env, 3));
     let ins0 = env.market_state().1.insurance;
+    // INV-046 (finding 6): a trade is charged the market base fee and the signed rate is only
+    // the signers' ceiling, so the base fee is the 100 bps the trade signs.
+    env.update_trade_fee_policy_with_cu(100);
     env.trade_asset_with_cu(1, &la, pa, &lb, pb, (10_000 * POS_SCALE) as i128, 100, 100);
     let to_mkt0 = (dom(&env, 0) - b0) + (dom(&env, 1) - b1);
     let to_mkt1 = (dom(&env, 2) - b2) + (dom(&env, 3) - b3);
@@ -1254,8 +1270,9 @@ fn v16_attack_batch_cpi_fee_bps_bounded_for_permissionless_lp() {
 // Isolation: per-leg fees in an atomic batch are credited to the CORRECT asset's insurance domains,
 // never aggregated or cross-credited across assets. The batch path reconstructs per-leg fees out of
 // the engine's AGGREGATE outcome (unlike single trades), so this guards that reconstruction against
-// cross-asset fee leakage. Two legs with different fee_bps must move each asset's own domain budget
-// by its own fee.
+// cross-asset fee leakage. Two legs with different fees must move each asset's own domain budget
+// by its own fee. Every leg is charged the one market base fee (INV-046 finding 6; the rates the
+// legs sign are only ceilings), so the fees differ by notional: the second leg is five times larger.
 #[test]
 fn v16_attack_batch_fees_isolated_to_each_asset_domain() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
@@ -1270,6 +1287,7 @@ fn v16_attack_batch_fees_isolated_to_each_asset_domain() {
     let before = env.market_state().1;
     let b0 = before.insurance_domain_budget[0] + before.insurance_domain_budget[1];
     let b1 = before.insurance_domain_budget[2] + before.insurance_domain_budget[3];
+    env.update_trade_fee_policy_with_cu(100);
     let sz = (10 * POS_SCALE) as i128;
     env.send(
         env.batch_trade_no_cpi_ix(
@@ -1286,9 +1304,9 @@ fn v16_attack_batch_fees_isolated_to_each_asset_domain() {
                 BatchTradeLeg {
                     asset_index: 1,
                     market_id: first_generation_market_id((1) as u16),
-                    size_q: sz,
+                    size_q: 5 * sz,
                     exec_price: 100,
-                    fee_bps: 500,
+                    fee_bps: 100,
                 },
             ],
         ),
@@ -1311,7 +1329,7 @@ fn v16_attack_batch_fees_isolated_to_each_asset_domain() {
     );
     assert!(
         a1 > a0,
-        "asset1 (fee_bps 500) credit {a1} > asset0 (fee_bps 100) credit {a0}: per-asset, not aggregated/cross-credited"
+        "asset1 (5x notional) credit {a1} > asset0 credit {a0}: per-asset, not aggregated/cross-credited"
     );
     assert_domain_budget_remaining_total_consistent(&after, "batch fee domain isolation");
 }

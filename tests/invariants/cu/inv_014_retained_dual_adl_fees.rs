@@ -309,7 +309,9 @@ fn v16_retained_dual_adl_reductions_bound_effective_fees_across_policy_and_route
                         &changed,
                         [2, 1, usize::from(cpi)],
                     ));
-                    let rate = if cpi { final_rate } else { CAP };
+                    // Every route charges the live policy within the signed CAP (INV-046
+                    // finding 6); a bilateral route no longer charges its signed rate.
+                    let rate = final_rate;
                     let mut fees = charge(quantity, rate);
                     assert!(fees <= charge(quantity, CAP));
                     check(

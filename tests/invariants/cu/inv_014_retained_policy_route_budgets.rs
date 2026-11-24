@@ -785,7 +785,13 @@ fn v16_retained_mixed_routes_cannot_exchange_fee_headroom_for_slippage_or_quanti
 
             let meta = commit(&mut w, retained_prefix.clone(), Route::SingleDirect, PREFIX);
             peak_cu = peak_cu.max(meta.compute_units_consumed);
-            ledger.commit(&[first], PREFIX, budget(&[first], None));
+            // Every route, the bilateral prefix included, is charged the live policy (LOWER_BPS
+            // since the detour above) within its signed rate (INV-046 finding 6).
+            let first_executed = Leg {
+                bps: LOWER_BPS,
+                ..first
+            };
+            ledger.commit(&[first_executed], PREFIX, budget(&[first_executed], None));
             fills += 1;
             ledger.check(&w, signed, epochs, requests);
             if route.cpi() {
@@ -799,7 +805,7 @@ fn v16_retained_mixed_routes_cannot_exchange_fee_headroom_for_slippage_or_quanti
                 let executed: Vec<_> = signed_legs
                     .iter()
                     .map(|leg| Leg {
-                        bps: if route.cpi() { LOWER_BPS } else { SIGNED_BPS },
+                        bps: LOWER_BPS,
                         ..*leg
                     })
                     .collect();
@@ -814,12 +820,7 @@ fn v16_retained_mixed_routes_cannot_exchange_fee_headroom_for_slippage_or_quanti
             assert_eq!(&ledger.amounts[..3], &signed[..3]);
             assert_eq!(
                 ledger.amounts[3],
-                budget(&[first], None)[3]
-                    + if route.cpi() {
-                        lower_fee
-                    } else {
-                        suffix_budget[3]
-                    }
+                budget(&[first_executed], None)[3] + lower_fee
             );
 
             peak_cu = peak_cu.max(w.policy(SIGNED_BPS, 40));

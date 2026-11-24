@@ -72,7 +72,7 @@ mod mixed_residue;
 use crate::support::{
     fuzz_model::{
         assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
-        PublicBCloseScale,
+        execute_trade_route_at_max, PublicBCloseScale,
     },
     v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, TX_CU_LIMIT},
 };
@@ -1350,8 +1350,15 @@ fn run_trade_driven_ewma_partition(
     );
     env.configure_ewma_mark(0, 1, INITIAL_PRICE, 1, 0)
         .map_err(|error| format!("INV-038 configure trade-driven EWMA: {error}"))?;
-    env.trade_no_cpi(0, 1, 0, VICTIM_Q, INITIAL_PRICE, 0)
-        .map_err(|error| format!("INV-038 open externality-bearing position: {error}"))?;
+    env.trade_no_cpi(
+        0,
+        1,
+        0,
+        VICTIM_Q,
+        INITIAL_PRICE,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("INV-038 open externality-bearing position: {error}"))?;
     env.set_matcher_spreads(3, BID_SPREAD_BPS, 0)
         .map_err(|error| format!("INV-038 configure equivalent CPI bid: {error}"))?;
     env.warp_to_slot(TRADE_SLOT);
@@ -1367,7 +1374,7 @@ fn run_trade_driven_ewma_partition(
         if index != 0 && previous_fill_moved_mark {
             let same_slot_price = relative_bid(&env)?;
             let same_slot =
-                execute_trade_route(&mut env, route, 2, 3, 0, part_q, same_slot_price, 0)
+                execute_trade_route_at_max(&mut env, route, 2, 3, 0, part_q, same_slot_price)
                     .expect_err(
                         "a pending trade-driven funding boundary must reject same-slot reuse",
                     );
@@ -1442,8 +1449,9 @@ fn run_trade_driven_ewma_partition(
         let externality_notional = max_side_notional
             .checked_mul(2)
             .ok_or("INV-038 two-sided externality overflow")?;
-        let landed = execute_trade_route(&mut env, route, 2, 3, 0, part_q, reported_price, 0)
-            .map_err(|error| format!("INV-038 {route:?} partition fill {index}: {error}"))?;
+        let landed =
+            execute_trade_route_at_max(&mut env, route, 2, 3, 0, part_q, reported_price)
+                .map_err(|error| format!("INV-038 {route:?} partition fill {index}: {error}"))?;
         if landed.compute_units >= TX_CU_LIMIT {
             return Err(format!(
                 "INV-038 {route:?} partition fill {index} used {} CU",

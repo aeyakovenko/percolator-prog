@@ -1,7 +1,8 @@
 //! INV-045, reopening 422/425: a stale observation in a later instruction cannot
 //! retain an earlier CPI's paid mark, fee debit, position change, or matcher write.
 //! A fresh retry and opposite-direction no-CPI batch must preserve per-asset price
-//! envelopes and charge only the accepted print, including the passive book.
+//! envelopes and value fees at the effective price (INV-046 finding 6), never at the
+//! raw print, including the passive book.
 //! Requires the checked-in auth matcher fixture's public spread configuration.
 //! This is bounded public-wrapper evidence on the supplied SBF, not row closure.
 
@@ -50,12 +51,14 @@ fn paid_move(
         old + movement
     };
     assert!(0 < movement && movement <= delta);
-    let externality = 2 * (oi_units * u128::from(old.max(effective))).max(u128::from(accepted));
+    // The one-unit fill's fee notional is valued at the effective price (INV-046 finding 6); the
+    // accepted print only decides how far the average moves.
+    let externality = 2 * (oi_units * u128::from(old.max(effective))).max(u128::from(effective));
     let move_bps = (u128::from(movement) * 10_000).div_ceil(u128::from(old));
     let movement_fee = (externality * move_bps).div_ceil(10_000);
-    let base_fee = 2 * (u128::from(accepted) * u128::from(BASE_BPS)).div_ceil(10_000);
+    let base_fee = 2 * (u128::from(effective) * u128::from(BASE_BPS)).div_ceil(10_000);
     let fee = (BASE_BPS..=10_000)
-        .map(|bps| 2 * (u128::from(accepted) * u128::from(bps)).div_ceil(10_000))
+        .map(|bps| 2 * (u128::from(effective) * u128::from(bps)).div_ceil(10_000))
         .find(|fee| *fee >= base_fee + movement_fee)
         .expect("fully funded mark fee fits the configured ceiling");
     assert!(fee - base_fee >= movement_fee);
@@ -245,13 +248,15 @@ fn v16_program_paid_cpi_then_stale_crank_rolls_back_before_fresh_batch_reversal(
                 AccountMeta::new(context, false),
                 AccountMeta::new_readonly(delegate, false),
             ],
+            // The taker signs the market's maximum rate: the base fee plus the mark fee its
+            // print requires must fit under it (INV-046 finding 6).
             data: env
                 .trade_cpi_ix(
                     portfolios[2],
                     portfolios[3],
                     0,
                     -(POS_SCALE as i128),
-                    BASE_BPS,
+                    env.max_trading_fee_bps(),
                     0,
                 )
                 .encode(),
@@ -367,14 +372,16 @@ fn v16_program_paid_cpi_then_stale_crank_rolls_back_before_fresh_batch_reversal(
         max_crank_cu = max_crank_cu.max(refresh_all(&mut env, &owners[0], portfolios, fresh));
         assert_eq!(env.market_state().1.assets[0].effective_price, 980_000);
         // Reverse the pending EWMA target through a two-asset no-CPI batch. The
-        // fresh Hybrid leg must use its own committed price and only its base fee.
+        // fresh Hybrid leg must use its own committed price and only its base fee. Both legs
+        // sign the market's maximum rate, which leaves room for the EWMA leg's mark fee.
+        let max_fee_bps = env.max_trading_fee_bps();
         let legs = (0..2)
             .map(|i| BatchTradeLeg {
                 asset_index: i as u16,
                 market_id: env.asset_market_id(i as u16),
                 size_q: -(POS_SCALE as i128),
                 exec_price: [1_300_000, 2_600_000][i],
-                fee_bps: BASE_BPS,
+                fee_bps: max_fee_bps,
             })
             .collect();
         env.svm.expire_blockhash();

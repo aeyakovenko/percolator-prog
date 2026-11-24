@@ -1264,6 +1264,9 @@ fn v16_attack_trade_fee_bps_bounded_and_conserving() {
     assert_eq!(g0.c_tot, 2_000_000, "no capital moved by rejected trades");
 
     // valid max fee (10_000 bps = 100% of notional) succeeds and accrues to insurance.
+    // INV-046 (finding 6): a trade is charged the market base fee, and the rate both signers
+    // sign is only their ceiling, so the market charges the 10_000 bps this test signs.
+    env.update_trade_fee_policy_with_cu(10_000);
     env.svm.expire_blockhash();
     let r = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 10_000);
     assert!(r.is_ok(), "max valid fee_bps should succeed: {:?}", r);
@@ -2095,6 +2098,9 @@ fn v16_attack_two_sided_trade_fee_symmetric() {
     let pb = env.create_portfolio(&lb);
     env.deposit(&la, pa, 1_000_000);
     env.deposit(&lb, pb, 1_000_000);
+    // INV-046 (finding 6): a trade is charged the market base fee, and the rate both signers
+    // sign is only their ceiling, so the market charges the 100 bps this test signs.
+    env.update_trade_fee_policy_with_cu(100);
     let (_, g0) = env.market_state();
     let ca0 = env.portfolio_state(pa).capital.get();
     let cb0 = env.portfolio_state(pb).capital.get();
@@ -2420,6 +2426,9 @@ fn v16_attack_full_feed_roundtrip_conserves() {
     let pb = env.create_portfolio(&lb);
     env.deposit(&la, pa, 1_000_000);
     env.deposit(&lb, pb, 1_000_000);
+    // INV-046 (finding 6): a trade is charged the market base fee, and the rate both signers
+    // sign is only their ceiling, so the market charges the 100 bps this test signs.
+    env.update_trade_fee_policy_with_cu(100);
     // open with a fee, then close with a fee (both flat).
     env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 100);
     env.svm.expire_blockhash();

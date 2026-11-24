@@ -188,12 +188,12 @@ fn v16_program_mixed_selected_rewards_preserve_active_keeper_maintenance_receipt
             trader_b,
             POS_SCALE as i128,
             900_000,
-            0,
+            env.max_trading_fee_bps(),
         ));
         maintenance.record(2, 4 * RATE, 0);
         let required = (2 * oi * u128::from(ENTRY) * 77).div_ceil(10_000);
-        let bps = (required * 10_000).div_ceil(2 * u128::from(ACCEPTED_PRINT));
-        let discovery = 2 * fee(POS_SCALE, ACCEPTED_PRINT, bps);
+        let bps = (required * 10_000).div_ceil(2 * u128::from(FEE_BASIS));
+        let discovery = 2 * fee(POS_SCALE, FEE_BASIS, bps);
         maintenance.check(&env, discovery, selected, 0, 0, eligible);
         peak = peak.max(env.push_auth_mark_for_asset_as_admin(1, 5, MARK));
 
@@ -481,11 +481,11 @@ fn v16_program_mixed_selected_liquidation_preserves_maintenance_policy_receipts_
                     trader_b,
                     POS_SCALE as i128,
                     900_000,
-                    0,
+                    env.max_trading_fee_bps(),
                 ));
                 let required = (2 * 100 * u128::from(ENTRY) * 77).div_ceil(10_000);
-                let bps = (required * 10_000).div_ceil(2 * u128::from(ACCEPTED_PRINT));
-                let discovery = 2 * fee(POS_SCALE, ACCEPTED_PRINT, bps);
+                let bps = (required * 10_000).div_ceil(2 * u128::from(FEE_BASIS));
+                let discovery = 2 * fee(POS_SCALE, FEE_BASIS, bps);
                 maintenance.check(&env, discovery, selected, 0, 0, eligible);
                 peak[0] = peak[0].max(env.push_auth_mark_for_asset_as_admin(1, 5, MARK));
                 // Publish through the trader, leaving the keeper's later fee debt intact.

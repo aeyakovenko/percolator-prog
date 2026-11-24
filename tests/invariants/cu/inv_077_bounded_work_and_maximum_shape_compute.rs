@@ -7584,6 +7584,9 @@ fn v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu() {
     let short_account = env.create_portfolio(&short_owner);
     env.deposit(&long_owner, long_account, 1_000_000);
     env.deposit(&short_owner, short_account, 1_000_000);
+    // INV-046 (finding 6): a trade is charged the market base fee and the signed rate is only
+    // the signers' ceiling, so the base fee is the 100 bps the trade signs and the fee path is measured.
+    env.update_trade_fee_policy_with_cu(100);
 
     env.svm.warp_to_slot(TRADE_SLOT);
     env.svm.expire_blockhash();
@@ -8473,6 +8476,9 @@ fn v16_bpf_batch_trade_14_legs_under_tx_limit() {
     let la = env.create_portfolio(&lp);
     env.deposit(&taker, ta, 10_000_000);
     env.deposit(&lp, la, 10_000_000);
+    // INV-046 (finding 6): every leg is charged the market base fee and the signed rate is only the
+    // signers' ceiling, so the base fee is the 100 bps the legs sign and the fee path is measured.
+    env.update_trade_fee_policy_with_cu(100);
     let legs: Vec<BatchTradeLeg> = (0..14u16)
         .map(|a| BatchTradeLeg {
             asset_index: a,

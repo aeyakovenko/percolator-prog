@@ -189,11 +189,11 @@ fn v16_program_keeper_maintenance_and_unreclaimed_penalties_stay_distinct_until_
             trader_b,
             POS_SCALE as i128,
             900_000,
-            0,
+            env.max_trading_fee_bps(),
         );
         let required = (2 * 100 * u128::from(ENTRY) * 77).div_ceil(10_000);
-        let trade_bps = (required * 10_000).div_ceil(2 * u128::from(ACCEPTED_PRINT));
-        let discovery = 2 * fee(POS_SCALE, ACCEPTED_PRINT, trade_bps);
+        let trade_bps = (required * 10_000).div_ceil(2 * u128::from(FEE_BASIS));
+        let discovery = 2 * fee(POS_SCALE, FEE_BASIS, trade_bps);
         assert_eq!(env.market_state().1.assets[1].effective_price, ENTRY);
         assert_eq!(env.market_state().1.assets[1].raw_oracle_target_price, MARK);
         assert_eq!(env.portfolio_state(keeper).last_fee_slot.get(), 1);

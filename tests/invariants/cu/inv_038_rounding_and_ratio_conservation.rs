@@ -1099,6 +1099,8 @@ fn v16_program_public_odd_atom_partitions_conserve_every_atom() {
     let mut batch = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
     batch.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
     batch.update_fee_redirect_policy_with_cu(10_000);
+    // INV-046 (finding 6): the leg is charged the market base fee; its signed rate is a ceiling.
+    batch.update_trade_fee_policy_with_cu(FEE_BPS);
     let taker_owner = Keypair::new();
     let lp_owner = Keypair::new();
     let taker = batch.create_portfolio(&taker_owner);
@@ -1160,6 +1162,9 @@ fn v16_attack_trade_fee_rounds_up_no_free_dust_trades() {
     let pb = env.create_portfolio(&lb);
     env.deposit(&la, pa, 1_000_000);
     env.deposit(&lb, pb, 1_000_000);
+    // INV-046 (finding 6): a trade is charged the market base fee and the signed rate is only
+    // the signers' ceiling, so the base fee is the 1 bps the trades sign.
+    env.update_trade_fee_policy_with_cu(1);
     let ins = |env: &V16CuEnv| env.market_state().1.insurance;
     // dust notional with the smallest nonzero fee: notional = size*price/POS_SCALE.
     // size = POS_SCALE/100 @ price 100 => notional = 1; fee_bps=1 => true fee = 0.0001 -> must ceil to >=1.
@@ -1191,7 +1196,8 @@ fn v16_attack_trade_fee_rounds_up_no_free_dust_trades() {
     // close the accumulated dust position; conservation still exact, insurance only grew.
     if opened > 0 {
         env.svm.expire_blockhash();
-        env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, -opened, 100, 0)
+        // Signs the 1 bps base: a lower signed rate is below the market's base fee and refused.
+        env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, -opened, 100, 1)
             .expect("close the accumulated dust position");
         assert_eq!(
             env.portfolio_state(pa).legs[0].basis_pos_q.get(),
@@ -1230,6 +1236,9 @@ fn v16_attack_subatom_fee_splits_cannot_accumulate_free_position() {
     env.deposit(&la, pa, 1_000_000);
     env.deposit(&lb, pb, 1_000_000);
 
+    // INV-046 (finding 6): a trade is charged the market base fee and the signed rate is only
+    // the signers' ceiling, so the base fee is the 1 bps the trades sign.
+    env.update_trade_fee_policy_with_cu(1);
     let sub_atom_size = (POS_SCALE / 100 - 1) as i128;
     assert!(sub_atom_size > 0, "probe size is nonzero");
     let mut opened = 0i128;
@@ -1275,6 +1284,9 @@ fn v16_attack_batch_subatom_fee_reconstruction_uses_ceil_notional() {
     let lp_account = env.create_portfolio(&lp);
     env.deposit(&taker, taker_account, 1_000_000);
     env.deposit(&lp, lp_account, 1_000_000);
+    // INV-046 (finding 6): the leg is charged the market base fee and its signed rate is only a
+    // ceiling, so the base fee is the 1 bps the leg signs.
+    env.update_trade_fee_policy_with_cu(1);
 
     let sub_atom_size = (POS_SCALE / 100 - 1) as i128;
     let before_insurance = env.market_state().1.insurance;

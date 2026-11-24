@@ -288,11 +288,11 @@ fn run_authenticated_handoff(
                         trader_b,
                         POS_SCALE as i128,
                         raw_print,
-                        0,
+                        env.max_trading_fee_bps(),
                     );
                     let required = (2 * 100 * u128::from(ENTRY) * 77).div_ceil(10_000);
-                    let trade_bps = (required * 10_000).div_ceil(2 * u128::from(ACCEPTED_PRINT));
-                    let paid = fee(POS_SCALE, ACCEPTED_PRINT, trade_bps);
+                    let trade_bps = (required * 10_000).div_ceil(2 * u128::from(FEE_BASIS));
+                    let paid = fee(POS_SCALE, FEE_BASIS, trade_bps);
                     let mut expected = FUNDS.map(i128::from);
                     expected[2] -= paid as i128;
                     expected[3] -= paid as i128;

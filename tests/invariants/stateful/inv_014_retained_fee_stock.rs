@@ -510,7 +510,9 @@ fn v16_program_retained_fee_stock_bundles_preserve_owner_budgets_across_policy_a
                         [2, 1, usize::from(cpi(route))],
                         &mut evidence,
                     );
-                    let charged_bps = if cpi(route) { live_bps } else { SIGNED_BPS };
+                    // Every route is charged the live policy within the signed rate (INV-046
+                    // finding 6); a bilateral fill no longer pays its signed rate.
+                    let charged_bps = live_bps;
                     if withdrawal_first {
                         budget.pay_insurance(FIRST_PAYOUT);
                     }

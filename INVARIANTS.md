@@ -907,7 +907,13 @@ behind, applies the reading. The change therefore moves the mark by at most one 
 steps in the slot it arrives, and by one capped step per slot after. A trade print that moves the
 mark (an EWMA mark, or a hybrid past its soft-stale window) is staged as before and can reach back
 over elapsed slots as far as the print clamp allows (`elapsed_slots × cap` from `mark_ewma_e6`); the
-trade pays the mark-movement fee for the whole move (INV-046).
+trade pays the mark-movement fee for the move of the average it makes (INV-046). One change is not
+held back: when a hybrid's soft-stale window passes, its target becomes its trade average for every
+writer (INV-046), and the crank stages that switch at once even on an asset more than one window
+behind. The average comes only from paid prints, no outside party chooses the moment, and a
+regularly cranked market makes the same switch; holding it back would let whichever writer reaches a
+lagging asset first choose the mark's path (INV-046 second read, finding 7; the owner's choice of
+2026-11-24).
 
 ```text
 OI_eff_long > 0 or OI_eff_short > 0, market live, unpaid target change arriving at slot now:
@@ -937,6 +943,19 @@ price shutdown froze; the asset's own staleness timer (`permissionless_resolve_s
 last good reading) does not refuse them, so they remain available until the asset is force-closed.
 Market-wide staleness still stops every trade, and the market then exits through permissionless
 resolution.
+
+**Scope: what a trade costs.** Every trade route charges its fee on the engine's effective price,
+whose path INV-045 bounds; the print's accepted price (the raw price clamped toward the trade
+average) decides only how far the average moves and the mark fee for that move. Every route charges
+the market's base fee, and the base plus any mark fee is at most the rate the payer authorized: the
+signed `fee_bps` on the no-CPI routes, and on the CPI routes the smaller of the taker's signed
+`fee_bps` and the cap the LP configured for its matcher. A print whose mark fee would exceed that
+rate moves the average only as far as the fee actually collected pays for, and a signed rate above
+the market's maximum is refused. Neither an oracle authority's average nor a matcher's print
+therefore sets what a trade costs (second read, finding 6; the owner's choices of 2026-11-24). The
+effective price is the one in force when the trade lands: a trade ordered before a crank that
+catches the price up pays at the earlier price, so ordering can change a trader's own fee by at most
+the catch-up's share of it, and only insurance's receipt, never another account's value.
 
 **Required tests.** Zero, extreme, stale, and out-of-band prices during normal, drain, reset,
 recovery, and close states.

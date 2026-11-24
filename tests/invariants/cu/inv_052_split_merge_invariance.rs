@@ -94,6 +94,9 @@ fn split_fee_trade_snapshot(parts_q: &[i128], fee_bps: u64) -> FeeTradeSnapshot 
     let account_b = env.create_portfolio(&owner_b);
     env.deposit(&owner_a, account_a, 1_000_000);
     env.deposit(&owner_b, account_b, 1_000_000);
+    // INV-046 (finding 6): a trade is charged the market base fee and the signed rate is only the
+    // signers' ceiling, so the base fee is the rate the trades sign.
+    env.update_trade_fee_policy_with_cu(fee_bps);
 
     for &part_q in parts_q {
         env.svm.expire_blockhash();
@@ -170,6 +173,10 @@ fn v16_program_split_fee_close_has_bounded_rounding_and_exact_custody() {
             PRICE,
             0,
         );
+        // INV-046 (finding 6): a trade is charged the market base fee and the signed rate is only
+        // the signers' ceiling, so the base fee is the rate the fee-bearing trades sign (set
+        // after the fee-free open).
+        env.update_trade_fee_policy_with_cu(FEE_BPS);
 
         let mut closed_q = 0;
         let mut notional = 0;
@@ -309,6 +316,10 @@ fn v16_program_fee_flip_partitions_preserve_economics_across_flat_boundary() {
             PRICE,
             0,
         );
+        // INV-046 (finding 6): a trade is charged the market base fee and the signed rate is only
+        // the signers' ceiling, so the base fee is the rate the fee-bearing trades sign (set
+        // after the fee-free open).
+        env.update_trade_fee_policy_with_cu(FEE_BPS);
 
         let mut notional = 0;
         let mut fee_per_side = 0;
@@ -379,6 +390,9 @@ fn v16_program_fee_flip_partitions_preserve_economics_across_flat_boundary() {
             account_a_basis_q: active_basis_for_asset(&a, 0),
             account_b_basis_q: active_basis_for_asset(&b, 0),
         };
+        // The exit is fee-free in this model: the base fee returns to 0 first, since a signed 0 is
+        // refused while the base fee is above it (INV-046 finding 6).
+        env.update_trade_fee_policy_with_cu(0);
         env.svm.expire_blockhash();
         let cu = env.trade_asset_with_cu(
             0, &owner_a, account_a, &owner_b, account_b, -final_q, PRICE, 0,

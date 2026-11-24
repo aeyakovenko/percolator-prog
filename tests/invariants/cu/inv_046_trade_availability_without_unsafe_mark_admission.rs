@@ -1296,3 +1296,185 @@ fn v16_attack_soft_stale_hybrid_target_does_not_depend_on_the_writer() {
         "inside the window a trade does not stage the average"
     );
 }
+
+// INV-046 second read, finding 7 (2026-11-24): a hybrid past its soft-stale window on an exposed
+// asset that nobody cranked for 100 slots. Rule A makes the trade average the target for every
+// writer. The crank used to hold that switch back while the asset was more than one window behind
+// (INV-045's catch-up rule) and walk the mark toward the retired feed price over the idle slots,
+// while a one-unit reducing trade staged the average at once; whoever acted first chose the
+// outcome (1,047,200 after a peak of 1,100,000, or 1,002,400). Both writers now stage the average
+// at once and end where a regularly cranked market ends.
+#[test]
+fn v16_attack_lagging_soft_stale_hybrid_mark_does_not_depend_on_the_first_writer() {
+    const P0: u64 = 1_000_000;
+    const P1: u64 = 1_100_000;
+    const IDLE_TO: u64 = 102;
+    let run = |trade_first: bool| -> (u64, u64, u64) {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: P0,
+            max_abs_funding_e9_per_slot: 0,
+            ..production_risk_params()
+        });
+        set_test_clock(&mut env, 1, 100);
+        let feed = [0x47; 32];
+        let initial = env.set_pyth_price_with_conf(&feed, P0 as i64, -6, 0, 100);
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed, [0; 32], [0; 32]],
+            &[initial],
+            1,
+            100,
+            0,
+            0,
+            3,
+            0,
+        )
+        .expect("configure the hybrid asset");
+        let owners: [Keypair; 2] = std::array::from_fn(|_| Keypair::new());
+        let portfolios = owners.each_ref().map(|owner| env.create_portfolio(owner));
+        for i in 0..2 {
+            env.deposit(&owners[i], portfolios[i], 1_000_000_000);
+        }
+        env.try_trade_asset_with_cu(
+            0,
+            &owners[0],
+            portfolios[0],
+            &owners[1],
+            portfolios[1],
+            (10 * POS_SCALE) as i128,
+            P0,
+            0,
+        )
+        .expect("open an exposed pair");
+        set_test_clock(&mut env, 2, 101);
+        let oracle = env.set_pyth_price_with_conf(&feed, P1 as i64, -6, 0, 101);
+        inv046_hybrid_crank(&mut env, portfolios[0], Some(oracle), 2);
+        let average = env.market_state().0.mark_ewma_e6;
+        set_test_clock(&mut env, IDLE_TO, 105);
+        if trade_first {
+            let mark = env.market_state().1.assets[0].effective_price;
+            env.try_trade_asset_with_cu(
+                0,
+                &owners[1],
+                portfolios[1],
+                &owners[0],
+                portfolios[0],
+                POS_SCALE as i128,
+                mark,
+                0,
+            )
+            .expect("a one-unit reduction on the lagging asset");
+        }
+        let mut peak = env.market_state().1.assets[0].effective_price;
+        for _ in 0..8 {
+            if env.market_state().1.assets[0].slot_last >= IDLE_TO {
+                break;
+            }
+            inv046_hybrid_crank(&mut env, portfolios[0], Some(oracle), IDLE_TO);
+            peak = peak.max(env.market_state().1.assets[0].effective_price);
+        }
+        let asset = env.market_state().1.assets[0];
+        assert_eq!(asset.slot_last, IDLE_TO);
+        assert_eq!(asset.raw_oracle_target_price, average, "the target is the average");
+        (asset.effective_price, peak, average)
+    };
+    let cranks_only = run(false);
+    let trade_first = run(true);
+    assert_eq!(cranks_only, trade_first, "the first writer chose the mark");
+    // The average at the onset is the mark the feed had already moved it to: nothing moves.
+    assert_eq!(cranks_only.0, cranks_only.2);
+    assert_eq!(cranks_only.1, cranks_only.2, "no excursion toward the retired feed price");
+}
+
+// INV-046 second read, finding 6 (2026-11-24): an EWMA-mark asset's oracle authority pushes the
+// trade average far from the effective price, then a taker closes one unit through TradeCpi in the
+// same slot. The fill's accepted price is the average at dt = 0, and the engine used to charge the
+// fee on it, to both sides: pushed toward `MAX_ORACLE_PRICE`, closing one unit worth ~1,000,500
+// took a 2,000,000-atom taker's whole capital and 965,500,035 atoms from the unsigned LP. Fees are
+// now charged on the effective price on every route, so the push leaves each side's fee at the
+// base rate on what the fill is worth at the effective price (about 1,000 atoms).
+#[test]
+fn v16_attack_authority_average_push_does_not_set_the_trade_fee_notional() {
+    const MARK: u64 = 1_000_000;
+    let run = |push: u64, taker_deposit: u128, open_units: u128| -> (u128, u128, u64) {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: MARK,
+            h_max: 20,
+            max_trading_fee_bps: 100,
+            trade_fee_base_bps: 10,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 20,
+            min_funding_lifetime_slots: 20,
+            ..V16CuMarketParams::default()
+        });
+        env.svm.warp_to_slot(1);
+        env.configure_ewma_mark_with_cu(1, MARK, 1, 0);
+        env.svm.warp_to_slot(2);
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let taker_owner = Keypair::new();
+        let taker = env.create_portfolio(&taker_owner);
+        let lp_owner = Keypair::new();
+        let lp = env.create_portfolio(&lp_owner);
+        env.deposit(&taker_owner, taker, taker_deposit);
+        env.deposit(&lp_owner, lp, 3_000_000_000);
+        let (matcher_ctx, matcher_delegate, _) = env
+            .init_matcher_context_with_passive_spread_authorized(matcher_program, &lp_owner, lp, 10, 10);
+        env.svm.expire_blockhash();
+        env.try_trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            matcher_ctx,
+            matcher_delegate,
+            0,
+            (open_units * POS_SCALE) as i128,
+            10,
+        )
+        .expect("open");
+        env.svm.warp_to_slot(30);
+        env.svm.expire_blockhash();
+        env.crank_asset_before_push(0, 30);
+        env.push_ewma_mark_with_cu(30, push);
+        let insurance_before = env.market_state().1.insurance;
+        let taker_capital_before = env.portfolio_state(taker).capital.get();
+        env.svm.expire_blockhash();
+        env.try_trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            matcher_ctx,
+            matcher_delegate,
+            0,
+            -(POS_SCALE as i128),
+            10,
+        )
+        .expect("close one unit");
+        let (cfg, group) = env.market_state();
+        assert!(cfg.mark_ewma_e6 > 9 * MARK, "the push moved the average");
+        (
+            group.insurance - insurance_before,
+            taker_capital_before - env.portfolio_state(taker).capital.get(),
+            group.assets[0].effective_price,
+        )
+    };
+    for (push, deposit, units) in [
+        (10 * MARK, 3_000_000_000, 10),
+        (100 * MARK, 3_000_000_000, 10),
+        (percolator::MAX_ORACLE_PRICE, 2_000_000, 1),
+    ] {
+        let (both_fees, taker_paid, effective) = run(push, deposit, units);
+        // The base rate (10 bps) on what the unit is worth at the effective price.
+        let fee = (effective as u128 * 10).div_ceil(10_000);
+        assert!(effective < 2 * MARK && fee > 0);
+        assert_eq!(both_fees, 2 * fee, "push {push}: the fee follows the effective price");
+        assert_eq!(taker_paid, fee, "push {push}: the taker pays the base fee only");
+    }
+}

@@ -68,7 +68,7 @@ fn v16_program_paid_rediscovery_revokes_prior_reward_authentication_until_recatc
             peer,
             (100 * POS_SCALE) as i128,
             ENTRY,
-            0,
+            env.max_trading_fee_bps(),
         );
         let profile = |env: &V16CuEnv| {
             state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
@@ -136,7 +136,14 @@ fn v16_program_paid_rediscovery_revokes_prior_reward_authentication_until_recatc
                 // Rediscovery uses a reduction after liquidation's side haircut.
                 let size = if phase == 0 { 4 } else { -2 } * POS_SCALE as i128;
                 let trade_cu = env.trade_asset_with_cu(
-                    0, &owners[2], trader_a, &owners[3], trader_b, size, 900_000, 0,
+                    0,
+                    &owners[2],
+                    trader_a,
+                    &owners[3],
+                    trader_b,
+                    size,
+                    900_000,
+                    env.max_trading_fee_bps(),
                 );
                 assert_cu_within("paid rediscovery trade", trade_cu, TRADE_CU_LIMIT);
                 let after = env.market_state().1;
@@ -415,12 +422,12 @@ fn run_report_cadence(max_funding: u64) {
                 trader_b,
                 POS_SCALE as i128,
                 900_000,
-                0,
+                env.max_trading_fee_bps(),
             );
             // Four discovery slots allow 96 bps; alpha=4/5 moves the paid mark 7,680.
             let required = (2 * 100 * u128::from(ENTRY) * 77).div_ceil(10_000);
-            let trade_bps = (required * 10_000).div_ceil(2 * u128::from(ACCEPTED_PRINT));
-            let paid = fee(POS_SCALE, ACCEPTED_PRINT, trade_bps);
+            let trade_bps = (required * 10_000).div_ceil(2 * u128::from(FEE_BASIS));
+            let paid = fee(POS_SCALE, FEE_BASIS, trade_bps);
             let discovery = 2 * paid;
             let mut expected = FUNDS.map(i128::from);
             expected[2] -= paid as i128;

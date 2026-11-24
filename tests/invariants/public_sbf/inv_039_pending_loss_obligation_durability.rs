@@ -84,17 +84,32 @@ fn v16_program_pr380_trade_order_preserves_elapsed_funding() {
         assert!(reproduction.attack_vault_dust <= bound, "{reproduction:?}");
         if matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
             // Exact funding (#458): the victim is order-independent; the only order-dependent
-            // atoms are the coalition's own payer-side rounding dust that the vault retains.
+            // atoms are the coalition's own payer-side rounding dust that the vault retains and
+            // the fee its stamp saves by landing before the catch-up, valued at the earlier
+            // effective price (INV-046 finding 6), which insurance does not receive.
             assert_eq!(
                 reproduction.attacker_coalition_gain,
                 reproduction
                     .control_vault_dust
-                    .saturating_sub(reproduction.attack_vault_dust),
+                    .saturating_sub(reproduction.attack_vault_dust)
+                    + reproduction.coalition_fee_saving,
                 "{reproduction:?}"
             );
-            assert!(reproduction.attacker_coalition_gain <= 1, "{reproduction:?}");
+            assert!(
+                reproduction.coalition_fee_saving
+                    <= crate::support::fuzz_model::pr380_stamp_fee_saving_bound(
+                        reproduction.control_stamp_fee
+                    ),
+                "{reproduction:?}"
+            );
+            assert!(
+                reproduction.attacker_coalition_gain <= 1 + reproduction.coalition_fee_saving,
+                "{reproduction:?}"
+            );
             assert_eq!(
-                reproduction.control_total_payout + reproduction.control_vault_dust,
+                reproduction.control_total_payout
+                    + reproduction.control_vault_dust
+                    + reproduction.coalition_fee_saving,
                 reproduction.attack_total_payout + reproduction.attack_vault_dust
             );
         }

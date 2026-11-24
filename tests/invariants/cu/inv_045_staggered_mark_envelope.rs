@@ -26,13 +26,15 @@ fn batch(
     size_q: i128,
     prices: [u64; 2],
 ) -> u64 {
+    // Legs sign the market's maximum rate, room for any mark fee (INV-046 finding 6).
+    let fee_bps = env.max_trading_fee_bps();
     let legs = (0..2)
         .map(|index| BatchTradeLeg {
             asset_index: index as u16,
             market_id: env.asset_market_id(index as u16),
             size_q,
             exec_price: prices[index],
-            fee_bps: 0,
+            fee_bps,
         })
         .collect();
     env.svm.expire_blockhash();
@@ -78,7 +80,9 @@ fn v16_program_batch_and_single_marks_preserve_staggered_elapsed_envelopes() {
             .div_ceil(u128::from(MARKS[index]));
         let externality_notional = 2 * OPEN_Q.unsigned_abs() * u128::from(MARKS[index]) / POS_SCALE;
         let required = (externality_notional * move_bps).div_ceil(10_000);
-        let notional = u128::from(accepted_prices[index]); // reduction is exactly POS_SCALE
+        // The reduction is exactly POS_SCALE, valued at the effective price, MARKS here (INV-046
+        // finding 6), not at the accepted print.
+        let notional = u128::from(MARKS[index]);
         (0..=10_000u128)
             .map(|bps| 2 * (notional * bps).div_ceil(10_000))
             .find(|paid| *paid >= required)
@@ -145,7 +149,7 @@ fn v16_program_batch_and_single_marks_preserve_staggered_elapsed_envelopes() {
                         portfolios[1],
                         -(POS_SCALE as i128),
                         raw_prices[index],
-                        0,
+                        env.max_trading_fee_bps(),
                     ));
                     assert_eq!(
                         env.market_state().1.insurance - insurance_before,
@@ -354,8 +358,9 @@ fn v16_program_mixed_spent_unspent_batch_capacity_is_asset_local() {
                 .div_ceil(u128::from(MARKS[i]));
             let externality = 2 * OPEN_Q.unsigned_abs() * u128::from(MARKS[i]) / POS_SCALE;
             let required = (externality * bps).div_ceil(10_000);
+            // The fee notional is valued at the effective price, MARKS here (INV-046 finding 6).
             (0..=10_000u128)
-                .map(|bps| 2 * (u128::from(accepted[i]) * bps).div_ceil(10_000))
+                .map(|bps| 2 * (u128::from(MARKS[i]) * bps).div_ceil(10_000))
                 .find(|paid| *paid >= required)
                 .expect("fully collectible discovery fee")
         });
@@ -416,9 +421,10 @@ fn v16_program_mixed_spent_unspent_batch_capacity_is_asset_local() {
                                 portfolios[1],
                                 -(POS_SCALE as i128),
                                 raw[i],
-                                0,
+                                env.max_trading_fee_bps(),
                             )
                         } else {
+                            let fee_bps = env.max_trading_fee_bps();
                             let legs = order
                                 .iter()
                                 .map(|&i| BatchTradeLeg {
@@ -426,7 +432,7 @@ fn v16_program_mixed_spent_unspent_batch_capacity_is_asset_local() {
                                     market_id: env.asset_market_id(i as u16),
                                     size_q: -(POS_SCALE as i128),
                                     exec_price: raw[i],
-                                    fee_bps: 0,
+                                    fee_bps,
                                 })
                                 .collect();
                             env.send(

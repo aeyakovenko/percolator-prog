@@ -548,11 +548,23 @@ pub struct ProspectiveFundingRewriteReproduction {
     /// Terminal vault SPL above insurance: exact-funding payer-ceiling/receiver-floor dust (#458).
     pub control_vault_dust: u128,
     pub attack_vault_dust: u128,
+    /// The control world's stamp fee, and what the trade-first stamp saves by landing before the
+    /// catch-up: a fee is valued at the effective price when its trade lands (INV-046 finding 6).
+    /// Zero on the CPI routes, whose prints the order may change.
+    pub control_stamp_fee: u128,
+    pub coalition_fee_saving: u128,
 }
 
 /// Exact funding (#458) floors each side's settlement, so every funded leg can leave less than
 /// one atom of payer-up/receiver-down dust in the vault. The PR 380 worlds hold four funded legs.
 pub const PR380_FUNDING_DUST_BOUND: u128 = 4;
+
+/// The largest fee the PR 380 stamp can save by landing before the catch-up, which moves the
+/// effective price 101 elapsed slots at the 1-bps per-slot cap: that fraction of the control fee,
+/// plus one ceiling atom per side.
+pub fn pr380_stamp_fee_saving_bound(control_stamp_fee: u128) -> u128 {
+    (control_stamp_fee * 101).div_ceil(10_000) + 2
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResolveBeforeCommittedAccrualReproduction {
@@ -21053,12 +21065,16 @@ fn build_bounded_oracle_failure_reference_seed(
     }
 
     runner.env.set_clock(AFTER_HOURS_SLOT, 103);
+    // The after-hours reduction signs the market's maximum rate, which leaves room for the mark fee
+    // that pays for moving the fallback mark (INV-046 finding 6: the signed rate caps base plus
+    // mark fee).
+    let fee_bps = runner.env.primary_max_trading_fee_bps();
     runner.execute_trade(
         TradeRoute::NoCpi,
         0,
         1,
         vec![(0, -(POS_SCALE as i128 / 4))],
-        0,
+        fee_bps,
         500,
         true,
     )?;
@@ -24385,8 +24401,15 @@ pub fn reproduce_unstaged_mark_target(
                         unreachable!()
                     }
                 };
-                env.trade_cpi(0, 1, 0, EXISTING_SIZE_Q, 0, 0)
-                    .map_err(|error| format!("PR 332 open liveness-control position: {error}"))?;
+                env.trade_cpi(
+                    0,
+                    1,
+                    0,
+                    EXISTING_SIZE_Q,
+                    env.primary_max_trading_fee_bps(),
+                    0,
+                )
+                .map_err(|error| format!("PR 332 open liveness-control position: {error}"))?;
                 let epoch_before = env.primary_market_state().1.oracle_epoch;
                 env.warp_to_slot(2);
                 let wrapper_target = match case {
@@ -24442,7 +24465,7 @@ pub fn reproduce_unstaged_mark_target(
                         unreachable!()
                     }
                 };
-                execute_trade_route(&mut env, route, 0, 1, 0, EXISTING_SIZE_Q, 200, 0)
+                execute_trade_route_at_max(&mut env, route, 0, 1, 0, EXISTING_SIZE_Q, 200)
                     .map_err(|error| format!("PR 333 publish trade-driven EWMA target: {error}"))?;
                 let discovery_profile = env.primary_profile(0);
                 if discovery_profile.mark_ewma_e6 != EWMA_TARGET {
@@ -24453,7 +24476,7 @@ pub fn reproduce_unstaged_mark_target(
                     env.primary_market_state().1.insurance
                 ));
                 }
-                execute_trade_route(&mut env, route, 0, 1, 0, -EXISTING_SIZE_Q, OLD_MARK, 0)
+                execute_trade_route_at_max(&mut env, route, 0, 1, 0, -EXISTING_SIZE_Q, OLD_MARK)
                     .map_err(|error| format!("PR 333 flatten discovery portfolios: {error}"))?;
                 if portfolio_has_active_asset(&env.primary_portfolio(0), 0)
                     || portfolio_has_active_asset(&env.primary_portfolio(1), 0)
@@ -24490,7 +24513,14 @@ pub fn reproduce_unstaged_mark_target(
 
     let before_rejection = tracked_economic_accounts(&env);
     let stale_increase_error = env
-        .trade_cpi(attacker, lp, 0, ATTACK_SIZE_Q, 0, 0)
+        .trade_cpi(
+            attacker,
+            lp,
+            0,
+            ATTACK_SIZE_Q,
+            env.primary_max_trading_fee_bps(),
+            0,
+        )
         .expect_err("stale-price CPI risk increase must reject");
     let stale_increase_rejected = stale_increase_error.contains("Custom(21)")
         || stale_increase_error.contains("custom program error: 0x15");
@@ -24506,8 +24536,15 @@ pub fn reproduce_unstaged_mark_target(
     let lagging_risk_reduction_landed = if lagging_position_q == 0 {
         true
     } else {
-        env.trade_cpi(attacker, lp, 0, -lagging_position_q, 0, 0)
-            .map_err(|error| format!("{case:?} lagging risk reduction rejected: {error}"))?;
+        env.trade_cpi(
+            attacker,
+            lp,
+            0,
+            -lagging_position_q,
+            env.primary_max_trading_fee_bps(),
+            0,
+        )
+        .map_err(|error| format!("{case:?} lagging risk reduction rejected: {error}"))?;
         !portfolio_has_active_asset(&env.primary_portfolio(attacker), 0)
             && !portfolio_has_active_asset(&env.primary_portfolio(lp), 0)
     };
@@ -24550,10 +24587,24 @@ pub fn reproduce_unstaged_mark_target(
     }
 
     let post_commit_trade = env
-        .trade_cpi(attacker, lp, 0, ATTACK_SIZE_Q, 0, 0)
+        .trade_cpi(
+            attacker,
+            lp,
+            0,
+            ATTACK_SIZE_Q,
+            env.primary_max_trading_fee_bps(),
+            0,
+        )
         .map_err(|error| format!("{case:?} post-commit CPI trade rejected: {error}"))?;
     let post_commit_exit = env
-        .trade_cpi(attacker, lp, 0, -ATTACK_SIZE_Q, 0, 0)
+        .trade_cpi(
+            attacker,
+            lp,
+            0,
+            -ATTACK_SIZE_Q,
+            env.primary_max_trading_fee_bps(),
+            0,
+        )
         .map_err(|error| format!("{case:?} post-commit CPI exit rejected: {error}"))?;
     let attacker_flat = env.primary_portfolio(attacker);
     let victim_flat = env.primary_portfolio(lp);
@@ -24986,9 +25037,20 @@ pub fn reproduce_prospective_funding_rewrite(
     let control = run_prospective_funding_world(seed, route, false)?;
     let attack = run_prospective_funding_world(seed, route, true)?;
     let fixed_execution_price = matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi);
+    // A fee is valued at the effective price when its trade lands (INV-046 finding 6), so the
+    // trade-first stamp, which lands before the catch-up, pays at the earlier effective price.
+    // Insurance, not the victim, receives the difference.
+    let coalition_fee_saving = if fixed_execution_price {
+        control
+            .stamp_fee
+            .checked_sub(attack.stamp_fee)
+            .ok_or("PR 380 trade-first ordering raised the stamp fee")?
+    } else {
+        0
+    };
     if control.f_short_num <= 0
         || (fixed_execution_price
-            && (control.stamp_fee != attack.stamp_fee
+            && (coalition_fee_saving > pr380_stamp_fee_saving_bound(control.stamp_fee)
                 || control.final_mark != attack.final_mark
                 || control.final_effective_price != attack.final_effective_price))
     {
@@ -25017,12 +25079,16 @@ pub fn reproduce_prospective_funding_rewrite(
     let control_vault_dust = vault_dust(&control)?;
     let attack_vault_dust = vault_dust(&attack)?;
     // With fixed execution prices, SPL value is order-independent once the bounded rounding
-    // dust retained by the vault is counted: the coalition can only gain what the victim lost
-    // plus the reduction of its own payer-side rounding dust.
+    // dust retained by the vault and the stamp's fee saving are counted: the coalition can only
+    // gain what the victim lost, the reduction of its own payer-side rounding dust, and the fee
+    // its own stamp saved.
     if fixed_execution_price
-        && (control.total_payout + control_vault_dust != attack.total_payout + attack_vault_dust
+        && (control.total_payout + control_vault_dust + coalition_fee_saving
+            != attack.total_payout + attack_vault_dust
             || attacker_coalition_gain
-                != victim_payout_loss + control_vault_dust.saturating_sub(attack_vault_dust))
+                != victim_payout_loss
+                    + control_vault_dust.saturating_sub(attack_vault_dust)
+                    + coalition_fee_saving)
     {
         return Err(format!(
             "PR 380 prospective worlds do not conserve order-independent SPL value: \
@@ -25043,6 +25109,8 @@ pub fn reproduce_prospective_funding_rewrite(
         attack_total_payout: attack.total_payout,
         control_vault_dust,
         attack_vault_dust,
+        control_stamp_fee: control.stamp_fee,
+        coalition_fee_saving,
     })
 }
 
@@ -25335,12 +25403,26 @@ pub fn reproduce_bilateral_fee_support(
 
     env.set_matcher_spreads(1, 0, 9_000)
         .map_err(|error| format!("PR 369 configure opening passive matcher: {error}"))?;
-    env.trade_cpi(0, 1, 0, -MOVER_Q, 0, 0)
+    env.trade_cpi(0, 1, 0, -MOVER_Q, env.primary_max_trading_fee_bps(), 0)
         .map_err(|error| format!("PR 369 open future distressed short: {error}"))?;
-    env.trade_no_cpi(2, 3, 0, BENEFICIARY_Q, MARK, 0)
-        .map_err(|error| format!("PR 369 open independent beneficiary/victim book: {error}"))?;
-    env.trade_no_cpi(4, close_lp, 0, BENEFICIARY_Q, MARK, 0)
-        .map_err(|error| format!("PR 369 open independent extraction pair: {error}"))?;
+    env.trade_no_cpi(
+        2,
+        3,
+        0,
+        BENEFICIARY_Q,
+        MARK,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("PR 369 open independent beneficiary/victim book: {error}"))?;
+    env.trade_no_cpi(
+        4,
+        close_lp,
+        0,
+        BENEFICIARY_Q,
+        MARK,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("PR 369 open independent extraction pair: {error}"))?;
     env.set_matcher_spreads(close_lp, 0, 9_000)
         .map_err(|error| format!("PR 369 configure extraction passive matcher: {error}"))?;
 
@@ -25415,7 +25497,7 @@ pub fn reproduce_bilateral_fee_support(
     }
     let market_id = env.primary_market_state().1.assets[0].market_id;
     let exit = match route {
-        TradeRoute::Cpi => env.trade_cpi(0, 1, 0, MOVER_Q, 0, 0),
+        TradeRoute::Cpi => env.trade_cpi(0, 1, 0, MOVER_Q, env.primary_max_trading_fee_bps(), 0),
         TradeRoute::BatchCpi => env.batch_trade_cpi(
             0,
             1,
@@ -25423,7 +25505,7 @@ pub fn reproduce_bilateral_fee_support(
                 asset_index: 0,
                 market_id,
                 size_q: MOVER_Q,
-                fee_bps: 0,
+                fee_bps: env.primary_max_trading_fee_bps(),
                 limit_price: 0,
             }],
         ),
@@ -25481,7 +25563,14 @@ pub fn reproduce_bilateral_fee_support(
     env.ensure_primary_matcher_enabled(close_lp)
         .map_err(|error| format!("PR 369 refresh close-LP matcher authorization: {error}"))?;
     let close = env
-        .trade_cpi(2, close_lp, 0, -BENEFICIARY_Q, 0, 0)
+        .trade_cpi(
+            2,
+            close_lp,
+            0,
+            -BENEFICIARY_Q,
+            env.primary_max_trading_fee_bps(),
+            0,
+        )
         .map_err(|error| format!("PR 369 close beneficiary through independent LP: {error}"))?;
     max_cu = max_cu.max(close.compute_units);
     let released = env.primary_portfolio(2).pnl.get().max(0) as u128;
@@ -27261,7 +27350,16 @@ pub fn verify_delayed_trade_fee_policy_nonextraction(
     )
     .map_err(|error| format!("PR 338 activate attacker-operated asset: {error}"))?;
 
-    let retained_trade = env.build_retained_no_cpi_trade(VICTIM, ATTACKER, ASSET, SIZE_Q, PRICE);
+    // The stale trade consents to the zero fee it was signed under (INV-046 finding 6: the signed
+    // rate is the ceiling for the base fee plus any mark fee).
+    let retained_trade = env.build_retained_no_cpi_trade_with_fee(
+        VICTIM,
+        ATTACKER,
+        ASSET,
+        SIZE_Q,
+        PRICE,
+        CURRENT_TRADE_FEE_BPS,
+    );
     let replay = env
         .land_retained(retained_policy)
         .map_err(|error| format!("PR 338 delayed trade-fee policy no longer lands: {error}"))?;
@@ -29050,7 +29148,10 @@ fn run_trade_fee_market_generation_world(
 
     let victim_deposit = env.build_retained_deposit(VICTIM, DEPOSIT);
     let attacker_deposit = env.build_retained_deposit(ATTACKER, DEPOSIT);
-    let retained_trade = env.build_retained_no_cpi_trade(VICTIM, ATTACKER, ASSET, SIZE_Q, PRICE);
+    // The retained trade consents to the zero fee it was signed under (INV-046 finding 6: the
+    // signed rate is the ceiling for the base fee plus any mark fee).
+    let retained_trade =
+        env.build_retained_no_cpi_trade_with_fee(VICTIM, ATTACKER, ASSET, SIZE_Q, PRICE, 0);
     let mut max_cu = 0;
     let replay_cu = if land_replay {
         let replay = env
@@ -32242,9 +32343,9 @@ fn run_prospective_funding_world(
     let configured_slot = env.current_slot();
     env.configure_ewma_mark(0, configured_slot, PRICE, MARK_HALFLIFE, 0)
         .map_err(|error| format!("PR 380 configure EWMA mark: {error}"))?;
-    execute_trade_route(&mut env, route, 0, 1, 0, POS_SCALE as i128, PRICE, 0)
+    execute_trade_route_at_max(&mut env, route, 0, 1, 0, POS_SCALE as i128, PRICE)
         .map_err(|error| format!("PR 380 open independent funding pair: {error}"))?;
-    execute_trade_route(&mut env, route, 2, 3, 0, POS_SCALE as i128, PRICE, 0)
+    execute_trade_route_at_max(&mut env, route, 2, 3, 0, POS_SCALE as i128, PRICE)
         .map_err(|error| format!("PR 380 open stamper pair: {error}"))?;
 
     env.warp_to_slot(PREP_SLOT);
@@ -32287,16 +32388,7 @@ fn run_prospective_funding_world(
     env.warp_to_slot(CATCHUP_SLOT);
     let insurance_before_stamp = env.primary_market_state().1.insurance;
     let stamp = |env: &mut V16Svm| {
-        execute_trade_route(
-            env,
-            route,
-            2,
-            3,
-            0,
-            -(POS_SCALE as i128),
-            STAMP_EXEC_PRICE,
-            0,
-        )
+        execute_trade_route_at_max(env, route, 2, 3, 0, -(POS_SCALE as i128), STAMP_EXEC_PRICE)
     };
     let catchup = |env: &mut V16Svm| -> Result<(), String> {
         for _ in 0..8 {
@@ -32576,8 +32668,15 @@ pub fn reproduce_pending_ewma_inheritance(
 
     let seed_capital_before =
         env.primary_portfolio(0).capital.get() + env.primary_portfolio(1).capital.get();
-    env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, MARK * 2, 0)
-        .map_err(|error| format!("{route:?} seed paid EWMA move: {error}"))?;
+    env.trade_no_cpi(
+        0,
+        1,
+        0,
+        POS_SCALE as i128,
+        MARK * 2,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("{route:?} seed paid EWMA move: {error}"))?;
     let seed_capital_after =
         env.primary_portfolio(0).capital.get() + env.primary_portfolio(1).capital.get();
     let seed_cost = seed_capital_before
@@ -32627,10 +32726,10 @@ pub fn reproduce_pending_ewma_inheritance(
     env.crank(0, 3, observations())
         .map_err(|error| format!("{route:?} settle pending EWMA seed winner: {error}"))?;
 
-    execute_trade_route(&mut env, route, 2, 3, 0, LARGE_Q, applied_mark, 0)
+    execute_trade_route_at_max(&mut env, route, 2, 3, 0, LARGE_Q, applied_mark)
         .map_err(|error| format!("{route:?} post-commit trade rejected: {error}"))?;
     let post_commit_trade_landed = true;
-    execute_trade_route(&mut env, route, 2, 3, 0, -LARGE_Q, applied_mark, 0)
+    execute_trade_route_at_max(&mut env, route, 2, 3, 0, -LARGE_Q, applied_mark)
         .map_err(|error| format!("{route:?} post-commit exit rejected: {error}"))?;
     let post_commit_exit_landed = true;
     let victim_capital = env.primary_portfolio(3).capital.get();
@@ -32720,14 +32819,28 @@ pub fn reproduce_reclaimable_ewma_fee(
     env.configure_ewma_mark_for_actor(0, ASSET, 3, MARK, 1, 0)
         .map_err(|error| format!("{route:?} configure creator EWMA: {error}"))?;
 
-    execute_trade_route(&mut env, route, 0, 3, ASSET, -POSITION_Q, MARK, 0)
+    execute_trade_route_at_max(&mut env, route, 0, 3, ASSET, -POSITION_Q, MARK)
         .map_err(|error| format!("{route:?} open against independent LP: {error}"))?;
     env.warp_to_slot(4);
     let insurance_before = env.primary_market_state().1.insurance;
-    env.trade_no_cpi(1, 2, ASSET, POSITION_Q, LOW_PRINT, 0)
-        .map_err(|error| format!("{route:?} self-trade paid EWMA move: {error}"))?;
-    env.trade_no_cpi(1, 2, ASSET, -POSITION_Q, LOW_PRINT, 0)
-        .map_err(|error| format!("{route:?} flatten temporary EWMA pair: {error}"))?;
+    env.trade_no_cpi(
+        1,
+        2,
+        ASSET,
+        POSITION_Q,
+        LOW_PRINT,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("{route:?} self-trade paid EWMA move: {error}"))?;
+    env.trade_no_cpi(
+        1,
+        2,
+        ASSET,
+        -POSITION_Q,
+        LOW_PRINT,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("{route:?} flatten temporary EWMA pair: {error}"))?;
     let (_, after_move) = env.primary_market_state();
     let fee_paid = after_move
         .insurance
@@ -32795,7 +32908,7 @@ pub fn reproduce_reclaimable_ewma_fee(
         ));
     }
 
-    execute_trade_route(&mut env, route, 0, 3, ASSET, POSITION_Q, effective_mark, 0)
+    execute_trade_route_at_max(&mut env, route, 0, 3, ASSET, POSITION_Q, effective_mark)
         .map_err(|error| format!("{route:?} close against independent LP: {error}"))?;
     for (actor, label) in [(0, "attacker"), (3, "victim")] {
         let before = tracked_economic_accounts(&env);
@@ -32982,11 +33095,18 @@ pub fn reproduce_trade_driven_liquidation_reward(
         }
     };
 
-    env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, MARK, 0)
-        .map_err(|error| format!("{mode:?} {route:?} open independent victim: {error}"))?;
+    env.trade_no_cpi(
+        0,
+        1,
+        0,
+        POS_SCALE as i128,
+        MARK,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("{mode:?} {route:?} open independent victim: {error}"))?;
     let supply_before = env.token_supply_observed();
     let insurance_before_move = env.primary_market_state().1.insurance;
-    execute_trade_route(&mut env, route, 2, 3, 0, TINY_Q, reported_price, 0)
+    execute_trade_route_at_max(&mut env, route, 2, 3, 0, TINY_Q, reported_price)
         .map_err(|error| format!("{mode:?} {route:?} paid mark-moving wash trade: {error}"))?;
     let (profile_after_move, group_after_move) = env.primary_market_state();
     let movement_fee = group_after_move
@@ -33095,7 +33215,7 @@ pub fn reproduce_trade_driven_liquidation_reward(
     let matched_close_q = i128::try_from(matched_close_q)
         .map_err(|_| "PR 280 matched effective close exceeds signed range")?;
     let close_price = refreshed_group.assets[0].effective_price;
-    execute_trade_route(&mut env, route, 2, 3, 0, -matched_close_q, close_price, 0)
+    execute_trade_route_at_max(&mut env, route, 2, 3, 0, -matched_close_q, close_price)
         .map_err(|error| format!("{mode:?} {route:?} close effective wash pair: {error}"))?;
 
     for actor in [2usize, 3] {
@@ -34123,6 +34243,32 @@ pub(crate) fn execute_trade_route(
     }
 }
 
+/// `execute_trade_route` signing the market's maximum rate: the trade pays the base fee and
+/// whatever mark fee its print requires. Since INV-046 finding 6 the signed rate is the ceiling
+/// for both, so this is what signing 0 authorized before.
+#[allow(dead_code)]
+pub(crate) fn execute_trade_route_at_max(
+    env: &mut V16Svm,
+    route: TradeRoute,
+    taker: usize,
+    maker: usize,
+    asset_index: u16,
+    size_q: i128,
+    price: u64,
+) -> Result<TxSuccess, String> {
+    let fee_bps = env.primary_max_trading_fee_bps();
+    execute_trade_route(
+        env,
+        route,
+        taker,
+        maker,
+        asset_index,
+        size_q,
+        price,
+        fee_bps,
+    )
+}
+
 #[allow(dead_code)]
 pub fn verify_attributed_pnl_roundtrip(
     mut seed: [u8; 32],
@@ -34458,22 +34604,13 @@ impl Inv024EpisodeEntitlement {
     }
 }
 
-fn inv024_exact_trade_fee(
-    route: TradeRoute,
-    price: u64,
-    caller_fee_bps: u64,
-) -> Result<u128, String> {
-    // In this fixture the configured market base fee and matcher spread are zero. The fee field on
-    // CPI instructions is the taker's cap; it is not an unsigned LP fee authorization and the
-    // wrapper correctly forwards only the zero market base fee. No-CPI peers both sign the exact
-    // caller fee.
-    let charged_fee_bps = match route {
-        TradeRoute::NoCpi | TradeRoute::BatchNoCpi => caller_fee_bps,
-        TradeRoute::Cpi | TradeRoute::BatchCpi => 0,
-    };
+fn inv024_exact_trade_fee(price: u64, base_fee_bps: u64) -> Result<u128, String> {
+    // Every route charges the market base fee within the rate its signer authorized (INV-046
+    // finding 6). Each episode installs its rate as the base fee and signs exactly that rate; the
+    // matcher spread is zero, so the fill prices at the authenticated mark.
     super::reference_math::mul_div_ceil(
         u128::from(price),
-        u128::from(charged_fee_bps),
+        u128::from(base_fee_bps),
         u128::from(MAX_MARGIN_BPS),
     )
 }
@@ -34527,11 +34664,10 @@ pub fn verify_multi_episode_entitlement_history(
 
     fn apply_fee(
         ledgers: &mut [Inv024EpisodeEntitlement; 2],
-        route: TradeRoute,
         price: u64,
         fee_bps: u64,
     ) -> Result<u128, String> {
-        let fee = inv024_exact_trade_fee(route, price, fee_bps)?;
+        let fee = inv024_exact_trade_fee(price, fee_bps)?;
         for ledger in ledgers {
             ledger.disclosed_fees = ledger
                 .disclosed_fees
@@ -34585,6 +34721,10 @@ pub fn verify_multi_episode_entitlement_history(
     ];
     assert_episode_claims("INV-024 initialized", &env, &ledgers)?;
 
+    // Every route charges the market base fee within its signed rate (INV-046 finding 6), so each
+    // episode installs its rate as the base fee.
+    env.update_trade_fee_policy(FEE_BPS_0)
+        .map_err(|error| format!("INV-024 episode-one fee policy: {error}"))?;
     // Episode one: A is long and earns exactly 100,000 atoms.
     execute_trade_route(
         &mut env,
@@ -34597,7 +34737,7 @@ pub fn verify_multi_episode_entitlement_history(
         FEE_BPS_0,
     )
     .map_err(|error| format!("INV-024 episode-one open {:?}: {error}", routes[0]))?;
-    apply_fee(&mut ledgers, routes[0], PRICE_0, FEE_BPS_0)?;
+    apply_fee(&mut ledgers, PRICE_0, FEE_BPS_0)?;
     assert_episode_claims("INV-024 episode-one open", &env, &ledgers)?;
 
     env.warp_to_slot(2);
@@ -34626,7 +34766,7 @@ pub fn verify_multi_episode_entitlement_history(
         FEE_BPS_0,
     )
     .map_err(|error| format!("INV-024 episode-one close {:?}: {error}", routes[1]))?;
-    apply_fee(&mut ledgers, routes[1], PRICE_1, FEE_BPS_0)?;
+    apply_fee(&mut ledgers, PRICE_1, FEE_BPS_0)?;
     assert_episode_claims("INV-024 episode-one close", &env, &ledgers)?;
     env.convert_released_pnl(ACCOUNT_A, EPISODE_PNL as u128)
         .map_err(|error| format!("INV-024 episode-one conversion: {error}"))?;
@@ -34634,6 +34774,8 @@ pub fn verify_multi_episode_entitlement_history(
 
     // Episode two reverses A's side and the winner, so aggregate cancellation cannot hide a
     // per-owner attribution error from either episode.
+    env.update_trade_fee_policy(FEE_BPS_1)
+        .map_err(|error| format!("INV-024 episode-two fee policy: {error}"))?;
     execute_trade_route(
         &mut env,
         routes[2],
@@ -34645,7 +34787,7 @@ pub fn verify_multi_episode_entitlement_history(
         FEE_BPS_1,
     )
     .map_err(|error| format!("INV-024 episode-two open {:?}: {error}", routes[2]))?;
-    apply_fee(&mut ledgers, routes[2], PRICE_1, FEE_BPS_1)?;
+    apply_fee(&mut ledgers, PRICE_1, FEE_BPS_1)?;
     assert_episode_claims("INV-024 episode-two open", &env, &ledgers)?;
 
     env.warp_to_slot(3);
@@ -34674,7 +34816,7 @@ pub fn verify_multi_episode_entitlement_history(
         FEE_BPS_1,
     )
     .map_err(|error| format!("INV-024 episode-two close {:?}: {error}", routes[3]))?;
-    apply_fee(&mut ledgers, routes[3], PRICE_2, FEE_BPS_1)?;
+    apply_fee(&mut ledgers, PRICE_2, FEE_BPS_1)?;
     assert_episode_claims("INV-024 episode-two close", &env, &ledgers)?;
     env.convert_released_pnl(ACCOUNT_B, EPISODE_PNL as u128)
         .map_err(|error| format!("INV-024 episode-two conversion: {error}"))?;

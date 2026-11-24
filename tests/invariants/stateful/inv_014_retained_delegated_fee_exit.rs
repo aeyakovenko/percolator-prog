@@ -426,7 +426,9 @@ fn v16_program_retained_fee_relaxation_must_precede_exit_and_roll_back_with_it()
                 if exit_first {
                     env.trade_no_cpi(TAKER, LP, ASSET, -QUANTITY, PRICE, SIGNED_BPS)
                         .unwrap();
-                    fees += fee_atoms(QUANTITY, SIGNED_BPS);
+                    // The bilateral exit pays the live hiked policy, within its signed rate
+                    // (INV-046 finding 6).
+                    fees += fee_atoms(QUANTITY, LP_CAP + 1);
                     check(&env, 0, fees, &paid);
                     // Consuming the exit independently makes the policy prefix provisional.
                     reject(&mut env, early, 4, PercolatorError::EngineStale, true);
@@ -753,7 +755,8 @@ fn v16_program_retained_lp_fee_cap_preserves_bilateral_and_delegated_exits() {
                     .land_retained(alternatives[chosen].clone())
                     .unwrap_or_else(|error| panic!("{label}: retained exit failed: {error}"));
                 peak_cu = peak_cu.max(success.compute_units);
-                let fee = fee_atoms(quantity, if is_cpi(route) { policy } else { SIGNED_BPS });
+                // Every route is charged the live policy within the signed rate (INV-046 finding 6).
+                let fee = fee_atoms(quantity, policy);
                 assert!(fee > 0);
                 check(&env, 0, fee, &paid);
                 for (index, actor) in [TAKER, LP].into_iter().enumerate() {

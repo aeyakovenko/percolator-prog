@@ -232,12 +232,12 @@ fn run_retained_handoff_impl(
             trader_b,
             POS_SCALE as i128,
             900_000,
-            0,
+            env.max_trading_fee_bps(),
         )
     });
     let required = (2 * 100 * u128::from(ENTRY) * 77).div_ceil(10_000);
-    let trade_bps = (required * 10_000).div_ceil(2 * u128::from(ACCEPTED_PRINT));
-    let paid = fee(POS_SCALE, ACCEPTED_PRINT, trade_bps);
+    let trade_bps = (required * 10_000).div_ceil(2 * u128::from(FEE_BASIS));
+    let paid = fee(POS_SCALE, FEE_BASIS, trade_bps);
     let discovery = 2 * paid;
     let mut initial_values = FUNDS.map(i128::from);
     initial_values[2] -= paid as i128;

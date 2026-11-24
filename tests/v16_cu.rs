@@ -2022,6 +2022,13 @@ impl V16CuEnv {
         state::read_market(&account.data).unwrap()
     }
 
+    /// The market's maximum trading fee rate. Since INV-046 finding 6 the rate a trade signs is
+    /// its ceiling for the market base fee plus any mark-movement fee, so a trade that may pay
+    /// whatever mark fee its print requires signs this rate (what signing 0 allowed before).
+    fn max_trading_fee_bps(&self) -> u64 {
+        self.market_state().1.config.max_trading_fee_bps
+    }
+
     fn asset_market_id(&self, asset_index: u16) -> u64 {
         self.market_state().1.assets[asset_index as usize].market_id
     }
@@ -7688,6 +7695,9 @@ fn ewma_no_cpi_fee_and_mark_for_reported_price(
         funded_no_cpi_reported_price_pair(&mut env, 3_000_000_000);
     let insurance_before = env.market_state().1.insurance;
     let size_q = (1000u128 * POS_SCALE) as i128;
+    // The signers authorize the market's maximum rate: the 100-bps base fee plus the mark fee the
+    // print requires (INV-046 finding 6: the signed rate caps both).
+    let fee_bps = env.max_trading_fee_bps();
     env.svm.expire_blockhash();
     try_no_cpi_reported_price_trade_with_cu(
         &mut env,
@@ -7698,7 +7708,7 @@ fn ewma_no_cpi_fee_and_mark_for_reported_price(
         account_b,
         size_q,
         reported_price,
-        100,
+        fee_bps,
     )
     .unwrap_or_else(|err| {
         panic!("{path:?}: no-CPI EWMA trade with reported_price={reported_price} failed: {err}")
@@ -7916,6 +7926,8 @@ fn assert_no_cpi_extreme_reported_price_caps_paid_ewma_move(
     let insurance_before = env.market_state().1.insurance;
 
     env.svm.expire_blockhash();
+    // Both signers authorize the market's maximum rate (INV-046 finding 6: the signed rate caps
+    // base plus mark fee, so signing 0 would forbid any paid move).
     let trade = try_no_cpi_reported_price_trade_with_cu(
         &mut env,
         path,
@@ -7925,7 +7937,7 @@ fn assert_no_cpi_extreme_reported_price_caps_paid_ewma_move(
         account_b,
         SIZE_Q,
         reported_price,
-        0,
+        MAX_FEE_BPS,
     );
     assert!(
         trade.is_ok(),
@@ -7943,7 +7955,8 @@ fn assert_no_cpi_extreme_reported_price_caps_paid_ewma_move(
         group.insurance > insurance_before,
         "{path:?}: capped EWMA movement still charges a fee"
     );
-    let trade_notional = SIZE_Q.unsigned_abs() * accepted_price as u128 / POS_SCALE;
+    // The fill is valued at the effective price, MARK (INV-046 finding 6).
+    let trade_notional = SIZE_Q.unsigned_abs() * MARK as u128 / POS_SCALE;
     let externality_notional = trade_notional * 2;
     let paid_move_bps = (group.insurance - insurance_before) * 10_000 / externality_notional;
     assert!(
@@ -8312,7 +8325,7 @@ fn assert_cpi_matcher_price_caps_paid_ewma_move(path: CpiEwmaTradePath, size_q: 
             matcher_delegate,
             0,
             size_q,
-            0,
+            MAX_FEE_BPS,
         ),
         CpiEwmaTradePath::Batch => env.send(
             env.batch_trade_cpi_ix(
@@ -8322,7 +8335,7 @@ fn assert_cpi_matcher_price_caps_paid_ewma_move(path: CpiEwmaTradePath, size_q: 
                     asset_index: 0,
                     market_id,
                     size_q,
-                    fee_bps: 0,
+                    fee_bps: MAX_FEE_BPS,
                     limit_price: 0,
                 }],
             ),
@@ -8347,8 +8360,9 @@ fn assert_cpi_matcher_price_caps_paid_ewma_move(path: CpiEwmaTradePath, size_q: 
     let mark_move_bps = percolator_prog::policy_v16::price_move_bps_ceil(MARK, cfg.mark_ewma_e6)
         .expect("actual mark move bps");
     let size_abs = size_q.unsigned_abs();
+    // The fill is valued at the effective price, MARK (INV-046 finding 6).
     let trade_notional = size_abs
-        .checked_mul(accepted_price as u128)
+        .checked_mul(MARK as u128)
         .and_then(|num| num.checked_add(POS_SCALE - 1))
         .expect("trade notional numerator")
         / POS_SCALE;
@@ -8384,6 +8398,11 @@ fn assert_cpi_matcher_price_caps_paid_ewma_move(path: CpiEwmaTradePath, size_q: 
 
 fn assert_underfunded_ewma_exit_uses_collected_fee(path: NoCpiReportedPricePath) {
     const MARK: u64 = 1_000_000;
+    // A fee is valued at the effective price (INV-046 finding 6), so at the 10_000-bps maximum a
+    // side's fee is the fill's value at that price. The authority's higher average leaves the long
+    // healthy at its 100% maintenance boundary with its gain still in PnL: its capital stays at the
+    // opening deposit, below that fee.
+    const PUSHED_MARK: u64 = 1_999_999;
     const SIZE_Q: i128 = POS_SCALE as i128;
 
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
@@ -8397,6 +8416,9 @@ fn assert_underfunded_ewma_exit_uses_collected_fee(path: NoCpiReportedPricePath)
     env.configure_ewma_mark_with_cu(0, MARK, 1, 0);
     let (long_owner, long, short_owner, short) =
         funded_no_cpi_reported_price_pair(&mut env, MARK as u128);
+    // Every trade signs the market's maximum rate, so the exit may pay whatever mark fee its print
+    // requires (INV-046 finding 6: the signed rate caps base plus mark fee).
+    let max_fee_bps = env.max_trading_fee_bps();
 
     try_no_cpi_reported_price_trade_with_cu(
         &mut env,
@@ -8407,14 +8429,14 @@ fn assert_underfunded_ewma_exit_uses_collected_fee(path: NoCpiReportedPricePath)
         short,
         SIZE_Q,
         MARK,
-        0,
+        max_fee_bps,
     )
     .unwrap_or_else(|err| panic!("{path:?}: setup open failed: {err}"));
 
-    // A legitimate oracle-authority update and public cranks leave the long healthy at the exact
-    // maintenance boundary, but with less capital than the maximum fee on a full exit.
+    // A legitimate oracle-authority update and public cranks leave the long healthy, but with less
+    // capital than its share of the maximum fee on a full exit.
     env.svm.warp_to_slot(10);
-    env.push_ewma_mark_with_cu(10, 1);
+    env.push_ewma_mark_with_cu(10, PUSHED_MARK);
     env.svm.expire_blockhash();
     env.crank_steps_after_market_catchup(
         long,
@@ -8439,7 +8461,9 @@ fn assert_underfunded_ewma_exit_uses_collected_fee(path: NoCpiReportedPricePath)
         .effective_price
         .checked_mul(2)
         .expect("one-slot upper price envelope");
-    let requested_fee_per_side = reported_exit_price as u128;
+    // At the 10_000-bps maximum a side's quoted fee is the whole fill value at the effective price
+    // (INV-046 finding 6), not at the reported print.
+    let requested_fee_per_side = group_before.assets[0].effective_price as u128;
     let long_capital = env.portfolio_state(long).capital.get();
     assert!(
         0 < long_capital && long_capital < requested_fee_per_side,
@@ -8456,7 +8480,7 @@ fn assert_underfunded_ewma_exit_uses_collected_fee(path: NoCpiReportedPricePath)
         short,
         -SIZE_Q,
         reported_exit_price,
-        0,
+        max_fee_bps,
     );
     assert!(
         exit.is_ok(),
@@ -8538,7 +8562,8 @@ fn assert_underfunded_cpi_ewma_exit_uses_collected_fee(path: CpiEwmaTradePath) {
         open_delegate,
         0,
         -SIZE_Q,
-        0,
+        // The taker signs the market's maximum rate (INV-046 finding 6), as on the exit below.
+        env.max_trading_fee_bps(),
     )
     .unwrap_or_else(|err| panic!("{path:?}: setup short open failed: {err}"));
 
@@ -8586,7 +8611,10 @@ fn assert_underfunded_cpi_ewma_exit_uses_collected_fee(path: CpiEwmaTradePath) {
         accepted_exit_price, expected_matcher_price,
         "{path:?}: wide matcher ask must remain inside the one-segment engine envelope"
     );
-    let requested_fee_per_side = accepted_exit_price as u128;
+    // At the 10_000-bps maximum a side's quoted fee is the whole fill value at the effective price
+    // (INV-046 finding 6), not at the accepted matcher print.
+    let requested_fee_per_side = group_before.assets[0].effective_price as u128;
+    let max_fee_bps = env.max_trading_fee_bps();
     let taker_capital = env.portfolio_state(taker).capital.get();
     assert!(
         0 < taker_capital && taker_capital < requested_fee_per_side,
@@ -8605,7 +8633,7 @@ fn assert_underfunded_cpi_ewma_exit_uses_collected_fee(path: CpiEwmaTradePath) {
             exit_delegate,
             0,
             SIZE_Q,
-            0,
+            max_fee_bps,
         ),
         CpiEwmaTradePath::Batch => env.send(
             env.batch_trade_cpi_ix(
@@ -8615,7 +8643,7 @@ fn assert_underfunded_cpi_ewma_exit_uses_collected_fee(path: CpiEwmaTradePath) {
                     asset_index: 0,
                     market_id: group_before.assets[0].market_id,
                     size_q: SIZE_Q,
-                    fee_bps: 0,
+                    fee_bps: max_fee_bps,
                     limit_price: 0,
                 }],
             ),

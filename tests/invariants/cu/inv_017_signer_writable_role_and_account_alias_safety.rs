@@ -2568,7 +2568,7 @@ fn inv017_create_unbudgeted_insurance(env: &mut V16CuEnv) {
         short,
         POS_SCALE as i128,
         RAW_UP,
-        0,
+        env.max_trading_fee_bps(),
     );
     env.crank(
         long,
@@ -2605,7 +2605,7 @@ fn inv017_create_unbudgeted_insurance(env: &mut V16CuEnv) {
         short,
         -(POS_SCALE as i128),
         1,
-        0,
+        env.max_trading_fee_bps(),
     );
     let released = env.portfolio_state(long).pnl.get();
     if released > 0 {

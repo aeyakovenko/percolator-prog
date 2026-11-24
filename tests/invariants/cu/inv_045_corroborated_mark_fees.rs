@@ -109,13 +109,13 @@ fn v16_program_corroborated_paid_mark_only_distributes_new_liquidation_fees() {
                 trader_b,
                 POS_SCALE as i128,
                 980_000,
-                0,
+                env.max_trading_fee_bps(),
             ));
             // Elapsed discovery accepts 96 bps; alpha=4/5 makes a 7,680-atom mark move.
             // The preexisting 100-unit OI pays the rounded 77-bps externality bilaterally.
             let required = (2 * 100 * u128::from(ENTRY) * 77).div_ceil(10_000);
-            let trade_bps = (required * 10_000).div_ceil(2 * u128::from(ACCEPTED_PRINT));
-            let per_trader_fee = fee(POS_SCALE, ACCEPTED_PRINT, trade_bps);
+            let trade_bps = (required * 10_000).div_ceil(2 * u128::from(FEE_BASIS));
+            let per_trader_fee = fee(POS_SCALE, FEE_BASIS, trade_bps);
             let movement_fee = 2 * per_trader_fee;
             let mut expected = FUNDS.map(i128::from);
             expected[2] -= per_trader_fee as i128;

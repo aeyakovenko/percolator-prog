@@ -558,7 +558,9 @@ This section describes intent and operational ordering, not argument-by-argument
   permissionless crank likewise holds back a changed oracle reading or EWMA mark on such an asset: it
   accrues toward the target in force, and a later crank, at most one window behind, applies the
   reading. A trade print that moves the mark is staged as before and pays the mark-movement fee for
-  the whole move.
+  the move of the average it makes. A hybrid's switch to its trade average when its soft-stale
+  window passes is not held back: every writer stages it at once, so whether a trade or a crank
+  reaches a lagging asset first does not change the mark's path (INV-046).
 
 ### Insurance management
 - **WithdrawInsuranceAsset** (tag 57)
@@ -707,6 +709,7 @@ EwmaMark is the smoothed authority-mark path for markets that use an internal ma
 - **Premium-based funding**: permissionless cranks compute funding from the spread between mark and index (premium), clamp it to `max_abs_funding_e9_per_slot`, and pass that internally to the engine. The crank instruction's funding-rate field is non-authoritative and must remain zero. A published report re-anchors the funding mark of a fresh hybrid asset to the accepted price path; over slots in which no report was published the mark of the last one stays in force. How often reports are published is therefore an input to funding: over a gap the side on the wrong side of the stale mark pays the premium, at most `max_abs_funding_e9_per_slot` of the notional per slot, and anyone can end the gap by publishing.
 - **Rate-limited index smoothing**: index price updates are clamped per slot via `clamp_toward_with_dt`, preventing instant mark-to-index jumps. When `dt = 0` or cap is zero, the function returns `index` unchanged (no movement).
 - **Execution-price consent**: `TradeCpi` and `TradeNoCpi` both allow counterparties to agree on an execution price. The wrapper clamps mark/index impact and charges dynamic mark-movement fees; it does not reject solely because the agreed execution is away from the current effective price.
+- **What a trade costs**: every route charges its fee on the engine's effective price, not on the agreed price or the trade average, at the market's base rate plus any mark-movement fee, and never above the rate the payer authorized: the signed `fee_bps` on the no-CPI routes, the smaller of the taker's signed `fee_bps` and the LP's configured matcher cap on the CPI routes. A print whose mark fee would exceed that rate moves the average only as far as the fee collected pays for (INV-046).
 - **Bilateral no-CPI trading**: `TradeNoCpi` is available in EwmaMark and external-oracle markets when both account owners sign. `TradeCpi` adds LP matcher-config binding, but the price-flexibility policy is the same.
 
 ### Hybrid after-hours mode

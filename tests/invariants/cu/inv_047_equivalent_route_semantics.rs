@@ -342,6 +342,9 @@ fn v16_program_fee_charged_close_matches_single_and_one_leg_batch_routes() {
             0,
         );
     }
+    // INV-046 (finding 6): a close is charged the market base fee and its signed rate is only the
+    // signers' ceiling, so the base fee is the 333 bps the closes sign (set after the fee-free opens).
+    env.update_trade_fee_policy_with_cu(FEE_BPS);
 
     // Normalize only by excluding the network fee payer; retain every economic account byte.
     let tracked = [
@@ -1380,6 +1383,9 @@ fn v16_bpf_tradenocpi_executes_and_is_bounded() {
     let short_account = env.create_portfolio(&short_owner);
     env.deposit(&long_owner, long_account, 1_000_000);
     env.deposit(&short_owner, short_account, 1_000_000);
+    // INV-046 (finding 6): the trade is charged the market base fee and its signed rate is only the
+    // signers' ceiling, so the base fee is the 100 bps the trade signs.
+    env.update_trade_fee_policy_with_cu(100);
 
     let trade_cu = env.trade_with_cu(
         &long_owner,

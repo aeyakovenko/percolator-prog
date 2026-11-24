@@ -290,7 +290,9 @@ fn v16_generated_retained_policy_routes_preserve_paid_earnings_across_funded_ret
                 );
                 assert_eq!(bincode::serialize(&retained).unwrap(), wire);
                 h.deliver(retained, None, [1, 0, usize::from(cpi)]);
-                book.fee = (1_050 * 105 * if cpi { restored_bps } else { CAP }).div_ceil(10_000);
+                // Every route is charged the restored policy within the signed CAP (INV-046
+                // finding 6); a bilateral close no longer pays its signed rate.
+                book.fee = (1_050 * 105 * restored_bps).div_ceil(10_000);
                 book.closed = true;
                 book.check(&h);
                 assert_eq!(h.world.env.control_sequences(0), controls);

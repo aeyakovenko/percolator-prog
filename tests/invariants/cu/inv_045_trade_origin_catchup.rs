@@ -15,6 +15,9 @@ mod corroborated_mark_fees;
 const ENTRY: u64 = 1_000_000;
 const ACCEPTED_PRINT: u64 = 990_400;
 const MARK: u64 = 992_320;
+/// The price a discovery trade's fee is valued at: the effective price, ENTRY here, never the
+/// accepted print (INV-046 finding 6).
+const FEE_BASIS: u64 = ENTRY;
 const FUNDS: [u64; 5] = [5_100_000, 100_000_000, 10_000_000, 10_000_000, 1_000];
 
 fn fund(env: &mut V16CuEnv, owner: &Keypair, amount: u64) -> (Pubkey, Pubkey) {
@@ -193,7 +196,7 @@ fn v16_program_trade_origin_liquidation_prices_and_entitlements_survive_catchup_
                         trader_b,
                         POS_SCALE as i128,
                         raw_print,
-                        0,
+                        env.max_trading_fee_bps(),
                     ));
                     assert_eq!(
                         [target, peer, keeper].map(|key| env.svm.get_account(&key)),
@@ -207,11 +210,12 @@ fn v16_program_trade_origin_liquidation_prices_and_entitlements_survive_catchup_
                     // Four elapsed slots accept 96 bps; alpha=4/5 leaves a 7,680-atom move.
                     // Existing 100-unit OI pays a bilateral 77-bps rounded externality.
                     let required = (2 * 100 * u128::from(ENTRY) * 77).div_ceil(10_000);
-                    let trade_bps = (required * 10_000).div_ceil(2 * u128::from(ACCEPTED_PRINT));
-                    let per_trader_fee = fee(POS_SCALE, ACCEPTED_PRINT, trade_bps);
+                    let trade_bps = (required * 10_000).div_ceil(2 * u128::from(FEE_BASIS));
+                    let per_trader_fee = fee(POS_SCALE, FEE_BASIS, trade_bps);
                     let movement_fee = 2 * per_trader_fee;
                     assert!(movement_fee > 0);
                     assert_ne!(per_trader_fee, fee(POS_SCALE, raw_print, trade_bps));
+                    assert_ne!(per_trader_fee, fee(POS_SCALE, ACCEPTED_PRINT, trade_bps));
                     assert_eq!(staged.insurance, movement_fee);
                     let mut expected = FUNDS.map(i128::from);
                     expected[2] -= per_trader_fee as i128;

@@ -773,16 +773,9 @@ fn v16_program_retained_fee_bundle_route_product_rolls_back_authorized_prefix() 
                             .unwrap_or_else(|error| panic!("{label}: retained retry: {error}"))
                             .compute_units,
                     );
-                    let fees = [0, 1].map(|pair| {
-                        fee_atoms(
-                            sizes[pair],
-                            if is_cpi(routes[pair]) {
-                                CAPS[1]
-                            } else {
-                                CAPS[pair]
-                            },
-                        )
-                    });
+                    // Every route is charged the restored live policy CAPS[1], within each
+                    // pair's signed CAPS[pair] (INV-046 finding 6).
+                    let fees = [0, 1].map(|pair| fee_atoms(sizes[pair], CAPS[1]));
                     for pair in 0..2 {
                         assert!(fees[pair] > 0 && fees[pair] <= fee_atoms(sizes[pair], CAPS[pair]));
                     }

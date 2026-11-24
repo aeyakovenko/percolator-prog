@@ -290,23 +290,21 @@ fn inv024_run_payout_prefix_history(
             -(POS_SCALE as i128)
         };
         let fee_bps = [7, 13][round];
+        // Every route charges the market base fee within its signed rate (INV-046 finding 6), so
+        // the round's rate is installed as the base fee and every route, CPI included, pays it.
+        step!("trade fee policy", env.update_trade_fee_policy(fee_bps), {});
         for closing in [false, true] {
             let route = routes[round * 2 + usize::from(closing)];
             let price = PRICES[round + usize::from(closing)];
             if matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
                 step!("matcher authorization", env.set_matcher_config(1, 1), {});
             }
-            // CPI has a taker cap, not a bilateral fee. This fixture's base fee
-            // and matcher spread are zero; only signed no-CPI fees are charged.
-            let fee = if matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
-                support::reference_math::mul_div_ceil(
-                    u128::from(price),
-                    u128::from(fee_bps),
-                    10_000,
-                )?
-            } else {
-                0
-            };
+            // The matcher spread is zero, so the fill prices at the authenticated mark.
+            let fee = support::reference_math::mul_div_ceil(
+                u128::from(price),
+                u128::from(fee_bps),
+                10_000,
+            )?;
             step!(
                 "trade",
                 execute_trade_route(

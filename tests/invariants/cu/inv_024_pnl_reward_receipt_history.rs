@@ -354,6 +354,15 @@ fn v16_program_pnl_rewards_and_receipts_preserve_history_wide_owner_claims() {
                             env.update_maintenance_fee_policy_with_cu(share),
                             {}
                         );
+                        // INV-046 (finding 6): a trade is charged the market base fee and the
+                        // signed rate is only the signers' ceiling, so the round's rate is set as
+                        // the market's base fee.
+                        step!(
+                            "trade fee policy",
+                            [],
+                            env.update_trade_fee_policy_with_cu(fee_bps),
+                            {}
+                        );
                         let open_fee =
                             (u128::from(PRICES[round]) * u128::from(fee_bps)).div_ceil(10_000);
                         step!(
@@ -786,6 +795,7 @@ fn v16_program_pnl_rewards_and_receipts_preserve_history_wide_owner_claims() {
         ),
         (16, 16, 24, 64, 16, 16)
     );
-    assert_eq!(checked_routes, 664);
+    // 664 routes plus one trade-fee policy step per round (16 worlds x 2 rounds).
+    assert_eq!(checked_routes, 696);
     eprintln!("INV-024 composed PnL/reward/receipt history: {worlds} worlds, {checked_routes} checked routes, {conversions} conversions, {live_payouts} live payouts, {terminal_payouts} terminal payouts, {terminal_preparations} expiry preparations, {receipt_retries} receipt retries; max CU {max_cu}");
 }

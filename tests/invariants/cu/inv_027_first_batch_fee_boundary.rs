@@ -56,6 +56,9 @@ fn v16_program_first_batch_admission_accounts_each_rounded_fee_after_maintenance
                 for asset in 0..2 {
                     env.configure_auth_mark_for_asset_as_admin(asset, START, PRICE);
                 }
+                // INV-046 (finding 6): legs are charged the market base fee and the signed rate is
+                // only the signers' ceiling, so the base fee is the rate the legs sign.
+                env.update_trade_fee_policy_with_cu(TRADE_BPS);
                 let owners = [Keypair::new(), Keypair::new()];
                 let portfolios = owners
                     .each_ref()

@@ -358,6 +358,12 @@ fn v16_program_fee_bearing_recovery_reconciles_raw_stocks_through_terminal_close
         "asset-1 backing",
         env.top_up_backing_bucket_from_admin_token_with_cu(tokens[2], 3, BACKING[1], 100)
     );
+    // INV-046 (finding 6): a trade is charged the market base fee and the signed rate is only the
+    // signers' ceiling, so the market's base fee is set to the rate the trade signs.
+    step!(
+        "trade fee policy",
+        env.update_trade_fee_policy_with_cu(FEE_BPS)
+    );
     expected.capital = DEPOSITS.map(|amount| Some(amount - TRADE_FEE));
     expected.insurance[1] = 2 * TRADE_FEE;
     step!(

@@ -4257,7 +4257,16 @@ impl V16Svm {
         size_q: i128,
         exec_price: u64,
     ) -> Transaction {
-        self.build_retained_no_cpi_trade_with_fee(taker, maker, asset_index, size_q, exec_price, 0)
+        // Signs the market's maximum rate (see `primary_max_trading_fee_bps`).
+        let fee_bps = self.primary_max_trading_fee_bps();
+        self.build_retained_no_cpi_trade_with_fee(
+            taker,
+            maker,
+            asset_index,
+            size_q,
+            exec_price,
+            fee_bps,
+        )
     }
 
     pub fn build_retained_convert_released_pnl(
@@ -4614,6 +4623,53 @@ impl V16Svm {
         limit_price: u64,
         backing_fee_cap_bps: u16,
     ) -> Transaction {
+        // The taker signs the market's maximum rate (see `primary_max_trading_fee_bps`); the LP's
+        // configured matcher cap still bounds it.
+        let fee_bps = self.primary_max_trading_fee_bps();
+        self.build_retained_cpi_trade_with_fee_and_backing_fee_cap(
+            taker,
+            maker,
+            asset_index,
+            size_q,
+            limit_price,
+            fee_bps,
+            backing_fee_cap_bps,
+        )
+    }
+
+    /// A retained TradeCpi whose taker signs `fee_bps` exactly, the ceiling for the market base
+    /// fee plus any mark fee (INV-046 finding 6).
+    pub fn build_retained_cpi_trade_with_fee(
+        &mut self,
+        taker: usize,
+        maker: usize,
+        asset_index: u16,
+        size_q: i128,
+        limit_price: u64,
+        fee_bps: u64,
+    ) -> Transaction {
+        self.build_retained_cpi_trade_with_fee_and_backing_fee_cap(
+            taker,
+            maker,
+            asset_index,
+            size_q,
+            limit_price,
+            fee_bps,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_retained_cpi_trade_with_fee_and_backing_fee_cap(
+        &mut self,
+        taker: usize,
+        maker: usize,
+        asset_index: u16,
+        size_q: i128,
+        limit_price: u64,
+        fee_bps: u64,
+        backing_fee_cap_bps: u16,
+    ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let account_a_portfolio_id = self.primary_portfolio_id(taker);
         let account_a_position_epoch = self.primary_portfolio_position_epoch(taker);
@@ -4632,7 +4688,7 @@ impl V16Svm {
                 asset_index,
                 market_id,
                 size_q,
-                fee_bps: 0,
+                fee_bps,
                 limit_price,
                 backing_fee_cap_bps,
             },
@@ -4657,13 +4713,15 @@ impl V16Svm {
         size_q: i128,
         exec_price: u64,
     ) -> Transaction {
+        // Signs the market's maximum rate (see `primary_max_trading_fee_bps`).
+        let fee_bps = self.primary_max_trading_fee_bps();
         self.build_retained_batch_no_cpi_trade_with_fee(
             taker,
             maker,
             asset_index,
             size_q,
             exec_price,
-            0,
+            fee_bps,
         )
     }
 
@@ -4717,6 +4775,9 @@ impl V16Svm {
         limit_price: u64,
     ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        // The leg signs the market's maximum rate (see `primary_max_trading_fee_bps`); the LP's
+        // configured matcher cap still bounds it.
+        let fee_bps = self.primary_max_trading_fee_bps();
         let account_a_portfolio_id = self.primary_portfolio_id(taker);
         let account_a_position_epoch = self.primary_portfolio_position_epoch(taker);
         let account_b_portfolio_id = self.primary_portfolio_id(maker);
@@ -4737,7 +4798,7 @@ impl V16Svm {
                     asset_index,
                     market_id,
                     size_q,
-                    fee_bps: 0,
+                    fee_bps,
                     limit_price,
                 }],
             },
@@ -5876,6 +5937,14 @@ impl V16Svm {
 
     pub fn current_slot(&self) -> u64 {
         self.svm.get_sysvar::<Clock>().slot
+    }
+
+    /// The primary market's maximum trading fee rate. Since INV-046 finding 6 a signed `fee_bps`
+    /// is the payer's ceiling for the market base fee plus any mark-movement fee, so the builders
+    /// that take no fee argument sign this rate: such a trade pays the base fee and whatever mark
+    /// fee its print requires, exactly what signing 0 authorized before the ceiling.
+    pub fn primary_max_trading_fee_bps(&self) -> u64 {
+        self.primary_market_state().1.config.max_trading_fee_bps
     }
 
     pub fn primary_market_state(&self) -> (state::WrapperConfigV16, MarketGroupV16) {

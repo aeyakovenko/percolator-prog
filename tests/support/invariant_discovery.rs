@@ -2193,6 +2193,12 @@ pub struct PairedTerminalPayoutEvidence {
     pub control_vault_dust: u128,
     pub reordered_vault_dust: u128,
     pub vault_dust_bound: u128,
+    /// The coalition's own trade fee saved in the reordered world. A fee is valued at the
+    /// effective price when its trade lands (INV-046 finding 6), so a trade ordered before a
+    /// catch-up crank pays at the earlier effective price; insurance, not another user, receives
+    /// less. Zero, with a zero bound, for every evidence that does not opt in.
+    pub coalition_fee_saving: u128,
+    pub coalition_fee_saving_bound: u128,
     pub users_terminal: bool,
     pub terminal_classification: PublicTerminalClassification,
     pub control_public_trace: PublicTraceEvidence,
@@ -2224,6 +2230,10 @@ pub struct ProspectiveAccrualDiscovery {
     /// Terminal vault SPL above insurance (exact-funding rounding dust, #458).
     pub control_vault_dust: u128,
     pub reordered_vault_dust: u128,
+    /// The fee the coalition's stamp saves by landing before the catch-up (INV-046 finding 6:
+    /// a fee is valued at the effective price when its trade lands), and the control world's fee.
+    pub coalition_fee_saving: u128,
+    pub control_stamp_fee: u128,
     pub final_mark: u64,
     pub final_effective_price: u64,
     pub terminal_evidence: PairedTerminalPayoutEvidence,
@@ -3652,18 +3662,24 @@ impl PairedTerminalPayoutEvidence {
         else {
             return false;
         };
-        // Without opted-in dust (both zero, bound zero) this is exact coalition and total
-        // equality. With exact funding the only admitted difference is the coalition's own
-        // bounded payer-side rounding dust that one world leaves in the vault.
+        // Without opted-in dust or fee saving (all zero, bounds zero) this is exact coalition and
+        // total equality. With exact funding the admitted differences are the coalition's own
+        // bounded payer-side rounding dust that one world leaves in the vault, and the bounded
+        // fee its own trade saves by landing at an earlier effective price (INV-046 finding 6).
         victim_payout_loss == 0
             && control_victim == reordered_victim
             && self.control_vault_dust <= self.vault_dust_bound
             && self.reordered_vault_dust <= self.vault_dust_bound
-            && control_coalition.checked_add(self.control_vault_dust)
+            && self.coalition_fee_saving <= self.coalition_fee_saving_bound
+            && control_coalition
+                .checked_add(self.control_vault_dust)
+                .and_then(|value| value.checked_add(self.coalition_fee_saving))
                 == reordered_coalition.checked_add(self.reordered_vault_dust)
             && control_victim.checked_add(control_coalition) == Some(control_total_payout)
             && reordered_victim.checked_add(reordered_coalition) == Some(reordered_total_payout)
-            && control_total_payout.checked_add(self.control_vault_dust)
+            && control_total_payout
+                .checked_add(self.control_vault_dust)
+                .and_then(|value| value.checked_add(self.coalition_fee_saving))
                 == reordered_total_payout.checked_add(self.reordered_vault_dust)
             && self.users_terminal
             && matches!(
@@ -3812,6 +3828,7 @@ fn build_paired_terminal_payout_evidence(
         terminal_rounding_residue_bound,
         [0, 0],
         0,
+        [0, 0],
         users_terminal,
         victim_payout_loss,
         counterparty_payout_gain,
@@ -3822,8 +3839,9 @@ fn build_paired_terminal_payout_evidence(
     )
 }
 
-/// `vault_dust` is `[control, reordered]` terminal vault SPL above insurance. Only bounded-exit
-/// certification admits it, and only as the coalition-side difference (see
+/// `vault_dust` is `[control, reordered]` terminal vault SPL above insurance, and
+/// `coalition_fee_saving` is `[saving, bound]` (see `PairedTerminalPayoutEvidence`). Only
+/// bounded-exit certification admits either, and only as the coalition-side difference (see
 /// `certifies_bounded_exit`).
 fn build_paired_terminal_payout_evidence_with_vault_dust(
     context: &str,
@@ -3832,6 +3850,7 @@ fn build_paired_terminal_payout_evidence_with_vault_dust(
     terminal_rounding_residue_bound: u128,
     vault_dust: [u128; 2],
     vault_dust_bound: u128,
+    coalition_fee_saving: [u128; 2],
     users_terminal: bool,
     victim_payout_loss: u128,
     counterparty_payout_gain: u128,
@@ -3889,6 +3908,8 @@ fn build_paired_terminal_payout_evidence_with_vault_dust(
         control_vault_dust: vault_dust[0],
         reordered_vault_dust: vault_dust[1],
         vault_dust_bound,
+        coalition_fee_saving: coalition_fee_saving[0],
+        coalition_fee_saving_bound: coalition_fee_saving[1],
         users_terminal,
         terminal_classification,
         control_public_trace,
@@ -11066,15 +11087,17 @@ fn discover_trade_fee_consent_violation(
         env.set_matcher_config_with_trade_fee_cap(LP, 1, BASE_FEE_BPS as u16)
             .map_err(|error| format!("bind permissive LP fee cap before taker consent: {error}"))?;
     }
+    // The retained trades are signed before the base fee rises, consenting to no fee at all: the
+    // signed rate is the ceiling for the base fee plus any mark fee (INV-046 finding 6), so 0.
     let retained = match kind {
         FeeConsentKind::RetainedNoCpiBaseFee => {
-            Some(env.build_retained_no_cpi_trade(TAKER, LP, 0, size_q, INITIAL_PRICE))
+            Some(env.build_retained_no_cpi_trade_with_fee(TAKER, LP, 0, size_q, INITIAL_PRICE, 0))
         }
-        FeeConsentKind::RetainedBatchNoCpiBaseFee => {
-            Some(env.build_retained_batch_no_cpi_trade(TAKER, LP, 0, size_q, INITIAL_PRICE))
-        }
+        FeeConsentKind::RetainedBatchNoCpiBaseFee => Some(
+            env.build_retained_batch_no_cpi_trade_with_fee(TAKER, LP, 0, size_q, INITIAL_PRICE, 0),
+        ),
         FeeConsentKind::RetainedCpiTakerBaseFee => {
-            Some(env.build_retained_cpi_trade(TAKER, LP, 0, size_q, 0))
+            Some(env.build_retained_cpi_trade_with_fee(TAKER, LP, 0, size_q, 0, 0))
         }
         _ => None,
     };
@@ -13617,13 +13640,17 @@ fn execute_reported_price_route(
     price: u64,
 ) -> Result<(), String> {
     let market_id = env.primary_market_state().1.assets[0].market_id;
+    // Every route signs the market's maximum rate: the trade pays the base fee and whatever mark
+    // fee its print requires (INV-046 finding 6: the signed rate caps both; 0 would forbid any
+    // paid move).
+    let fee_bps = env.primary_max_trading_fee_bps();
     match route {
         ProspectiveAccrualRoute::NoCpi => env
-            .trade_no_cpi(taker, maker, 0, size_q, price, 0)
+            .trade_no_cpi(taker, maker, 0, size_q, price, fee_bps)
             .map(|_| ())
             .map_err(|error| format!("reported-price trade: {error}")),
         ProspectiveAccrualRoute::Cpi => env
-            .trade_cpi(taker, maker, 0, size_q, 0, 0)
+            .trade_cpi(taker, maker, 0, size_q, fee_bps, 0)
             .map(|_| ())
             .map_err(|error| format!("CPI reported-price trade: {error}")),
         ProspectiveAccrualRoute::BatchNoCpi => env
@@ -13635,7 +13662,7 @@ fn execute_reported_price_route(
                     market_id,
                     size_q,
                     exec_price: price,
-                    fee_bps: 0,
+                    fee_bps,
                 }],
             )
             .map(|_| ())
@@ -13648,7 +13675,7 @@ fn execute_reported_price_route(
                     asset_index: 0,
                     market_id,
                     size_q,
-                    fee_bps: 0,
+                    fee_bps,
                     limit_price: 0,
                 }],
             )
@@ -13674,9 +13701,13 @@ fn execute_discovery_trade_route(
         env.ensure_primary_matcher_enabled(maker)
             .map_err(|error| format!("refresh discovery CPI matcher authorization: {error}"))?;
     }
+    // Every route signs the market's maximum rate: the trade pays the base fee and whatever mark
+    // fee its print requires (INV-046 finding 6: the signed rate caps both; 0 would forbid any
+    // paid move).
+    let fee_bps = env.primary_max_trading_fee_bps();
     match route {
         DiscoveryTradeRoute::NoCpi => env
-            .trade_no_cpi(taker, maker, asset_index, size_q, price, 0)
+            .trade_no_cpi(taker, maker, asset_index, size_q, price, fee_bps)
             .map(|_| ()),
         DiscoveryTradeRoute::BatchNoCpi => env
             .batch_trade_no_cpi(
@@ -13687,12 +13718,12 @@ fn execute_discovery_trade_route(
                     market_id,
                     size_q,
                     exec_price: price,
-                    fee_bps: 0,
+                    fee_bps,
                 }],
             )
             .map(|_| ()),
         DiscoveryTradeRoute::Cpi => env
-            .trade_cpi(taker, maker, asset_index, size_q, 0, 0)
+            .trade_cpi(taker, maker, asset_index, size_q, fee_bps, 0)
             .map(|_| ()),
         DiscoveryTradeRoute::BatchCpi => env
             .batch_trade_cpi(
@@ -13702,7 +13733,7 @@ fn execute_discovery_trade_route(
                     asset_index,
                     market_id,
                     size_q,
-                    fee_bps: 0,
+                    fee_bps,
                     limit_price: 0,
                 }],
             )
@@ -13728,13 +13759,14 @@ fn build_retained_discovery_trade(
             .map_err(|error| format!("refresh retained CPI matcher authorization: {error}"))?;
     }
     match route {
+        // Signs the market's maximum rate, as the default builders of the other routes do.
         DiscoveryTradeRoute::NoCpi => Ok(env.build_retained_no_cpi_trade_with_fee_and_backing_cap(
             taker,
             maker,
             asset_index,
             size_q,
             price,
-            0,
+            env.primary_max_trading_fee_bps(),
             backing_fee_cap_bps,
         )),
         DiscoveryTradeRoute::BatchNoCpi => {
@@ -13763,6 +13795,8 @@ struct ProspectiveAccrualWorld {
     f_short_num: i128,
     total_payout: u128,
     vault_dust: u128,
+    /// Terminal insurance: here exactly the fee the stamp trade paid.
+    insurance_residual: u128,
     users_terminal: bool,
     victim_destination: Pubkey,
     coalition_destinations: [Pubkey; 3],
@@ -13945,6 +13979,7 @@ fn run_prospective_accrual_world(
         f_short_num: group_after.assets[0].f_short_num,
         total_payout,
         vault_dust,
+        insurance_residual: terminal_group.insurance,
         users_terminal,
         victim_destination,
         coalition_destinations,
@@ -13955,6 +13990,17 @@ fn run_prospective_accrual_world(
 /// Exact funding (#458) floors each funded leg's settlement once, so the four funded legs of a
 /// prospective-accrual world can leave at most one atom each of payer-up/receiver-down dust.
 pub const PROSPECTIVE_FUNDING_DUST_BOUND: u128 = 4;
+
+/// How far the catch-up moves the effective price in a prospective-accrual world: 101 elapsed
+/// slots at the 1-bps per-slot cap. A stamp that lands before the catch-up is valued at the earlier
+/// effective price (INV-046 finding 6), so its fee is lower by at most this fraction of the
+/// control fee, plus one ceiling atom per side.
+pub const PROSPECTIVE_CATCHUP_LAG_BPS: u128 = 101;
+
+/// The largest fee the coalition's stamp can save by landing before the catch-up.
+pub fn prospective_stamp_fee_saving_bound(control_stamp_fee: u128) -> u128 {
+    (control_stamp_fee * PROSPECTIVE_CATCHUP_LAG_BPS).div_ceil(10_000) + 2
+}
 
 fn discover_one_prospective_accrual_violation(
     mut seed: [u8; 32],
@@ -13989,6 +14035,11 @@ fn discover_one_prospective_accrual_violation(
         .coalition_payout
         .checked_sub(control.coalition_payout)
         .ok_or_else(|| "trade-first ordering decreased coalition payout".to_string())?;
+    // The coalition's stamp fee is the only insurance either world collects.
+    let coalition_fee_saving = control
+        .insurance_residual
+        .checked_sub(reordered.insurance_residual)
+        .ok_or_else(|| "trade-first ordering raised the coalition's stamp fee".to_string())?;
     let terminal_evidence = build_paired_terminal_payout_evidence_with_vault_dust(
         &format!("{route:?} prospective accrual ordering"),
         vec![reordered.victim_destination],
@@ -13996,6 +14047,10 @@ fn discover_one_prospective_accrual_violation(
         0,
         [control.vault_dust, reordered.vault_dust],
         PROSPECTIVE_FUNDING_DUST_BOUND,
+        [
+            coalition_fee_saving,
+            prospective_stamp_fee_saving_bound(control.insurance_residual),
+        ],
         control.users_terminal && reordered.users_terminal,
         victim_payout_loss,
         coalition_payout_gain,
@@ -14014,6 +14069,8 @@ fn discover_one_prospective_accrual_violation(
         reordered_total_payout: reordered.total_payout,
         control_vault_dust: control.vault_dust,
         reordered_vault_dust: reordered.vault_dust,
+        coalition_fee_saving,
+        control_stamp_fee: control.insurance_residual,
         final_mark: reordered.final_mark,
         final_effective_price: reordered.final_effective_price,
         terminal_evidence,
@@ -14082,8 +14139,15 @@ fn run_pending_mark_admission_world(
                     PendingMarkSource::ReportedPriceTrade
                     | PendingMarkSource::ReportedPriceBatch => unreachable!(),
                 };
-                env.trade_cpi(0, 1, 0, EXISTING_SIZE_Q, 0, 0)
-                    .map_err(|error| format!("open liveness-control position: {error}"))?;
+                env.trade_cpi(
+                    0,
+                    1,
+                    0,
+                    EXISTING_SIZE_Q,
+                    env.primary_max_trading_fee_bps(),
+                    0,
+                )
+                .map_err(|error| format!("open liveness-control position: {error}"))?;
                 env.warp_to_slot(2);
                 let published_target = match source {
                     PendingMarkSource::AuthenticatedPush => {
@@ -14147,7 +14211,14 @@ fn run_pending_mark_admission_world(
     let (stale_risk_rejected_lock, rejected_exact_rollback, stale_risk_landed) =
         if attempt_stale_risk {
             let before_rejection = fingerprint(&env);
-            match env.trade_cpi(attacker, victim, 0, CONTROL_SIZE_Q, 0, 0) {
+            match env.trade_cpi(
+                attacker,
+                victim,
+                0,
+                CONTROL_SIZE_Q,
+                env.primary_max_trading_fee_bps(),
+                0,
+            ) {
                 Ok(_) => (false, false, true),
                 Err(error) => {
                     let rejected_lock = error.contains("Custom(21)")
@@ -14167,8 +14238,15 @@ fn run_pending_mark_admission_world(
         };
 
     if lagging_position_q != 0 {
-        env.trade_cpi(attacker, victim, 0, -lagging_position_q, 0, 0)
-            .map_err(|error| format!("{source:?} lagging risk reduction rejected: {error}"))?;
+        env.trade_cpi(
+            attacker,
+            victim,
+            0,
+            -lagging_position_q,
+            env.primary_max_trading_fee_bps(),
+            0,
+        )
+        .map_err(|error| format!("{source:?} lagging risk reduction rejected: {error}"))?;
     }
 
     env.warp_to_slot(3);
@@ -14195,16 +14273,37 @@ fn run_pending_mark_admission_world(
     }
 
     if stale_risk_landed {
-        env.trade_cpi(attacker, victim, 0, -CONTROL_SIZE_Q, 0, 0)
-            .map_err(|error| format!("{source:?} stale-risk exit rejected: {error}"))?;
+        env.trade_cpi(
+            attacker,
+            victim,
+            0,
+            -CONTROL_SIZE_Q,
+            env.primary_max_trading_fee_bps(),
+            0,
+        )
+        .map_err(|error| format!("{source:?} stale-risk exit rejected: {error}"))?;
     }
 
     let attacker_capital_before = env.primary_portfolio(attacker).capital.get();
     let victim_capital_before = env.primary_portfolio(victim).capital.get();
-    env.trade_cpi(attacker, victim, 0, CONTROL_SIZE_Q, 0, 0)
-        .map_err(|error| format!("{source:?} post-commit control trade rejected: {error}"))?;
-    env.trade_cpi(attacker, victim, 0, -CONTROL_SIZE_Q, 0, 0)
-        .map_err(|error| format!("{source:?} post-commit control exit rejected: {error}"))?;
+    env.trade_cpi(
+        attacker,
+        victim,
+        0,
+        CONTROL_SIZE_Q,
+        env.primary_max_trading_fee_bps(),
+        0,
+    )
+    .map_err(|error| format!("{source:?} post-commit control trade rejected: {error}"))?;
+    env.trade_cpi(
+        attacker,
+        victim,
+        0,
+        -CONTROL_SIZE_Q,
+        env.primary_max_trading_fee_bps(),
+        0,
+    )
+    .map_err(|error| format!("{source:?} post-commit control exit rejected: {error}"))?;
     let attacker_after = env.primary_portfolio(attacker);
     let victim_after = env.primary_portfolio(victim);
     let post_commit_round_trip_landed = attacker_after.capital.get() == attacker_capital_before
@@ -14383,8 +14482,15 @@ fn run_pending_mark_inheritance_world(
         .get()
         .checked_add(env.primary_portfolio(1).capital.get())
         .ok_or_else(|| "seed-pair capital overflow".to_string())?;
-    env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, MARK * 2, 0)
-        .map_err(|error| format!("{route:?} seed paid EWMA move: {error}"))?;
+    env.trade_no_cpi(
+        0,
+        1,
+        0,
+        POS_SCALE as i128,
+        MARK * 2,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("{route:?} seed paid EWMA move: {error}"))?;
     let seed_capital_after = env
         .primary_portfolio(0)
         .capital
@@ -14453,8 +14559,15 @@ fn run_pending_mark_inheritance_world(
         execute_discovery_trade_route(&mut env, route, 2, 3, 0, -LARGE_Q, committed_mark)
             .map_err(|error| format!("{route:?} stale retained exposure exit rejected: {error}"))?;
     }
-    env.trade_no_cpi(0, 1, 0, -(POS_SCALE as i128), committed_mark, 0)
-        .map_err(|error| format!("{route:?} close mark-seed exposure: {error}"))?;
+    env.trade_no_cpi(
+        0,
+        1,
+        0,
+        -(POS_SCALE as i128),
+        committed_mark,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("{route:?} close mark-seed exposure: {error}"))?;
 
     let attacker_capital_before = env.primary_portfolio(2).capital.get();
     let victim_capital_before = env.primary_portfolio(3).capital.get();
@@ -15113,10 +15226,24 @@ fn discover_one_mark_movement_reserve_violation(
             })?;
     env.begin_public_trace();
     let insurance_before = env.primary_market_state().1.insurance;
-    env.trade_no_cpi(1, 2, ASSET, POSITION_Q, LOW_PRINT, 0)
-        .map_err(|error| format!("{route:?} pay downward mark movement: {error}"))?;
-    env.trade_no_cpi(1, 2, ASSET, -POSITION_Q, LOW_PRINT, 0)
-        .map_err(|error| format!("{route:?} flatten mark-moving pair: {error}"))?;
+    env.trade_no_cpi(
+        1,
+        2,
+        ASSET,
+        POSITION_Q,
+        LOW_PRINT,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("{route:?} pay downward mark movement: {error}"))?;
+    env.trade_no_cpi(
+        1,
+        2,
+        ASSET,
+        -POSITION_Q,
+        LOW_PRINT,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("{route:?} flatten mark-moving pair: {error}"))?;
     let movement_fee = env
         .primary_market_state()
         .1
@@ -15342,8 +15469,15 @@ fn discover_one_trade_driven_liquidation(
         }
     };
 
-    env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, MARK, 0)
-        .map_err(|error| format!("{mode:?} open independent victim: {error}"))?;
+    env.trade_no_cpi(
+        0,
+        1,
+        0,
+        POS_SCALE as i128,
+        MARK,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("{mode:?} open independent victim: {error}"))?;
     let supply_before = env.token_supply_observed();
     let victim_equity_before = u128::try_from(discovery_portfolio_equity(&env, 0)?)
         .map_err(|_| format!("{mode:?} victim began insolvent"))?;
@@ -15613,12 +15747,26 @@ fn discover_one_bilateral_mark_fee_violation(
 
     env.set_matcher_spreads(1, 0, 9_000)
         .map_err(|error| format!("configure opening passive matcher: {error}"))?;
-    env.trade_cpi(0, 1, 0, -MOVER_Q, 0, 0)
+    env.trade_cpi(0, 1, 0, -MOVER_Q, env.primary_max_trading_fee_bps(), 0)
         .map_err(|error| format!("open future underfunded mover: {error}"))?;
-    env.trade_no_cpi(2, 3, 0, BENEFICIARY_Q, MARK, 0)
-        .map_err(|error| format!("open independent beneficiary book: {error}"))?;
-    env.trade_no_cpi(4, close_lp, 0, BENEFICIARY_Q, MARK, 0)
-        .map_err(|error| format!("open independent extraction book: {error}"))?;
+    env.trade_no_cpi(
+        2,
+        3,
+        0,
+        BENEFICIARY_Q,
+        MARK,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("open independent beneficiary book: {error}"))?;
+    env.trade_no_cpi(
+        4,
+        close_lp,
+        0,
+        BENEFICIARY_Q,
+        MARK,
+        env.primary_max_trading_fee_bps(),
+    )
+    .map_err(|error| format!("open independent extraction book: {error}"))?;
     env.set_matcher_spreads(close_lp, 0, 9_000)
         .map_err(|error| format!("configure extraction matcher: {error}"))?;
 
@@ -15749,8 +15897,15 @@ fn discover_one_bilateral_mark_fee_violation(
 
     env.ensure_primary_matcher_enabled(close_lp)
         .map_err(|error| format!("refresh independent LP matcher authorization: {error}"))?;
-    env.trade_cpi(2, close_lp, 0, -BENEFICIARY_Q, 0, 0)
-        .map_err(|error| format!("close beneficiary through independent LP: {error}"))?;
+    env.trade_cpi(
+        2,
+        close_lp,
+        0,
+        -BENEFICIARY_Q,
+        env.primary_max_trading_fee_bps(),
+        0,
+    )
+    .map_err(|error| format!("close beneficiary through independent LP: {error}"))?;
     let released = env.primary_portfolio(2).pnl.get().max(0) as u128;
     if released == 0 {
         return Err("bilateral mark produced no releasable coalition PnL".into());

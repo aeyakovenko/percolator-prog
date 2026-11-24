@@ -54,9 +54,12 @@ pub(super) fn discover(
             AccountMeta::new_readonly(delegate, false),
         ]);
     }
+    // Every route signs the market's maximum rate, so the discovery pays whatever mark fee its
+    // print requires (INV-046 finding 6: the signed rate is the ceiling; the LP's cap is 10_000).
+    let fee_bps = env.max_trading_fee_bps();
     let data = match (batch, cpi) {
-        (false, false) => env.trade_no_cpi_ix(a, b, 0, size, 900_000, 0),
-        (false, true) => env.trade_cpi_ix(a, b, 0, size, 0, 900_000),
+        (false, false) => env.trade_no_cpi_ix(a, b, 0, size, 900_000, fee_bps),
+        (false, true) => env.trade_cpi_ix(a, b, 0, size, fee_bps, 900_000),
         (true, false) => env.batch_trade_no_cpi_ix(
             a,
             b,
@@ -65,7 +68,7 @@ pub(super) fn discover(
                 market_id: env.asset_market_id(0),
                 size_q: size,
                 exec_price: 900_000,
-                fee_bps: 0,
+                fee_bps,
             }],
         ),
         (true, true) => env.batch_trade_cpi_ix(
@@ -76,7 +79,7 @@ pub(super) fn discover(
                 market_id: env.asset_market_id(0),
                 size_q: size,
                 limit_price: 900_000,
-                fee_bps: 0,
+                fee_bps,
             }],
         ),
     };
