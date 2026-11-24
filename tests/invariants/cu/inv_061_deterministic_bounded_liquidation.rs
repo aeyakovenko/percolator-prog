@@ -812,32 +812,34 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
         percolator::SOCIAL_LOSS_DEN - 121_035
     );
     let before_owner_reduction = env.market_state().1;
-    // l1 still owes its share of s1's bankruptcy as an outstanding B loss. The short-side source
-    // domain holds only loser-paid fresh backing at par, more than enough to cover that loss.
+    // Engine #274: the crank settled l1's pending K/F before booking its share of s1's
+    // bankruptcy, so the share netted against l1's gain and l1 enters its owner exit with positive
+    // PnL. The short-side source domain holds only loser-paid fresh backing at par, and none of it
+    // has been spent or owed back. (Before engine 263c34d4 the share landed first, as PnL -2, and
+    // l1's gain then cured it from that backing although nobody was owed it.)
     let short_source = usize::from(ASSET) * 2 + 1;
-    let l1_outstanding_loss = u128::try_from(-env.portfolio_state(l1).pnl.get())
-        .expect("l1 must carry a B loss into its owner exit");
-    assert!(l1_outstanding_loss > 0);
-    let cured_num = l1_outstanding_loss * BOUND_SCALE;
-    let source_before_cure = before_owner_reduction.source_credit[short_source];
-    let bucket_before_cure = before_owner_reduction.source_backing_buckets[short_source];
+    assert!(
+        env.portfolio_state(l1).pnl.get() > 0,
+        "l1's B share nets against its gain before its owner exit"
+    );
+    let source_before_exit = before_owner_reduction.source_credit[short_source];
+    let bucket_before_exit = before_owner_reduction.source_backing_buckets[short_source];
     assert_eq!(
         (
-            source_before_cure.spent_backing_num,
-            source_before_cure.provider_receivable_num
+            source_before_exit.spent_backing_num,
+            source_before_exit.provider_receivable_num
         ),
         (0, 0)
     );
     assert_eq!(
-        source_before_cure.credit_rate_num,
+        source_before_exit.credit_rate_num,
         percolator::CREDIT_RATE_SCALE
     );
     assert_eq!(
-        bucket_before_cure.status,
+        bucket_before_exit.status,
         percolator::BackingBucketStatusV16::Fresh
     );
-    assert!(bucket_before_cure.expiry_slot > before_owner_reduction.current_slot);
-    assert!(bucket_before_cure.fresh_unliened_backing_num >= cured_num);
+    assert!(bucket_before_exit.expiry_slot > before_owner_reduction.current_slot);
     let l1_leg_before = active_leg_for_asset(&env.portfolio_state(l1), ASSET as usize);
     let l1_effective_before =
         reference_current_epoch_effective_abs(&before_owner_reduction, l1_leg_before);
@@ -863,24 +865,23 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
         carry_state.assets[ASSET as usize].social_loss_dust_long_num,
         percolator::SOCIAL_LOSS_DEN - 121_035
     );
-    // Engine #172: the backed gain l1 realizes on exit cures that outstanding loss instead of
-    // being burned. The cure consumes fresh counterparty backing atom for atom and records the
-    // matching provider receivable; only the remainder of the gain becomes a claim.
-    let cured_source = carry_state.source_credit[short_source];
+    // l1's exit realizes its backed gain as a claim; with no outstanding loss there is nothing to
+    // cure, so the exit spends none of the short side's backing and owes its provider nothing.
+    let exit_source = carry_state.source_credit[short_source];
     assert_eq!(
         (
-            cured_source.spent_backing_num,
-            cured_source.provider_receivable_num
+            exit_source.spent_backing_num,
+            exit_source.provider_receivable_num
         ),
-        (cured_num, cured_num)
+        (0, 0)
     );
     assert_eq!(
         carry_state.source_backing_buckets[short_source].fresh_unliened_backing_num,
-        bucket_before_cure.fresh_unliened_backing_num - cured_num
+        bucket_before_exit.fresh_unliened_backing_num
     );
     assert_eq!(
         carry_state.source_backing_buckets[short_source].consumed_liened_backing_num,
-        cured_num
+        0
     );
     assert!(env.portfolio_state(l1).pnl.get() > 0);
     assert_eq!(carry_state.negative_pnl_account_count, 0);
@@ -899,11 +900,11 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
         ASSET as usize
     ));
     assert!(health_cert(&env.portfolio_state(s2)).certified_liq_deficit != 0);
-    // s2's realized loss lands as fresh loser-paid backing, which first refills the receivable
-    // the cure left behind. Spent backing is a cumulative audit counter, so it keeps the cure.
+    // s2's realized loss lands as fresh loser-paid backing; there is no receivable for it to
+    // refill, and nothing has been spent.
     let repaid_source = env.market_state().1.source_credit[short_source];
     assert_eq!(repaid_source.provider_receivable_num, 0);
-    assert_eq!(repaid_source.spent_backing_num, cured_num);
+    assert_eq!(repaid_source.spent_backing_num, 0);
 
     let mut successful_steps = 0usize;
     for slot in 6..=8u64 {
@@ -1159,13 +1160,9 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
     assert_eq!(source.positive_claim_bound_num, 0);
     assert_eq!(source.exact_positive_claim_num, 0);
     assert!(source.provider_receivable_num > 0);
-    // The terminal conversions drew the outstanding receivable from the refilled bucket, so
-    // only the cure that s2's loss already repaid (#172) separates the cumulative spent audit
-    // from it.
-    assert_eq!(
-        source.spent_backing_num,
-        source.provider_receivable_num + cured_num
-    );
+    // The terminal conversions drew the outstanding receivable from the bucket, and nothing else
+    // was ever spent from it (no cure: engine #274), so the cumulative spent audit equals it.
+    assert_eq!(source.spent_backing_num, source.provider_receivable_num);
     assert_eq!(source.provider_receivable_num % BOUND_SCALE, 0);
     let refill_atoms = source.provider_receivable_num / BOUND_SCALE;
     let refill_expiry =
@@ -1275,6 +1272,11 @@ fn v16_program_reset_carry_liquidation_matrix_preserves_progress() {
         env.svm.get_account(&env.vault).unwrap(),
         custody_before_retirement
     );
+    // Every atom has an owner: the accounts are flat with zero PnL, the backing is withdrawn and
+    // the asset retired, so the vault is exactly the accounts' capital plus insurance (engine
+    // #274: before 263c34d4 two atoms of cured backing were left owned by nobody).
+    assert_eq!(retired.vault, retired.c_tot + retired.insurance);
+    assert_eq!(retired.vault as u64, env.token_amount(env.vault));
 }
 
 #[test]
@@ -2246,7 +2248,7 @@ fn inv061_source_defines_test(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_liquidation_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "06b7e5be2046184417e51247f249288e9d357bab";
+    const ENGINE_PIN: &str = "263c34d4d30d254a6a44e33fc13665707f659401";
     const CLASSES: &[Inv061LiquidationClass] = &[
         Inv061LiquidationClass {
             class: "sole public ingress and deterministic dispatch",

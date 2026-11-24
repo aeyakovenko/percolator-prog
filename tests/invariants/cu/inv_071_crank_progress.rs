@@ -387,10 +387,17 @@ fn v16_program_public_b_prerequisite_preserves_later_liquidation_progress() {
     let b_after = active_leg_for_asset(&after_b, 1);
     assert!(b_after.b_snap > b_before.b_snap);
     assert!(b_after.b_snap <= target_b);
+    // Engine #274: the B step first settles the account's pending K/F on the whole account's
+    // canonical plan (a leg's K/F before its B loss), so the adverse leg's K/F snapshots may
+    // advance. Its position, ADL basis, weight, epochs and B state stay as they were.
+    let adverse_after = active_leg_for_asset(&after_b, 0);
+    let mut adverse_framed = adverse_before;
+    adverse_framed.k_snap = adverse_after.k_snap;
+    adverse_framed.f_snap = adverse_after.f_snap;
+    adverse_framed.kf_epoch_snap = adverse_after.kf_epoch_snap;
     assert_eq!(
-        active_leg_for_asset(&after_b, 0),
-        adverse_before,
-        "B settlement must frame the independent adverse leg"
+        adverse_after, adverse_framed,
+        "B settlement must frame the independent adverse leg's position, weight and B state"
     );
     assert_eq!(
         env.svm.get_account(&env.vault).unwrap(),
@@ -3639,7 +3646,7 @@ fn inv071_source_defines_kani_proof(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "06b7e5be2046184417e51247f249288e9d357bab";
+    const ENGINE_PIN: &str = "263c34d4d30d254a6a44e33fc13665707f659401";
     const CLASSES: &[Inv071ProgressClass] = &[
         Inv071ProgressClass {
             class: "summary fidelity selector totality and wrapper dispatch",

@@ -32330,6 +32330,42 @@ each with a regression test that fails on the previous program.
   crank calls per exposed asset; clause C4's justification and the reducing trade's preconditions
   were incomplete; BatchTradeCpi's fee cap was missing from the list of refusals.
 
+### Engine #274: the crank's B chunk settles pending K/F first (2026-11-24)
+
+Engine pin `06b7e5be` -> `263c34d4` (the fix, and a test-only engine commit before it; 35 places in
+27 files). An outside report (engine issue #274), reproduced here and in the engine with tests
+written from the source: the permissionless crank's B-settlement step booked an account's B share
+before its pending K/F, unlike every other B path, and the auto-crank ranks a B-stale account's B
+chunk above a refresh. When a keeper liquidated a bankrupt loser before its winner was refreshed,
+the winner's share landed as negative PnL, and its later gain cured that debt from loser-paid
+backing nobody was owed. Through the program, the reset-carry liquidation matrix showed it: l1
+entered its owner exit at capital 1,000 and PnL -2, its gain cured the 2 atoms from the short side's
+backing, and the retired market ended with a vault of 6,007 against C_tot 6,005 and no insurance:
+two atoms owned by no account or provider, which `CloseSlab` would sweep to the admin. With this
+pin, l1 enters its exit at PnL 7, nothing is cured, and the vault ends at 6,006 = C_tot.
+
+Tests changed (the owner approved rewriting them, 2026-11-24):
+
+- `v16_program_reset_carry_liquidation_matrix_preserves_progress` asserted the cure (l1 "must
+  carry a B loss into its owner exit", the backing the cure spent and owed, and the receivable s2's
+  loss refilled). It now asserts that l1's share nets against its gain before the exit, that no
+  backing is spent or owed through the exit and s2's liquidation, that the terminal spent audit
+  equals the receivable the conversions drew, and, at the end, that the vault is exactly C_tot plus
+  insurance and equals the vault's token balance.
+- `v16_program_public_b_prerequisite_preserves_later_liquidation_progress` asserted that the B step
+  leaves the account's other leg byte-identical. The step now settles the account's K/F on the
+  whole account's canonical plan first, so that leg's K/F snapshots may advance; its position, ADL
+  basis, weight, epochs and B state are still checked unchanged.
+
+Compute: the crank's B step now settles every leg's K/F before the chunk. At the maximum shape
+(fourteen legs, twenty-eight source records) the short-side B settlement's peak crank moves from
+556,221 to 697,757 CU (`cu/inv_077_short_side_b_budget.rs`, whose per-call limit is 1,375,000 CU).
+Every other compute test is unchanged in outcome, the 325,000-CU crank guardrail included.
+
+Still open (engine spec, section 8): an account already insolvent when a gain arrives is valued
+against the support its gain's source domain holds at that moment, so whether its refresh comes
+before or after its loser pays into that domain can still change its terminal value.
+
 ### The program's own arithmetic is checked in the deployed build (2026-11-22)
 
 Program manifest only; the engine pin stays `4e77481b`. Until now the manifest had no release

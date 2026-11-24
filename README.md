@@ -797,7 +797,7 @@ The engine may choose a progress-priority branch, including:
 
 - resolved-market cursor close/reconciliation
 - active close continuation
-- account-B settlement
+- account-B settlement (after the account's pending K/F, so a winner's share of a default nets against its gain whichever account the cranks reach first; engine issue #274)
 - ordinary bounded keeper crank
 
 The important product invariant is that a public crank should either commit bounded progress or return a clear terminal/recovery error. It should not depend on a privileged operator to handle ordinary stale-account, residual, or catchup work.
