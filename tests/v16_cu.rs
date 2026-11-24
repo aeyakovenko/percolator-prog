@@ -2779,7 +2779,10 @@ impl V16CuEnv {
         maker_account: Pubkey,
         init_data: Vec<u8>,
     ) -> (Pubkey, Pubkey, u64) {
-        let ctx = Pubkey::new_unique();
+        // The context account signs its own initialization (percolator-match requires it, so a
+        // third party cannot initialize an LP's freshly created context first).
+        let ctx_keypair = Keypair::new();
+        let ctx = ctx_keypair.pubkey();
         let (_, maker_owner) = state::read_portfolio_owner_preflight(
             &self
                 .svm
@@ -2828,11 +2831,11 @@ impl V16CuEnv {
                 program_id: matcher_program,
                 accounts: vec![
                     AccountMeta::new_readonly(delegate, false),
-                    AccountMeta::new(ctx, false),
+                    AccountMeta::new(ctx, true),
                 ],
                 data: init_data,
             },
-            &[],
+            &[&ctx_keypair],
         )
         .expect("init matcher context");
         (ctx, delegate, cu)
