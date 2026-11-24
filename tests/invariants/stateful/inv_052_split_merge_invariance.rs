@@ -1491,7 +1491,6 @@ fn group_differences(
     compare!(current_slot);
     compare!(assets);
     compare!(bankruptcy_hlock_active);
-    compare!(threshold_stress_active);
     compare!(loss_stale_active);
     compare!(recovery_reason);
     compare!(mode);

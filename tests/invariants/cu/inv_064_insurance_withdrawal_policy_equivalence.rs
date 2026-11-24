@@ -1308,12 +1308,8 @@ fn v16_live_insurance_withdraw_uses_active_loss_not_bankruptcy_history() {
         .expect("flat healthy live insurance withdrawal must succeed");
 
     // Each active "insurance still protecting loss" flag independently blocks the withdrawal.
-    let cases: [(&str, fn(&mut MarketGroupV16, bool)); 2] = [
-        ("threshold_stress_active", |g, v| {
-            g.threshold_stress_active = v
-        }),
-        ("loss_stale_active", |g, v| g.loss_stale_active = v),
-    ];
+    let cases: [(&str, fn(&mut MarketGroupV16, bool)); 1] =
+        [("loss_stale_active", |g, v| g.loss_stale_active = v)];
     for (label, set) in cases {
         env.mutate_market(|_cfg, group| set(group, true));
         let before = env.market_state().1;

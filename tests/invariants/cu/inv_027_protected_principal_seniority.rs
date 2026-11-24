@@ -2211,7 +2211,7 @@ struct Inv027LossStaleRoute {
 
 #[test]
 fn v16_program_loss_stale_economic_routes_have_a_complete_seniority_disposition() {
-    const ENGINE_PIN: &str = "263c34d4d30d254a6a44e33fc13665707f659401";
+    const ENGINE_PIN: &str = "7a712baa792667be0dc99bdba779effb97108508";
     const ROWS: &[Inv027LossStaleRoute] = &[
         Inv027LossStaleRoute {
             owner: "handle_deposit",

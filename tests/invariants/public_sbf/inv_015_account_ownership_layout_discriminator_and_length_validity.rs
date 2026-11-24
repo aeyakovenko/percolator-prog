@@ -339,7 +339,6 @@ fn nested_byte_cases() -> Vec<NestedByteCase> {
             route: ConsumingRoute::Deposit,
         },
         market_field!(bankruptcy_hlock_active),
-        market_field!(threshold_stress_active),
         market_field!(loss_stale_active),
         market_field!(mode),
         market_field!(payout_snapshot_captured),
@@ -411,7 +410,7 @@ fn nested_byte_cases() -> Vec<NestedByteCase> {
         receipt_field!(present),
         receipt_field!(finalized),
     ];
-    assert_eq!(cases.len(), 40, "review every persisted engine byte domain");
+    assert_eq!(cases.len(), 39, "review every persisted engine byte domain");
     cases
 }
 

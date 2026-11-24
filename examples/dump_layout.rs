@@ -118,7 +118,6 @@ fn main() {
     mgf!(slot_last, u64);
     mgf!(current_slot, u64);
     mgf!(bankruptcy_hlock_active, u8);
-    mgf!(threshold_stress_active, u8);
     mgf!(loss_stale_active, u8);
     mgf!(recovery_reason, u8);
     mgf!(mode, u8);

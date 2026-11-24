@@ -32366,6 +32366,21 @@ Still open (engine spec, section 8): an account already insolvent when a gain ar
 against the support its gain's source domain holds at that moment, so whether its refresh comes
 before or after its loser pays into that domain can still change its terminal value.
 
+### The dead threshold-stress flag is removed (2026-11-24)
+
+Engine pin `263c34d4` -> `7a712baa` (the engine change and nothing else). The engine header's
+`threshold_stress_active` was read as a market-wide lock (it would have refused every account's
+withdrawals and conversions, and the wrapper's live insurance and backing withdrawals) but nothing
+ever set it: a default-only lock of the kind INV-087 rules out. The owner had it removed. The
+engine header is one byte shorter; the h-lock lane, the oracle-anchor reset gate and the shape check
+no longer read it, and the wrapper's domain-withdrawal gate (`domain_withdrawal_has_active_loss`)
+lost the input. Tests changed only where they named the field: the INV-074 Kani harness (one input
+and one cover fewer), the INV-015 header field list, the INV-064 table of flags that block a live
+withdrawal (loss-stale remains), the INV-052 field comparison, the INV-027 diagnostic message and two
+diagnostic strings of the fuzz model; one term of the fuzz model's market-lock progress rank, always
+zero, is gone. The engine's two Kani proofs that set the flag lost that case (one is renamed
+`proof_v16_global_hlock_lane_selects_hmax_only_for_bankruptcy_recovery_or_candidate`).
+
 ### The program's own arithmetic is checked in the deployed build (2026-11-22)
 
 Program manifest only; the engine pin stays `4e77481b`. Until now the manifest had no release

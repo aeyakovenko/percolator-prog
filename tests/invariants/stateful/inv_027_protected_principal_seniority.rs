@@ -323,12 +323,11 @@ fn run_fully_backed_pnl_seniority_control(route: TradeRoute) {
     if let Err(error) = env.convert_released_pnl(WINNER, released) {
         panic!(
             "{route:?}: realizable source support did not convert: {error}; \
-             market_mode={:?}, bankruptcy_lock={}, threshold_lock={}, loss_stale={}, \
+             market_mode={:?}, bankruptcy_lock={}, loss_stale={}, \
              negative_accounts={}, stale_certs={}, b_stale_accounts={}, winner_stale={}, \
              winner_b_stale={}, winner_cert_valid={}, winner_active={:?}",
             group_before_conversion.mode,
             group_before_conversion.bankruptcy_hlock_active,
-            group_before_conversion.threshold_stress_active,
             group_before_conversion.loss_stale_active,
             group_before_conversion.negative_pnl_account_count,
             group_before_conversion.stale_certificate_count,

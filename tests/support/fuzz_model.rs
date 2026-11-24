@@ -7152,7 +7152,7 @@ impl ScenarioRunner {
             .collect();
         format!(
             "liveness_state={{clock:{}, market_current:{}, market_slot:{}, epochs:[{},{},{},{}], \
-             locks:[{},{},{}], assets:{assets:?}, backing:{live_backing:?}, \
+             locks:[{},{}], assets:{assets:?}, backing:{live_backing:?}, \
              accounts:{accounts:?}}}",
             self.env.current_slot(),
             group.current_slot,
@@ -7162,7 +7162,6 @@ impl ScenarioRunner {
             group.risk_epoch,
             group.asset_set_epoch,
             group.bankruptcy_hlock_active,
-            group.threshold_stress_active,
             group.loss_stale_active,
         )
     }
@@ -7509,7 +7508,6 @@ impl ScenarioRunner {
         };
         let market_locks = recovery_phase
             .checked_mul(1u128 << 120)
-            .and_then(|value| value.checked_add(u128::from(group.threshold_stress_active)))
             .and_then(|value| value.checked_add(loss_work))
             .ok_or("market-lock progress rank overflow")?;
         Ok(ProgressRank {
@@ -8265,7 +8263,7 @@ impl ScenarioRunner {
             .collect();
         Ok(format!(
             "market={{mode:{:?}, recovery:{:?}, slot:{}, current:{}, oracle_epoch:{}, \
-             funding_epoch:{}, risk_epoch:{}, locks:[{},{},{}]}} assets={assets:?} \
+             funding_epoch:{}, risk_epoch:{}, locks:[{},{}]}} assets={assets:?} \
              taker={{rank:{:?}, stale:{}, b_stale:{}, rebalance_lock:{}, liquidation_lock:{}, \
              cert:{:?}, matcher:[enabled={},epoch={}]}} maker={{rank:{:?}, stale:{}, \
              b_stale:{}, rebalance_lock:{}, liquidation_lock:{}, cert:{:?}, \
@@ -8278,7 +8276,6 @@ impl ScenarioRunner {
             group.funding_epoch,
             group.risk_epoch,
             group.bankruptcy_hlock_active,
-            group.threshold_stress_active,
             group.loss_stale_active,
             self.progress_rank(taker)?,
             taker_account.stale_state,

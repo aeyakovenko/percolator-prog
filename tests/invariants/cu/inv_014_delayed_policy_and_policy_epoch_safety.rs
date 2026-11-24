@@ -169,7 +169,7 @@ fn inv014_validate_mounted_witness(
 
 #[test]
 fn v16_program_retained_fee_consent_witness_roster_is_source_complete() {
-    const ENGINE_PIN: &str = "263c34d4d30d254a6a44e33fc13665707f659401";
+    const ENGINE_PIN: &str = "7a712baa792667be0dc99bdba779effb97108508";
     const WITNESSES: &[Inv014RetainedFeeWitness] = &[
         Inv014RetainedFeeWitness {
             path: "tests/invariants/cu/inv_014_delayed_policy_and_policy_epoch_safety.rs",

@@ -569,7 +569,7 @@ This section describes intent and operational ordering, not argument-by-argument
     but it is not the hot live-withdrawal key unless it is also configured as the operator
   - uses the same API for asset 0 and permissionless assets 1..N; asset 0's special recovery rule is
     that ordinary `RETIRE` rejects it, so it can restart but cannot be returned to the reusable-slot pool
-  - while Live it is rejected if the market is unhealthy, lagged, h-lock/stress-active, or has
+  - while Live it is rejected if the market is unhealthy, lagged, h-lock-active, or has
     negative senior residual; asset-0 shutdown/restart does not give `marketauth` a
     domain-insurance drain bypass
   - after resolution it is the terminal payout: once every portfolio is closed and removed,
@@ -755,7 +755,7 @@ This section describes the product-level behavior the wrapper expects from the p
 The fast lane requires the market to be current and solvent in the senior-residual sense:
 
 - no target/effective oracle lag for extraction-sensitive operations
-- no durable bankruptcy h-lock or stress-envelope reconciliation in progress
+- no durable bankruptcy h-lock in progress
 - no senior residual deficit, meaning `vault - c_tot - insurance` is non-negative after senior obligations
 - account-local losses, fees, and PnL have been settled through the relevant engine path
 
@@ -774,11 +774,11 @@ Expected behavior while lagged:
 - fresh positive PnL uses `h_max`, not the fast `h_min` lane
 - trades are expected to go through the conservative engine/wrapper path and must not create positive-credit extraction from stale or lagged state
 
-Once permissionless progress catches the market up and there is no bankruptcy, stress, or residual deficit, the market returns to the healthy lane.
+Once permissionless progress catches the market up and there is no bankruptcy or residual deficit, the market returns to the healthy lane.
 
 ### Bankruptcy, h-lock, and residual queues
 
-Clamping by itself is not the durable bankruptcy h-lock. Durable h-lock is for bankruptcy or stress states where the engine has discovered residual loss that must be worked through before ordinary positive-PnL usability resumes.
+Clamping by itself is not the durable bankruptcy h-lock. Durable h-lock is for bankruptcy states where the engine has discovered residual loss that must be worked through before ordinary positive-PnL usability resumes.
 
 The engine is expected to make these states explicit and incremental:
 
@@ -812,7 +812,7 @@ There are two different insurance withdrawal surfaces:
 - live `WithdrawInsuranceAsset`, which is a per-asset operator path bounded by that asset's funded
   long+short insurance budget
 
-Live insurance withdrawal is intentionally stricter. It is expected to be allowed only when the live market is flat or loss-current, target/effective-lag-free, stress-free, h-lock-free, and has non-negative senior residual. In other words, live insurance can be withdrawn from an empty or fully healthy market, but not while the insurance fund is still protecting unresolved loss or bankruptcy work.
+Live insurance withdrawal is intentionally stricter. It is expected to be allowed only when the live market is flat or loss-current, target/effective-lag-free, h-lock-free, and has non-negative senior residual. In other words, live insurance can be withdrawn from an empty or fully healthy market, but not while the insurance fund is still protecting unresolved loss or bankruptcy work.
 
 ### Product intuition
 

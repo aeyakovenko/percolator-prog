@@ -1196,7 +1196,7 @@ budgets of the asset's two loss domains, never more than the market's insurance 
 reserved for source credit, and never more than the vault. Each withdrawal debits that budget, so
 splitting across routes, assets, domains or instructions cannot withdraw more than it. While the
 market is Live, a withdrawal is refused while any loss is active (an account with negative PnL, the
-domain's loss barrier, threshold stress, a loss-stale market or asset, recovery) or while an exposed
+domain's loss barrier, a loss-stale market or asset, recovery) or while an exposed
 asset's target lags its mark, unless the asset has been shut down empty and matured. There is no
 proportional cap and no cooldown; their configuration fields are reserved and must be zero.
 

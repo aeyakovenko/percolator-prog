@@ -321,7 +321,6 @@ pub mod state {
         pub current_slot: u64,
         pub assets: Vec<AssetStateV16>,
         pub bankruptcy_hlock_active: bool,
-        pub threshold_stress_active: bool,
         pub loss_stale_active: bool,
         pub recovery_reason: Option<PermissionlessRecoveryReasonV16>,
         pub mode: MarketModeV16,
@@ -399,7 +398,6 @@ pub mod state {
                 current_slot: 0,
                 assets,
                 bankruptcy_hlock_active: false,
-                threshold_stress_active: false,
                 loss_stale_active: false,
                 recovery_reason: None,
                 mode: MarketModeV16::Live,
@@ -2483,7 +2481,6 @@ pub mod state {
             current_slot: wire.current_slot.get(),
             assets: Vec::with_capacity(slot_count),
             bankruptcy_hlock_active: decode_bool(wire.bankruptcy_hlock_active)?,
-            threshold_stress_active: decode_bool(wire.threshold_stress_active)?,
             loss_stale_active: decode_bool(wire.loss_stale_active)?,
             recovery_reason: wire
                 .recovery_reason
@@ -2667,7 +2664,6 @@ pub mod state {
         header.slot_last = percolator::V16PodU64::new(group.slot_last);
         header.current_slot = percolator::V16PodU64::new(group.current_slot);
         header.bankruptcy_hlock_active = encode_bool_for_account(group.bankruptcy_hlock_active);
-        header.threshold_stress_active = encode_bool_for_account(group.threshold_stress_active);
         header.loss_stale_active = encode_bool_for_account(group.loss_stale_active);
         header.recovery_reason =
             percolator::V16OptionalRecoveryReasonAccount::from_runtime(group.recovery_reason);
@@ -6036,13 +6032,11 @@ pub mod policy_v16 {
     pub fn domain_withdrawal_has_active_loss(
         negative_pnl_account_count: u64,
         pending_domain_loss_barrier: u64,
-        threshold_stress_active: bool,
         loss_stale_active: bool,
         recovery_active: bool,
     ) -> bool {
         negative_pnl_account_count != 0
             || pending_domain_loss_barrier != 0
-            || threshold_stress_active
             || loss_stale_active
             || recovery_active
     }
@@ -6588,7 +6582,6 @@ pub mod processor {
         if policy_v16::domain_withdrawal_has_active_loss(
             group.header.negative_pnl_account_count.get(),
             pending_domain_loss_barrier,
-            group.header.threshold_stress_active != 0,
             group.header.loss_stale_active != 0,
             recovery_active,
         ) {
@@ -7434,7 +7427,6 @@ pub mod processor {
             || group.markets[asset_index].engine.asset.lifecycle != 2
             || asset_local_has_position_or_loss_state_view(group, asset_index)
             || group.header.bankruptcy_hlock_active != 0
-            || group.header.threshold_stress_active != 0
             || group
                 .header
                 .recovery_reason

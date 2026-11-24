@@ -2248,7 +2248,7 @@ fn inv061_source_defines_test(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_liquidation_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "263c34d4d30d254a6a44e33fc13665707f659401";
+    const ENGINE_PIN: &str = "7a712baa792667be0dc99bdba779effb97108508";
     const CLASSES: &[Inv061LiquidationClass] = &[
         Inv061LiquidationClass {
             class: "sole public ingress and deterministic dispatch",
