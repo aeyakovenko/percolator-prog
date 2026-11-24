@@ -32205,7 +32205,11 @@ effect the settlement would have had (the market's loss-stale summary, from the 
 entry) and charges the fee. If the charge leaves no liquidation deficit it keeps the certificate
 with its equity less the charge (`kernel_cert_equity_after_capital_charge`, Kani-verified for all
 inputs) and does not validate the account again; if it leaves a deficit it voids the certificate as
-the settlement would, so the account is refreshed before it can be liquidated, as before.
+the settlement would, so the account is refreshed before it can be liquidated, as before. A kept
+certificate does not deduct the backing utilization fee accrued on the account's liens since its
+last collection: a refresh collects that fee first, so the kept certificate exceeds the post-state
+refresh by exactly that fee, as any current certificate does in a market without a maintenance fee
+(engine test `v16_fee_sync_kept_certificate_leaves_utilization_fees_to_the_next_collection`).
 
 Two of the skip's conditions were added after review, each with a test that fails without it:
 
