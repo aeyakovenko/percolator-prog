@@ -71,8 +71,8 @@ fn v16_program_explicit_engine_error_dispositions_are_source_complete() {
             witness: "v16_attack_sync_maintenance_cannot_close_empty_live_victim_portfolio",
         },
         ErrorDisposition {
-            source_arm: "Err(V16Error::NonProgress) if market_accrual_performed => {",
-            disposition: "the wrapper already committed authenticated market progress; kept only when the engine moved no fee and no position before it gave up",
+            source_arm: "Err(V16Error::NonProgress) if market_accrual_performed || maintenance_collected => {",
+            disposition: "the wrapper already committed authenticated market progress or a due maintenance collection that advanced the portfolio's fee cursor; kept only when the engine moved no fee and no position before it gave up",
             witness: "v16_attack_stale_liquidation_budget_observation_crank_progresses_without_reward_or_value",
         },
         ErrorDisposition {

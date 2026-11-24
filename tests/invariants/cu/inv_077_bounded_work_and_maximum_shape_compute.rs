@@ -5684,7 +5684,6 @@ fn v16_attack_max_source_maintenance_sync_stays_bounded() {
 }
 
 #[test]
-#[ignore = "open INV-077 item (2026-11-23): with a maintenance fee and current assets, the fixture's CPI fill that opens the LP's tenth leg exceeds the transaction limit; see tests/invariants/README.md, 'INV-077 open item'"]
 fn v16_program_public_full_shape_maintenance_has_bounded_continuation() {
     const FEE_PER_SLOT: u128 = 1;
     const LIMIT: u64 = 1_375_000;
@@ -5730,6 +5729,21 @@ fn v16_program_public_full_shape_maintenance_has_bounded_continuation() {
     let foreign_keys = [taker, env.vault, env.mint];
     let foreign_before = foreign_keys.map(|key| env.svm.get_account(&key).unwrap());
     let custody = env.token_amount(env.vault);
+
+    // The fixture's push helper cranks lagging assets (INV-045 catch-up rule), so the LP's
+    // oldest leg asset can end setup ahead of its last fee slot. Collect that fee first, so the
+    // deferred attempts below start from a portfolio with nothing collectible.
+    env.svm.expire_blockhash();
+    let collect_before = env.portfolio_state(lp);
+    let collect_cu = env.sync_maintenance_fee_with_cu(lp, None, slot);
+    assert_cu_within("full-shape maintenance before deferral", collect_cu, LIMIT);
+    let collected = env.portfolio_state(lp);
+    assert!(collected.last_fee_slot.get() >= collect_before.last_fee_slot.get());
+    assert_eq!(
+        collect_before.capital.get() - collected.capital.get(),
+        FEE_PER_SLOT
+            * u128::from(collected.last_fee_slot.get() - collect_before.last_fee_slot.get())
+    );
 
     env.svm.warp_to_slot(slot + 1);
     env.svm.expire_blockhash();
@@ -5798,7 +5812,9 @@ fn v16_program_public_full_shape_maintenance_has_bounded_continuation() {
         let mut max_checkpoint_cu = 0;
         let mut max_mark_cu = 0;
         for asset in 0..ACTIVE_CAP {
-            let mark_cu = env.push_auth_mark_for_asset_as_admin(asset, charge_slot, 100);
+            // An unchanged price: the catch-up rule does not refuse it, and the crank schedule
+            // below, not the push helper, owns every pending slot.
+            let mark_cu = env.push_auth_mark_for_asset_as_admin_raw(asset, charge_slot, 100);
             assert_cu_within("full-shape maintenance authenticated mark", mark_cu, LIMIT);
             max_mark_cu = max_mark_cu.max(mark_cu);
             assert_eq!(

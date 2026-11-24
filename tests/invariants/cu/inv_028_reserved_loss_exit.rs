@@ -103,8 +103,8 @@ fn v16_program_recovery_force_close_preserves_historical_liens_and_partial_recei
 fn run_reserved_loss_exit(recovery: bool) {
     // Revalidate this witness locally without recertifying the older global roster.
     assert!(include_str!("../../../Cargo.lock").contains(
-        "git+https://github.com/aeyakovenko/percolator?rev=710761371c75b85bfe8209986fc16a87d68fdbd0#\
-         710761371c75b85bfe8209986fc16a87d68fdbd0"
+        "git+https://github.com/aeyakovenko/percolator?rev=06b7e5be2046184417e51247f249288e9d357bab#\
+         06b7e5be2046184417e51247f249288e9d357bab"
     ));
     let mut calls = 0;
     let mut rollbacks = 0;

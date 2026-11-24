@@ -30965,7 +30965,7 @@ charter.
 | INV-074 | Independent + P(wrapper) + P(engine) + source composition + F + SVM/CU | `cu/inv_074_scope_locality.rs` partitions every current persisted scope into nine classes and binds twenty-eight exact-pin engine frame/isolation proofs to twenty-one executable public witnesses. INV-088 independently inventories all fifty wrapper-to-engine transition classes and their certificate dispositions, making the induction source-complete. Public products cover same-asset and cross-asset portfolios, all trade routes and sides, concurrent closes, source/backing/insurance domains, partial receipts, shared portfolios, simultaneous ResetPending/Recovery episodes, restart, market instances, and fourteen-leg maximum shape with exact OI, stock, encumbrance, and SPL frames. A new transition, frame theorem, persisted scope, engine pin, or supported bound reopens this row. |
 | INV-075 | P(engine) + F + SVM/CU + R + source composition | The v16.9.1 charter and pinned engine use deterministic exclusive serialization: one active close per domain, one per account, and rejection before mutation for a contender in an occupied domain. `cu/inv_075_close_priority_ownership_and_episode_integrity.rs`, `stateful/inv_074_scope_locality.rs`, and the INV-086 active-close frontier cover both same-domain landing orders, different-domain coexistence, owner cure/replay, user-operation barriers, expiry-1/equal/+1, every one/two-action ordering, exact rejected frames, and terminal settlement of all six economically involved portfolios. A source-complete gate binds five ownership/lifecycle classes to fourteen exact-pin engine proofs and twelve public witnesses, including monotonic `close_id`, immutable close identity and lifetime, strict ledger progress, canceled/finalized inertness, wrapper error propagation, and SVM rollback. A new close ingress, ownership rule, proof, pin, or rollback semantic reopens the row. |
 | INV-076 | P(engine) + source composition + F + SVM/CU + R | `cu/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs` partitions close finalization into eight classes and binds thirty-four exact-pin engine contracts/proofs to eighteen executable public witnesses. The composition covers immutable close identity and drift, exclusive barriers, principal/support/insurance attribution, exact B/residual booking, retained effective exposure and pending obligations, cure/cancel, finalized-ledger inertness, terminal Recovery, and bounded selector dispatch. INV-080 source-proves that every rejected engine phase reaches an instruction error; SVM transaction rollback is the named atomicity boundary for the deliberately `_not_atomic` engine API, and both close ingresses are directly source-locked. Public products retain same-/cross-asset drift, all trade transports, complete cure rollback, OI/basis/custody frames, 2,106 active-close frontier edges, and maximum-shape terminal work. A new close phase, ingress, error disposition, pin, partition, or rollback semantic reopens closure. INV-075 separately owns the aligned exclusive close-ownership specification. |
-| INV-077 | Independent + SVM/CU | `cu/inv_077_bounded_work_and_maximum_shape_compute.rs`, the public B-settlement trace in `cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs`, and the paid-EWMA terminal composition in `cu/inv_045_no_free_mark_movement.rs` (the production-derived registry maps all 49 tags to measured CU evidence; exact public products cover 5,782 configured assets, fourteen active legs, all twenty-eight source records and simultaneous liens, all 42 authenticated feed references, the full two-chunk accrual horizon, maximum B work, terminal cleanup, and strict admission rejection above supported shapes. The public maximum-N campaign appends all 5,768 additional assets after both funded maximum-shape portfolios exist, refreshes both in 30 bounded automatic calls, lands unilateral reduction at 1,178,936 CU, completes ResetPending cleanup/finalization, exits every remaining leg, and returns both owners' senior capital. A last-domain backing-principal exit at the same maximum market shape now measures public top-up and withdrawal at 34,414 and 31,569 CU while preserving unrelated source domains and residual custody exactly. Separate equal-risk, Hybrid, Recovery, conversion, resolved-close, lien-release, and terminal-slab products keep every required continuation below the transaction ceiling. A new public route, larger supported bound, unbounded collection, or materially different multiplicative work composition reopens this current-surface closure) Open item (2026-11-23): on a market with a maintenance fee, once the assets are current, the CPI fill that opens the source-claim LP's tenth leg exceeds the transaction limit; the full-shape no-reward maintenance test is ignored until the fix (see the dated open item). |
+| INV-077 | Independent + SVM/CU | `cu/inv_077_bounded_work_and_maximum_shape_compute.rs`, the public B-settlement trace in `cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs`, and the paid-EWMA terminal composition in `cu/inv_045_no_free_mark_movement.rs` (the production-derived registry maps all 49 tags to measured CU evidence; exact public products cover 5,782 configured assets, fourteen active legs, all twenty-eight source records and simultaneous liens, all 42 authenticated feed references, the full two-chunk accrual horizon, maximum B work, terminal cleanup, and strict admission rejection above supported shapes. The public maximum-N campaign appends all 5,768 additional assets after both funded maximum-shape portfolios exist, refreshes both in 30 bounded automatic calls, lands unilateral reduction at 1,178,936 CU, completes ResetPending cleanup/finalization, exits every remaining leg, and returns both owners' senior capital. A last-domain backing-principal exit at the same maximum market shape now measures public top-up and withdrawal at 34,414 and 31,569 CU while preserving unrelated source domains and residual custody exactly. Separate equal-risk, Hybrid, Recovery, conversion, resolved-close, lien-release, and terminal-slab products keep every required continuation below the transaction ceiling. A new public route, larger supported bound, unbounded collection, or materially different multiplicative work composition reopens this current-surface closure) |
 | INV-078 | Independent + P(engine) + source composition + F + SVM/CU + R + C | `stateful/inv_078_permissionless_recovery_coverage.rs`, `stateful/inv_071_crank_progress.rs`, `stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs`, `cu/inv_028_source_domain_realizability_cap.rs`, `cu/inv_071_crank_progress.rs`, and `cu/inv_078_permissionless_recovery_coverage.rs` cover the current failure lattice: unavailable/stale oracle, absent or expired backing, absent or exhausted insurance, B headroom, impaired liens, domain-local locks, close expiry, payout conflict, ResetPending, Recovery, and retirement/restart. Every public seed retains a bounded senior-preserving terminal route with exact stock, encumbrance, OI, and SPL custody reconciliation. The exact-pin composition gate joins those public frontiers to residual partition, declared-Recovery, selector-totality, rank, and terminal-progress proofs and maximum supported work shapes. Closure is scoped to the current API and named authenticated-input, scheduler, rollback, and arithmetic assumptions; a new failure class, terminal mode, pin, or supported shape reopens this row. |
 | INV-079 | Direct + Static rosters + R | `public_sbf/inv_079_public_reachability_evidence.rs` and `public_sbf/inv_007_no_aba_reuse.rs` enforce the finding manifest and production/method rosters, mutation-test the public trace recorder, and replay all 11 whole-market ABA request classes with actual transaction signers, compiled account metas, exact token/lamport deltas, mint-supply deltas, rejected-call rollback with the network fee classified separately, and zero out-of-band economic mutation. The shared validator rejects malformed provenance, checked quote imbalance, wrong token ownership, and malformed vault participation; a recursive source guard requires all 75 current trace consumers to validate or classify immediately. Registry entries must resolve to actual `#[test]` functions. The normalized terminal classifier is compared with an independent decision model over a bounded corpus of 663,552 representative cells spanning successful/rejected public traces, zero/one/full-width amounts, every terminal flag combination, and all required/attempted/progressing masks over three exit routes. Persistent-lock evidence requires complete required/attempted masks with zero progressing bits, so successful no-op routes cannot masquerade as liveness. Twenty-two terminal finding-blind oracles bind exact impact to public evidence; all 32 oracles, 11 retry kinds, 15 supersession kinds, 126 qualifying benchmark rows, and seventeen nonqualifying rows have source-complete executable dispositions. A new trace consumer, public route, evidence class, retry/control kind, or benchmark row reopens this current-surface closure. |
 | INV-080 | P + F + SVM/CU + source composition | `kani/inv_080_error_propagation_and_exact_rollback.rs` and `cu/inv_080_error_propagation_and_exact_rollback.rs` prove every current engine error variant maps to a nonzero instruction `ProgramError`; source-lock all explicit engine-error dispositions, 135 ordinary mappings, the authenticated hybrid soft-stale parser fallback, 49 direct dispatcher returns over 43 canonical handlers, and both entrypoint adapters. Thirty exact-SBF tests cover partial oracle, legacy realloc, terminal top-up, token CPI, engine-shape, and over-withdraw failures, and prove a nonzero engine result aborts multi-instruction transactions before independently valid later SPL deposit and matcher-CPI return-data consumers can commit. The two engine safe-success dispositions require independently witnessed wrapper progress or safe optional cleanup. Exact rollback after a returned error is the named SVM semantic assumption; a new engine result disposition, handler, entrypoint, or error-swallowing callsite reopens this row. |
@@ -31171,7 +31171,7 @@ Verdicts mean:
 | AUDIT-074 | CONDITIONAL | Scope locality is discharged by transition induction instead of an arbitrary larger Cartesian product. A source-complete fifty-class wrapper transition roster feeds nine scope classes; twenty-eight exact-pin engine frame/isolation proofs and twenty-one public witnesses cover market, asset, side, portfolio, certificate, source/backing/provider, insurance, close, receipt, lifecycle, restart, instance, and historical-summary state. Existing same-/cross-asset, shared-portfolio, simultaneous-lifecycle, receipt, and maximum-shape products supply route fidelity and exact custody/OI/value frames. A new transition, scope, proof, pin, or supported bound reopens closure. |
 | AUDIT-075 | CONDITIONAL | The prior priority/preemption wording was stale relative to the pinned v16.9.1 source of truth and is replaced by its proven exclusive-serialization invariant. Both public landing orders of equal-domain contenders establish first-landed ownership, exact rejected-contender rollback, immutable accepted identity, permissionless expiry/Recovery, and identical exact terminal economics for all six involved portfolios. Different-domain closes coexist and independently lower their residuals. The active-close graph crosses both sides, expiry-1/equal/+1, and every one/two-action ordering; unrelated actions frame the episode, 136 cures succeed, and 26 inadmissible cures roll back exactly. The source-complete gate binds exclusive domain/account acquisition, immutable snapshot/residual/lifetime, landing-order and disjoint-domain progress, owner cure/replay barriers, and finalized/error behavior to fourteen exact-pin engine proofs and twelve public witnesses. Because each close holds exactly one domain and contention rejects rather than compares, hold-and-wait and equal-priority livelock are structurally absent. A new ingress, ownership state, continuation, pin, or wrapper error disposition reopens closure. |
 | AUDIT-076 | CONDITIONAL | Close finalization is discharged by an eight-class composition over thirty-four exact-pin engine contracts/proofs and eighteen executable public witnesses. Successful phases cover immutable identity/drift, exclusive barriers, principal/support/insurance attribution, exact residual/B partition and rank decrease, effective-exposure retention, pending-obligation release, cure/cancel, finalized-ledger inertness, declared Recovery, and bounded dispatch. Failed phases do not need wrapper-level engine fault injection: INV-080 source-proves every engine error reaches the instruction boundary, and the named SVM rollback guarantee restores all program bytes, SPL balances, and lamports. Both close ingresses are directly locked to that propagation. Existing public products retain every trade route, same-/cross-asset drift, post-refresh and post-accrual rejection, exact OI/basis/custody frames, 2,106 active-close frontier edges, and maximum-shape terminal work. A new close phase, ingress, error disposition, pin, partition, or rollback semantic reopens this row. INV-075 separately source-composes the normative first-landed exclusive ownership rule. |
-| AUDIT-077 | REOPENED | The [route-to-shape CU index](#inv-077-route-to-shape-cu-evidence) separates successful public progress at explicit shapes from ordinary CU controls, host-shaped scale fixtures, and rejection-only boundaries. Public maximum-N owner exit, maximum-source resolved crank, lien release, Hybrid and Recovery witnesses retain their own ceilings and oracles; none transfers its result to another route or unexecuted product. Direct `CloseResolved` with fourteen legs/twenty-eight source records is now measured by the direct-route witness and selected by the CU registry. Remaining bindings include full-shape force close and rewarded maintenance, no-reward maintenance with a maintenance fee once the assets are current (open item, 2026-11-23), maximum-work B settlement, combined market/feed/backlog/terminal occupancy products, owner-window signatures, and simultaneous source-lien maxima. This fresh SBF measurement does not prove all bounded continuations or promote this verdict. |
+| AUDIT-077 | REOPENED | The [route-to-shape CU index](#inv-077-route-to-shape-cu-evidence) separates successful public progress at explicit shapes from ordinary CU controls, host-shaped scale fixtures, and rejection-only boundaries. Public maximum-N owner exit, maximum-source resolved crank, lien release, Hybrid and Recovery witnesses retain their own ceilings and oracles; none transfers its result to another route or unexecuted product. Direct `CloseResolved` with fourteen legs/twenty-eight source records is now measured by the direct-route witness and selected by the CU registry. Remaining bindings include full-shape force close and rewarded maintenance, full-shape maintenance that leaves the account liquidatable (the crank that collects the fee, voids and refreshes, then the owner's reducing fill; 2026-11-23), maximum-work B settlement, combined market/feed/backlog/terminal occupancy products, owner-window signatures, and simultaneous source-lien maxima. This fresh SBF measurement does not prove all bounded continuations or promote this verdict. |
 | AUDIT-078 | REOPENED | The current permissionless terminal-failure lattice is complete by proof/public-route composition. Public products cover unavailable or stale oracle input, absent/expired backing, absent/exhausted insurance, B saturation, impaired liens, domain-local locks, close expiry, payout conflict, ResetPending, Recovery, and retirement/restart; every seed retains a bounded value-moving senior-preserving exit with exact stock, encumbrance, OI, and SPL reconciliation. The shared liveness gate binds those routes to selector totality, residual partition, declared-Recovery, rank-decrease, and terminal scanner proofs and the supported maximum account/source/oracle shapes. A new failure class, terminal mode, pin, or shape reopens closure. |
 | AUDIT-079 | CONDITIONAL | The LiteSVM trace schema records actual transaction signers, compiled account metas, exact authority-attributed tracked token/lamport deltas, rejected writable-account rollback with the fee-payer network charge separated from program effects, between-transaction economic mutation, and exact mint-supply deltas for terminal burns. The shared validator requires an allowlisted public construction sequence containing a real wrapper call and rejects malformed success, rollback, signer, account, payload, program, CU, token-owner, vault-participation, and quote-balance evidence. A recursive scan source-locks all 75 current trace consumers to validate or classify immediately, and both route and special-method registries now require actual `#[test]` functions. The normalized terminal classifier agrees with an independent decision model in all 663,552 representative cells spanning successful/rejected public traces, zero/one/full-width economic amounts, every terminal flag combination, and all required/attempted/progressing masks over three independent exit routes. Twenty-two of 32 finding-blind violation oracles carry classifier-bound exact LoF evidence; all 32 oracles, all 11 retained-retry kinds, all 15 same-incarnation supersession kinds, all 126 qualifying benchmark rows, and all seventeen nonqualifying rows have source-complete executable dispositions. The dated benchmark is evidence for the current finite surface, not a completeness claim against unknown findings; a new trace consumer, route, evidence class, retry/control kind, or benchmark row reopens this row. |
 | AUDIT-080 | CONDITIONAL | The wrapper-specific obligation is complete propagation, while exact transaction rollback is a named SVM semantic assumption. Assumption-free Kani checks all twelve engine error variants. Source-complete guards own every explicit engine disposition, all 133 ordinary mapping sites, all 49 variant-to-handler returns over 43 canonical implementations, every shared handler family, both entrypoint adapters, and the sole authenticated hybrid parser-error fallback. The canonical Recovery-pair result is explicitly required to flow through `map_v16_error` rather than a safe-success branch. The only engine safe-success dispositions are optional deregistration that keeps the live user account and `NonProgress` after independently observed market progress, each with a public witness. Thirty exact-SBF tests sample late failures across engine mutation, realloc, oracle, matcher CPI, SPL CPI, resolved payout, insurance, and backing paths with exact persistent frames and live retries. Two multi-instruction transactions additionally prove a nonzero engine result prevents later SPL-deposit and matcher-return consumers from executing. Rows #428 and #432 now have retained value-debit and CPI-fee consent histories with generic error/success composition evidence. A new disposition, handler, adapter, or swallowed engine result reopens this row. |
@@ -32133,16 +32133,17 @@ cranks first or publishes within the window, and the expected numbers are recomp
   that push through raw instructions call the same helper. The generated scenario runner makes that
   catch-up a public crank step of its own, checked as any crank, before the push's snapshot, then
   pushes without the helper.
-- One test is ignored: INV-077's full-shape no-reward maintenance. Its fixture now keeps the assets
-  current, and a fill then exceeds the transaction limit; see the next section.
+- One test was ignored from this landing until the engine fix of the same day: INV-077's
+  full-shape no-reward maintenance. Its fixture now keeps the assets current, and a fill then
+  exceeded the transaction limit; see the next two sections.
 
 ### INV-077 open item: with a maintenance fee, a fill at the full source shape exceeds the transaction limit (2026-11-23)
 
-Open. Found while landing the INV-045 catch-up rule above; the owner chose to land that rule with
+Closed the same day by engine `06b7e5be` for accounts the fee leaves healthy (next section). Found
+while landing the INV-045 catch-up rule above; the owner chose to land that rule with
 `v16_program_public_full_shape_maintenance_has_bounded_continuation` ignored and to fix this next.
-It is the one ignored test in the invariant suites. The INV-079 census names it in
-`OPEN_IGNORED_TESTS` and fails once it runs again, and `traceability_gaps.tsv` no longer cites it
-as INV-077 evidence.
+Until the fix it was the one ignored test in the invariant suites: the INV-079 census named it in
+`OPEN_IGNORED_TESTS`, and `traceability_gaps.tsv` did not cite it as INV-077 evidence.
 
 The test's fixture (`setup_max_source_live_pair`, maintenance fee 1 atom per slot) gives the LP
 source claims asset by asset: CPI fills, then the asset's mark pushed up and back down. Under the
@@ -32176,14 +32177,90 @@ loss-carrying legs (`account_fee_anchor_for_loss_currentness`). While one of tho
 behind, the anchor does not pass the account's last fee slot and the sync returns after one
 validation. Once they are current, the sync also settles the account's side effects over every leg
 (`settle_account_side_effects_not_atomic`), charges the fee and validates the account and the
-market again (`validate_with_market`, `validate_shape`). The engine trade's extra per-leg cost is
-not traced yet.
+market again (`validate_with_market`, `validate_shape`). The engine trade's extra cost follows from
+the certificate: the settlement and the charge void it, and the trade's pre-step then rebuilds it
+from every leg.
 
 Not measured yet: whether an owner can close, withdraw or be liquidated at this shape with a
 maintenance fee (the program runs the same fee sync before a value debit), and whether a separate
 `SyncMaintenanceFee` before the fill makes the fill fit. Fixtures without a fee build fourteen legs
 with twenty-eight source records and pass. A failed fill rolls back. The measurements and the
 marker commands are kept with the review notes, outside this repository.
+
+### INV-077: a fee sync with nothing to settle keeps a current, healthy certificate (2026-11-23)
+
+Engine pin `71076137` -> `06b7e5be` (the INV-077 fix; engine master moved only by proofs in
+between). The composition tests bound to the exact engine revision carry the new one (35 places in
+27 files). It closes the open item above for accounts the fee leaves healthy.
+
+Compute markers inside the engine, on program `aac89b9e` with the fixture's assets kept current,
+split the fill that opens the LP's ninth leg (1,335,443 CU): the fee sync validated the LP against
+the market three times (about 100,000 CU each), settled every leg although nothing was owed (82,211
+CU of K/F and 36,307 CU of B), and voided the certificate, so the trade's pre-step rebuilt it from
+every leg (345,580 CU, against 18,054 CU with the certificate kept). The engine's fee sync now skips
+its side-effect settlement when it has nothing to settle: the certificate is current, the PnL is not
+negative, every active leg is settled to its asset's K, F, K/F epoch and B, and none of the
+account's source domains is backed by a lapsed Fresh or an Impaired bucket. It writes the one other
+effect the settlement would have had (the market's loss-stale summary, from the asset of its last
+entry) and charges the fee. If the charge leaves no liquidation deficit it keeps the certificate
+with its equity less the charge (`kernel_cert_equity_after_capital_charge`, Kani-verified for all
+inputs) and does not validate the account again; if it leaves a deficit it voids the certificate as
+the settlement would, so the account is refreshed before it can be liquidated, as before.
+
+Two of the skip's conditions were added after review, each with a test that fails without it:
+
+- Lapsed backing. No epoch moves when a source bucket's expiry passes, so a certificate that counts
+  a claim on lapsed backing stays current, while a refresh refuses until the bucket is expired.
+  Before the fix the fee sync voided it and the next position action refused; a kept certificate
+  would have let that action use the lapsed backing.
+- Healthy only. The permissionless crank collects a due fee before it asks the engine what to do. A
+  kept certificate that showed a deficit made that crank liquidate in the same transaction as the
+  market accrual and the fee (357,597 CU against the 325,000-CU crank guardrail in
+  `v16_attack_crossed_trade_cannot_turn_partial_liquidation_survivors_same_side`); before the fix
+  that crank refreshed and a later one liquidated. With the rule, liquidation timing and cost are
+  unchanged and that test passes unedited, as do the two that share the reset-pending fixture.
+
+Program change: with the certificate kept, the engine can find nothing for a crank to do after it
+collects a due fee, and the crank used to fail with `EngineNonProgress`, rolling the collection back.
+A collection that advanced the portfolio's fee cursor now counts as the crank's progress, as the
+refresh that followed it did before (`v16_program_crank_whose_only_work_is_a_due_fee_collects_it`
+fails without the rule; the INV-088 census, the INV-071 compute-unit tests and the stateful INV-071,
+INV-082 and INV-088 tests pass with it).
+
+Results with this pin: the full-shape fixture builds all fourteen legs with the assets current; the
+CPI fill that opens the LP's fourteenth leg costs 1,118,713 CU (about 70,000 CU per leg), where the
+tenth leg's fill exceeded 1,400,000 CU before.
+`v16_program_public_full_shape_maintenance_has_bounded_continuation` runs again: its
+`SyncMaintenanceFee` charges cost 676,552 CU (1,253,143 CU on 2026-09-08), the deferred attempts
+409,582 CU, the fourteen unchanged-price marks at most 6,249 CU each, and the crank schedules
+consume pending-slot ranks 92 -> 0 and 14 -> 0 at most 49,961 CU per crank. The short-side B budget
+peak moves from 556,220 to 556,221 CU (`cu/inv_077_short_side_b_budget.rs`).
+
+Tests changed:
+
+- The full-shape test in two places. The catch-up cranks of setup move one asset's accrual past the
+  LP's last fee slot, so one atom of fee is collectible when setup ends: the test now collects it
+  first, so the deferred attempts start with nothing collectible. Its fourteen marks push an
+  unchanged price through the new `push_auth_mark_for_asset_as_admin_raw` (the push without the
+  helper's catch-up cranks), so the test's crank schedule, which it counts against the pending rank,
+  owns every pending slot. The INV-079 census exception is removed, and `traceability_gaps.tsv`
+  cites the test as INV-077 evidence again.
+- INV-054's two fee-only admission tests asserted that a fee debit voids the certificate. INV-054
+  allows a writer to issue a certificate for the post-state instead: they now accept a void
+  certificate or one equal to the snapshot full refresh, and the refresh crank after it may find
+  nothing to do.
+- INV-060's explicitly refreshed worlds crank after `SyncMaintenanceFee`; with the certificate kept
+  that crank may find nothing to do, and the exact-certificate checks after it are unchanged.
+- INV-061's multi-asset ADL discovery syncs the target's fee every slot and then refreshed it; it now
+  refreshes only a voided certificate (a healthy target's stays current), so the slot whose charge
+  leaves a deficit is still the one it finds.
+- INV-080's census of explicit engine-error arms carries the crank's `NonProgress` arm as it now
+  reads (`if market_accrual_performed || maintenance_collected`), with its disposition restated.
+
+Not covered: an account at the full shape whose fee charge leaves it liquidatable takes the voiding
+path, as before the fix. Its compute at fourteen legs (the crank that collects the fee, voids and
+refreshes, then the owner's reducing fill) is not measured; AUDIT-077 lists it as a remaining
+binding.
 
 ### INV-064 states the program's insurance-withdrawal budget (2026-11-23)
 
@@ -33608,11 +33685,11 @@ and auth matcher `50e532267926e180f013200c1799e26127dd23dc150866cffd491424629ddf
 Production sources, Cargo manifests/lock and matcher sources match their recorded `7d6d4cfb`
 baseline; no rebuild, engine proof or status promotion is claimed.
 
-> Restated on 2026-11-23 (see "INV-077 open item: with a maintenance fee, a fill at the full source
-> shape exceeds the transaction limit"): this test is ignored. Under the INV-045 catch-up rule its
-> fixture keeps the assets current, and the CPI fill that opens the LP's tenth leg runs out of
-> compute before the maintenance steps run. The figures above are from 2026-09-08 and are not
-> current evidence.
+> Restated on 2026-11-23 (see "INV-077: a fee sync with nothing to settle keeps a current,
+> healthy certificate"): under the INV-045 catch-up rule this fixture keeps the assets current, and the
+> test ran out of compute in setup until engine `06b7e5be`; it now collects the fee setup leaves
+> collectible before the deferred attempts, and pushes its unchanged marks without the catch-up
+> helper. The figures above are from 2026-09-08; the current ones are in that section.
 
 Non-merged full-shape force-close attempt from the same base/artifacts: both portfolios retained
 fourteen legs, with twenty-eight value-bearing LP sources and none on its counterparty. Asset 13

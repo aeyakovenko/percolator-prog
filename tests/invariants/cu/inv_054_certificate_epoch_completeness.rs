@@ -334,10 +334,18 @@ fn run_fee_only_admission_case(route: TradeRoute) {
     assert_eq!(after.insurance, before.insurance + FEE);
     assert_eq!(env.svm.get_account(&peer).unwrap(), peer_before);
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
-    assert!(
-        !cert_is_current(&env, portfolio),
-        "the fee debit must invalidate the touched cache despite unchanged global epoch keys"
-    );
+    // The fee debit cannot leave a stale certificate despite unchanged global epoch keys. INV-054
+    // lets the writer invalidate it or issue one for the post-state: a fee sync whose settlement had
+    // nothing to settle keeps the current certificate with the charge taken from its equity, and
+    // that certificate must then be exactly the snapshot full refresh.
+    if cert_is_current(&env, portfolio) {
+        assert_eq!(
+            health_cert(&debited).certified_equity,
+            (CAPITAL - FEE) as i128,
+            "{route:?}: a kept certificate carries the post-debit equity"
+        );
+        assert_exact_certificate(&env, portfolio);
+    }
 
     let mut tracked = vec![
         env.market,
@@ -369,13 +377,16 @@ fn run_fee_only_admission_case(route: TradeRoute) {
         );
     }
 
-    let refresh_cu = env.crank(
-        portfolio,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 2,
-            observations: crank_observations(0),
-        },
-    );
+    // A kept certificate leaves the crank no refresh to do.
+    let refresh_cu = env
+        .crank_if_actionable(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        )
+        .unwrap_or(0);
     assert_cu_within("public post-fee full refresh", refresh_cu, CRANK_CU_LIMIT);
     assert!(cert_is_current(&env, portfolio));
     let refreshed = health_cert(&env.portfolio_state(portfolio));

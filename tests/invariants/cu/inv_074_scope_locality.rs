@@ -1740,7 +1740,7 @@ fn inv074_source_defines_test(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_scope_locality_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "710761371c75b85bfe8209986fc16a87d68fdbd0";
+    const ENGINE_PIN: &str = "06b7e5be2046184417e51247f249288e9d357bab";
     const CLASSES: &[Inv074ScopeClass] = &[
         Inv074ScopeClass {
             class: "market and portfolio quote-value frames",

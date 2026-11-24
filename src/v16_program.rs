@@ -14942,6 +14942,7 @@ pub mod processor {
                 .header
                 .active_bitmap
                 .map(percolator::V16PodU64::get);
+            let mut maintenance_collected = false;
             if cfg.maintenance_fee_per_slot != 0
                 && !percolator::active_bitmap_is_empty(active_bitmap)
                 && portfolio.header.last_fee_slot.get() < authenticated_now_slot
@@ -14949,7 +14950,13 @@ pub mod processor {
                 && !summary.pending_close
                 && !summary.expired_close
             {
+                let fee_cursor_before = portfolio.header.last_fee_slot.get();
                 collect_maintenance_fee_before_value_debit_view(&cfg, &mut fee_carry, &mut group, &mut portfolio)?;
+                // A collection that advanced the fee cursor is progress of its own. A fee sync
+                // with nothing to settle keeps a current certificate (INV-077), so the engine may
+                // then find nothing else to do; the collection still stands, as it did when the
+                // sync voided the certificate and the engine refreshed it.
+                maintenance_collected = portfolio.header.last_fee_slot.get() != fee_cursor_before;
                 summary = group
                     .build_actionable_summary_at_slot(&portfolio.as_view(), authenticated_now_slot)
                     .map_err(map_v16_error)?;
@@ -14981,14 +14988,14 @@ pub mod processor {
                 },
             ) {
                 Ok(result) if matches!(result.selected, AutoCrankPlanV16::NoAction) => {
-                    if market_accrual_performed {
+                    if market_accrual_performed || maintenance_collected {
                         None
                     } else {
                         return Err(PercolatorError::EngineNonProgress.into());
                     }
                 }
                 Ok(result) => Some(result),
-                Err(V16Error::NonProgress) if market_accrual_performed => {
+                Err(V16Error::NonProgress) if market_accrual_performed || maintenance_collected => {
                     // The engine's crank is not atomic: it can return NonProgress after a completed
                     // refresh (a liquidation that found nothing to do). That state is kept. A state
                     // in which the engine took a fee or moved a position before giving up is not.

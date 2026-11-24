@@ -41,8 +41,8 @@ const MULTI_ASSET_OPEN_TRADE_CU_LIMIT: u64 = 750_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 const MAX_10M_MARKET_SLOTS: usize = 5_492;
 const CERTIFIED_ENGINE_GIT_SOURCE: &str =
-    "git+https://github.com/aeyakovenko/percolator?rev=710761371c75b85bfe8209986fc16a87d68fdbd0#\
-     710761371c75b85bfe8209986fc16a87d68fdbd0";
+    "git+https://github.com/aeyakovenko/percolator?rev=06b7e5be2046184417e51247f249288e9d357bab#\
+     06b7e5be2046184417e51247f249288e9d357bab";
 
 fn assert_certified_engine_pin(context: &str) {
     assert!(
@@ -3853,6 +3853,16 @@ impl V16CuEnv {
         mark_e6: u64,
     ) -> u64 {
         self.crank_asset_before_push(asset_index, now_slot);
+        self.push_auth_mark_for_asset_as_admin_raw(asset_index, now_slot, mark_e6)
+    }
+
+    /// The push alone, without the INV-045 catch-up cranks of `crank_asset_before_push`.
+    fn push_auth_mark_for_asset_as_admin_raw(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        mark_e6: u64,
+    ) -> u64 {
         let sequences = self.control_sequences(asset_index as usize);
         let observation_sequence = next_control_sequence(sequences.oracle_observation);
         send_tx(

@@ -19067,10 +19067,15 @@ fn verify_one_multi_asset_adl_liquidation(
             .sync_maintenance_fee(TARGET, slot)
             .map_err(|error| format!("charge equal-risk target maintenance: {error}"))?;
         max_compute_units = max_compute_units.max(fee_sync.compute_units);
-        let refresh = env
-            .crank(TARGET, slot, Vec::new())
-            .map_err(|error| format!("certify equal-risk liquidation target: {error}"))?;
-        max_compute_units = max_compute_units.max(refresh.compute_units);
+        // A sync that had nothing to settle and left the target healthy keeps its certificate
+        // current (INV-077); only a voided certificate needs the public refresh.
+        let (_, synced_group) = env.primary_market_state();
+        if !discovery_certificate_is_current(&synced_group, &env.primary_portfolio(TARGET))? {
+            let refresh = env
+                .crank(TARGET, slot, Vec::new())
+                .map_err(|error| format!("certify equal-risk liquidation target: {error}"))?;
+            max_compute_units = max_compute_units.max(refresh.compute_units);
+        }
 
         let (_, group) = env.primary_market_state();
         let account = env.primary_portfolio(TARGET);

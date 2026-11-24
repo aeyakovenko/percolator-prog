@@ -20,6 +20,7 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+use crate::support::fuzz_model::assert_current_certificate_matches_independent;
 
 #[path = "inv_071_terminal_cursor_time.rs"]
 mod terminal_cursor_time;
@@ -3638,7 +3639,7 @@ fn inv071_source_defines_kani_proof(source: &str, function: &str) -> bool {
 
 #[test]
 fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
-    const ENGINE_PIN: &str = "710761371c75b85bfe8209986fc16a87d68fdbd0";
+    const ENGINE_PIN: &str = "06b7e5be2046184417e51247f249288e9d357bab";
     const CLASSES: &[Inv071ProgressClass] = &[
         Inv071ProgressClass {
             class: "summary fidelity selector totality and wrapper dispatch",
@@ -3959,4 +3960,91 @@ fn v16_program_crank_progress_and_recovery_composition_is_source_complete() {
             "INV-071 lost state-indexed liveness composition {theorem}",
         );
     }
+}
+
+#[test]
+fn v16_program_crank_whose_only_work_is_a_due_fee_collects_it() {
+    // A fee sync that has nothing to settle and leaves the account healthy keeps its current
+    // certificate (INV-077), so the engine may find nothing else to do. A crank whose only work is
+    // that due fee still succeeds and keeps the collection, as it did when the sync voided the
+    // certificate and the engine refreshed it; a crank with nothing left is refused, with an exact
+    // rollback.
+    const PRICE: u64 = 100;
+    const START_SLOT: u64 = 1;
+    const COLLECT_SLOT: u64 = 4;
+    const FEE_PER_SLOT: u128 = 37;
+    const DEPOSIT: u128 = 1_000;
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        2,
+        5_000,
+        10_000,
+        500,
+        FEE_PER_SLOT,
+    );
+    env.svm.warp_to_slot(START_SLOT);
+    for asset in 0..2 {
+        env.configure_auth_mark_for_asset_as_admin(asset, START_SLOT, PRICE);
+    }
+    let owners = [Keypair::new(), Keypair::new()];
+    let portfolios = owners.each_ref().map(|owner| env.create_portfolio(owner));
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    for party in 0..2 {
+        env.deposit(&owners[party], portfolios[party], DEPOSIT);
+    }
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        portfolios[0],
+        &owners[1],
+        portfolios[1],
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    // Only the empty keeper observes time: the market reaches COLLECT_SLOT, so a crank on a trader
+    // at that slot has no accrual of its own to do.
+    for slot in START_SLOT + 1..=COLLECT_SLOT {
+        env.svm.warp_to_slot(slot);
+        env.crank(
+            keeper,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations_for_assets(&[0, 1]),
+            },
+        );
+    }
+    let target = portfolios[0];
+    let before = env.portfolio_state(target);
+    assert_eq!(before.last_fee_slot.get(), START_SLOT);
+    let insurance_before = env.market_state().1.insurance;
+    let crank = || ProgInstruction::PermissionlessCrank {
+        now_slot: COLLECT_SLOT,
+        observations: crank_observations_for_assets(&[0, 1]),
+    };
+
+    let collect_cu = env
+        .crank_if_actionable(target, crank())
+        .expect("a crank whose only work is a due fee succeeds");
+    assert_cu_within("fee-only crank", collect_cu, CRANK_CU_LIMIT);
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(target);
+    let fee = FEE_PER_SLOT * u128::from(COLLECT_SLOT - START_SLOT);
+    assert_eq!(account.last_fee_slot.get(), COLLECT_SLOT);
+    assert_eq!(account.capital.get(), before.capital.get() - fee);
+    assert_eq!(group.insurance, insurance_before + fee);
+    assert!(
+        health_cert(&account).valid,
+        "the healthy account keeps its certificate"
+    );
+    assert!(
+        assert_current_certificate_matches_independent("fee-only crank", &group, &account)
+            .expect("the kept certificate must match the independent model")
+    );
+
+    assert_eq!(
+        env.crank_if_actionable(target, crank()),
+        None,
+        "with the fee collected, the crank has nothing left and is refused"
+    );
 }

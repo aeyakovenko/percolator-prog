@@ -567,7 +567,10 @@ fn v16_program_accrued_maintenance_precedes_new_asset_risk_admission() {
                 if explicitly_refreshed {
                     for portfolio in portfolios {
                         env.sync_maintenance_fee_with_cu(portfolio, None, ADMISSION_SLOT);
-                        env.crank(
+                        // A sync that had nothing to settle and left the account healthy keeps its
+                        // certificate current (INV-077), leaving the crank nothing to refresh;
+                        // check_accounting proves that certificate exact either way.
+                        env.crank_if_actionable(
                             portfolio,
                             ProgInstruction::PermissionlessCrank {
                                 now_slot: ADMISSION_SLOT,

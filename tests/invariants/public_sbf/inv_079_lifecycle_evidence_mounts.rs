@@ -2,7 +2,6 @@
 //! plus a ledger-independent census of every public invariant Rust source.
 //!
 //! Require both a mounted file and an unconditional, nonignored test item.
-//! The one exception is a test named in `OPEN_IGNORED_TESTS` while its open item stands.
 //! Text in comments, strings or nested functions cannot supply test evidence.
 //! The existing proptest! declaration form is recognized explicitly. Other macro
 //! expansion, execution and test-body fidelity remain separate obligations.
@@ -180,23 +179,6 @@ fn public_invariant_sources() -> BTreeSet<PathBuf> {
     sources
 }
 
-/// Tests that stay declared but ignored while an open item stands, each recorded in
-/// `tests/invariants/README.md`. Only `public_source_gaps` skips them: an ignored test is never
-/// evidence (`evidence_gaps` does not read this list), and the census fails once a listed test
-/// runs again, so the entry is removed with the fix.
-const OPEN_IGNORED_TESTS: [(&str, &str); 1] = [(
-    // INV-077 open item (2026-11-23): with a maintenance fee and current assets, the fixture's
-    // CPI fill that opens the LP's tenth leg exceeds the transaction limit.
-    "tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs",
-    "v16_program_public_full_shape_maintenance_has_bounded_continuation",
-)];
-
-fn open_ignored_test(path: &std::path::Path, test: &str) -> bool {
-    OPEN_IGNORED_TESTS
-        .iter()
-        .any(|(open_path, open_test)| path == std::path::Path::new(open_path) && test == *open_test)
-}
-
 fn public_source_gaps(
     sources: &BTreeSet<PathBuf>,
     mounted: &BTreeMap<PathBuf, MountedSource>,
@@ -210,9 +192,6 @@ fn public_source_gaps(
             )),
             Some(source) => {
                 for test in source.declared_tests.difference(&source.available_tests) {
-                    if open_ignored_test(path, test) {
-                        continue;
-                    }
                     gaps.push(format!(
                         "unavailable declared test: {}#{test}",
                         path.display()
@@ -230,17 +209,6 @@ fn v16_every_public_invariant_source_and_declared_test_is_mounted() {
     let mounted = mounted_sources(None);
     let gaps = public_source_gaps(&sources, &mounted);
     assert!(gaps.is_empty(), "{}", gaps.join("\n"));
-    for (path, test) in OPEN_IGNORED_TESTS {
-        let source = &mounted[&PathBuf::from(path)];
-        assert!(
-            source.declared_tests.contains(test),
-            "open ignored test {path}#{test} is not declared"
-        );
-        assert!(
-            !source.available_tests.contains(test),
-            "{path}#{test} runs again: remove it from OPEN_IGNORED_TESTS and close its open item"
-        );
-    }
     let tests: usize = sources
         .iter()
         .map(|path| mounted[path].available_tests.len())
@@ -324,23 +292,6 @@ fn v16_public_source_census_rejects_unlisted_and_disabled_evidence() {
         rejected += 1;
     }
     assert_eq!(rejected, 35);
-
-    // The open-item exception names one test: an ignore on another test in the same file is
-    // still a gap.
-    let (open_path, open_test) = OPEN_IGNORED_TESTS[0];
-    let witness = "v16_attack_public_14_leg_28_source_domain_exit_stays_bounded";
-    let source = &baseline[&PathBuf::from(open_path)].source;
-    let declaration = format!("fn {witness}(");
-    assert_eq!(source.matches(&declaration).count(), 1);
-    let mutated = source.replacen(&declaration, &format!("#[ignore]\n{declaration}"), 1);
-    let gaps = public_source_gaps(&sources, &mounted_sources(Some((open_path, &mutated))));
-    assert_eq!(gaps.len(), 1, "{gaps:?}");
-    assert!(
-        gaps[0].contains(witness) && !gaps[0].contains(open_test),
-        "{gaps:?}"
-    );
-    rejected += 1;
-    assert_eq!(rejected, 36);
     eprintln!("INV-079 reverse census: {rejected} unlisted/disabled mutations rejected, 16 enabled controls accepted");
 }
 
